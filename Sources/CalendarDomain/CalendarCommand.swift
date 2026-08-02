@@ -1,0 +1,34 @@
+import Foundation
+
+public enum CalendarCommand: Sendable {
+    case createItem(CalendarItem)
+    case updateItem(CalendarItem)
+    case deleteItem(UUID)
+    case moveItem(UUID, to: CalendarDate)
+    case setTaskCompleted(UUID, Date?)
+    case setOccurrenceCompleted(OccurrenceKey, Date?)
+    case createSeries(WeeklySeries)
+    case mutateSeries(
+        OccurrenceKey,
+        scope: SeriesScope,
+        edit: SeriesEdit,
+        newSeriesID: UUID
+    )
+    case createCategory(CalendarCategory)
+    case updateCategory(CalendarCategory)
+    case reorderCategories([UUID])
+    case deleteCategory(UUID, migrateTo: UUID)
+}
+
+public enum ReducerError: Error, Equatable, Sendable {
+    case missingItem
+    case missingSeries
+    case unknownCategory
+    case duplicateCategoryName
+    case invalidCategoryColor
+    case invalidCategoryOrder
+    case protectedCategory
+    case invalidMigrationTarget
+    case eventCannotComplete
+    case invalidState
+}
