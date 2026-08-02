@@ -1,0 +1,523 @@
+import Foundation
+
+public struct RecurrenceGraph: Codable, Equatable, Sendable {
+    public var series: [UUID: WeeklySeries]
+    public var exceptions: [OccurrenceKey: OccurrenceExceptionKind]
+    public var completions: [OccurrenceKey: OccurrenceCompletion]
+
+    public init(
+        series: [UUID: WeeklySeries],
+        exceptions: [OccurrenceKey: OccurrenceExceptionKind],
+        completions: [OccurrenceKey: OccurrenceCompletion]
+    ) {
+        self.series = series
+        self.exceptions = exceptions
+        self.completions = completions
+    }
+}
+
+public enum SeriesScope: Equatable, Sendable {
+    case onlyThis
+    case thisAndFuture
+}
+
+public enum OptionalPatch<Value: Sendable>: Sendable {
+    case unchanged
+    case set(Value)
+    case clear
+}
+
+public struct SeriesPatch: Sendable {
+    public var title: String?
+    public var kind: ItemKind?
+    public var categoryID: UUID?
+    public var timeRange: OptionalPatch<LocalTimeRange>
+    public var displayedDate: CalendarDate?
+    public var weekdays: Set<Weekday>?
+    public var endDate: OptionalPatch<CalendarDate>
+
+    public init(
+        title: String? = nil,
+        kind: ItemKind? = nil,
+        categoryID: UUID? = nil,
+        timeRange: OptionalPatch<LocalTimeRange> = .unchanged,
+        displayedDate: CalendarDate? = nil,
+        weekdays: Set<Weekday>? = nil,
+        endDate: OptionalPatch<CalendarDate> = .unchanged
+    ) {
+        self.title = title
+        self.kind = kind
+        self.categoryID = categoryID
+        self.timeRange = timeRange
+        self.displayedDate = displayedDate
+        self.weekdays = weekdays
+        self.endDate = endDate
+    }
+}
+
+public enum SeriesEdit: Sendable {
+    case patch(SeriesPatch)
+    case delete
+}
+
+public enum SeriesMutationError: Error, Equatable, Sendable {
+    case unknownSeries
+    case unknownOccurrence
+    case invalidOnlyThisRulePatch
+    case duplicateSeriesID
+}
+
+public enum SeriesMutationEngine {
+    public static func apply(
+        edit: SeriesEdit,
+        to key: OccurrenceKey,
+        scope: SeriesScope,
+        in graph: RecurrenceGraph,
+        newSeriesID: UUID,
+        now: Date
+    ) throws -> RecurrenceGraph {
+        guard let series = graph.series[key.seriesID] else {
+            throw SeriesMutationError.unknownSeries
+        }
+        guard identifiesInstance(key, of: series, exceptions: graph.exceptions) else {
+            throw SeriesMutationError.unknownOccurrence
+        }
+
+        switch scope {
+        case .onlyThis:
+            return try applyOnlyThis(edit: edit, to: key, series: series, graph: graph)
+        case .thisAndFuture:
+            return try applyThisAndFuture(
+                edit: edit,
+                to: key,
+                series: series,
+                graph: graph,
+                newSeriesID: newSeriesID,
+                now: now
+            )
+        }
+    }
+
+    private static func applyOnlyThis(
+        edit: SeriesEdit,
+        to key: OccurrenceKey,
+        series: WeeklySeries,
+        graph: RecurrenceGraph
+    ) throws -> RecurrenceGraph {
+        var result = graph
+
+        switch edit {
+        case .delete:
+            result.exceptions[key] = .skipped
+            result.completions.removeValue(forKey: key)
+            return result
+
+        case let .patch(patch):
+            guard patch.weekdays == nil, isUnchanged(patch.endDate) else {
+                throw SeriesMutationError.invalidOnlyThisRulePatch
+            }
+
+            var override = effectiveOverride(for: key, in: series, exceptions: graph.exceptions)
+            applyOccurrencePatch(patch, to: &override)
+            result.exceptions[key] = .modified(override)
+            if override.kind == .event {
+                result.completions.removeValue(forKey: key)
+            }
+            return result
+        }
+    }
+
+    private static func applyThisAndFuture(
+        edit: SeriesEdit,
+        to key: OccurrenceKey,
+        series: WeeklySeries,
+        graph: RecurrenceGraph,
+        newSeriesID: UUID,
+        now: Date
+    ) throws -> RecurrenceGraph {
+        switch edit {
+        case .delete:
+            return applyFutureDelete(to: key, series: series, graph: graph, now: now)
+        case let .patch(patch):
+            guard newSeriesID != series.id, graph.series[newSeriesID] == nil else {
+                throw SeriesMutationError.duplicateSeriesID
+            }
+            return try applyFuturePatch(
+                patch,
+                to: key,
+                series: series,
+                graph: graph,
+                newSeriesID: newSeriesID,
+                now: now
+            )
+        }
+    }
+
+    private static func applyFutureDelete(
+        to key: OccurrenceKey,
+        series: WeeklySeries,
+        graph: RecurrenceGraph,
+        now: Date
+    ) -> RecurrenceGraph {
+        var result = graph
+        removeFutureState(for: series.id, from: key.originalDate, in: &result)
+        closeOrRemoveHistoricalSeries(
+            series,
+            at: key.originalDate,
+            graph: graph,
+            result: &result,
+            now: now
+        )
+        return result
+    }
+
+    private static func applyFuturePatch(
+        _ patch: SeriesPatch,
+        to key: OccurrenceKey,
+        series: WeeklySeries,
+        graph: RecurrenceGraph,
+        newSeriesID: UUID,
+        now: Date
+    ) throws -> RecurrenceGraph {
+        let dayDelta = patch.displayedDate.map { key.originalDate.days(until: $0) } ?? 0
+        let future = try makeFutureSeries(
+            from: series,
+            patch: patch,
+            boundary: key.originalDate,
+            dayDelta: dayDelta,
+            id: newSeriesID,
+            now: now
+        )
+
+        var result = graph
+        removeFutureState(for: series.id, from: key.originalDate, in: &result)
+        closeOrRemoveHistoricalSeries(
+            series,
+            at: key.originalDate,
+            graph: graph,
+            result: &result,
+            now: now
+        )
+        result.series[future.id] = future
+
+        migrateFutureExceptions(
+            from: series.id,
+            boundary: key.originalDate,
+            to: future,
+            dayDelta: dayDelta,
+            boundaryPatch: patch,
+            graph: graph,
+            result: &result
+        )
+        migrateFutureCompletions(
+            from: series.id,
+            boundary: key.originalDate,
+            to: future,
+            dayDelta: dayDelta,
+            graph: graph,
+            result: &result
+        )
+        return result
+    }
+
+    private static func makeFutureSeries(
+        from series: WeeklySeries,
+        patch: SeriesPatch,
+        boundary: CalendarDate,
+        dayDelta: Int,
+        id: UUID,
+        now: Date
+    ) throws -> WeeklySeries {
+        var weekdays = patch.weekdays ?? series.weekdays
+        if dayDelta != 0 {
+            weekdays = Set(weekdays.map { shiftedWeekday($0, by: dayDelta) })
+        }
+
+        let shiftedEndDate = series.endDate?.addingDays(dayDelta)
+        let endDate: CalendarDate?
+        switch patch.endDate {
+        case .unchanged:
+            endDate = shiftedEndDate
+        case let .set(value):
+            endDate = value
+        case .clear:
+            endDate = nil
+        }
+
+        let timeRange = applying(patch.timeRange, to: series.timeRange)
+        return try WeeklySeries(
+            id: id,
+            kind: patch.kind ?? series.kind,
+            title: patch.title ?? series.title,
+            categoryID: patch.categoryID ?? series.categoryID,
+            startDate: boundary.addingDays(dayDelta),
+            endDate: endDate,
+            weekdays: weekdays,
+            timeRange: timeRange,
+            creationTimeZoneIdentifier: series.creationTimeZoneIdentifier,
+            createdAt: now,
+            updatedAt: now
+        )
+    }
+
+    private static func closeOrRemoveHistoricalSeries(
+        _ series: WeeklySeries,
+        at boundary: CalendarDate,
+        graph: RecurrenceGraph,
+        result: inout RecurrenceGraph,
+        now: Date
+    ) {
+        guard hasHistoricalInstanceOrException(
+            of: series,
+            before: boundary,
+            exceptions: graph.exceptions
+        ) else {
+            result.series.removeValue(forKey: series.id)
+            return
+        }
+
+        var historical = series
+        let requestedEnd = boundary.previousDay
+        if let existingEnd = series.endDate, existingEnd < requestedEnd {
+            historical.endDate = existingEnd
+        } else {
+            historical.endDate = requestedEnd
+        }
+        historical.updatedAt = now
+        result.series[series.id] = historical
+    }
+
+    private static func migrateFutureExceptions(
+        from oldSeriesID: UUID,
+        boundary: CalendarDate,
+        to future: WeeklySeries,
+        dayDelta: Int,
+        boundaryPatch: SeriesPatch,
+        graph: RecurrenceGraph,
+        result: inout RecurrenceGraph
+    ) {
+        for (oldKey, exception) in graph.exceptions where isFutureKey(
+            oldKey,
+            seriesID: oldSeriesID,
+            boundary: boundary
+        ) {
+            let newKey = OccurrenceKey(
+                seriesID: future.id,
+                originalDate: oldKey.originalDate.addingDays(dayDelta)
+            )
+            guard isWithinBounds(newKey.originalDate, of: future) else {
+                continue
+            }
+
+            var migrated = shifted(exception, by: dayDelta)
+            if oldKey.originalDate == boundary,
+               case var .modified(override) = migrated {
+                applyContentPatch(boundaryPatch, to: &override)
+                migrated = .modified(override)
+            }
+            result.exceptions[newKey] = migrated
+        }
+    }
+
+    private static func migrateFutureCompletions(
+        from oldSeriesID: UUID,
+        boundary: CalendarDate,
+        to future: WeeklySeries,
+        dayDelta: Int,
+        graph: RecurrenceGraph,
+        result: inout RecurrenceGraph
+    ) {
+        guard future.kind == .task else {
+            return
+        }
+
+        for (oldKey, completion) in graph.completions where isFutureKey(
+            oldKey,
+            seriesID: oldSeriesID,
+            boundary: boundary
+        ) {
+            let newKey = OccurrenceKey(
+                seriesID: future.id,
+                originalDate: oldKey.originalDate.addingDays(dayDelta)
+            )
+            guard isWithinBounds(newKey.originalDate, of: future),
+                  hasCompletableInstance(newKey, in: future, exceptions: result.exceptions)
+            else {
+                continue
+            }
+            result.completions[newKey] = OccurrenceCompletion(
+                key: newKey,
+                completedAt: completion.completedAt
+            )
+        }
+    }
+
+    private static func removeFutureState(
+        for seriesID: UUID,
+        from boundary: CalendarDate,
+        in graph: inout RecurrenceGraph
+    ) {
+        graph.exceptions = graph.exceptions.filter { key, _ in
+            !isFutureKey(key, seriesID: seriesID, boundary: boundary)
+        }
+        graph.completions = graph.completions.filter { key, _ in
+            !isFutureKey(key, seriesID: seriesID, boundary: boundary)
+        }
+    }
+
+    private static func identifiesInstance(
+        _ key: OccurrenceKey,
+        of series: WeeklySeries,
+        exceptions: [OccurrenceKey: OccurrenceExceptionKind]
+    ) -> Bool {
+        if exceptions[key] != nil {
+            return true
+        }
+        return isNaturallyGenerated(key.originalDate, by: series)
+    }
+
+    private static func hasHistoricalInstanceOrException(
+        of series: WeeklySeries,
+        before boundary: CalendarDate,
+        exceptions: [OccurrenceKey: OccurrenceExceptionKind]
+    ) -> Bool {
+        if exceptions.keys.contains(where: {
+            $0.seriesID == series.id && $0.originalDate < boundary
+        }) {
+            return true
+        }
+
+        let historicalEnd: CalendarDate
+        if let endDate = series.endDate, endDate < boundary {
+            historicalEnd = endDate
+        } else {
+            historicalEnd = boundary.previousDay
+        }
+        guard series.startDate <= historicalEnd else {
+            return false
+        }
+
+        var date = series.startDate
+        while date <= historicalEnd {
+            if series.weekdays.contains(date.weekday) {
+                return true
+            }
+            date = date.addingDays(1)
+        }
+        return false
+    }
+
+    private static func hasCompletableInstance(
+        _ key: OccurrenceKey,
+        in series: WeeklySeries,
+        exceptions: [OccurrenceKey: OccurrenceExceptionKind]
+    ) -> Bool {
+        switch exceptions[key] {
+        case .skipped:
+            return false
+        case let .modified(override):
+            return override.kind == .task
+        case nil:
+            return isNaturallyGenerated(key.originalDate, by: series)
+        }
+    }
+
+    private static func isNaturallyGenerated(
+        _ date: CalendarDate,
+        by series: WeeklySeries
+    ) -> Bool {
+        guard date >= series.startDate,
+              series.endDate.map({ date <= $0 }) ?? true
+        else {
+            return false
+        }
+        return series.weekdays.contains(date.weekday)
+    }
+
+    private static func isWithinBounds(_ date: CalendarDate, of series: WeeklySeries) -> Bool {
+        date >= series.startDate && (series.endDate.map { date <= $0 } ?? true)
+    }
+
+    private static func isFutureKey(
+        _ key: OccurrenceKey,
+        seriesID: UUID,
+        boundary: CalendarDate
+    ) -> Bool {
+        key.seriesID == seriesID && key.originalDate >= boundary
+    }
+
+    private static func effectiveOverride(
+        for key: OccurrenceKey,
+        in series: WeeklySeries,
+        exceptions: [OccurrenceKey: OccurrenceExceptionKind]
+    ) -> OccurrenceOverride {
+        if case let .modified(override) = exceptions[key] {
+            return override
+        }
+        return OccurrenceOverride(
+            displayedDate: key.originalDate,
+            title: series.title,
+            kind: series.kind,
+            categoryID: series.categoryID,
+            timeRange: series.timeRange
+        )
+    }
+
+    private static func applyOccurrencePatch(_ patch: SeriesPatch, to override: inout OccurrenceOverride) {
+        applyContentPatch(patch, to: &override)
+        if let displayedDate = patch.displayedDate {
+            override.displayedDate = displayedDate
+        }
+    }
+
+    private static func applyContentPatch(_ patch: SeriesPatch, to override: inout OccurrenceOverride) {
+        if let title = patch.title {
+            override.title = title
+        }
+        if let kind = patch.kind {
+            override.kind = kind
+        }
+        if let categoryID = patch.categoryID {
+            override.categoryID = categoryID
+        }
+        override.timeRange = applying(patch.timeRange, to: override.timeRange)
+    }
+
+    private static func applying(
+        _ patch: OptionalPatch<LocalTimeRange>,
+        to current: LocalTimeRange?
+    ) -> LocalTimeRange? {
+        switch patch {
+        case .unchanged:
+            current
+        case let .set(value):
+            value
+        case .clear:
+            nil
+        }
+    }
+
+    private static func isUnchanged<Value>(_ patch: OptionalPatch<Value>) -> Bool where Value: Sendable {
+        if case .unchanged = patch {
+            return true
+        }
+        return false
+    }
+
+    private static func shifted(
+        _ exception: OccurrenceExceptionKind,
+        by dayDelta: Int
+    ) -> OccurrenceExceptionKind {
+        guard dayDelta != 0, case var .modified(override) = exception else {
+            return exception
+        }
+        override.displayedDate = override.displayedDate.addingDays(dayDelta)
+        return .modified(override)
+    }
+
+    private static func shiftedWeekday(_ weekday: Weekday, by dayDelta: Int) -> Weekday {
+        let shiftedZeroBased = (weekday.rawValue - 1 + dayDelta) % Weekday.allCases.count
+        let normalized = shiftedZeroBased >= 0 ? shiftedZeroBased : shiftedZeroBased + Weekday.allCases.count
+        return Weekday(rawValue: normalized + 1)!
+    }
+}
