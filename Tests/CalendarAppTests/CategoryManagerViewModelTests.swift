@@ -1,0 +1,172 @@
+import CalendarDomain
+import Foundation
+import Testing
+@testable import CalendarApp
+
+@Suite("CategoryManagerViewModelTests")
+@MainActor
+struct CategoryManagerViewModelTests {
+    @Test func emptyAndDuplicateNamesAreRejectedCaseInsensitively() async throws {
+        var state = makeEmptyState()
+        let work = makeCategory(name: "工作")
+        state.categories[work.id] = work
+        let (store, _) = try await makeReadyStore(initialState: state)
+        let vm = CategoryManagerViewModel(store: store)
+
+        vm.draftName = "   \n"
+        await #expect(throws: CategoryManagerError.emptyName) {
+            try await vm.create()
+        }
+
+        vm.draftName = " 工作 "
+        await #expect(throws: CategoryManagerError.duplicateName) {
+            try await vm.create()
+        }
+        #expect(store.state == state)
+    }
+
+    @Test func colorHexAcceptsOnlyASCIIHashRRGGBBAndNormalizesUppercase() throws {
+        #expect(try CategoryColorValidator.normalizedHex("#7f53ac") == "#7F53AC")
+        for value in ["7F53AC", "#7F53A", "#7F53AC0", " #7F53AC", "#7F53AＧ"] {
+            #expect(throws: CategoryManagerError.invalidColor) {
+                try CategoryColorValidator.normalizedHex(value)
+            }
+        }
+    }
+
+    @Test func readabilityForCustomColorMatchesRenderedTheme() throws {
+        let color = try CategoryColorValidator.normalizedHex("#7f53ac")
+        let light = try CategoryColorValidator.itemContrastRatio(colorHex: color, appearance: .light)
+        let dark = try CategoryColorValidator.itemContrastRatio(colorHex: color, appearance: .dark)
+
+        #expect(light >= 4.5)
+        #expect(dark >= 4.5)
+        #expect(CalendarTheme.categoryItemBackgroundOpacity == 0.14)
+        #expect(CalendarTheme.previewLightCanvasHex == "#FFFFFF")
+        #expect(CalendarTheme.previewLightTextHex == "#1D1D1F")
+        #expect(CalendarTheme.previewDarkCanvasHex == "#1C1C1E")
+        #expect(CalendarTheme.previewDarkTextHex == "#F5F5F7")
+    }
+
+    @Test func extremeAccentColorsReceiveVisibleOutline() throws {
+        #expect(try CategoryColorValidator.accentNeedsOutline(colorHex: "#FFFFFF", appearance: .light))
+        #expect(try CategoryColorValidator.accentNeedsOutline(colorHex: "#000000", appearance: .dark))
+        #expect(try CategoryColorValidator.accentNeedsOutline(colorHex: "#FFFFFF", appearance: .dark) == false)
+        #expect(try CategoryColorValidator.accentNeedsOutline(colorHex: "#000000", appearance: .light) == false)
+    }
+
+    @Test func defaultPaletteUsesTheSameReadabilityValidation() throws {
+        #expect(CategoryManagerViewModel.defaultPalette == [
+            "#4F7FFF", "#7A67D8", "#D65E73", "#D9893D",
+            "#53A66F", "#2E9DA7", "#8A6A4A", "#8E8E93"
+        ])
+        for color in CategoryManagerViewModel.defaultPalette {
+            try CategoryColorValidator.validateReadableInBothAppearances(color)
+        }
+    }
+
+    @Test func uncategorizedIsProtectedButCanUseTheSharedReorderAction() async throws {
+        var state = makeEmptyState()
+        let work = makeCategory(name: "工作")
+        state.categories[work.id] = work
+        let (store, _) = try await makeReadyStore(initialState: state)
+        let vm = CategoryManagerViewModel(store: store)
+        let uncategorized = try #require(state.categories[state.uncategorizedID])
+
+        vm.draftName = "其他"
+        vm.draftColorHex = "#4F7FFF"
+        await #expect(throws: CategoryManagerError.protectedCategory) {
+            try await vm.update(uncategorized)
+        }
+        vm.categoryToDelete = uncategorized
+        vm.migrationTargetID = work.id
+        await #expect(throws: CategoryManagerError.protectedCategory) {
+            try await vm.deleteConfirmed()
+        }
+
+        try await vm.reorder([work.id, uncategorized.id])
+        #expect(store.state.categories[work.id]?.sortIndex == 0)
+        #expect(store.state.categories[uncategorized.id]?.sortIndex == 1)
+    }
+
+    @Test func deleteRequiresExplicitMigrationChoice() async throws {
+        let uncategorizedID = UUID(uuidString: "00000000-0000-0000-0000-000000000701")!
+        var state = CalendarState.empty(
+            uncategorizedID: uncategorizedID,
+            now: Date(timeIntervalSince1970: 0)
+        )
+        let work = CalendarCategory(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000702")!,
+            name: "工作",
+            colorHex: "#4F7FFF",
+            sortIndex: 1,
+            createdAt: Date(timeIntervalSince1970: 0),
+            updatedAt: Date(timeIntervalSince1970: 0)
+        )
+        state.categories[work.id] = work
+        let repository = InMemoryCalendarRepository(initialState: state)
+        let store = CalendarStore(initialState: state, repository: repository)
+        await store.load()
+        let vm = CategoryManagerViewModel(store: store)
+        vm.categoryToDelete = work
+        vm.migrationTargetID = nil
+        await #expect(throws: CategoryManagerError.migrationRequired) {
+            try await vm.deleteConfirmed()
+        }
+        #expect(store.state == state)
+    }
+
+    @Test func deleteToUncategorizedAtomicallyMigratesAllReferencesAndUndoRestoresEverything() async throws {
+        let fixture = try makeCategoryReferenceFixture()
+        let original = fixture.state
+        let (store, repository) = try await makeReadyStore(initialState: original)
+        let vm = CategoryManagerViewModel(store: store)
+        vm.categoryToDelete = original.categories[fixture.deletedCategoryID]!
+        vm.migrationTargetID = original.uncategorizedID
+
+        try await vm.deleteConfirmed()
+
+        #expect(store.state.categories[fixture.deletedCategoryID] == nil)
+        #expect(store.state.items.values.allSatisfy { $0.categoryID != fixture.deletedCategoryID })
+        #expect(store.state.recurrence.series.values.allSatisfy { $0.categoryID != fixture.deletedCategoryID })
+        #expect(store.state.recurrence.exceptions.values.allSatisfy { exception in
+            if case let .modified(override) = exception {
+                return override.categoryID != fixture.deletedCategoryID
+            }
+            return true
+        })
+        #expect(store.state.items.values.allSatisfy { $0.categoryID == original.uncategorizedID })
+        #expect(await repository.persistedState == store.state)
+
+        try await store.undo()
+        #expect(store.state == original)
+        #expect(await repository.persistedState == original)
+    }
+
+    @Test func unreadableColorDoesNotCommit() async throws {
+        let state = makeEmptyState()
+        let (store, repository) = try await makeReadyStore(initialState: state)
+        let unreadablePalette = CategoryPreviewPalette(
+            lightCanvasHex: "#FFFFFF",
+            lightTextHex: "#FFFFFF",
+            darkCanvasHex: "#1C1C1E",
+            darkTextHex: "#1C1C1E",
+            categoryBackgroundOpacity: 0.14
+        )
+        #expect(throws: CategoryManagerError.insufficientContrast) {
+            try CategoryColorValidator.validateReadableInBothAppearances(
+                "#4F7FFF",
+                palette: unreadablePalette
+            )
+        }
+
+        let vm = CategoryManagerViewModel(store: store, previewPalette: unreadablePalette)
+        vm.draftName = "不可读"
+        vm.draftColorHex = "#4F7FFF"
+        await #expect(throws: CategoryManagerError.insufficientContrast) {
+            try await vm.create()
+        }
+        #expect(store.state == state)
+        #expect(await repository.saveCount == 0)
+    }
+}

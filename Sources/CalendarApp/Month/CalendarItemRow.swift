@@ -51,6 +51,7 @@ struct CalendarItemRow: View {
     let category: CalendarCategory?
     var onCompletion: ((CalendarCommand) -> Void)?
     var onOpenDetail: ((ProjectedItem) -> Void)?
+    @Environment(\.colorScheme) private var colorScheme
 
     private var categoryColor: Color {
         CalendarTheme.categoryColor(category?.colorHex ?? "#8E8E93")
@@ -65,6 +66,12 @@ struct CalendarItemRow: View {
             RoundedRectangle(cornerRadius: 1)
                 .fill(isCompletedTask ? CalendarTheme.completedTaskAccent(categoryColor) : categoryColor)
                 .frame(width: 3)
+                .overlay {
+                    if accentNeedsOutline {
+                        RoundedRectangle(cornerRadius: 1)
+                            .stroke(CalendarTheme.itemAccentOutline, lineWidth: 1)
+                    }
+                }
 
             if item.kind == .task {
                 Button {
@@ -126,5 +133,12 @@ struct CalendarItemRow: View {
 
     private static func timeString(_ minute: MinuteOfDay) -> String {
         String(format: "%02d:%02d", minute.value / 60, minute.value % 60)
+    }
+
+    private var accentNeedsOutline: Bool {
+        CalendarTheme.accentNeedsOutline(
+            category?.colorHex ?? "#8E8E93",
+            appearance: colorScheme == .dark ? .dark : .light
+        )
     }
 }

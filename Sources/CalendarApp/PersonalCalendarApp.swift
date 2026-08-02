@@ -16,5 +16,10 @@ struct PersonalCalendarApp: App {
                 .task { await environment.store.load() }
         }
         .defaultSize(width: 1180, height: 820)
+
+        Window("分类管理", id: "category-manager") {
+            CategoryManagerView(store: environment.store)
+                .frame(minWidth: 440, minHeight: 520)
+        }
     }
 }

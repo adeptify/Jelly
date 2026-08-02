@@ -9,6 +9,7 @@ enum MonthEmptyStateHintPolicy {
 
 struct MonthView: View {
     let store: CalendarStore
+    @Environment(\.openWindow) private var openWindow
     @StateObject private var model: MonthViewModel
     @AppStorage("calendar.hiddenCategoryIDs") private var storedHiddenCategoryIDs = ""
     @State private var hiddenCategoryIDs: Set<UUID> = []
@@ -118,6 +119,9 @@ struct MonthView: View {
                     categories: orderedCategories,
                     hiddenCategoryIDs: $hiddenCategoryIDs
                 )
+            }
+            Button("管理分类") {
+                openWindow(id: "category-manager")
             }
         }
         .padding(.horizontal, 16)
