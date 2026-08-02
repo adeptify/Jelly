@@ -66,6 +66,10 @@ final class MonthViewModel: ObservableObject {
         max(0, cell.items.count - visibleItems(in: cell, capacity: capacity).count)
     }
 
+    func item(withID id: String) -> ProjectedItem? {
+        projection.days.lazy.flatMap(\.items).first(where: { $0.id == id })
+    }
+
     func update(
         state: CalendarState,
         hiddenCategoryIDs: Set<UUID>,

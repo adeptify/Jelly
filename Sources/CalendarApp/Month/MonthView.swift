@@ -10,7 +10,11 @@ enum MonthEmptyStateHintPolicy {
 struct MonthView: View {
     let store: CalendarStore
     @StateObject private var model: MonthViewModel
+    @AppStorage("calendar.hiddenCategoryIDs") private var storedHiddenCategoryIDs = ""
     @State private var hiddenCategoryIDs: Set<UUID> = []
+    @State private var quickCreateDate: CalendarDate?
+    @State private var selectedDayDrawerDate: CalendarDate?
+    @State private var selectedItem: ProjectedItem?
 
     init(store: CalendarStore) {
         self.store = store
@@ -33,22 +37,54 @@ struct MonthView: View {
                     spacing: 0
                 ) {
                     ForEach(MonthGridBuilder.cells(containing: model.displayedMonth), id: \.self) { date in
-                        DayCellView(
-                            cell: model.cell(for: date),
-                            capacity: MonthLayout.itemCapacity(cellHeight: proxy.size.height / 6),
-                            model: model,
-                            categories: store.state.categories,
-                            selectedDate: $model.selectedDate
-                        )
+                        dayCell(for: date, cellHeight: proxy.size.height / 6)
                         .frame(height: proxy.size.height / 6)
                     }
                 }
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear { refreshProjection() }
+        .onAppear {
+            hiddenCategoryIDs = CategoryFilterView.decode(storedHiddenCategoryIDs)
+            refreshProjection()
+        }
         .onChange(of: store.state) { _, _ in refreshProjection() }
         .onChange(of: hiddenCategoryIDs) { _, _ in refreshProjection() }
+        .onChange(of: storedHiddenCategoryIDs) { _, encoded in
+            hiddenCategoryIDs = CategoryFilterView.decode(encoded)
+        }
+        .popover(isPresented: quickCreatePresented) {
+            if let date = quickCreateDate {
+                QuickCreatePopover(
+                    date: date,
+                    categories: orderedCategories,
+                    store: store,
+                    onClose: { quickCreateDate = nil }
+                )
+            }
+        }
+        .popover(item: $selectedItem) { item in
+            ItemDetailPopover(
+                item: item,
+                store: store,
+                categories: orderedCategories,
+                onClose: { selectedItem = nil }
+            )
+        }
+        .overlay(alignment: .trailing) {
+            if let date = selectedDayDrawerDate {
+                DayDrawerView(
+                    date: date,
+                    store: store,
+                    categories: store.state.categories,
+                    hiddenCategoryIDs: hiddenCategoryIDs,
+                    onClose: { selectedDayDrawerDate = nil },
+                    onQuickCreate: { quickCreateDate = $0 },
+                    onOpenDetail: { selectedItem = $0 }
+                )
+                .transition(.move(edge: .trailing))
+            }
+        }
         .alert("日历提示", isPresented: alertPresented) {
             Button("知道了", role: .cancel) { store.dismissErrors() }
         } message: {
@@ -77,6 +113,12 @@ struct MonthView: View {
                 Image(systemName: "chevron.right")
             }
             .help("下个月")
+            Menu("分类") {
+                CategoryFilterView(
+                    categories: orderedCategories,
+                    hiddenCategoryIDs: $hiddenCategoryIDs
+                )
+            }
         }
         .padding(.horizontal, 16)
         .frame(height: CalendarTheme.toolbarHeight)
@@ -107,6 +149,52 @@ struct MonthView: View {
             get: { store.loadError != nil || store.mutationError != nil },
             set: { if !$0 { store.dismissErrors() } }
         )
+    }
+
+    private var quickCreatePresented: Binding<Bool> {
+        Binding(
+            get: { quickCreateDate != nil },
+            set: { if !$0 { quickCreateDate = nil } }
+        )
+    }
+
+    private var orderedCategories: [CalendarCategory] {
+        store.state.categories.values.sorted {
+            $0.sortIndex == $1.sortIndex ? $0.name < $1.name : $0.sortIndex < $1.sortIndex
+        }
+    }
+
+    @ViewBuilder
+    private func dayCell(for date: CalendarDate, cellHeight: CGFloat) -> some View {
+        let cell = model.cell(for: date)
+        let capacity = MonthLayout.itemCapacity(cellHeight: cellHeight)
+        DayCellView(
+            cell: cell,
+            capacity: capacity,
+            model: model,
+            categories: store.state.categories,
+            onAction: handle,
+            onCompletion: sendCompletion
+        )
+    }
+
+    private func handle(_ action: DayCellAction) {
+        switch action {
+        case let .openDay(date):
+            model.selectedDate = date
+            selectedDayDrawerDate = date
+        case let .quickCreate(date):
+            quickCreateDate = date
+        case let .openItem(id):
+            selectedItem = model.item(withID: id)
+        }
+    }
+
+    private func sendCompletion(_ command: CalendarCommand) {
+        guard store.phase == .ready else { return }
+        Task {
+            try? await store.send(command, undoLabel: "已更新完成状态")
+        }
     }
 
     private func refreshProjection() {

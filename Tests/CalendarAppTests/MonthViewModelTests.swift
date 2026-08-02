@@ -129,4 +129,25 @@ struct MonthViewModelTests {
         #expect(hidden.items.isEmpty)
         #expect(model.overflowCount(in: hidden, capacity: 1) == 0)
     }
+
+    @Test func hiddenCategoriesAreExcludedFromFreshProjectionAndOverflow() throws {
+        let visibleCategory = UUID()
+        let hiddenCategory = UUID()
+        let date = CalendarDate(year: 2026, month: 8, day: 3)!
+        var state = CalendarState.empty(uncategorizedID: visibleCategory, now: .distantPast)
+        state.categories[hiddenCategory] = CalendarCategory(
+            id: hiddenCategory, name: "隐藏", colorHex: "#FF3B30", sortIndex: 1,
+            createdAt: .distantPast, updatedAt: .distantPast
+        )
+        let visible = try makeItem(categoryID: visibleCategory, title: "显示", date: date)
+        let hidden = try makeItem(categoryID: hiddenCategory, title: "隐藏", date: date)
+        state.items[visible.id] = visible
+        state.items[hidden.id] = hidden
+        let model = MonthViewModel(
+            displayedMonth: date, state: state, hiddenCategoryIDs: [hiddenCategory], today: date
+        )
+        let cell = model.cell(for: date)
+        #expect(cell.items.map(\.title) == ["显示"])
+        #expect(model.overflowCount(in: cell, capacity: 1) == 0)
+    }
 }
