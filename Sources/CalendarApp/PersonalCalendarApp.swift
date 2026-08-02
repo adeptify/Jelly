@@ -16,6 +16,17 @@ struct PersonalCalendarApp: App {
                 .task { await environment.store.load() }
         }
         .defaultSize(width: 1180, height: 820)
+        .commands {
+            CommandGroup(replacing: .undoRedo) {
+                Button("撤销") {
+                    Task {
+                        try? await environment.store.undo()
+                    }
+                }
+                .keyboardShortcut("z", modifiers: .command)
+                .disabled(!environment.store.canUndo || environment.store.isMutating)
+            }
+        }
 
         Window("分类管理", id: "category-manager") {
             CategoryManagerView(store: environment.store)

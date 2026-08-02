@@ -151,7 +151,7 @@ enum StoreError: Error, Equatable, Sendable {
         mutationError = nil
     }
 
-    private func requireReadyForMutation() throws {
+    func requireReadyForMutation() throws {
         guard phase == .ready else {
             throw mutationRejection()
         }

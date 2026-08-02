@@ -129,6 +129,7 @@ struct CalendarItemRow: View {
             ),
             in: RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius)
         )
+        .draggable(transferPayload)
     }
 
     private static func timeString(_ minute: MinuteOfDay) -> String {
@@ -141,5 +142,14 @@ struct CalendarItemRow: View {
             isCompletedTask: isCompletedTask,
             appearance: colorScheme == .dark ? .dark : .light
         )
+    }
+
+    private var transferPayload: CalendarTransferPayload {
+        switch item {
+        case let .item(item):
+            .item(item.id)
+        case let .occurrence(occurrence):
+            .occurrence(occurrence.key)
+        }
     }
 }

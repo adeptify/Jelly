@@ -32,6 +32,7 @@ struct DayCellView: View {
     let capacity: Int
     let model: MonthViewModel
     let categories: [UUID: CalendarCategory]
+    @ObservedObject var dropCoordinator: CalendarDropCoordinator
     let onAction: (DayCellAction) -> Void
     let onCompletion: (CalendarCommand) -> Void
 
@@ -81,6 +82,19 @@ struct DayCellView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .windowBackgroundColor))
         .overlay(Rectangle().stroke(CalendarTheme.gridStroke, lineWidth: 0.5))
+        .overlay {
+            if dropCoordinator.dropTargetDate == cell.date {
+                Rectangle()
+                    .fill(Color.accentColor.opacity(0.16))
+                    .allowsHitTesting(false)
+                    .overlay(alignment: .bottomLeading) {
+                        Text("移到 \(cell.date.month)月\(cell.date.day)日")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Color.accentColor)
+                            .padding(4)
+                    }
+            }
+        }
         .background {
             Rectangle()
                 .fill(.clear)
@@ -88,6 +102,15 @@ struct DayCellView: View {
                 .onTapGesture {
                     onAction(DayCellInteractionRouter.action(for: .emptyArea, date: cell.date))
                 }
+        }
+        .dropDestination(for: CalendarTransferPayload.self) { payloads, _ in
+            guard let payload = payloads.first else { return false }
+            Task {
+                try? await dropCoordinator.accept(payload, on: cell.date)
+            }
+            return true
+        } isTargeted: { isTargeted in
+            dropCoordinator.setTargeted(isTargeted, date: cell.date)
         }
     }
 }

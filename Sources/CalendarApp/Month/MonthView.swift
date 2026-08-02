@@ -11,11 +11,13 @@ struct MonthView: View {
     let store: CalendarStore
     @Environment(\.openWindow) private var openWindow
     @StateObject private var model: MonthViewModel
+    @StateObject private var dropCoordinator: CalendarDropCoordinator
     @AppStorage("calendar.hiddenCategoryIDs") private var storedHiddenCategoryIDs = ""
     @State private var hiddenCategoryIDs: Set<UUID> = []
     @State private var quickCreateDate: CalendarDate?
     @State private var selectedDayDrawerDate: CalendarDate?
     @State private var selectedItem: ProjectedItem?
+    @State private var isResolvingRecurringDrop = false
 
     init(store: CalendarStore) {
         self.store = store
@@ -26,6 +28,7 @@ struct MonthView: View {
             hiddenCategoryIDs: [],
             today: today
         ))
+        _dropCoordinator = StateObject(wrappedValue: CalendarDropCoordinator(store: store))
     }
 
     var body: some View {
@@ -72,6 +75,20 @@ struct MonthView: View {
                 onClose: { selectedItem = nil }
             )
         }
+        .confirmationDialog(
+            "移动重复事项",
+            isPresented: recurringDropConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("仅本次") { resolveRecurringDrop(scope: .onlyThis) }
+            Button("本次及以后") { resolveRecurringDrop(scope: .thisAndFuture) }
+            Button("取消", role: .cancel) {
+                isResolvingRecurringDrop = false
+                dropCoordinator.cancel()
+            }
+        } message: {
+            Text("请选择移动范围")
+        }
         .overlay(alignment: .trailing) {
             if let date = selectedDayDrawerDate {
                 DayDrawerView(
@@ -84,6 +101,21 @@ struct MonthView: View {
                     onOpenDetail: { selectedItem = $0 }
                 )
                 .transition(.move(edge: .trailing))
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if let undoNotice = store.undoNotice {
+                HStack(spacing: 10) {
+                    Text(undoNotice)
+                    Button("撤销") { undo() }
+                        .disabled(!store.canUndo || store.isMutating)
+                }
+                .font(.system(size: 12, weight: .medium))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.regularMaterial, in: Capsule())
+                .padding(.bottom, 16)
+                .transition(.opacity)
             }
         }
         .alert("日历提示", isPresented: alertPresented) {
@@ -177,6 +209,7 @@ struct MonthView: View {
             capacity: capacity,
             model: model,
             categories: store.state.categories,
+            dropCoordinator: dropCoordinator,
             onAction: handle,
             onCompletion: sendCompletion
         )
@@ -198,6 +231,31 @@ struct MonthView: View {
         guard store.phase == .ready else { return }
         Task {
             try? await store.send(command, undoLabel: "已更新完成状态")
+        }
+    }
+
+    private var recurringDropConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { dropCoordinator.pendingRecurringDrop != nil },
+            set: { isPresented in
+                if !isPresented, !isResolvingRecurringDrop {
+                    dropCoordinator.cancel()
+                }
+            }
+        )
+    }
+
+    private func resolveRecurringDrop(scope: SeriesScope) {
+        isResolvingRecurringDrop = true
+        Task {
+            defer { isResolvingRecurringDrop = false }
+            try? await dropCoordinator.resolve(scope: scope)
+        }
+    }
+
+    private func undo() {
+        Task {
+            try? await store.undo()
         }
     }
 
