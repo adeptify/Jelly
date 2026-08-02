@@ -301,7 +301,12 @@ struct CategoryManagerView: View {
     private var deleteDialogPresented: Binding<Bool> {
         Binding(
             get: { model.categoryToDelete != nil },
-            set: { if !$0 { model.categoryToDelete = nil } }
+            set: {
+                if !$0 {
+                    model.categoryToDelete = nil
+                    model.migrationTargetID = nil
+                }
+            }
         )
     }
 
@@ -341,12 +346,12 @@ struct CategoryManagerView: View {
     }
 
     private func confirmDelete(_ category: CalendarCategory, migrateTo targetID: UUID) {
-        model.categoryToDelete = category
-        model.migrationTargetID = targetID
+        model.categoryToDelete = nil
+        model.migrationTargetID = nil
         localError = nil
         Task {
             do {
-                try await model.deleteConfirmed()
+                try await model.deleteConfirmed(category: category, migrationTargetID: targetID)
                 startCreating()
             } catch {
                 localError = message(for: error)

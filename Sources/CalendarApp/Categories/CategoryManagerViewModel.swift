@@ -81,11 +81,13 @@ enum CategoryColorValidator {
     static func accentNeedsOutline(
         colorHex: String,
         appearance: CalendarAppearance,
-        palette: CategoryPreviewPalette = .production
+        palette: CategoryPreviewPalette = .production,
+        renderingOpacity: Double = 1
     ) throws -> Bool {
         let category = try color(for: colorHex)
         let canvas = try color(for: canvasHex(for: appearance, palette: palette))
-        return category.contrastRatio(with: canvas) < CalendarTheme.categoryAccentMinimumContrast
+        let renderedAccent = category.composited(over: canvas, alpha: renderingOpacity)
+        return renderedAccent.contrastRatio(with: canvas) < CalendarTheme.categoryAccentMinimumContrast
     }
 
     private static func canvasHex(
@@ -206,6 +208,16 @@ final class CategoryManagerViewModel: ObservableObject {
         }
         guard let migrationTargetID else {
             throw CategoryManagerError.migrationRequired
+        }
+        try await deleteConfirmed(category: category, migrationTargetID: migrationTargetID)
+    }
+
+    func deleteConfirmed(
+        category: CalendarCategory,
+        migrationTargetID: UUID
+    ) async throws {
+        guard category.id != store.state.uncategorizedID else {
+            throw CategoryManagerError.protectedCategory
         }
         guard migrationTargetID != category.id,
               store.state.categories[migrationTargetID] != nil

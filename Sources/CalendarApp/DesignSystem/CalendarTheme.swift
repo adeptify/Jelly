@@ -11,6 +11,7 @@ enum CalendarTheme {
     static let categoryItemBackgroundOpacity = 0.14
     static let categoryTextMinimumContrast = 4.5
     static let categoryAccentMinimumContrast = 3.0
+    static let completedTaskAccentOpacity = 0.45
 
     static let toolbarHeight: CGFloat = 52
     static let weekdayHeaderHeight: CGFloat = 28
@@ -29,7 +30,9 @@ enum CalendarTheme {
         category.opacity(categoryItemBackgroundOpacity)
     }
     static func completedTaskBackground(_ category: Color) -> Color { category.opacity(0.07) }
-    static func completedTaskAccent(_ category: Color) -> Color { category.opacity(0.45) }
+    static func completedTaskAccent(_ category: Color) -> Color {
+        category.opacity(completedTaskAccentOpacity)
+    }
 
     static func categoryColor(_ hex: String) -> Color {
         let text = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
@@ -44,9 +47,18 @@ enum CalendarTheme {
     }
 
     static func accentNeedsOutline(_ hex: String, appearance: CalendarAppearance) -> Bool {
+        itemAccentNeedsOutline(hex, isCompletedTask: false, appearance: appearance)
+    }
+
+    static func itemAccentNeedsOutline(
+        _ hex: String,
+        isCompletedTask: Bool,
+        appearance: CalendarAppearance
+    ) -> Bool {
         (try? CategoryColorValidator.accentNeedsOutline(
             colorHex: hex,
-            appearance: appearance
+            appearance: appearance,
+            renderingOpacity: isCompletedTask ? completedTaskAccentOpacity : 1
         )) ?? false
     }
 

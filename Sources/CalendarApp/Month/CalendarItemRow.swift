@@ -136,8 +136,9 @@ struct CalendarItemRow: View {
     }
 
     private var accentNeedsOutline: Bool {
-        CalendarTheme.accentNeedsOutline(
+        CalendarTheme.itemAccentNeedsOutline(
             category?.colorHex ?? "#8E8E93",
+            isCompletedTask: isCompletedTask,
             appearance: colorScheme == .dark ? .dark : .light
         )
     }

@@ -55,6 +55,32 @@ struct CategoryManagerViewModelTests {
         #expect(try CategoryColorValidator.accentNeedsOutline(colorHex: "#000000", appearance: .light) == false)
     }
 
+    @Test func completedTaskAccentUsesRenderedOpacityWhenDecidingItsOutline() throws {
+        #expect(CalendarTheme.completedTaskAccentOpacity == 0.45)
+        #expect(try CategoryColorValidator.accentNeedsOutline(
+            colorHex: "#4F7FFF", appearance: .light
+        ) == false)
+        #expect(try CategoryColorValidator.accentNeedsOutline(
+            colorHex: "#4F7FFF", appearance: .dark
+        ) == false)
+        #expect(try CategoryColorValidator.accentNeedsOutline(
+            colorHex: "#4F7FFF",
+            appearance: .light,
+            renderingOpacity: CalendarTheme.completedTaskAccentOpacity
+        ))
+        #expect(try CategoryColorValidator.accentNeedsOutline(
+            colorHex: "#4F7FFF",
+            appearance: .dark,
+            renderingOpacity: CalendarTheme.completedTaskAccentOpacity
+        ))
+        #expect(CalendarTheme.itemAccentNeedsOutline(
+            "#4F7FFF", isCompletedTask: true, appearance: .light
+        ))
+        #expect(CalendarTheme.itemAccentNeedsOutline(
+            "#4F7FFF", isCompletedTask: true, appearance: .dark
+        ))
+    }
+
     @Test func defaultPaletteUsesTheSameReadabilityValidation() throws {
         #expect(CategoryManagerViewModel.defaultPalette == [
             "#4F7FFF", "#7A67D8", "#D65E73", "#D9893D",
@@ -141,6 +167,31 @@ struct CategoryManagerViewModelTests {
         try await store.undo()
         #expect(store.state == original)
         #expect(await repository.persistedState == original)
+    }
+
+    @Test func capturedDeleteChoiceSurvivesDialogDismissal() async throws {
+        let fixture = try makeCategoryReferenceFixture()
+        let (store, _) = try await makeReadyStore(initialState: fixture.state)
+        let vm = CategoryManagerViewModel(store: store)
+        let category = fixture.state.categories[fixture.deletedCategoryID]!
+        let migrationTargetID = fixture.targetCategoryID
+
+        vm.categoryToDelete = category
+        vm.migrationTargetID = migrationTargetID
+        vm.categoryToDelete = nil
+        vm.migrationTargetID = nil
+
+        try await vm.deleteConfirmed(category: category, migrationTargetID: migrationTargetID)
+
+        #expect(store.state.categories[category.id] == nil)
+        #expect(store.state.items.values.allSatisfy { $0.categoryID == migrationTargetID })
+        #expect(store.state.recurrence.series.values.allSatisfy { $0.categoryID == migrationTargetID })
+        #expect(store.state.recurrence.exceptions.values.allSatisfy { exception in
+            if case let .modified(override) = exception {
+                return override.categoryID == migrationTargetID
+            }
+            return true
+        })
     }
 
     @Test func unreadableColorDoesNotCommit() async throws {
