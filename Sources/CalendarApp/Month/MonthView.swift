@@ -17,7 +17,7 @@ struct MonthView: View {
     @State private var quickCreateDate: CalendarDate?
     @State private var selectedDayDrawerDate: CalendarDate?
     @State private var selectedItem: ProjectedItem?
-    @State private var isResolvingRecurringDrop = false
+    @State private var isRecurringDropConfirmationPresented = false
 
     init(store: CalendarStore) {
         self.store = store
@@ -57,6 +57,9 @@ struct MonthView: View {
         .onChange(of: storedHiddenCategoryIDs) { _, encoded in
             hiddenCategoryIDs = CategoryFilterView.decode(encoded)
         }
+        .onChange(of: dropCoordinator.pendingRecurringDrop) { _, pendingDrop in
+            isRecurringDropConfirmationPresented = pendingDrop != nil
+        }
         .popover(isPresented: quickCreatePresented) {
             if let date = quickCreateDate {
                 QuickCreatePopover(
@@ -77,13 +80,13 @@ struct MonthView: View {
         }
         .confirmationDialog(
             "移动重复事项",
-            isPresented: recurringDropConfirmationPresented,
+            isPresented: $isRecurringDropConfirmationPresented,
             titleVisibility: .visible
         ) {
             Button("仅本次") { resolveRecurringDrop(scope: .onlyThis) }
             Button("本次及以后") { resolveRecurringDrop(scope: .thisAndFuture) }
             Button("取消", role: .cancel) {
-                isResolvingRecurringDrop = false
+                isRecurringDropConfirmationPresented = false
                 dropCoordinator.cancel()
             }
         } message: {
@@ -234,22 +237,15 @@ struct MonthView: View {
         }
     }
 
-    private var recurringDropConfirmationPresented: Binding<Bool> {
-        Binding(
-            get: { dropCoordinator.pendingRecurringDrop != nil },
-            set: { isPresented in
-                if !isPresented, !isResolvingRecurringDrop {
-                    dropCoordinator.cancel()
-                }
-            }
-        )
-    }
-
     private func resolveRecurringDrop(scope: SeriesScope) {
-        isResolvingRecurringDrop = true
+        guard let resolution = dropCoordinator.beginResolution(scope: scope) else { return }
+        isRecurringDropConfirmationPresented = false
         Task {
-            defer { isResolvingRecurringDrop = false }
-            try? await dropCoordinator.resolve(scope: scope)
+            do {
+                try await dropCoordinator.submit(resolution)
+            } catch {
+                isRecurringDropConfirmationPresented = true
+            }
         }
     }
 

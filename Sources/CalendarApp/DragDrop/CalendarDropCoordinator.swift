@@ -8,11 +8,18 @@ struct PendingRecurringDrop: Equatable {
     let newSeriesID: UUID
 }
 
+struct RecurringDropResolution: Equatable {
+    let pendingDrop: PendingRecurringDrop
+    let scope: SeriesScope
+}
+
 @MainActor
 final class CalendarDropCoordinator: ObservableObject {
     private let store: CalendarStore
     @Published var pendingRecurringDrop: PendingRecurringDrop?
     @Published private(set) var dropTargetDate: CalendarDate?
+    private(set) var isResolvingRecurringDrop = false
+    private var activeResolution: RecurringDropResolution?
 
     init(store: CalendarStore) {
         self.store = store
@@ -43,21 +50,46 @@ final class CalendarDropCoordinator: ObservableObject {
         }
     }
 
-    func resolve(scope: SeriesScope) async throws {
-        guard let pendingRecurringDrop else { return }
-        try await store.send(
-            .mutateSeries(
-                pendingRecurringDrop.key,
-                scope: scope,
-                edit: .patch(.init(displayedDate: pendingRecurringDrop.destination)),
-                newSeriesID: pendingRecurringDrop.newSeriesID
-            ),
-            undoLabel: "移动重复事项"
+    func beginResolution(scope: SeriesScope) -> RecurringDropResolution? {
+        guard let pendingRecurringDrop, !isResolvingRecurringDrop else { return nil }
+        let resolution = RecurringDropResolution(
+            pendingDrop: pendingRecurringDrop,
+            scope: scope
         )
-        self.pendingRecurringDrop = nil
+        activeResolution = resolution
+        isResolvingRecurringDrop = true
+        return resolution
+    }
+
+    func submit(_ resolution: RecurringDropResolution) async throws {
+        guard activeResolution == resolution else { return }
+        activeResolution = nil
+
+        do {
+            try await store.send(
+                .mutateSeries(
+                    resolution.pendingDrop.key,
+                    scope: resolution.scope,
+                    edit: .patch(.init(displayedDate: resolution.pendingDrop.destination)),
+                    newSeriesID: resolution.pendingDrop.newSeriesID
+                ),
+                undoLabel: "移动重复事项"
+            )
+            pendingRecurringDrop = nil
+            isResolvingRecurringDrop = false
+        } catch {
+            isResolvingRecurringDrop = false
+            throw error
+        }
+    }
+
+    func resolve(scope: SeriesScope) async throws {
+        guard let resolution = beginResolution(scope: scope) else { return }
+        try await submit(resolution)
     }
 
     func cancel() {
+        guard !isResolvingRecurringDrop else { return }
         pendingRecurringDrop = nil
     }
 }

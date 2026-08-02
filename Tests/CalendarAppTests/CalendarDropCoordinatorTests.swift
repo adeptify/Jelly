@@ -153,6 +153,78 @@ struct CalendarDropCoordinatorTests {
         #expect(await repository.saveCount == 0)
     }
 
+    @Test func concurrentRecurringResolutionsSubmitExactlyOneMutation() async throws {
+        let harness = try makeMondayWednesdayDropHarness()
+        let repository = InMemoryCalendarRepository(initialState: harness.originalState)
+        let store = CalendarStore(initialState: harness.originalState, repository: repository)
+        await store.load()
+        let coordinator = CalendarDropCoordinator(store: store)
+        try await coordinator.accept(.occurrence(harness.boundaryMonday), on: harness.destinationTuesday)
+        await repository.suspendNextSave()
+
+        let firstSubmission = Task { @MainActor in
+            try await coordinator.resolve(scope: .thisAndFuture)
+        }
+        await repository.waitForSaveToStart()
+
+        let duplicateSubmission = Task { @MainActor in
+            try await coordinator.resolve(scope: .thisAndFuture)
+        }
+        try await duplicateSubmission.value
+        #expect(await repository.saveCount == 0)
+
+        await repository.resumeSave()
+        try await firstSubmission.value
+
+        #expect(await repository.saveCount == 1)
+        #expect(coordinator.pendingRecurringDrop == nil)
+    }
+
+    @Test func failedRecurringResolutionKeepsPendingDropForRetry() async throws {
+        let harness = try makeMondayWednesdayDropHarness()
+        let repository = InMemoryCalendarRepository(initialState: harness.originalState)
+        let store = CalendarStore(initialState: harness.originalState, repository: repository)
+        await store.load()
+        let coordinator = CalendarDropCoordinator(store: store)
+        try await coordinator.accept(.occurrence(harness.boundaryMonday), on: harness.destinationTuesday)
+        await repository.failNextSave()
+
+        do {
+            try await coordinator.resolve(scope: .thisAndFuture)
+            Issue.record("A failed save must reject the recurring move.")
+        } catch let error as StoreError {
+            #expect(error == .persistenceFailed)
+        }
+
+        #expect(coordinator.pendingRecurringDrop?.key == harness.boundaryMonday)
+        #expect(coordinator.pendingRecurringDrop?.destination == harness.destinationTuesday)
+        #expect(store.mutationError != nil)
+        #expect(await repository.saveCount == 0)
+
+        try await coordinator.resolve(scope: .thisAndFuture)
+
+        #expect(await repository.saveCount == 1)
+        #expect(coordinator.pendingRecurringDrop == nil)
+    }
+
+    @Test func sharedUndoCommandUsesStoreAvailabilityAndSnapshot() async throws {
+        let original = makeEmptyState()
+        let repository = InMemoryCalendarRepository(initialState: original)
+        let store = CalendarStore(initialState: original, repository: repository)
+        await store.load()
+        let item = try makeItem(categoryID: original.uncategorizedID)
+
+        #expect(CalendarUndoCommandRouter.isDisabled(for: store))
+        try await store.send(.createItem(item), undoLabel: "添加事项")
+        #expect(CalendarUndoCommandRouter.isDisabled(for: store) == false)
+
+        try await CalendarUndoCommandRouter.undo(store: store)
+
+        #expect(store.state == original)
+        #expect(await repository.persistedState == original)
+        #expect(CalendarUndoCommandRouter.isDisabled(for: store))
+    }
+
     @Test func hoverTargetShowsFeedbackWithoutMutation() async throws {
         let original = makeEmptyState()
         let repository = InMemoryCalendarRepository(initialState: original)
