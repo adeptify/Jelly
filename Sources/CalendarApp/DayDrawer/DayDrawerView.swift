@@ -2,6 +2,7 @@ import CalendarDomain
 import SwiftUI
 
 struct DayDrawerView: View {
+    let date: CalendarDate
     let store: CalendarStore
     let categories: [UUID: CalendarCategory]
     let hiddenCategoryIDs: Set<UUID>
@@ -19,6 +20,7 @@ struct DayDrawerView: View {
         onQuickCreate: @escaping (CalendarDate) -> Void,
         onOpenDetail: @escaping (ProjectedItem) -> Void
     ) {
+        self.date = date
         self.store = store
         self.categories = categories
         self.hiddenCategoryIDs = hiddenCategoryIDs
@@ -63,7 +65,7 @@ struct DayDrawerView: View {
             }
 
             Button("新建事项") {
-                onQuickCreate(model.date)
+                onQuickCreate(model.quickCreateDate)
             }
             .keyboardShortcut("n", modifiers: [.command])
         }
@@ -76,6 +78,9 @@ struct DayDrawerView: View {
         }
         .onChange(of: store.state) { _, state in
             model.refresh(state: state, hiddenCategoryIDs: hiddenCategoryIDs)
+        }
+        .onChange(of: date) { _, date in
+            model.retarget(date: date, state: store.state, hiddenCategoryIDs: hiddenCategoryIDs)
         }
         .onChange(of: hiddenCategoryIDs) { _, hidden in
             model.refresh(state: store.state, hiddenCategoryIDs: hidden)

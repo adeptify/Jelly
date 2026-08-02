@@ -6,6 +6,27 @@ import Testing
 @Suite("ItemEditorViewModelTests")
 @MainActor
 struct ItemEditorViewModelTests {
+    @Test func dayDrawerRetargetsDateItemsAndQuickCreateWhenExternalDateChanges() throws {
+        let dateA = CalendarDate(year: 2026, month: 8, day: 3)!
+        let dateB = CalendarDate(year: 2026, month: 8, day: 4)!
+        var state = makeEmptyState()
+        let itemA = try makeItem(categoryID: state.uncategorizedID, title: "A 日事项", date: dateA)
+        let itemB = try makeItem(categoryID: state.uncategorizedID, title: "B 日事项", date: dateB)
+        state.items[itemA.id] = itemA
+        state.items[itemB.id] = itemB
+
+        let model = DayDrawerViewModel(date: dateA, state: state, hiddenCategoryIDs: [])
+        #expect(model.date == dateA)
+        #expect(model.items.map(\.title) == ["A 日事项"])
+        #expect(model.quickCreateDate == dateA)
+
+        model.retarget(date: dateB, state: state, hiddenCategoryIDs: [])
+
+        #expect(model.date == dateB)
+        #expect(model.items.map(\.title) == ["B 日事项"])
+        #expect(model.quickCreateDate == dateB)
+    }
+
     @Test func untimedDraftCreatesItemWithNoTimeRange() throws {
         let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000601")!
         let draft = ItemDraft(
