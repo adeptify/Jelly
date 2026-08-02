@@ -66,6 +66,42 @@ struct MonthViewModelTests {
         #expect(MonthLayout.itemCapacity(cellHeight: 116) == 3)
     }
 
+    @Test func emptyStateHintAppearsOnlyForReadyTrulyEmptyCalendar() throws {
+        let empty = makeEmptyState()
+
+        for phase in [
+            StorePhase.notLoaded,
+            .loading,
+            .mutating,
+            .restoring,
+            .loadFailed
+        ] {
+            #expect(MonthEmptyStateHintPolicy.shouldShow(phase: phase, state: empty) == false)
+        }
+        #expect(MonthEmptyStateHintPolicy.shouldShow(phase: .ready, state: empty))
+
+        var withItem = empty
+        let item = try makeItem(categoryID: empty.uncategorizedID)
+        withItem.items[item.id] = item
+        #expect(MonthEmptyStateHintPolicy.shouldShow(phase: .ready, state: withItem) == false)
+
+        var withSeries = empty
+        let series = try WeeklySeries(
+            id: UUID(),
+            kind: .task,
+            title: "重复事项",
+            categoryID: empty.uncategorizedID,
+            startDate: CalendarDate(year: 2026, month: 8, day: 3)!,
+            endDate: nil,
+            weekdays: [.monday],
+            timeRange: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        withSeries.recurrence.series[series.id] = series
+        #expect(MonthEmptyStateHintPolicy.shouldShow(phase: .ready, state: withSeries) == false)
+    }
+
     @Test func stateUpdateRefreshesProjectedRowsAndColors() throws {
         let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000501")!
         let date = CalendarDate(year: 2026, month: 8, day: 3)!

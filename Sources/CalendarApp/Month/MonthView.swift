@@ -1,6 +1,12 @@
 import CalendarDomain
 import SwiftUI
 
+enum MonthEmptyStateHintPolicy {
+    static func shouldShow(phase: StorePhase, state: CalendarState) -> Bool {
+        phase == .ready && state.items.isEmpty && state.recurrence.series.isEmpty
+    }
+}
+
 struct MonthView: View {
     let store: CalendarStore
     @StateObject private var model: MonthViewModel
@@ -55,7 +61,7 @@ struct MonthView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(monthTitle)
                     .font(CalendarTheme.monthTitleFont)
-                if store.state.items.isEmpty && store.state.recurrence.series.isEmpty {
+                if MonthEmptyStateHintPolicy.shouldShow(phase: store.phase, state: store.state) {
                     Text("点击日期开始创建")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
