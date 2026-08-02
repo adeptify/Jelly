@@ -340,17 +340,22 @@ private func isTrimmedNonEmpty(_ value: String) -> Bool {
 }
 
 private func normalizedCategoryName(_ name: String) -> String {
-    name.trimmingCharacters(in: .whitespacesAndNewlines).folding(
-        options: [.caseInsensitive, .diacriticInsensitive],
-        locale: .current
-    )
+    name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 }
 
 private func isValidColor(_ color: String) -> Bool {
-    guard color.count == 7, color.first == "#" else {
+    let scalars = color.unicodeScalars
+    guard scalars.count == 7, scalars.first?.value == 35 else {
         return false
     }
-    return color.dropFirst().allSatisfy { $0.isHexDigit }
+    return scalars.dropFirst().allSatisfy { scalar in
+        switch scalar.value {
+        case 48...57, 65...70, 97...102:
+            true
+        default:
+            false
+        }
+    }
 }
 
 private func isValidTimeRange(_ timeRange: LocalTimeRange?) -> Bool {

@@ -422,6 +422,73 @@ struct CalendarReducerTests {
         #expect(result.categories[category.id]?.sortIndex == 3)
     }
 
+    @Test func creatingCategoryRejectsFullWidthHexDigits() throws {
+        let fixture = try makeCategoryReferenceFixture()
+        let category = CalendarCategory(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000361")!,
+            name: "健康",
+            colorHex: "#ＡＢＣＤＥＦ",
+            sortIndex: 0,
+            createdAt: .init(timeIntervalSince1970: 0),
+            updatedAt: .init(timeIntervalSince1970: 0)
+        )
+        #expect(throws: ReducerError.invalidCategoryColor) {
+            try CalendarReducer.reduce(
+                fixture.state,
+                command: .createCategory(category),
+                now: .now
+            )
+        }
+    }
+
+    @Test func categoryNamesIgnoreCaseButKeepDiacriticDifferences() throws {
+        let uncategorizedID = UUID(uuidString: "00000000-0000-0000-0000-000000000362")!
+        let state = CalendarState.empty(uncategorizedID: uncategorizedID, now: .now)
+        let resume = CalendarCategory(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000363")!,
+            name: "Resume",
+            colorHex: "#4F7FFF",
+            sortIndex: 0,
+            createdAt: .now,
+            updatedAt: .now
+        )
+        let withResume = try CalendarReducer.reduce(
+            state,
+            command: .createCategory(resume),
+            now: .now
+        )
+        let caseVariant = CalendarCategory(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000364")!,
+            name: "resume",
+            colorHex: "#53A66F",
+            sortIndex: 0,
+            createdAt: .now,
+            updatedAt: .now
+        )
+        #expect(throws: ReducerError.duplicateCategoryName) {
+            try CalendarReducer.reduce(
+                withResume,
+                command: .createCategory(caseVariant),
+                now: .now
+            )
+        }
+
+        let accented = CalendarCategory(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000365")!,
+            name: "résumé",
+            colorHex: "#D65E73",
+            sortIndex: 0,
+            createdAt: .now,
+            updatedAt: .now
+        )
+        let result = try CalendarReducer.reduce(
+            withResume,
+            command: .createCategory(accented),
+            now: .now
+        )
+        #expect(result.categories[accented.id]?.name == "résumé")
+    }
+
     private func makeRecurringTaskState(endDate: CalendarDate? = nil) throws -> CalendarState {
         let uncategorizedID = UUID(uuidString: "00000000-0000-0000-0000-000000000350")!
         let state = CalendarState.empty(uncategorizedID: uncategorizedID, now: .init(timeIntervalSince1970: 0))
