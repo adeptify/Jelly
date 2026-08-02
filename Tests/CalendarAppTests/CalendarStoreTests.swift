@@ -176,4 +176,127 @@ struct CalendarStoreTests {
         #expect(store.state == restored)
         #expect(await repository.persistedState == restored)
     }
+
+    @Test func invalidSemanticRestoreKeepsMemoryDiskAndRollbackUntouched() async throws {
+        let stored = try makeStateWithOneItem()
+        let (store, repository) = try await makeReadyStore(initialState: stored)
+        try await store.send(.createCategory(makeCategory(name: "保留撤销")), undoLabel: "添加分类")
+        let publishedBeforeRestore = store.state
+        let primaryBytesBeforeRestore = await repository.rawDocumentData()
+        let canUndoBeforeRestore = store.canUndo
+        let sourceDirectory = try makeTemporaryCalendarAppDirectory()
+        defer { try? FileManager.default.removeItem(at: sourceDirectory) }
+        let source = sourceDirectory.appendingPathComponent("invalid-semantic-backup.json")
+        let rollback = sourceDirectory
+            .appendingPathComponent("Rollbacks", isDirectory: true)
+            .appendingPathComponent("proposed-rollback.json")
+        var invalid = publishedBeforeRestore
+        let itemID = try #require(invalid.items.keys.first)
+        invalid.items[itemID]?.categoryID = UUID()
+        try writeRawBackupDocument(state: invalid, to: source)
+
+        do {
+            try await store.restore(from: source, using: BackupService(), rollbackURL: rollback)
+            Issue.record("A backup with a dangling category must be rejected.")
+        } catch let error as StoreError {
+            #expect(error == .restoreFailed)
+        }
+
+        #expect(store.state == publishedBeforeRestore)
+        #expect(await repository.rawDocumentData() == primaryBytesBeforeRestore)
+        #expect(await repository.saveCount == 1)
+        #expect(store.canUndo == canUndoBeforeRestore)
+        #expect(FileManager.default.fileExists(atPath: rollback.path) == false)
+        #expect(FileManager.default.fileExists(atPath: rollback.deletingLastPathComponent().path) == false)
+    }
+
+    @Test func successfulRestorePublishesOnceAndClearsUndo() async throws {
+        let original = makeEmptyState()
+        let restored = try makeCompleteRecurrenceGraphState()
+        let (store, repository) = try await makeReadyStore(initialState: original)
+        try await store.send(.createCategory(makeCategory(name: "待撤销")), undoLabel: "添加分类")
+        let preRestore = store.state
+        let preRestoreBytes = await repository.rawDocumentData()
+        let savesBeforeRestore = await repository.saveCount
+        let source = try makeBackupFile(for: restored)
+        defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
+        let rollbackDirectory = source.deletingLastPathComponent()
+            .appendingPathComponent("Rollbacks", isDirectory: true)
+        let rollback = rollbackDirectory.appendingPathComponent("restore-\(UUID().uuidString).json")
+        #expect(FileManager.default.fileExists(atPath: rollbackDirectory.path) == false)
+
+        let publicationGenerationBeforeRestore = store.statePublicationGeneration
+
+        try await store.restore(from: source, using: BackupService(), rollbackURL: rollback)
+
+        #expect(store.state == restored)
+        #expect(await repository.persistedState == restored)
+        #expect(await repository.saveCount == savesBeforeRestore + 1)
+        #expect(store.statePublicationGeneration == publicationGenerationBeforeRestore + 1)
+        #expect(FileManager.default.fileExists(atPath: rollbackDirectory.path))
+        #expect(try Data(contentsOf: rollback) == preRestoreBytes)
+        #expect(try decodedBackupState(from: rollback) == preRestore)
+        #expect(store.canUndo == false)
+        #expect(store.undoNotice == nil)
+    }
+}
+
+private func makeTemporaryCalendarAppDirectory() throws -> URL {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CalendarStoreTests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+    return directory
+}
+
+private func writeRawBackupDocument(state: CalendarState, to url: URL) throws {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    encoder.dateEncodingStrategy = .millisecondsSince1970
+    try encoder.encode(CalendarDocument(state: state)).write(to: url)
+}
+
+private func decodedBackupState(from url: URL) throws -> CalendarState {
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .millisecondsSince1970
+    return try decoder.decode(CalendarDocument.self, from: Data(contentsOf: url)).state
+}
+
+private func makeCompleteRecurrenceGraphState() throws -> CalendarState {
+    var state = try makeStateWithOneItem()
+    let series = try WeeklySeries(
+        id: UUID(),
+        kind: .task,
+        title: "恢复后的每周复盘",
+        categoryID: state.uncategorizedID,
+        startDate: .init(year: 2026, month: 8, day: 3)!,
+        endDate: .init(year: 2026, month: 8, day: 31)!,
+        weekdays: [.monday, .wednesday],
+        timeRange: nil,
+        createdAt: .distantPast,
+        updatedAt: .distantPast
+    )
+    let modifiedKey = OccurrenceKey(
+        seriesID: series.id,
+        originalDate: .init(year: 2026, month: 8, day: 10)!
+    )
+    let completedKey = OccurrenceKey(
+        seriesID: series.id,
+        originalDate: .init(year: 2026, month: 8, day: 12)!
+    )
+    state.recurrence = .init(
+        series: [series.id: series],
+        exceptions: [
+            modifiedKey: .modified(.init(
+                displayedDate: .init(year: 2026, month: 8, day: 11)!,
+                title: "保留的单次例外",
+                kind: .task,
+                categoryID: state.uncategorizedID,
+                timeRange: nil
+            ))
+        ],
+        completions: [
+            completedKey: .init(key: completedKey, completedAt: .distantPast)
+        ]
+    )
+    return state
 }

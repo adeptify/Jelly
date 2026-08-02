@@ -149,6 +149,7 @@ actor InMemoryCalendarRepository: CalendarRepository {
 
     func failNextSave() { failSave = true }
     func replaceRawDocument(with data: Data) { rawDocument = data }
+    func rawDocumentData() -> Data { rawDocument }
 
     func suspendNextLoad() { suspendLoad = true }
     func suspendNextSave() { suspendSave = true }

@@ -46,6 +46,30 @@ enum CalendarItemRowInteractionRouter {
     }
 }
 
+struct CalendarItemRowPresentation: Equatable {
+    let categoryName: String?
+    let timeText: String?
+    let title: String
+
+    static func make(
+        availableContentWidth: Double,
+        categoryName: String,
+        timeRange: LocalTimeRange?,
+        title: String
+    ) -> CalendarItemRowPresentation {
+        let isCompactTimedRow = timeRange != nil && availableContentWidth < 120
+        return CalendarItemRowPresentation(
+            categoryName: isCompactTimedRow ? nil : categoryName,
+            timeText: timeRange.map { timeString($0.start) },
+            title: title
+        )
+    }
+
+    private static func timeString(_ minute: MinuteOfDay) -> String {
+        String(format: "%02d:%02d", minute.value / 60, minute.value % 60)
+    }
+}
+
 struct CalendarItemRow: View {
     let item: ProjectedItem
     let category: CalendarCategory?
@@ -103,21 +127,35 @@ struct CalendarItemRow: View {
                     onOpenDetail?(item)
                 }
             } label: {
-                HStack(spacing: 4) {
-                    Text(category?.name ?? "未分类")
-                        .lineLimit(1)
-                    if let time = item.timeRange {
-                        Text(Self.timeString(time.start))
-                            .monospacedDigit()
+                GeometryReader { proxy in
+                    let presentation = CalendarItemRowPresentation.make(
+                        availableContentWidth: proxy.size.width,
+                        categoryName: category?.name ?? "未分类",
+                        timeRange: item.timeRange,
+                        title: item.title
+                    )
+                    HStack(spacing: 4) {
+                        if let categoryName = presentation.categoryName {
+                            Text(categoryName)
+                                .lineLimit(1)
+                        }
+                        if let timeText = presentation.timeText {
+                            Text(timeText)
+                                .monospacedDigit()
+                                .fixedSize(horizontal: true, vertical: false)
+                                .layoutPriority(2)
+                        }
+                        Text(presentation.title)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                        Spacer(minLength: 0)
                     }
-                    Text(item.title)
-                        .lineLimit(1)
-                        .layoutPriority(1)
-                    Spacer(minLength: 0)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 }
                 .foregroundStyle(isCompletedTask ? CalendarTheme.completedText : .primary)
             }
             .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .font(CalendarTheme.itemFont)
         .padding(.horizontal, 4)
@@ -130,10 +168,6 @@ struct CalendarItemRow: View {
             in: RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius)
         )
         .draggable(transferPayload)
-    }
-
-    private static func timeString(_ minute: MinuteOfDay) -> String {
-        String(format: "%02d:%02d", minute.value / 60, minute.value % 60)
     }
 
     private var accentNeedsOutline: Bool {

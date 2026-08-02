@@ -27,6 +27,16 @@ enum DayCellInteractionRouter {
     }
 }
 
+enum DayCellSurfaceInteraction {
+    static func backgroundAction(for date: CalendarDate) -> DayCellAction {
+        .quickCreate(date)
+    }
+
+    static func controlAction(for target: DayCellHitTarget, date: CalendarDate) -> DayCellAction {
+        DayCellInteractionRouter.action(for: target, date: date)
+    }
+}
+
 struct DayCellView: View {
     let cell: MonthCellModel
     let capacity: Int
@@ -43,7 +53,7 @@ struct DayCellView: View {
         VStack(alignment: .leading, spacing: CalendarTheme.itemSpacing) {
             HStack {
                 Button {
-                    onAction(DayCellInteractionRouter.action(for: .dateNumber, date: cell.date))
+                    onAction(DayCellSurfaceInteraction.controlAction(for: .dateNumber, date: cell.date))
                 } label: {
                     Text("\(cell.date.day)")
                         .font(CalendarTheme.dateFont)
@@ -63,13 +73,13 @@ struct DayCellView: View {
                     category: categories[item.categoryID],
                     onCompletion: onCompletion,
                     onOpenDetail: { opened in
-                        onAction(DayCellInteractionRouter.action(for: .item(opened.id), date: cell.date))
+                        onAction(DayCellSurfaceInteraction.controlAction(for: .item(opened.id), date: cell.date))
                     }
                 )
             }
             if overflow > 0 {
                 Button("还有 \(overflow) 项") {
-                    onAction(DayCellInteractionRouter.action(for: .overflow, date: cell.date))
+                    onAction(DayCellSurfaceInteraction.controlAction(for: .overflow, date: cell.date))
                 }
                 .buttonStyle(.plain)
                 .font(CalendarTheme.itemFont)
@@ -80,7 +90,14 @@ struct DayCellView: View {
         }
         .padding(CalendarTheme.cellPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background {
+            Rectangle()
+                .fill(Color(nsColor: .windowBackgroundColor))
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    onAction(DayCellSurfaceInteraction.backgroundAction(for: cell.date))
+                }
+        }
         .overlay(Rectangle().stroke(CalendarTheme.gridStroke, lineWidth: 0.5))
         .overlay {
             if dropCoordinator.dropTargetDate == cell.date {
@@ -94,14 +111,6 @@ struct DayCellView: View {
                             .padding(4)
                     }
             }
-        }
-        .background {
-            Rectangle()
-                .fill(.clear)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    onAction(DayCellInteractionRouter.action(for: .emptyArea, date: cell.date))
-                }
         }
         .dropDestination(for: CalendarTransferPayload.self) { payloads, _ in
             guard let payload = payloads.first else { return false }

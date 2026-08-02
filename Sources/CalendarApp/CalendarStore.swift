@@ -22,7 +22,12 @@ enum StoreError: Error, Equatable, Sendable {
 
 @MainActor
 @Observable final class CalendarStore {
-    private(set) var state: CalendarState
+    private(set) var state: CalendarState {
+        didSet {
+            statePublicationGeneration &+= 1
+        }
+    }
+    private(set) var statePublicationGeneration: UInt = 0
     private(set) var loadError: String?
     private(set) var mutationError: String?
     private(set) var phase: StorePhase

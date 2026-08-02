@@ -1,5 +1,16 @@
 import SwiftUI
 
+enum CalendarAppWindow {
+    case mainCalendar
+    case categoryManager
+}
+
+enum CalendarAppCommandPolicy {
+    static func installsBackupCommands(in window: CalendarAppWindow) -> Bool {
+        window == .mainCalendar
+    }
+}
+
 @MainActor
 @main
 struct PersonalCalendarApp: App {
@@ -18,6 +29,9 @@ struct PersonalCalendarApp: App {
         .defaultSize(width: 1180, height: 820)
         .commands {
             CalendarUndoCommands(store: environment.store)
+            if CalendarAppCommandPolicy.installsBackupCommands(in: .mainCalendar) {
+                BackupCommands(store: environment.store, backupService: environment.backupService)
+            }
         }
 
         Window("分类管理", id: "category-manager") {
@@ -26,6 +40,9 @@ struct PersonalCalendarApp: App {
         }
         .commands {
             CalendarUndoCommands(store: environment.store)
+            if CalendarAppCommandPolicy.installsBackupCommands(in: .categoryManager) {
+                BackupCommands(store: environment.store, backupService: environment.backupService)
+            }
         }
     }
 }

@@ -40,8 +40,12 @@ struct CategoryManagerView: View {
             Text("“\(category.name)”中的事项和重复事项会被一并迁移。请选择迁移目标。")
         }
         .onChange(of: store.state) { _, state in
-            if let editingCategoryID, state.categories[editingCategoryID] == nil {
-                startCreating()
+            if let editingCategoryID {
+                if let category = state.categories[editingCategoryID] {
+                    model.synchronizeDraftFromStore(category)
+                } else {
+                    startCreating()
+                }
             }
         }
     }
@@ -52,6 +56,22 @@ struct CategoryManagerView: View {
                 Text("分类")
                     .font(.headline)
                 Spacer()
+                Button {
+                    moveSelectedCategory(.up)
+                } label: {
+                    Image(systemName: "chevron.up")
+                }
+                .help("上移当前分类")
+                .accessibilityLabel("上移当前分类")
+                .disabled(reorderedIDs(for: .up) == nil || store.phase != .ready)
+                Button {
+                    moveSelectedCategory(.down)
+                } label: {
+                    Image(systemName: "chevron.down")
+                }
+                .help("下移当前分类")
+                .accessibilityLabel("下移当前分类")
+                .disabled(reorderedIDs(for: .down) == nil || store.phase != .ready)
                 Button(action: startCreating) {
                     Image(systemName: "plus")
                 }
@@ -312,15 +332,13 @@ struct CategoryManagerView: View {
 
     private func select(_ category: CalendarCategory) {
         editingCategoryID = category.id
-        model.draftName = category.name
-        model.draftColorHex = category.colorHex
+        model.beginEditing(category)
         localError = nil
     }
 
     private func startCreating() {
         editingCategoryID = nil
-        model.draftName = ""
-        model.draftColorHex = CategoryManagerViewModel.defaultPalette[0]
+        model.beginCreating()
         localError = nil
     }
 
@@ -362,10 +380,27 @@ struct CategoryManagerView: View {
     private func moveCategories(from source: IndexSet, to destination: Int) {
         var categories = orderedCategories
         categories.move(fromOffsets: source, toOffset: destination)
+        submitReorder(categories.map(\.id))
+    }
+
+    private func moveSelectedCategory(_ direction: CategoryReorderMove.Direction) {
+        guard let ids = reorderedIDs(for: direction) else { return }
+        submitReorder(ids)
+    }
+
+    private func reorderedIDs(for direction: CategoryReorderMove.Direction) -> [UUID]? {
+        CategoryReorderMove.reorderedIDs(
+            orderedCategories.map(\.id),
+            selected: editingCategoryID,
+            direction: direction
+        )
+    }
+
+    private func submitReorder(_ ids: [UUID]) {
         localError = nil
         Task {
             do {
-                try await model.reorder(categories.map(\.id))
+                try await model.reorder(ids)
             } catch {
                 localError = message(for: error)
             }

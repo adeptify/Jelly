@@ -7,6 +7,28 @@ enum CalendarAppearance: Sendable {
     case dark
 }
 
+enum CategoryReorderMove {
+    enum Direction {
+        case up
+        case down
+    }
+
+    static func reorderedIDs(
+        _ ids: [UUID],
+        selected: UUID?,
+        direction: Direction
+    ) -> [UUID]? {
+        guard let selected, let currentIndex = ids.firstIndex(of: selected) else {
+            return nil
+        }
+        let targetIndex = direction == .up ? currentIndex - 1 : currentIndex + 1
+        guard ids.indices.contains(targetIndex) else { return nil }
+        var result = ids
+        result.swapAt(currentIndex, targetIndex)
+        return result
+    }
+}
+
 struct CategoryPreviewPalette: Sendable {
     let lightCanvasHex: String
     let lightTextHex: String
@@ -155,6 +177,7 @@ final class CategoryManagerViewModel: ObservableObject {
 
     private let store: CalendarStore
     private let previewPalette: CategoryPreviewPalette
+    private var editingBaseline: CategoryDraft?
 
     @Published var draftName = ""
     @Published var draftColorHex = "#4F7FFF"
@@ -181,7 +204,7 @@ final class CategoryManagerViewModel: ObservableObject {
             updatedAt: now
         )
         try await send(.createCategory(category), undoLabel: "已添加分类")
-        draftName = ""
+        beginCreating()
     }
 
     func update(_ category: CalendarCategory) async throws {
@@ -193,6 +216,9 @@ final class CategoryManagerViewModel: ObservableObject {
         updated.name = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.colorHex = draftColorHex
         try await send(.updateCategory(updated), undoLabel: "已更新分类")
+        if let authoritative = store.state.categories[category.id] {
+            beginEditing(authoritative)
+        }
     }
 
     func reorder(_ ids: [UUID]) async throws {
@@ -232,6 +258,23 @@ final class CategoryManagerViewModel: ObservableObject {
         self.migrationTargetID = nil
     }
 
+    func beginEditing(_ category: CalendarCategory) {
+        draftName = category.name
+        draftColorHex = category.colorHex
+        editingBaseline = .init(category: category)
+    }
+
+    func beginCreating() {
+        draftName = ""
+        draftColorHex = Self.defaultPalette[0]
+        editingBaseline = nil
+    }
+
+    func synchronizeDraftFromStore(_ category: CalendarCategory) {
+        guard editingBaseline?.id == category.id, !hasUnsavedDraftChanges else { return }
+        beginEditing(category)
+    }
+
     private func validateDraft(excluding categoryID: UUID?) throws {
         let trimmedName = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
@@ -252,6 +295,11 @@ final class CategoryManagerViewModel: ObservableObject {
         draftColorHex = normalizedColor
     }
 
+    private var hasUnsavedDraftChanges: Bool {
+        guard let editingBaseline else { return false }
+        return draftName != editingBaseline.name || draftColorHex != editingBaseline.colorHex
+    }
+
     private func send(_ command: CalendarCommand, undoLabel: String) async throws {
         do {
             try await store.send(command, undoLabel: undoLabel)
@@ -268,6 +316,18 @@ final class CategoryManagerViewModel: ObservableObject {
             default:
                 throw error
             }
+        }
+    }
+
+    private struct CategoryDraft {
+        let id: UUID
+        let name: String
+        let colorHex: String
+
+        init(category: CalendarCategory) {
+            id = category.id
+            name = category.name
+            colorHex = category.colorHex
         }
     }
 }

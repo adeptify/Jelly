@@ -220,4 +220,43 @@ struct CategoryManagerViewModelTests {
         #expect(store.state == state)
         #expect(await repository.saveCount == 0)
     }
+
+    @Test func authoritativeUndoRefreshesCleanSelectedDraft() async throws {
+        var state = makeEmptyState()
+        let work = makeCategory(name: "工作")
+        state.categories[work.id] = work
+        let (store, _) = try await makeReadyStore(initialState: state)
+        let vm = CategoryManagerViewModel(store: store)
+
+        vm.beginEditing(work)
+        vm.draftColorHex = "#7A67D8"
+        try await vm.update(work)
+        try await store.undo()
+        let restored = try #require(store.state.categories[work.id])
+
+        vm.synchronizeDraftFromStore(restored)
+
+        #expect(vm.draftName == "工作")
+        #expect(vm.draftColorHex == "#007AFF")
+    }
+
+    @Test func authoritativeUpdateDoesNotOverwriteUnsavedSelectedDraft() async throws {
+        var state = makeEmptyState()
+        let work = makeCategory(name: "工作")
+        state.categories[work.id] = work
+        let (store, _) = try await makeReadyStore(initialState: state)
+        let vm = CategoryManagerViewModel(store: store)
+
+        vm.beginEditing(work)
+        vm.draftName = "本地未保存名称"
+        var external = work
+        external.colorHex = "#53A66F"
+        try await store.send(.updateCategory(external), undoLabel: "外部更新")
+        let authoritative = try #require(store.state.categories[work.id])
+
+        vm.synchronizeDraftFromStore(authoritative)
+
+        #expect(vm.draftName == "本地未保存名称")
+        #expect(vm.draftColorHex == "#007AFF")
+    }
 }
