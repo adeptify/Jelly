@@ -16,7 +16,8 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "CalendarDomain", targets: ["CalendarDomain"]),
-        .library(name: "CalendarPersistence", targets: ["CalendarPersistence"])
+        .library(name: "CalendarPersistence", targets: ["CalendarPersistence"]),
+        .executable(name: "PersonalCalendar", targets: ["CalendarApp"])
     ],
     dependencies: [
         .package(
@@ -30,6 +31,10 @@ let package = Package(
             name: "CalendarPersistence",
             dependencies: ["CalendarDomain"]
         ),
+        .executableTarget(
+            name: "CalendarApp",
+            dependencies: ["CalendarDomain", "CalendarPersistence"]
+        ),
         .testTarget(
             name: "CalendarDomainTests",
             dependencies: [
@@ -41,6 +46,16 @@ let package = Package(
         .testTarget(
             name: "CalendarPersistenceTests",
             dependencies: [
+                "CalendarDomain",
+                "CalendarPersistence",
+                .product(name: "Testing", package: "swift-testing")
+            ],
+            linkerSettings: testingLinkerSettings
+        ),
+        .testTarget(
+            name: "CalendarAppTests",
+            dependencies: [
+                "CalendarApp",
                 "CalendarDomain",
                 "CalendarPersistence",
                 .product(name: "Testing", package: "swift-testing")
