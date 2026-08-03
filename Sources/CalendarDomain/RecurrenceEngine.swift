@@ -18,8 +18,8 @@ public enum RecurrenceEngine {
         exceptions: [OccurrenceKey: OccurrenceExceptionKind],
         completions: [OccurrenceKey: OccurrenceCompletion]
     ) -> [CalendarOccurrence] {
-        let projectionStart = max(series.startDate, range.start)
-        let projectionEnd = min(series.endDate ?? range.end, range.end)
+        let projectionStart = series.ruleStartDate
+        let projectionEnd = min(series.recurrenceEndDate ?? range.end, range.end)
         var consumedKeys = Set<OccurrenceKey>()
         var occurrencesByKey = [OccurrenceKey: CalendarOccurrence]()
 
@@ -43,7 +43,7 @@ public enum RecurrenceEngine {
                         override: override,
                         completions: completions
                     )
-                    if range.contains(occurrence.displayedDate) {
+                    if range.intersects(occurrence.schedule) {
                         occurrencesByKey[key] = occurrence
                     }
                 case nil:
@@ -53,7 +53,7 @@ public enum RecurrenceEngine {
                         override: nil,
                         completions: completions
                     )
-                    if range.contains(occurrence.displayedDate) {
+                    if range.intersects(occurrence.schedule) {
                         occurrencesByKey[key] = occurrence
                     }
                 }
@@ -65,17 +65,20 @@ public enum RecurrenceEngine {
         for (key, exception) in exceptions {
             guard key.seriesID == series.id,
                   !consumedKeys.contains(key),
-                  case let .modified(override) = exception,
-                  range.contains(override.displayedDate)
+                  case let .modified(override) = exception
             else {
                 continue
             }
-            occurrencesByKey[key] = makeOccurrence(
+            let occurrence = makeOccurrence(
                 key: key,
                 series: series,
                 override: override,
                 completions: completions
             )
+            guard range.intersects(occurrence.schedule) else {
+                continue
+            }
+            occurrencesByKey[key] = occurrence
         }
 
         return occurrencesByKey.values.sorted(by: isOrderedBefore)
@@ -87,25 +90,28 @@ public enum RecurrenceEngine {
         override: OccurrenceOverride?,
         completions: [OccurrenceKey: OccurrenceCompletion]
     ) -> CalendarOccurrence {
-        let displayedDate = override?.displayedDate ?? key.originalDate
         let title = override?.title ?? series.title
         let kind = override?.kind ?? series.kind
         let categoryID = override?.categoryID ?? series.categoryID
-        let timeRange: LocalTimeRange?
+        let schedule: CalendarSchedule
         if let override {
-            timeRange = override.timeRange
+            schedule = override.displayedSchedule
         } else {
-            timeRange = series.timeRange
+            schedule = try! CalendarSchedule(
+                startDate: key.originalDate,
+                endDate: key.originalDate.addingDays(series.durationDays - 1),
+                startTime: series.startTime,
+                endTime: series.endTime
+            )
         }
         let completedAt = kind == .task ? completions[key]?.completedAt : nil
 
         return CalendarOccurrence(
             key: key,
-            displayedDate: displayedDate,
+            schedule: schedule,
             title: title,
             kind: kind,
             categoryID: categoryID,
-            timeRange: timeRange,
             creationTimeZoneIdentifier: series.creationTimeZoneIdentifier,
             completedAt: completedAt,
             createdAt: series.createdAt
@@ -116,17 +122,17 @@ public enum RecurrenceEngine {
         _ lhs: CalendarOccurrence,
         _ rhs: CalendarOccurrence
     ) -> Bool {
-        if lhs.displayedDate != rhs.displayedDate {
-            return lhs.displayedDate < rhs.displayedDate
+        if lhs.schedule.startDate != rhs.schedule.startDate {
+            return lhs.schedule.startDate < rhs.schedule.startDate
         }
 
-        switch (lhs.timeRange, rhs.timeRange) {
+        switch (lhs.schedule.startTime, rhs.schedule.startTime) {
         case (nil, .some):
             return true
         case (.some, nil):
             return false
-        case let (.some(lhsTimeRange), .some(rhsTimeRange)) where lhsTimeRange.start != rhsTimeRange.start:
-            return lhsTimeRange.start < rhsTimeRange.start
+        case let (.some(lhsStartTime), .some(rhsStartTime)) where lhsStartTime != rhsStartTime:
+            return lhsStartTime < rhsStartTime
         default:
             return lhs.key.originalDate < rhs.key.originalDate
         }
@@ -134,7 +140,7 @@ public enum RecurrenceEngine {
 }
 
 private extension CalendarDateRange {
-    func contains(_ date: CalendarDate) -> Bool {
-        start <= date && date <= end
+    func intersects(_ schedule: CalendarSchedule) -> Bool {
+        schedule.startDate <= end && start <= schedule.endDate
     }
 }

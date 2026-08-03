@@ -298,6 +298,59 @@ struct RecurrenceEngineTests {
         }
     }
 
+    @Test func eachSelectedWeekdayStartsAnIndependentOverlappingSpan() throws {
+        let series = try makeV2Series(
+            ruleStartDate: .init(year: 2026, month: 8, day: 3)!,
+            weekdays: [.wednesday, .thursday],
+            durationDays: 2
+        )
+        let result = RecurrenceEngine.occurrences(
+            of: series,
+            in: .init(
+                start: .init(year: 2026, month: 8, day: 5)!,
+                end: .init(year: 2026, month: 8, day: 7)!
+            ),
+            exceptions: [:],
+            completions: [:]
+        )
+        let expected = [
+            try CalendarSchedule(
+                startDate: .init(year: 2026, month: 8, day: 5)!,
+                endDate: .init(year: 2026, month: 8, day: 6)!,
+                startTime: nil,
+                endTime: nil
+            ),
+            try CalendarSchedule(
+                startDate: .init(year: 2026, month: 8, day: 6)!,
+                endDate: .init(year: 2026, month: 8, day: 7)!,
+                startTime: nil,
+                endTime: nil
+            )
+        ]
+
+        #expect(result.map(\.schedule) == expected)
+    }
+
+    @Test func recurrenceEndLimitsStartButDoesNotClipFinalSpan() throws {
+        let series = try makeV2Series(
+            ruleStartDate: .init(year: 2026, month: 8, day: 3)!,
+            recurrenceEndDate: .init(year: 2026, month: 8, day: 5)!,
+            weekdays: [.wednesday],
+            durationDays: 3
+        )
+        let result = RecurrenceEngine.occurrences(
+            of: series,
+            in: .init(
+                start: .init(year: 2026, month: 8, day: 1)!,
+                end: .init(year: 2026, month: 8, day: 10)!
+            ),
+            exceptions: [:],
+            completions: [:]
+        )
+
+        #expect(try #require(result.first).schedule.endDate == CalendarDate(year: 2026, month: 8, day: 7)!)
+    }
+
     private func makeSeries(
         id: UUID = UUID(uuidString: "00000000-0000-0000-0000-000000000201")!,
         kind: ItemKind = .task,
@@ -319,6 +372,30 @@ struct RecurrenceEngineTests {
             weekdays: weekdays,
             timeRange: timeRange,
             creationTimeZoneIdentifier: creationTimeZoneIdentifier,
+            createdAt: Date(timeIntervalSince1970: 0),
+            updatedAt: Date(timeIntervalSince1970: 0)
+        )
+    }
+
+    private func makeV2Series(
+        id: UUID = UUID(uuidString: "00000000-0000-0000-0000-000000000202")!,
+        ruleStartDate: CalendarDate,
+        recurrenceEndDate: CalendarDate? = nil,
+        weekdays: Set<Weekday>,
+        durationDays: Int
+    ) throws -> WeeklySeries {
+        try WeeklySeries(
+            id: id,
+            kind: .task,
+            title: "每周计划",
+            categoryID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            ruleStartDate: ruleStartDate,
+            recurrenceEndDate: recurrenceEndDate,
+            weekdays: weekdays,
+            durationDays: durationDays,
+            startTime: nil,
+            endTime: nil,
+            creationTimeZoneIdentifier: "Asia/Shanghai",
             createdAt: Date(timeIntervalSince1970: 0),
             updatedAt: Date(timeIntervalSince1970: 0)
         )

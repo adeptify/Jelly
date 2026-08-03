@@ -4,6 +4,170 @@ import Testing
 
 @Suite("SeriesMutationEngineTests")
 struct SeriesMutationEngineTests {
+    @Test func onlyThisLeadingResizeKeepsStableKeyAndChangesWholeSchedule() throws {
+        let series = try makeV2Series(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000240")!,
+            durationDays: 2
+        )
+        let key = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: .init(year: 2026, month: 8, day: 12)!
+        )
+        let graph = RecurrenceGraph(series: [series.id: series], exceptions: [:], completions: [:])
+
+        let result = try SeriesMutationEngine.apply(
+            edit: .patch(.init(
+                displayedStartDate: .init(year: 2026, month: 8, day: 11)!,
+                durationDays: 3
+            )),
+            to: key,
+            scope: .onlyThis,
+            in: graph,
+            newSeriesID: UUID(uuidString: "00000000-0000-0000-0000-000000000241")!,
+            now: .now
+        )
+
+        guard case let .some(.modified(override)) = result.exceptions[key] else {
+            Issue.record("Expected the selected occurrence to become a modified override")
+            return
+        }
+        #expect(override.displayedSchedule.startDate == CalendarDate(year: 2026, month: 8, day: 11)!)
+        #expect(override.displayedSchedule.endDate == CalendarDate(year: 2026, month: 8, day: 13)!)
+        #expect(override.displayedSchedule.durationDays == 3)
+    }
+
+    @Test func onlyThisTimeResizeUpdatesBothScheduleTimes() throws {
+        let series = try makeV2Series(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000242")!
+        )
+        let key = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: .init(year: 2026, month: 8, day: 12)!
+        )
+        let graph = RecurrenceGraph(series: [series.id: series], exceptions: [:], completions: [:])
+        let startTime = MinuteOfDay(hour: 9, minute: 0)!
+        let endTime = MinuteOfDay(hour: 10, minute: 0)!
+
+        let result = try SeriesMutationEngine.apply(
+            edit: .patch(.init(
+                startTime: .set(startTime),
+                endTime: .set(endTime)
+            )),
+            to: key,
+            scope: .onlyThis,
+            in: graph,
+            newSeriesID: UUID(uuidString: "00000000-0000-0000-0000-000000000243")!,
+            now: .now
+        )
+
+        guard case let .some(.modified(override)) = result.exceptions[key] else {
+            Issue.record("Expected the selected occurrence to become a modified override")
+            return
+        }
+        #expect(override.displayedSchedule.startTime == startTime)
+        #expect(override.displayedSchedule.endTime == endTime)
+    }
+
+    @Test func futureLeadingResizeShiftsRuleWeekdaysDeadlineExceptionsAndCompletions() throws {
+        let originalDeadline = CalendarDate(year: 2026, month: 9, day: 30)!
+        let series = try makeV2Series(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000244")!,
+            recurrenceEndDate: originalDeadline,
+            durationDays: 2
+        )
+        let key = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: .init(year: 2026, month: 8, day: 12)!
+        )
+        let futureKey = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: .init(year: 2026, month: 8, day: 19)!
+        )
+        let exceptionSchedule = try CalendarSchedule(
+            startDate: .init(year: 2026, month: 8, day: 20)!,
+            endDate: .init(year: 2026, month: 8, day: 21)!,
+            startTime: nil,
+            endTime: nil
+        )
+        let exception = OccurrenceOverride(
+            displayedSchedule: exceptionSchedule,
+            title: "已改期",
+            kind: .task,
+            categoryID: series.categoryID
+        )
+        let graph = RecurrenceGraph(
+            series: [series.id: series],
+            exceptions: [futureKey: .modified(exception)],
+            completions: [futureKey: .init(key: futureKey, completedAt: .now)]
+        )
+        let futureSeriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000245")!
+
+        let result = try SeriesMutationEngine.apply(
+            edit: .patch(.init(
+                displayedStartDate: .init(year: 2026, month: 8, day: 11)!,
+                durationDays: 3
+            )),
+            to: key,
+            scope: .thisAndFuture,
+            in: graph,
+            newSeriesID: futureSeriesID,
+            now: .now
+        )
+
+        let future = try #require(result.series[futureSeriesID])
+        let shiftedFutureKey = OccurrenceKey(
+            seriesID: futureSeriesID,
+            originalDate: .init(year: 2026, month: 8, day: 18)!
+        )
+        #expect(future.ruleStartDate == CalendarDate(year: 2026, month: 8, day: 11)!)
+        #expect(future.weekdays == Set([Weekday.tuesday]))
+        #expect(future.recurrenceEndDate == CalendarDate(year: 2026, month: 9, day: 29)!)
+        #expect(future.durationDays == 3)
+        let expectedException = OccurrenceExceptionKind.modified(OccurrenceOverride(
+            displayedSchedule: try CalendarSchedule(
+                startDate: .init(year: 2026, month: 8, day: 19)!,
+                endDate: .init(year: 2026, month: 8, day: 20)!,
+                startTime: nil,
+                endTime: nil
+            ),
+            title: exception.title,
+            kind: exception.kind,
+            categoryID: exception.categoryID
+        ))
+        #expect(result.exceptions[shiftedFutureKey] == expectedException)
+        #expect(result.completions[shiftedFutureKey]?.key == shiftedFutureKey)
+        #expect(result.exceptions[futureKey] == nil)
+        #expect(result.completions[futureKey] == nil)
+    }
+
+    @Test func futureTrailingResizeChangesDurationWithoutMovingDeadline() throws {
+        let originalDeadline = CalendarDate(year: 2026, month: 9, day: 30)!
+        let series = try makeV2Series(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000246")!,
+            recurrenceEndDate: originalDeadline,
+            durationDays: 2
+        )
+        let key = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: .init(year: 2026, month: 8, day: 12)!
+        )
+        let graph = RecurrenceGraph(series: [series.id: series], exceptions: [:], completions: [:])
+        let futureSeriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000247")!
+
+        let result = try SeriesMutationEngine.apply(
+            edit: .patch(.init(durationDays: 4)),
+            to: key,
+            scope: .thisAndFuture,
+            in: graph,
+            newSeriesID: futureSeriesID,
+            now: .now
+        )
+
+        let future = try #require(result.series[futureSeriesID])
+        #expect(future.durationDays == 4)
+        #expect(future.recurrenceEndDate == originalDeadline)
+    }
+
     @Test func onlyThisMoveCreatesOneModifiedException() throws {
         let series = try makeMondayWednesdaySeries(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000201")!
@@ -763,6 +927,27 @@ struct SeriesMutationEngineTests {
             kind: series.kind,
             categoryID: series.categoryID,
             timeRange: series.timeRange
+        )
+    }
+
+    private func makeV2Series(
+        id: UUID,
+        recurrenceEndDate: CalendarDate? = nil,
+        durationDays: Int = 1
+    ) throws -> WeeklySeries {
+        try WeeklySeries(
+            id: id,
+            kind: .task,
+            title: "周计划",
+            categoryID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            ruleStartDate: .init(year: 2026, month: 8, day: 3)!,
+            recurrenceEndDate: recurrenceEndDate,
+            weekdays: [.wednesday],
+            durationDays: durationDays,
+            startTime: nil,
+            endTime: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
         )
     }
 }

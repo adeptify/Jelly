@@ -4,6 +4,41 @@ import Testing
 
 @Suite("CalendarReducerTests")
 struct CalendarReducerTests {
+    @Test func validatorRejectsRecurringSeriesWithInvalidV2Schedule() throws {
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000369")!
+        var state = CalendarState.empty(uncategorizedID: categoryID, now: .distantPast)
+        var series = try WeeklySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000368")!,
+            kind: .task,
+            title: "跨日重复事项",
+            categoryID: categoryID,
+            ruleStartDate: .init(year: 2026, month: 8, day: 3)!,
+            recurrenceEndDate: nil,
+            weekdays: [.wednesday],
+            durationDays: 2,
+            startTime: nil,
+            endTime: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        series.durationDays = 0
+        state.recurrence.series[series.id] = series
+
+        #expect(throws: ReducerError.invalidState) {
+            try CalendarReducer.reduce(
+                state,
+                command: .setOccurrenceCompleted(
+                    .init(
+                        seriesID: series.id,
+                        originalDate: .init(year: 2026, month: 8, day: 5)!
+                    ),
+                    nil
+                ),
+                now: .now
+            )
+        }
+    }
+
     @Test func movingMultiDayItemPreservesInclusiveDurationAndTimes() throws {
         let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000370")!
         let original = try makeItem(

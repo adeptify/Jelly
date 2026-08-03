@@ -5,14 +5,79 @@ public struct WeeklySeries: Identifiable, Codable, Equatable, Sendable {
     public var kind: ItemKind
     public var title: String
     public var categoryID: UUID
-    public var startDate: CalendarDate
-    public var endDate: CalendarDate?
+    public var ruleStartDate: CalendarDate
+    public var recurrenceEndDate: CalendarDate?
     public var weekdays: Set<Weekday>
-    public var timeRange: LocalTimeRange?
+    public var durationDays: Int
+    public var startTime: MinuteOfDay?
+    public var endTime: MinuteOfDay?
     public var creationTimeZoneIdentifier: String
     public var createdAt: Date
     public var updatedAt: Date
 
+    public init(
+        id: UUID,
+        kind: ItemKind,
+        title: String,
+        categoryID: UUID,
+        ruleStartDate: CalendarDate,
+        recurrenceEndDate: CalendarDate?,
+        weekdays: Set<Weekday>,
+        durationDays: Int,
+        startTime: MinuteOfDay?,
+        endTime: MinuteOfDay?,
+        creationTimeZoneIdentifier: String = TimeZone.current.identifier,
+        createdAt: Date,
+        updatedAt: Date
+    ) throws {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else {
+            throw DomainValidationError.emptyTitle
+        }
+        guard !weekdays.isEmpty else {
+            throw DomainValidationError.emptyWeekdaySet
+        }
+        guard durationDays >= 1 else {
+            throw DomainValidationError.invalidDateRange
+        }
+        guard TimeZone(identifier: creationTimeZoneIdentifier) != nil else {
+            throw DomainValidationError.invalidTimeZoneIdentifier
+        }
+        if let recurrenceEndDate {
+            guard recurrenceEndDate >= ruleStartDate else {
+                throw DomainValidationError.invalidRecurrenceEnd
+            }
+            guard Self.hasMatchingWeekday(
+                between: ruleStartDate,
+                and: recurrenceEndDate,
+                weekdays: weekdays
+            ) else {
+                throw DomainValidationError.noOccurrenceInRange
+            }
+        }
+        _ = try CalendarSchedule(
+            startDate: ruleStartDate,
+            endDate: ruleStartDate.addingDays(durationDays - 1),
+            startTime: startTime,
+            endTime: endTime
+        )
+
+        self.id = id
+        self.kind = kind
+        self.title = trimmedTitle
+        self.categoryID = categoryID
+        self.ruleStartDate = ruleStartDate
+        self.recurrenceEndDate = recurrenceEndDate
+        self.weekdays = weekdays
+        self.durationDays = durationDays
+        self.startTime = startTime
+        self.endTime = endTime
+        self.creationTimeZoneIdentifier = creationTimeZoneIdentifier
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    @available(*, deprecated, message: "Use the V2 schedule fields instead.")
     public init(
         id: UUID,
         kind: ItemKind,
@@ -26,40 +91,35 @@ public struct WeeklySeries: Identifiable, Codable, Equatable, Sendable {
         createdAt: Date,
         updatedAt: Date
     ) throws {
-        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedTitle.isEmpty else {
-            throw DomainValidationError.emptyTitle
-        }
-        guard !weekdays.isEmpty else {
-            throw DomainValidationError.emptyWeekdaySet
-        }
-        guard TimeZone(identifier: creationTimeZoneIdentifier) != nil else {
-            throw DomainValidationError.invalidTimeZoneIdentifier
-        }
-        if let endDate {
-            guard endDate >= startDate else {
-                throw DomainValidationError.invalidRecurrenceEnd
-            }
-            guard Self.hasMatchingWeekday(
-                between: startDate,
-                and: endDate,
-                weekdays: weekdays
-            ) else {
-                throw DomainValidationError.noOccurrenceInRange
-            }
-        }
+        try self.init(
+            id: id,
+            kind: kind,
+            title: title,
+            categoryID: categoryID,
+            ruleStartDate: startDate,
+            recurrenceEndDate: endDate,
+            weekdays: weekdays,
+            durationDays: 1,
+            startTime: timeRange?.start,
+            endTime: timeRange?.end,
+            creationTimeZoneIdentifier: creationTimeZoneIdentifier,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
 
-        self.id = id
-        self.kind = kind
-        self.title = trimmedTitle
-        self.categoryID = categoryID
-        self.startDate = startDate
-        self.endDate = endDate
-        self.weekdays = weekdays
-        self.timeRange = timeRange
-        self.creationTimeZoneIdentifier = creationTimeZoneIdentifier
-        self.createdAt = createdAt
-        self.updatedAt = updatedAt
+    @available(*, deprecated, message: "Use ruleStartDate instead.")
+    public var startDate: CalendarDate { ruleStartDate }
+
+    @available(*, deprecated, message: "Use recurrenceEndDate instead.")
+    public var endDate: CalendarDate? { recurrenceEndDate }
+
+    @available(*, deprecated, message: "Use startTime and endTime instead.")
+    public var timeRange: LocalTimeRange? {
+        guard let startTime, let endTime else {
+            return nil
+        }
+        return try? LocalTimeRange(start: startTime, end: endTime)
     }
 
     public init(from decoder: any Decoder) throws {
@@ -68,10 +128,55 @@ public struct WeeklySeries: Identifiable, Codable, Equatable, Sendable {
         let kind = try container.decode(ItemKind.self, forKey: .kind)
         let title = try container.decode(String.self, forKey: .title)
         let categoryID = try container.decode(UUID.self, forKey: .categoryID)
-        let startDate = try container.decode(CalendarDate.self, forKey: .startDate)
-        let endDate = try container.decodeIfPresent(CalendarDate.self, forKey: .endDate)
+        let v2RuleStartDate = try container.decodeIfPresent(CalendarDate.self, forKey: .ruleStartDate)
+        let legacyStartDate = try container.decodeIfPresent(CalendarDate.self, forKey: .startDate)
+        let v2DurationDays = try container.decodeIfPresent(Int.self, forKey: .durationDays)
+        let usesV2Fields = v2RuleStartDate != nil || v2DurationDays != nil
+        guard let ruleStartDate = v2RuleStartDate ?? legacyStartDate else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .ruleStartDate,
+                in: container,
+                debugDescription: "WeeklySeries is missing its rule start date."
+            )
+        }
+        guard v2RuleStartDate == nil || legacyStartDate == nil || v2RuleStartDate == legacyStartDate else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .startDate,
+                in: container,
+                debugDescription: "WeeklySeries contains conflicting V1 and V2 rule start dates."
+            )
+        }
+
+        let v2RecurrenceEndDate = try container.decodeIfPresent(
+            CalendarDate.self,
+            forKey: .recurrenceEndDate
+        )
+        let legacyEndDate = try container.decodeIfPresent(CalendarDate.self, forKey: .endDate)
+        guard !usesV2Fields || legacyEndDate == nil || legacyEndDate == v2RecurrenceEndDate else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .endDate,
+                in: container,
+                debugDescription: "WeeklySeries contains conflicting V1 and V2 recurrence end dates."
+            )
+        }
+        let recurrenceEndDate = usesV2Fields ? v2RecurrenceEndDate : legacyEndDate
+
+        let legacyTimeRange = try container.decodeIfPresent(LocalTimeRange.self, forKey: .timeRange)
+        let v2StartTime = try container.decodeIfPresent(MinuteOfDay.self, forKey: .startTime)
+        let v2EndTime = try container.decodeIfPresent(MinuteOfDay.self, forKey: .endTime)
+        guard !usesV2Fields || legacyTimeRange == nil ||
+            (v2StartTime == legacyTimeRange?.start && v2EndTime == legacyTimeRange?.end)
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .timeRange,
+                in: container,
+                debugDescription: "WeeklySeries contains conflicting V1 and V2 times."
+            )
+        }
+        let durationDays = v2DurationDays ?? 1
+        let startTime = usesV2Fields ? v2StartTime : legacyTimeRange?.start
+        let endTime = usesV2Fields ? v2EndTime : legacyTimeRange?.end
         let weekdays = try container.decode(Set<Weekday>.self, forKey: .weekdays)
-        let timeRange = try container.decodeIfPresent(LocalTimeRange.self, forKey: .timeRange)
         let creationTimeZoneIdentifier = try container.decode(String.self, forKey: .creationTimeZoneIdentifier)
         let createdAt = try container.decode(Date.self, forKey: .createdAt)
         let updatedAt = try container.decode(Date.self, forKey: .updatedAt)
@@ -82,10 +187,12 @@ public struct WeeklySeries: Identifiable, Codable, Equatable, Sendable {
                 kind: kind,
                 title: title,
                 categoryID: categoryID,
-                startDate: startDate,
-                endDate: endDate,
+                ruleStartDate: ruleStartDate,
+                recurrenceEndDate: recurrenceEndDate,
                 weekdays: weekdays,
-                timeRange: timeRange,
+                durationDays: durationDays,
+                startTime: startTime,
+                endTime: endTime,
                 creationTimeZoneIdentifier: creationTimeZoneIdentifier,
                 createdAt: createdAt,
                 updatedAt: updatedAt
@@ -105,10 +212,12 @@ public struct WeeklySeries: Identifiable, Codable, Equatable, Sendable {
         try container.encode(kind, forKey: .kind)
         try container.encode(title, forKey: .title)
         try container.encode(categoryID, forKey: .categoryID)
-        try container.encode(startDate, forKey: .startDate)
-        try container.encodeIfPresent(endDate, forKey: .endDate)
+        try container.encode(ruleStartDate, forKey: .ruleStartDate)
+        try container.encodeIfPresent(recurrenceEndDate, forKey: .recurrenceEndDate)
         try container.encode(weekdays, forKey: .weekdays)
-        try container.encodeIfPresent(timeRange, forKey: .timeRange)
+        try container.encode(durationDays, forKey: .durationDays)
+        try container.encodeIfPresent(startTime, forKey: .startTime)
+        try container.encodeIfPresent(endTime, forKey: .endTime)
         try container.encode(creationTimeZoneIdentifier, forKey: .creationTimeZoneIdentifier)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
@@ -134,13 +243,18 @@ public struct WeeklySeries: Identifiable, Codable, Equatable, Sendable {
         case kind
         case title
         case categoryID
-        case startDate
-        case endDate
+        case ruleStartDate
+        case recurrenceEndDate
         case weekdays
-        case timeRange
+        case durationDays
+        case startTime
+        case endTime
         case creationTimeZoneIdentifier
         case createdAt
         case updatedAt
+        case startDate
+        case endDate
+        case timeRange
     }
 }
 
@@ -160,12 +274,24 @@ public enum OccurrenceExceptionKind: Codable, Equatable, Sendable {
 }
 
 public struct OccurrenceOverride: Codable, Equatable, Sendable {
-    public var displayedDate: CalendarDate
+    public var displayedSchedule: CalendarSchedule
     public var title: String
     public var kind: ItemKind
     public var categoryID: UUID
-    public var timeRange: LocalTimeRange?
 
+    public init(
+        displayedSchedule: CalendarSchedule,
+        title: String,
+        kind: ItemKind,
+        categoryID: UUID
+    ) {
+        self.displayedSchedule = displayedSchedule
+        self.title = title
+        self.kind = kind
+        self.categoryID = categoryID
+    }
+
+    @available(*, deprecated, message: "Use displayedSchedule instead.")
     public init(
         displayedDate: CalendarDate,
         title: String,
@@ -173,11 +299,72 @@ public struct OccurrenceOverride: Codable, Equatable, Sendable {
         categoryID: UUID,
         timeRange: LocalTimeRange?
     ) {
-        self.displayedDate = displayedDate
-        self.title = title
-        self.kind = kind
-        self.categoryID = categoryID
-        self.timeRange = timeRange
+        self.init(
+            displayedSchedule: try! CalendarSchedule(
+                startDate: displayedDate,
+                endDate: displayedDate,
+                startTime: timeRange?.start,
+                endTime: timeRange?.end
+            ),
+            title: title,
+            kind: kind,
+            categoryID: categoryID
+        )
+    }
+
+    @available(*, deprecated, message: "Use displayedSchedule.startDate instead.")
+    public var displayedDate: CalendarDate { displayedSchedule.startDate }
+
+    @available(*, deprecated, message: "Use displayedSchedule.startTime and displayedSchedule.endTime instead.")
+    public var timeRange: LocalTimeRange? {
+        guard let startTime = displayedSchedule.startTime,
+              let endTime = displayedSchedule.endTime else {
+            return nil
+        }
+        return try? LocalTimeRange(start: startTime, end: endTime)
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let title = try container.decode(String.self, forKey: .title)
+        let kind = try container.decode(ItemKind.self, forKey: .kind)
+        let categoryID = try container.decode(UUID.self, forKey: .categoryID)
+        let displayedSchedule: CalendarSchedule
+        if container.contains(.displayedSchedule) {
+            displayedSchedule = try container.decode(CalendarSchedule.self, forKey: .displayedSchedule)
+        } else {
+            let displayedDate = try container.decode(CalendarDate.self, forKey: .displayedDate)
+            let timeRange = try container.decodeIfPresent(LocalTimeRange.self, forKey: .timeRange)
+            displayedSchedule = try CalendarSchedule(
+                startDate: displayedDate,
+                endDate: displayedDate,
+                startTime: timeRange?.start,
+                endTime: timeRange?.end
+            )
+        }
+        self.init(
+            displayedSchedule: displayedSchedule,
+            title: title,
+            kind: kind,
+            categoryID: categoryID
+        )
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(displayedSchedule, forKey: .displayedSchedule)
+        try container.encode(title, forKey: .title)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(categoryID, forKey: .categoryID)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case displayedSchedule
+        case title
+        case kind
+        case categoryID
+        case displayedDate
+        case timeRange
     }
 }
 
@@ -193,17 +380,37 @@ public struct OccurrenceCompletion: Codable, Equatable, Sendable {
 
 public struct CalendarOccurrence: Identifiable, Equatable, Sendable {
     public let key: OccurrenceKey
-    public let displayedDate: CalendarDate
+    public let schedule: CalendarSchedule
     public let title: String
     public let kind: ItemKind
     public let categoryID: UUID
-    public let timeRange: LocalTimeRange?
     public let creationTimeZoneIdentifier: String
     public let completedAt: Date?
     public let createdAt: Date
 
     public var id: OccurrenceKey { key }
 
+    public init(
+        key: OccurrenceKey,
+        schedule: CalendarSchedule,
+        title: String,
+        kind: ItemKind,
+        categoryID: UUID,
+        creationTimeZoneIdentifier: String,
+        completedAt: Date?,
+        createdAt: Date
+    ) {
+        self.key = key
+        self.schedule = schedule
+        self.title = title
+        self.kind = kind
+        self.categoryID = categoryID
+        self.creationTimeZoneIdentifier = creationTimeZoneIdentifier
+        self.completedAt = completedAt
+        self.createdAt = createdAt
+    }
+
+    @available(*, deprecated, message: "Use the schedule initializer instead.")
     public init(
         key: OccurrenceKey,
         displayedDate: CalendarDate,
@@ -215,14 +422,32 @@ public struct CalendarOccurrence: Identifiable, Equatable, Sendable {
         completedAt: Date?,
         createdAt: Date
     ) {
-        self.key = key
-        self.displayedDate = displayedDate
-        self.title = title
-        self.kind = kind
-        self.categoryID = categoryID
-        self.timeRange = timeRange
-        self.creationTimeZoneIdentifier = creationTimeZoneIdentifier
-        self.completedAt = completedAt
-        self.createdAt = createdAt
+        self.init(
+            key: key,
+            schedule: try! CalendarSchedule(
+                startDate: displayedDate,
+                endDate: displayedDate,
+                startTime: timeRange?.start,
+                endTime: timeRange?.end
+            ),
+            title: title,
+            kind: kind,
+            categoryID: categoryID,
+            creationTimeZoneIdentifier: creationTimeZoneIdentifier,
+            completedAt: completedAt,
+            createdAt: createdAt
+        )
+    }
+
+    @available(*, deprecated, message: "Use schedule.startDate instead.")
+    public var displayedDate: CalendarDate { schedule.startDate }
+
+    @available(*, deprecated, message: "Use schedule.startTime and schedule.endTime instead.")
+    public var timeRange: LocalTimeRange? {
+        guard let startTime = schedule.startTime,
+              let endTime = schedule.endTime else {
+            return nil
+        }
+        return try? LocalTimeRange(start: startTime, end: endTime)
     }
 }

@@ -31,10 +31,12 @@ public struct SeriesPatch: Sendable {
     public var title: String?
     public var kind: ItemKind?
     public var categoryID: UUID?
-    public var timeRange: OptionalPatch<LocalTimeRange>
-    public var displayedDate: CalendarDate?
     public var weekdays: Set<Weekday>?
-    public var endDate: OptionalPatch<CalendarDate>
+    public var recurrenceEndDate: OptionalPatch<CalendarDate>
+    public var displayedStartDate: CalendarDate?
+    public var durationDays: Int?
+    public var startTime: OptionalPatch<MinuteOfDay>
+    public var endTime: OptionalPatch<MinuteOfDay>
 
     public init(
         title: String? = nil,
@@ -43,15 +45,46 @@ public struct SeriesPatch: Sendable {
         timeRange: OptionalPatch<LocalTimeRange> = .unchanged,
         displayedDate: CalendarDate? = nil,
         weekdays: Set<Weekday>? = nil,
-        endDate: OptionalPatch<CalendarDate> = .unchanged
+        endDate: OptionalPatch<CalendarDate> = .unchanged,
+        displayedStartDate: CalendarDate? = nil,
+        durationDays: Int? = nil,
+        startTime: OptionalPatch<MinuteOfDay> = .unchanged,
+        endTime: OptionalPatch<MinuteOfDay> = .unchanged
     ) {
         self.title = title
         self.kind = kind
         self.categoryID = categoryID
-        self.timeRange = timeRange
-        self.displayedDate = displayedDate
         self.weekdays = weekdays
-        self.endDate = endDate
+        self.recurrenceEndDate = endDate
+        self.displayedStartDate = displayedStartDate ?? displayedDate
+        self.durationDays = durationDays
+        switch timeRange {
+        case .unchanged:
+            self.startTime = startTime
+            self.endTime = endTime
+        case let .set(value):
+            self.startTime = Self.isUnchanged(startTime) ? .set(value.start) : startTime
+            self.endTime = Self.isUnchanged(endTime) ? .set(value.end) : endTime
+        case .clear:
+            self.startTime = Self.isUnchanged(startTime) ? .clear : startTime
+            self.endTime = Self.isUnchanged(endTime) ? .clear : endTime
+        }
+    }
+
+    private static func isUnchanged<Value>(_ patch: OptionalPatch<Value>) -> Bool where Value: Sendable {
+        if case .unchanged = patch {
+            return true
+        }
+        return false
+    }
+
+    @available(*, deprecated, message: "Use displayedStartDate instead.")
+    public var displayedDate: CalendarDate? { displayedStartDate }
+
+    @available(*, deprecated, message: "Use recurrenceEndDate instead.")
+    public var endDate: OptionalPatch<CalendarDate> {
+        get { recurrenceEndDate }
+        set { recurrenceEndDate = newValue }
     }
 }
 
@@ -113,12 +146,12 @@ public enum SeriesMutationEngine {
             return result
 
         case let .patch(patch):
-            guard patch.weekdays == nil, isUnchanged(patch.endDate) else {
+            guard patch.weekdays == nil, isUnchanged(patch.recurrenceEndDate) else {
                 throw SeriesMutationError.invalidOnlyThisRulePatch
             }
 
             var override = effectiveOverride(for: key, in: series, exceptions: graph.exceptions)
-            applyOccurrencePatch(patch, to: &override)
+            try applyOccurrencePatch(patch, to: &override)
             result.exceptions[key] = .modified(override)
             if override.kind == .event {
                 result.completions.removeValue(forKey: key)
@@ -179,7 +212,7 @@ public enum SeriesMutationEngine {
         newSeriesID: UUID,
         now: Date
     ) throws -> RecurrenceGraph {
-        let dayDelta = patch.displayedDate.map { key.originalDate.days(until: $0) } ?? 0
+        let dayDelta = patch.displayedStartDate.map { key.originalDate.days(until: $0) } ?? 0
         let future = try makeFutureSeries(
             from: series,
             patch: patch,
@@ -200,7 +233,7 @@ public enum SeriesMutationEngine {
         )
         result.series[future.id] = future
 
-        migrateFutureExceptions(
+        try migrateFutureExceptions(
             from: series.id,
             boundary: key.originalDate,
             to: future,
@@ -237,27 +270,30 @@ public enum SeriesMutationEngine {
             weekdays = series.weekdays
         }
 
-        let shiftedEndDate = series.endDate?.addingDays(dayDelta)
-        let endDate: CalendarDate?
-        switch patch.endDate {
+        let shiftedEndDate = dayDelta == 0
+            ? series.recurrenceEndDate
+            : series.recurrenceEndDate?.addingDays(dayDelta)
+        let recurrenceEndDate: CalendarDate?
+        switch patch.recurrenceEndDate {
         case .unchanged:
-            endDate = shiftedEndDate
+            recurrenceEndDate = shiftedEndDate
         case let .set(value):
-            endDate = value
+            recurrenceEndDate = value
         case .clear:
-            endDate = nil
+            recurrenceEndDate = nil
         }
 
-        let timeRange = applying(patch.timeRange, to: series.timeRange)
         return try WeeklySeries(
             id: id,
             kind: patch.kind ?? series.kind,
             title: patch.title ?? series.title,
             categoryID: patch.categoryID ?? series.categoryID,
-            startDate: boundary.addingDays(dayDelta),
-            endDate: endDate,
+            ruleStartDate: boundary.addingDays(dayDelta),
+            recurrenceEndDate: recurrenceEndDate,
             weekdays: weekdays,
-            timeRange: timeRange,
+            durationDays: patch.durationDays ?? series.durationDays,
+            startTime: applying(patch.startTime, to: series.startTime),
+            endTime: applying(patch.endTime, to: series.endTime),
             creationTimeZoneIdentifier: series.creationTimeZoneIdentifier,
             createdAt: now,
             updatedAt: now
@@ -282,10 +318,10 @@ public enum SeriesMutationEngine {
 
         var historical = series
         let requestedEnd = boundary.previousDay
-        if let existingEnd = series.endDate, existingEnd < requestedEnd {
-            historical.endDate = existingEnd
+        if let existingEnd = series.recurrenceEndDate, existingEnd < requestedEnd {
+            historical.recurrenceEndDate = existingEnd
         } else {
-            historical.endDate = requestedEnd
+            historical.recurrenceEndDate = requestedEnd
         }
         historical.updatedAt = now
         result.series[series.id] = historical
@@ -299,7 +335,7 @@ public enum SeriesMutationEngine {
         boundaryPatch: SeriesPatch,
         graph: RecurrenceGraph,
         result: inout RecurrenceGraph
-    ) {
+    ) throws {
         for (oldKey, exception) in graph.exceptions where isFutureKey(
             oldKey,
             seriesID: oldSeriesID,
@@ -313,10 +349,10 @@ public enum SeriesMutationEngine {
                 continue
             }
 
-            var migrated = shifted(exception, by: dayDelta)
+            var migrated = try shifted(exception, by: dayDelta)
             if oldKey.originalDate == boundary,
                case var .modified(override) = migrated {
-                applyOccurrencePatch(boundaryPatch, to: &override)
+                try applyOccurrencePatch(boundaryPatch, to: &override)
                 migrated = .modified(override)
             }
             result.exceptions[newKey] = migrated
@@ -392,16 +428,16 @@ public enum SeriesMutationEngine {
         }
 
         let historicalEnd: CalendarDate
-        if let endDate = series.endDate, endDate < boundary {
+        if let endDate = series.recurrenceEndDate, endDate < boundary {
             historicalEnd = endDate
         } else {
             historicalEnd = boundary.previousDay
         }
-        guard series.startDate <= historicalEnd else {
+        guard series.ruleStartDate <= historicalEnd else {
             return false
         }
 
-        var date = series.startDate
+        var date = series.ruleStartDate
         while date <= historicalEnd {
             if series.weekdays.contains(date.weekday) {
                 return true
@@ -430,8 +466,8 @@ public enum SeriesMutationEngine {
         _ date: CalendarDate,
         by series: WeeklySeries
     ) -> Bool {
-        guard date >= series.startDate,
-              series.endDate.map({ date <= $0 }) ?? true
+        guard date >= series.ruleStartDate,
+              series.recurrenceEndDate.map({ date <= $0 }) ?? true
         else {
             return false
         }
@@ -439,7 +475,7 @@ public enum SeriesMutationEngine {
     }
 
     private static func isWithinBounds(_ date: CalendarDate, of series: WeeklySeries) -> Bool {
-        date >= series.startDate && (series.endDate.map { date <= $0 } ?? true)
+        date >= series.ruleStartDate && (series.recurrenceEndDate.map { date <= $0 } ?? true)
     }
 
     private static func isFutureKey(
@@ -459,19 +495,24 @@ public enum SeriesMutationEngine {
             return override
         }
         return OccurrenceOverride(
-            displayedDate: key.originalDate,
+            displayedSchedule: try! CalendarSchedule(
+                startDate: key.originalDate,
+                endDate: key.originalDate.addingDays(series.durationDays - 1),
+                startTime: series.startTime,
+                endTime: series.endTime
+            ),
             title: series.title,
             kind: series.kind,
-            categoryID: series.categoryID,
-            timeRange: series.timeRange
+            categoryID: series.categoryID
         )
     }
 
-    private static func applyOccurrencePatch(_ patch: SeriesPatch, to override: inout OccurrenceOverride) {
+    private static func applyOccurrencePatch(
+        _ patch: SeriesPatch,
+        to override: inout OccurrenceOverride
+    ) throws {
         applyContentPatch(patch, to: &override)
-        if let displayedDate = patch.displayedDate {
-            override.displayedDate = displayedDate
-        }
+        override.displayedSchedule = try applying(patch, to: override.displayedSchedule)
     }
 
     private static func applyContentPatch(_ patch: SeriesPatch, to override: inout OccurrenceOverride) {
@@ -484,13 +525,12 @@ public enum SeriesMutationEngine {
         if let categoryID = patch.categoryID {
             override.categoryID = categoryID
         }
-        override.timeRange = applying(patch.timeRange, to: override.timeRange)
     }
 
-    private static func applying(
-        _ patch: OptionalPatch<LocalTimeRange>,
-        to current: LocalTimeRange?
-    ) -> LocalTimeRange? {
+    private static func applying<Value>(
+        _ patch: OptionalPatch<Value>,
+        to current: Value?
+    ) -> Value? where Value: Sendable {
         switch patch {
         case .unchanged:
             current
@@ -499,6 +539,20 @@ public enum SeriesMutationEngine {
         case .clear:
             nil
         }
+    }
+
+    private static func applying(
+        _ patch: SeriesPatch,
+        to schedule: CalendarSchedule
+    ) throws -> CalendarSchedule {
+        let startDate = patch.displayedStartDate ?? schedule.startDate
+        let durationDays = patch.durationDays ?? schedule.durationDays
+        return try CalendarSchedule(
+            startDate: startDate,
+            endDate: startDate.addingDays(durationDays - 1),
+            startTime: applying(patch.startTime, to: schedule.startTime),
+            endTime: applying(patch.endTime, to: schedule.endTime)
+        )
     }
 
     private static func isUnchanged<Value>(_ patch: OptionalPatch<Value>) -> Bool where Value: Sendable {
@@ -511,11 +565,11 @@ public enum SeriesMutationEngine {
     private static func shifted(
         _ exception: OccurrenceExceptionKind,
         by dayDelta: Int
-    ) -> OccurrenceExceptionKind {
+    ) throws -> OccurrenceExceptionKind {
         guard dayDelta != 0, case var .modified(override) = exception else {
             return exception
         }
-        override.displayedDate = override.displayedDate.addingDays(dayDelta)
+        override.displayedSchedule = try override.displayedSchedule.shifted(byDays: dayDelta)
         return .modified(override)
     }
 

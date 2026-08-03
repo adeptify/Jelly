@@ -269,7 +269,7 @@ public enum CalendarStateValidator {
                   isTrimmedNonEmpty(series.title),
                   TimeZone(identifier: series.creationTimeZoneIdentifier) != nil,
                   !series.weekdays.isEmpty,
-                  isValidTimeRange(series.timeRange),
+                  isValidSeriesSchedule(series),
                   isValidSeriesBounds(series)
             else {
                 throw ReducerError.invalidState
@@ -285,7 +285,7 @@ public enum CalendarStateValidator {
             if case let .modified(override) = exception {
                 guard state.categories[override.categoryID] != nil,
                       isTrimmedNonEmpty(override.title),
-                      isValidTimeRange(override.timeRange)
+                      isValidSchedule(override.displayedSchedule)
                 else {
                     throw ReducerError.invalidState
                 }
@@ -376,13 +376,13 @@ private func isValidTimeRange(_ timeRange: LocalTimeRange?) -> Bool {
 }
 
 private func isValidSeriesBounds(_ series: WeeklySeries) -> Bool {
-    guard let endDate = series.endDate else {
+    guard let endDate = series.recurrenceEndDate else {
         return true
     }
-    guard endDate >= series.startDate else {
+    guard endDate >= series.ruleStartDate else {
         return false
     }
-    var date = series.startDate
+    var date = series.ruleStartDate
     while date <= endDate {
         if series.weekdays.contains(date.weekday) {
             return true
@@ -392,6 +392,18 @@ private func isValidSeriesBounds(_ series: WeeklySeries) -> Bool {
     return false
 }
 
+private func isValidSeriesSchedule(_ series: WeeklySeries) -> Bool {
+    guard series.durationDays >= 1 else {
+        return false
+    }
+    return (try? CalendarSchedule(
+        startDate: series.ruleStartDate,
+        endDate: series.ruleStartDate.addingDays(series.durationDays - 1),
+        startTime: series.startTime,
+        endTime: series.endTime
+    )) != nil
+}
+
 private func isWithinBounds(_ date: CalendarDate, of series: WeeklySeries) -> Bool {
-    date >= series.startDate && (series.endDate.map { date <= $0 } ?? true)
+    date >= series.ruleStartDate && (series.recurrenceEndDate.map { date <= $0 } ?? true)
 }
