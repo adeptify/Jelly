@@ -64,6 +64,29 @@ enum MonthQuickCreateRouting {
     }
 }
 
+enum WeekStreamAutoScrollPlan: Equatable {
+    case scroll(CalendarDate)
+    case extendEarlier(thenScrollTo: CalendarDate)
+    case extendLater(thenScrollTo: CalendarDate)
+}
+
+enum WeekStreamAutoScrollRouting {
+    static func plan(
+        cursorDate: CalendarDate,
+        direction: CalendarInteractionAutoScrollDirection,
+        loadedWeekStarts: [CalendarDate]
+    ) -> WeekStreamAutoScrollPlan {
+        let targetWeek = WeekStreamModel.weekStart(containing: cursorDate.addingDays(direction.dayDelta))
+        guard !loadedWeekStarts.contains(targetWeek) else {
+            return .scroll(targetWeek)
+        }
+        switch direction {
+        case .earlier: return .extendEarlier(thenScrollTo: targetWeek)
+        case .later: return .extendLater(thenScrollTo: targetWeek)
+        }
+    }
+}
+
 struct MonthView: View {
     let store: CalendarStore
     private let todayRefreshPolicy: MonthViewTodayRefreshPolicy
@@ -73,6 +96,7 @@ struct MonthView: View {
     @StateObject private var model: MonthViewModel
     @StateObject private var dropCoordinator: CalendarDropCoordinator
     @StateObject private var interactionCoordinator: CalendarInteractionCoordinator
+    @StateObject private var autoScrollDriver: CalendarInteractionAutoScrollDriver
     @StateObject private var weekStreamScrollCoordinator: WeekStreamScrollCoordinator
     @StateObject private var weekStreamRestoration: WeekStreamRestorationController
     @AppStorage("calendar.hiddenCategoryIDs") private var storedHiddenCategoryIDs = ""
@@ -80,6 +104,7 @@ struct MonthView: View {
     @State private var quickCreatePresentation: QuickCreatePresentation?
     @State private var dateFrameMap = CalendarDateFrameMap(frames: [])
     @State private var lastEditorAnchorFrame: CGRect?
+    @State private var quickCreateMeasuredContentSize = CGSize.zero
     @State private var selectedDayDrawerDate: CalendarDate?
     @State private var selectedItem: ProjectedItem?
     @State private var recurringDropPresentation = RecurringDropPresentationController()
@@ -101,6 +126,7 @@ struct MonthView: View {
         ))
         _dropCoordinator = StateObject(wrappedValue: CalendarDropCoordinator(store: store))
         _interactionCoordinator = StateObject(wrappedValue: CalendarInteractionCoordinator())
+        _autoScrollDriver = StateObject(wrappedValue: CalendarInteractionAutoScrollDriver())
         let restoration = WeekStreamRestorationController()
         _weekStreamRestoration = StateObject(wrappedValue: restoration)
         _weekStreamScrollCoordinator = StateObject(wrappedValue: WeekStreamScrollCoordinator {
@@ -138,6 +164,10 @@ struct MonthView: View {
         }
         .onChange(of: dropCoordinator.pendingRecurringDrop) { _, pendingDrop in
             recurringDropPresentation.pendingDropDidChange(hasPendingDrop: pendingDrop != nil)
+        }
+        .onPreferenceChange(QuickCreateCardSizePreferenceKey.self) { size in
+            guard size.width > 0, size.height > 0 else { return }
+            quickCreateMeasuredContentSize = size
         }
         .popover(item: $selectedItem) { item in
             ItemDetailPopover(
@@ -178,8 +208,9 @@ struct MonthView: View {
             GeometryReader { proxy in
                 if let presentation = quickCreatePresentation {
                     let windowBounds = proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root))
-                    let placement = AnchoredEditorLayout.place(
-                        cardSize: QuickCreatePopover.cardSize,
+                    let overlayPresentation = QuickCreateOverlayPresentation(
+                        presentation: presentation,
+                        measuredContentSize: quickCreateMeasuredContentSize,
                         anchorFrame: resolvedEditorAnchorFrame(
                             for: presentation.anchorDate,
                             windowBounds: windowBounds
@@ -190,12 +221,17 @@ struct MonthView: View {
                         presentation: presentation,
                         categories: orderedCategories,
                         store: store,
+                        availableWidth: overlayPresentation.placement.frame.width,
+                        maximumContentHeight: overlayPresentation.contentLayout.maximumHeight,
                         onClose: dismissQuickCreate
                     )
-                    .frame(width: QuickCreatePopover.cardSize.width)
+                    .frame(width: overlayPresentation.placement.frame.width)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                     .shadow(color: .black.opacity(0.16), radius: 14, y: 5)
-                    .position(x: placement.frame.midX, y: placement.frame.midY)
+                    .position(
+                        x: overlayPresentation.placement.frame.midX,
+                        y: overlayPresentation.placement.frame.midY
+                    )
                     .accessibilityIdentifier("quick-create-overlay-card")
                 }
             }
@@ -479,6 +515,14 @@ struct MonthView: View {
                     lastEditorAnchorFrame = frame
                 }
             }
+            .onChange(of: autoScrollDriver.latestTick) { _, tick in
+                guard let tick else { return }
+                advanceRangeAutoScroll(
+                    tick,
+                    viewportBounds: viewportBounds,
+                    scrollProxy: scrollProxy
+                )
+            }
         }
     }
 
@@ -488,35 +532,94 @@ struct MonthView: View {
         scrollProxy: ScrollViewProxy
     ) {
         switch gesture {
-        case let .began(date, point):
-            interactionCoordinator.pointerDown(on: date, target: .emptyCell, point: point)
+        case let .began(date, target, point):
+            autoScrollDriver.cancel()
+            interactionCoordinator.pointerDown(on: date, target: target, point: point)
         case let .changed(point):
             let date = dateFrameMap.date(at: point)
-            let actions = interactionCoordinator.updatePointer(
+            _ = interactionCoordinator.updatePointer(
                 point: point,
                 over: date,
                 viewportBounds: viewportBounds
             )
-            for action in actions {
-                guard let date else { continue }
-                switch action {
-                case .scrollEarlier:
-                    scrollProxy.scrollTo(
-                        WeekStreamModel.weekStart(containing: date).addingDays(-7),
-                        anchor: .top
-                    )
-                case .scrollLater:
-                    scrollProxy.scrollTo(
-                        WeekStreamModel.weekStart(containing: date).addingDays(7),
-                        anchor: .bottom
-                    )
-                case .openCreate:
-                    break
-                }
-            }
+            autoScrollDriver.update(direction: interactionCoordinator.autoScrollDirection)
         case let .ended(point):
-            let action = interactionCoordinator.pointerUp(at: point, over: dateFrameMap.date(at: point))
+            autoScrollDriver.cancel()
+            let releaseDate = dateFrameMap.date(at: point) ?? dateFrameMap.nearestDate(to: point)
+            let action = interactionCoordinator.pointerUp(at: point, over: releaseDate)
             presentQuickCreate(for: action)
+        }
+    }
+
+    private func advanceRangeAutoScroll(
+        _ tick: CalendarInteractionAutoScrollTick,
+        viewportBounds: CGRect,
+        scrollProxy: ScrollViewProxy
+    ) {
+        guard interactionCoordinator.isSelectingRange,
+              interactionCoordinator.autoScrollDirection == tick.direction
+        else {
+            return
+        }
+        let pointer = interactionCoordinator.latestPointer ?? CGPoint(
+            x: viewportBounds.midX,
+            y: tick.direction == .earlier ? viewportBounds.minY : viewportBounds.maxY
+        )
+        guard let cursorDate = dateFrameMap.date(at: pointer)
+            ?? dateFrameMap.nearestDate(to: pointer)
+            ?? interactionCoordinator.selectionCursorDate
+        else {
+            return
+        }
+
+        let targetDate = cursorDate.addingDays(tick.direction.dayDelta)
+        interactionCoordinator.refreshSelection(over: targetDate)
+        let plan = WeekStreamAutoScrollRouting.plan(
+            cursorDate: cursorDate,
+            direction: tick.direction,
+            loadedWeekStarts: model.weekStarts
+        )
+        switch plan {
+        case let .scroll(targetWeek):
+            scrollProxy.scrollTo(
+                targetWeek,
+                anchor: tick.direction == .earlier ? .top : .bottom
+            )
+        case let .extendEarlier(thenScrollTo: targetWeek):
+            _ = model.extendEarlier(
+                visibleWeek: WeekStreamModel.weekStart(containing: cursorDate),
+                pixelOffset: 0
+            )
+            scrollToAutoScrollTarget(
+                targetWeek,
+                direction: tick.direction,
+                scrollProxy: scrollProxy
+            )
+        case let .extendLater(thenScrollTo: targetWeek):
+            _ = model.extendLater(
+                visibleWeek: WeekStreamModel.weekStart(containing: cursorDate),
+                pixelOffset: 0
+            )
+            scrollToAutoScrollTarget(
+                targetWeek,
+                direction: tick.direction,
+                scrollProxy: scrollProxy
+            )
+        }
+    }
+
+    private func scrollToAutoScrollTarget(
+        _ targetWeek: CalendarDate,
+        direction: CalendarInteractionAutoScrollDirection,
+        scrollProxy: ScrollViewProxy
+    ) {
+        Task { @MainActor in
+            await Task.yield()
+            guard model.weekStarts.contains(targetWeek) else { return }
+            scrollProxy.scrollTo(
+                targetWeek,
+                anchor: direction == .earlier ? .top : .bottom
+            )
         }
     }
 
@@ -532,14 +635,18 @@ struct MonthView: View {
         else {
             return
         }
+        autoScrollDriver.cancel()
         quickCreatePresentation = presentation
         lastEditorAnchorFrame = dateFrameMap.frame(for: presentation.anchorDate)
+        quickCreateMeasuredContentSize = .zero
         interactionCoordinator.openEditor(for: presentation.range, anchor: presentation.anchorDate)
     }
 
     private func dismissQuickCreate() {
+        autoScrollDriver.cancel()
         quickCreatePresentation = nil
         lastEditorAnchorFrame = nil
+        quickCreateMeasuredContentSize = .zero
         interactionCoordinator.cancel()
     }
 

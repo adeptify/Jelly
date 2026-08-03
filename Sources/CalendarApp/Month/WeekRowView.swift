@@ -289,15 +289,46 @@ struct CalendarDateFramePreferenceKey: PreferenceKey {
     }
 }
 
+enum WeekRowHitSurface: Equatable {
+    case emptySurface
+    case dateNumber
+    case overflow
+    case item
+    case completion
+    case scroll
+}
+
+enum WeekRowHitRouting {
+    static func selectionTarget(for surface: WeekRowHitSurface) -> CalendarInteractionHitTarget? {
+        switch surface {
+        case .emptySurface:
+            .emptyCell
+        case .dateNumber, .overflow, .item, .completion, .scroll:
+            nil
+        }
+    }
+
+    static func dayAction(for surface: WeekRowHitSurface, date: CalendarDate) -> DayCellAction? {
+        switch surface {
+        case .dateNumber:
+            DayCellSurfaceInteraction.controlAction(for: .dateNumber, date: date)
+        case .overflow:
+            DayCellSurfaceInteraction.controlAction(for: .overflow, date: date)
+        case .emptySurface, .item, .completion, .scroll:
+            nil
+        }
+    }
+}
+
 enum WeekRowRangeGesture {
-    case began(CalendarDate, CGPoint)
+    case began(CalendarDate, CalendarInteractionHitTarget, CGPoint)
     case changed(CGPoint)
     case ended(CGPoint)
 
     static func target(for target: DayCellHitTarget) -> CalendarInteractionHitTarget {
         switch target {
         case .emptyArea:
-            .emptyCell
+            WeekRowHitRouting.selectionTarget(for: .emptySurface) ?? .emptyCell
         case .dateNumber:
             .dateNumber
         case .overflow:
@@ -400,7 +431,7 @@ private struct WeekRowDateCell: View {
         VStack(spacing: 0) {
             HStack(spacing: 2) {
                 Button {
-                    onAction(DayCellSurfaceInteraction.controlAction(for: .dateNumber, date: date))
+                    sendDayAction(for: .dateNumber)
                 } label: {
                     Text("\(date.day)")
                         .font(CalendarTheme.dateFont)
@@ -416,7 +447,7 @@ private struct WeekRowDateCell: View {
 
                 if overflow > 0 {
                     Button("还有 \(overflow) 项") {
-                        onAction(DayCellSurfaceInteraction.controlAction(for: .overflow, date: date))
+                        sendDayAction(for: .overflow)
                     }
                     .buttonStyle(.plain)
                     .font(.system(size: 10, weight: .medium))
@@ -474,12 +505,18 @@ private struct WeekRowDateCell: View {
     private var rangeSelectionGesture: some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named(CalendarInteractionCoordinateSpace.root))
             .onChanged { value in
-                onRangeGesture(.began(date, value.startLocation))
+                guard let target = WeekRowHitRouting.selectionTarget(for: .emptySurface) else { return }
+                onRangeGesture(.began(date, target, value.startLocation))
                 onRangeGesture(.changed(value.location))
             }
             .onEnded { value in
                 onRangeGesture(.ended(value.location))
             }
+    }
+
+    private func sendDayAction(for surface: WeekRowHitSurface) {
+        guard let action = WeekRowHitRouting.dayAction(for: surface, date: date) else { return }
+        onAction(action)
     }
 }
 

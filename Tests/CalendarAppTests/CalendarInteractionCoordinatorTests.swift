@@ -77,6 +77,66 @@ struct CalendarInteractionCoordinatorTests {
         #expect(coordinator.previewRange == .init(start: date(3), end: date(6)))
     }
 
+    @Test func selectionAtAnEdgeStartsWithoutDateFrameAndKeepsReleaseDateAsAnchor() {
+        let coordinator = CalendarInteractionCoordinator()
+        let viewport = CGRect(x: 0, y: 0, width: 700, height: 240)
+        coordinator.beginRange(on: date(8), point: CGPoint(x: 100, y: 120))
+
+        _ = coordinator.updatePointer(
+            point: CGPoint(x: 100, y: 20),
+            over: nil,
+            viewportBounds: viewport
+        )
+        coordinator.refreshSelection(over: date(4))
+
+        #expect(coordinator.autoScrollDirection == .earlier)
+        #expect(coordinator.previewRange == .init(start: date(4), end: date(8)))
+        #expect(coordinator.pointerUp(at: CGPoint(x: 100, y: 20), over: date(3)) == .openCreate(
+            .init(start: date(3), end: date(8)),
+            anchor: date(3)
+        ))
+    }
+
+    @Test func autoScrollDriverTicksAcrossWeeksUntilCancelled() {
+        let scheduler = ManualAutoScrollScheduler()
+        let driver = CalendarInteractionAutoScrollDriver(scheduler: scheduler)
+
+        driver.update(direction: .earlier)
+        #expect(driver.latestTick == .init(sequence: 1, direction: .earlier))
+
+        scheduler.advance(by: 0.18)
+        #expect(driver.latestTick == .init(sequence: 2, direction: .earlier))
+        scheduler.advance(by: 0.18)
+        #expect(driver.latestTick == .init(sequence: 3, direction: .earlier))
+
+        driver.cancel()
+        scheduler.advance(by: 1)
+        #expect(driver.latestTick == .init(sequence: 3, direction: .earlier))
+    }
+
+    @Test func autoScrollDriverChangesDirectionWithoutLeakingThePreviousSchedule() {
+        let scheduler = ManualAutoScrollScheduler()
+        let driver = CalendarInteractionAutoScrollDriver(scheduler: scheduler)
+
+        driver.update(direction: .earlier)
+        driver.update(direction: .later)
+        scheduler.advance(by: 0.18)
+
+        #expect(driver.latestTick == .init(sequence: 3, direction: .later))
+    }
+
+    @Test func autoScrollAtLoadedWindowEdgePlansExtensionBeforeScrollingTheTargetWeek() {
+        let cursor = date(3)
+        let targetWeek = WeekStreamModel.weekStart(containing: cursor).addingDays(-7)
+        let plan = WeekStreamAutoScrollRouting.plan(
+            cursorDate: cursor,
+            direction: .earlier,
+            loadedWeekStarts: [WeekStreamModel.weekStart(containing: cursor)]
+        )
+
+        #expect(plan == .extendEarlier(thenScrollTo: targetWeek))
+    }
+
     @Test func escapeCancelAndSuccessfulSaveClearEditingRange() {
         let coordinator = CalendarInteractionCoordinator()
         let selectedRange = CalendarDateRange(start: date(6), end: date(8))
@@ -101,6 +161,7 @@ struct CalendarInteractionCoordinatorTests {
 
         #expect(frames.date(at: CGPoint(x: 150, y: 60)) == date(7))
         #expect(frames.date(at: CGPoint(x: 210, y: 60)) == nil)
+        #expect(frames.nearestDate(to: CGPoint(x: 250, y: 60)) == date(7))
     }
 
     @Test func monthQuickCreateRoutingSeedsTheExplicitQuickCreateRange() throws {
@@ -120,5 +181,41 @@ struct CalendarInteractionCoordinatorTests {
 
     private func date(_ day: Int) -> CalendarDate {
         CalendarDate(year: 2026, month: 8, day: day)!
+    }
+}
+
+@MainActor
+private final class ManualAutoScrollScheduler: CalendarInteractionAutoScrollScheduler {
+    private final class Token: CalendarInteractionAutoScrollCancellation {
+        var cancelled = false
+
+        func cancel() {
+            cancelled = true
+        }
+    }
+
+    private struct ScheduledAction {
+        let dueAt: TimeInterval
+        let token: Token
+        let action: () -> Void
+    }
+
+    private var now: TimeInterval = 0
+    private var actions: [ScheduledAction] = []
+
+    func schedule(
+        after delay: TimeInterval,
+        action: @escaping () -> Void
+    ) -> any CalendarInteractionAutoScrollCancellation {
+        let token = Token()
+        actions.append(.init(dueAt: now + delay, token: token, action: action))
+        return token
+    }
+
+    func advance(by interval: TimeInterval) {
+        now += interval
+        let due = actions.filter { $0.dueAt <= now }
+        actions.removeAll { $0.dueAt <= now }
+        due.filter { !$0.token.cancelled }.forEach { $0.action() }
     }
 }

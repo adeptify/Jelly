@@ -20,12 +20,72 @@ struct QuickCreatePresentation: Equatable {
     }
 }
 
+struct QuickCreateCardSizePreferenceKey: PreferenceKey {
+    static let defaultValue = CGSize.zero
+
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        let next = nextValue()
+        if next.width > 0, next.height > 0 {
+            value = next
+        }
+    }
+}
+
+enum QuickCreateContentLayout: Equatable {
+    case natural
+    case scrollable(maximumHeight: CGFloat)
+
+    var maximumHeight: CGFloat? {
+        switch self {
+        case .natural: nil
+        case let .scrollable(maximumHeight): maximumHeight
+        }
+    }
+}
+
+struct QuickCreateOverlayPresentation: Equatable {
+    let presentation: QuickCreatePresentation
+    let placement: AnchoredEditorPlacement
+
+    init(
+        presentation: QuickCreatePresentation,
+        measuredContentSize: CGSize,
+        anchorFrame: CGRect,
+        windowBounds: CGRect
+    ) {
+        self.presentation = presentation
+        let preferredSize = CGSize(
+            width: measuredContentSize.width > 0
+                ? measuredContentSize.width
+                : QuickCreatePopover.preferredWidth,
+            height: max(0, measuredContentSize.height)
+        )
+        placement = AnchoredEditorLayout.place(
+            cardSize: preferredSize,
+            anchorFrame: anchorFrame,
+            windowBounds: windowBounds
+        )
+    }
+
+    var contentLayout: QuickCreateContentLayout {
+        placement.requiresInternalScroll
+            ? .scrollable(maximumHeight: placement.frame.height)
+            : .natural
+    }
+
+    var maximumContentHeight: CGFloat? {
+        contentLayout.maximumHeight
+    }
+}
+
 struct QuickCreatePopover: View {
-    static let cardSize = CGSize(width: 370, height: 460)
+    nonisolated static let preferredWidth: CGFloat = 370
 
     let store: CalendarStore
     let categories: [CalendarCategory]
     let onClose: () -> Void
+    private let availableWidth: CGFloat
+    private let maximumContentHeight: CGFloat?
     @Environment(\.openWindow) private var openWindow
     @FocusState private var titleFocused: Bool
     @StateObject private var model: ItemEditorViewModel
@@ -38,11 +98,15 @@ struct QuickCreatePopover: View {
         presentation: QuickCreatePresentation,
         categories: [CalendarCategory],
         store: CalendarStore,
+        availableWidth: CGFloat = QuickCreatePopover.preferredWidth,
+        maximumContentHeight: CGFloat? = nil,
         onClose: @escaping () -> Void
     ) {
         self.store = store
         self.categories = categories
         self.onClose = onClose
+        self.availableWidth = availableWidth
+        self.maximumContentHeight = maximumContentHeight
         let categoryID = categories.first?.id ?? store.state.uncategorizedID
         let draft = presentation.initialDraft(categoryID: categoryID)
         _model = StateObject(wrappedValue: ItemEditorViewModel(mode: .create, draft: draft))
@@ -51,9 +115,17 @@ struct QuickCreatePopover: View {
     }
 
     var body: some View {
-        editorContent
-            .padding(18)
-            .frame(width: 370)
+        Group {
+            if let maximumContentHeight {
+                ScrollView(.vertical) {
+                    measuredEditorContent
+                }
+                .frame(height: maximumContentHeight)
+            } else {
+                measuredEditorContent
+            }
+        }
+            .frame(width: availableWidth)
             .onAppear { titleFocused = true }
             .onKeyPress(.return) {
                 save()
@@ -62,6 +134,20 @@ struct QuickCreatePopover: View {
             .onKeyPress(.escape) {
                 onClose()
                 return .handled
+            }
+    }
+
+    private var measuredEditorContent: some View {
+        editorContent
+            .padding(18)
+            .frame(width: availableWidth)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: QuickCreateCardSizePreferenceKey.self,
+                        value: proxy.size
+                    )
+                }
             }
     }
 

@@ -46,6 +46,104 @@ enum CalendarInteractionAction: Equatable {
     case scrollLater
 }
 
+enum CalendarInteractionAutoScrollDirection: Equatable {
+    case earlier
+    case later
+
+    var dayDelta: Int {
+        switch self {
+        case .earlier: -7
+        case .later: 7
+        }
+    }
+}
+
+struct CalendarInteractionAutoScrollTick: Equatable {
+    let sequence: Int
+    let direction: CalendarInteractionAutoScrollDirection
+}
+
+@MainActor
+protocol CalendarInteractionAutoScrollCancellation: AnyObject {
+    func cancel()
+}
+
+@MainActor
+protocol CalendarInteractionAutoScrollScheduler: AnyObject {
+    func schedule(
+        after delay: TimeInterval,
+        action: @escaping () -> Void
+    ) -> any CalendarInteractionAutoScrollCancellation
+}
+
+@MainActor
+final class CalendarInteractionAutoScrollDriver: ObservableObject {
+    private let scheduler: any CalendarInteractionAutoScrollScheduler
+    private var cancellation: (any CalendarInteractionAutoScrollCancellation)?
+    private var sequence = 0
+    private var direction: CalendarInteractionAutoScrollDirection?
+
+    @Published private(set) var latestTick: CalendarInteractionAutoScrollTick?
+
+    init(scheduler: any CalendarInteractionAutoScrollScheduler = MainQueueAutoScrollScheduler()) {
+        self.scheduler = scheduler
+    }
+
+    func update(direction: CalendarInteractionAutoScrollDirection?) {
+        guard self.direction != direction else { return }
+        cancellation?.cancel()
+        cancellation = nil
+        self.direction = direction
+        guard let direction else { return }
+        emit(direction)
+        scheduleNext(direction)
+    }
+
+    func cancel() {
+        update(direction: nil)
+    }
+
+    private func emit(_ direction: CalendarInteractionAutoScrollDirection) {
+        sequence += 1
+        latestTick = .init(sequence: sequence, direction: direction)
+    }
+
+    private func scheduleNext(_ direction: CalendarInteractionAutoScrollDirection) {
+        cancellation = scheduler.schedule(after: CalendarInteractionCoordinator.autoScrollThrottle) {
+            [weak self] in
+            guard let self, self.direction == direction else { return }
+            self.emit(direction)
+            self.scheduleNext(direction)
+        }
+    }
+}
+
+@MainActor
+private final class MainQueueAutoScrollScheduler: CalendarInteractionAutoScrollScheduler {
+    private final class Cancellation: CalendarInteractionAutoScrollCancellation {
+        let workItem: DispatchWorkItem
+
+        init(workItem: DispatchWorkItem) {
+            self.workItem = workItem
+        }
+
+        func cancel() {
+            workItem.cancel()
+        }
+    }
+
+    func schedule(
+        after delay: TimeInterval,
+        action: @escaping () -> Void
+    ) -> any CalendarInteractionAutoScrollCancellation {
+        let workItem = DispatchWorkItem {
+            Task { @MainActor in action() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        return Cancellation(workItem: workItem)
+    }
+}
+
 struct CalendarDateFrame: Equatable, Identifiable {
     let date: CalendarDate
     let frame: CGRect
@@ -72,6 +170,17 @@ struct CalendarDateFrameMap: Equatable {
             .key
     }
 
+    func nearestDate(to point: CGPoint) -> CalendarDate? {
+        framesByDate.min { left, right in
+            let leftDistance = left.value.squaredDistance(to: point)
+            let rightDistance = right.value.squaredDistance(to: point)
+            if leftDistance == rightDistance {
+                return left.key < right.key
+            }
+            return leftDistance < rightDistance
+        }?.key
+    }
+
     var visibleDates: [CalendarDate] {
         framesByDate.keys.sorted()
     }
@@ -84,6 +193,7 @@ final class CalendarInteractionCoordinator: ObservableObject {
     static let autoScrollThrottle: TimeInterval = 0.18
 
     @Published private(set) var state: CalendarInteractionState = .idle
+    @Published private(set) var autoScrollDirection: CalendarInteractionAutoScrollDirection?
 
     private struct Press {
         let date: CalendarDate
@@ -107,6 +217,24 @@ final class CalendarInteractionCoordinator: ObservableObject {
         case let .editing(draft, _):
             draft
         case .idle, .movingItem, .resizingLeading, .resizingTrailing, .pendingRecurrenceScope:
+            nil
+        }
+    }
+
+    var isSelectingRange: Bool {
+        if case .selectingRange = state {
+            true
+        } else {
+            false
+        }
+    }
+
+    var latestPointer: CGPoint? { latestPoint }
+
+    var selectionCursorDate: CalendarDate? {
+        switch state {
+        case let .selectingRange(_, currentDate): currentDate
+        case .idle, .movingItem, .resizingLeading, .resizingTrailing, .pendingRecurrenceScope, .editing:
             nil
         }
     }
@@ -142,7 +270,18 @@ final class CalendarInteractionCoordinator: ObservableObject {
 
         let currentDate = date ?? latestDate ?? press.date
         state = .selectingRange(anchorDate: press.date, currentDate: currentDate)
+        autoScrollDirection = edgeDirection(for: point, in: viewportBounds)
         return autoScrollActions(for: point, in: viewportBounds)
+    }
+
+    func refreshSelection(over date: CalendarDate?) {
+        guard let date,
+              case let .selectingRange(anchorDate, _) = state
+        else {
+            return
+        }
+        latestDate = date
+        state = .selectingRange(anchorDate: anchorDate, currentDate: date)
     }
 
     func pointerUp(at point: CGPoint, over date: CalendarDate?) -> CalendarInteractionAction? {
@@ -190,6 +329,7 @@ final class CalendarInteractionCoordinator: ObservableObject {
         latestPoint = nil
         latestDate = nil
         lastAutoScrollAt = nil
+        autoScrollDirection = nil
         if case .selectingRange = state {
             state = .idle
         }
@@ -204,13 +344,14 @@ final class CalendarInteractionCoordinator: ObservableObject {
         else {
             return []
         }
-        let intent: CalendarInteractionAction?
-        if point.y <= viewportBounds.minY + Self.autoScrollEdgeThreshold {
-            intent = .scrollEarlier
-        } else if point.y >= viewportBounds.maxY - Self.autoScrollEdgeThreshold {
-            intent = .scrollLater
-        } else {
-            intent = nil
+        let intent: CalendarInteractionAction? = edgeDirection(
+            for: point,
+            in: viewportBounds
+        ).map { direction in
+            switch direction {
+            case .earlier: .scrollEarlier
+            case .later: .scrollLater
+            }
         }
         guard let intent else { return [] }
 
@@ -220,6 +361,20 @@ final class CalendarInteractionCoordinator: ObservableObject {
         }
         lastAutoScrollAt = timestamp
         return [intent]
+    }
+
+    private func edgeDirection(
+        for point: CGPoint,
+        in viewportBounds: CGRect?
+    ) -> CalendarInteractionAutoScrollDirection? {
+        guard let viewportBounds, viewportBounds.height > 0 else { return nil }
+        if point.y <= viewportBounds.minY + Self.autoScrollEdgeThreshold {
+            return .earlier
+        }
+        if point.y >= viewportBounds.maxY - Self.autoScrollEdgeThreshold {
+            return .later
+        }
+        return nil
     }
 
     private static func normalizedRange(
@@ -236,5 +391,13 @@ final class CalendarInteractionCoordinator: ObservableObject {
 private extension CGPoint {
     func distance(to other: CGPoint) -> CGFloat {
         hypot(x - other.x, y - other.y)
+    }
+}
+
+private extension CGRect {
+    func squaredDistance(to point: CGPoint) -> CGFloat {
+        let horizontal = max(minX - point.x, 0, point.x - maxX)
+        let vertical = max(minY - point.y, 0, point.y - maxY)
+        return horizontal * horizontal + vertical * vertical
     }
 }

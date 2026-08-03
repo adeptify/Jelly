@@ -11,6 +11,7 @@ struct AnchoredEditorPlacement: Equatable {
     let frame: CGRect
     let edge: AnchoredEditorEdge
     let pinnedToWindowEdge: Bool
+    let requiresInternalScroll: Bool
 }
 
 enum AnchoredEditorLayout {
@@ -22,18 +23,29 @@ enum AnchoredEditorLayout {
         anchorFrame: CGRect,
         windowBounds: CGRect
     ) -> AnchoredEditorPlacement {
-        let safeBounds = windowBounds.insetBy(dx: safeInset, dy: safeInset)
+        let safeBounds = boundedSafeArea(in: windowBounds)
+        let constrainedCardSize = CGSize(
+            width: min(max(0, cardSize.width), safeBounds.width),
+            height: min(max(0, cardSize.height), safeBounds.height)
+        )
+        let requiresInternalScroll = cardSize.height > constrainedCardSize.height
         guard anchorFrame.intersects(windowBounds) else {
             return offscreenPlacement(
-                cardSize: cardSize,
+                cardSize: constrainedCardSize,
                 anchorFrame: anchorFrame,
-                safeBounds: safeBounds
+                safeBounds: safeBounds,
+                requiresInternalScroll: requiresInternalScroll
             )
         }
 
-        let candidates = candidateFrames(cardSize: cardSize, anchorFrame: anchorFrame)
+        let candidates = candidateFrames(cardSize: constrainedCardSize, anchorFrame: anchorFrame)
         if let candidate = candidates.first(where: { safeBounds.contains($0.frame) }) {
-            return .init(frame: candidate.frame, edge: candidate.edge, pinnedToWindowEdge: false)
+            return .init(
+                frame: candidate.frame,
+                edge: candidate.edge,
+                pinnedToWindowEdge: false,
+                requiresInternalScroll: requiresInternalScroll
+            )
         }
 
         let candidate = candidates.min { left, right in
@@ -42,7 +54,8 @@ enum AnchoredEditorLayout {
         return .init(
             frame: clamped(candidate.frame, to: safeBounds),
             edge: candidate.edge,
-            pinnedToWindowEdge: false
+            pinnedToWindowEdge: false,
+            requiresInternalScroll: requiresInternalScroll
         )
     }
 
@@ -93,7 +106,8 @@ enum AnchoredEditorLayout {
     private static func offscreenPlacement(
         cardSize: CGSize,
         anchorFrame: CGRect,
-        safeBounds: CGRect
+        safeBounds: CGRect,
+        requiresInternalScroll: Bool
     ) -> AnchoredEditorPlacement {
         let edge: AnchoredEditorEdge
         let origin: CGPoint
@@ -120,7 +134,18 @@ enum AnchoredEditorLayout {
         return .init(
             frame: clamped(frame, to: safeBounds),
             edge: edge,
-            pinnedToWindowEdge: true
+            pinnedToWindowEdge: true,
+            requiresInternalScroll: requiresInternalScroll
+        )
+    }
+
+    private static func boundedSafeArea(in windowBounds: CGRect) -> CGRect {
+        let inset = windowBounds.insetBy(dx: safeInset, dy: safeInset)
+        return CGRect(
+            x: inset.minX,
+            y: inset.minY,
+            width: max(0, inset.width),
+            height: max(0, inset.height)
         )
     }
 
