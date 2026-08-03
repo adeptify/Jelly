@@ -111,6 +111,48 @@ struct CalendarDropCoordinatorTests {
         #expect(store.canUndo == false)
     }
 
+    @Test func recurringDropAtPreviouslyMovedBoundaryKeepsSelectedDestinationAndUndoes() async throws {
+        let harness = try makeMondayWednesdayDropHarness()
+        let existingBoundaryDate = CalendarDate(year: 2026, month: 8, day: 12)!
+        let selectedDestination = CalendarDate(year: 2026, month: 8, day: 13)!
+        var originalState = harness.originalState
+        originalState.recurrence.exceptions[harness.boundaryMonday] = .modified(.init(
+            displayedDate: existingBoundaryDate,
+            title: "边界已改期",
+            kind: .task,
+            categoryID: originalState.uncategorizedID,
+            timeRange: nil
+        ))
+        let repository = InMemoryCalendarRepository(initialState: originalState)
+        let store = CalendarStore(initialState: originalState, repository: repository)
+        await store.load()
+        let coordinator = CalendarDropCoordinator(store: store)
+
+        try await coordinator.accept(.occurrence(harness.boundaryMonday), on: selectedDestination)
+        let pending = try #require(coordinator.pendingRecurringDrop)
+        try await coordinator.resolve(scope: .thisAndFuture)
+
+        let shiftedBoundaryKey = OccurrenceKey(
+            seriesID: pending.newSeriesID,
+            originalDate: selectedDestination
+        )
+        guard case let .some(.modified(boundaryOverride)) =
+            store.state.recurrence.exceptions[shiftedBoundaryKey]
+        else {
+            Issue.record("Expected the dragged boundary override in the new series")
+            return
+        }
+        #expect(boundaryOverride.displayedDate == selectedDestination)
+        #expect(await repository.persistedState == store.state)
+        #expect(store.canUndo)
+
+        try await store.undo()
+
+        #expect(store.state == originalState)
+        #expect(await repository.persistedState == originalState)
+        #expect(store.canUndo == false)
+    }
+
     @Test func recurringDropOnlyThisCreatesOneMovedException() async throws {
         let harness = try makeMondayWednesdayDropHarness()
         let repository = InMemoryCalendarRepository(initialState: harness.originalState)

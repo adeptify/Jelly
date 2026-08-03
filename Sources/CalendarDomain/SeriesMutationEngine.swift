@@ -312,7 +312,7 @@ public enum SeriesMutationEngine {
             var migrated = shifted(exception, by: dayDelta)
             if oldKey.originalDate == boundary,
                case var .modified(override) = migrated {
-                applyContentPatch(boundaryPatch, to: &override)
+                applyOccurrencePatch(boundaryPatch, to: &override)
                 migrated = .modified(override)
             }
             result.exceptions[newKey] = migrated

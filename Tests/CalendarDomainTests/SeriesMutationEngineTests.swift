@@ -416,6 +416,87 @@ struct SeriesMutationEngineTests {
         })
     }
 
+    @Test func thisAndFutureMoveAtPreviouslyMovedBoundaryUsesSelectedDestinationOnce() throws {
+        let series = try makeMondayWednesdaySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000226")!
+        )
+        let boundary = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: .init(year: 2026, month: 8, day: 10)!
+        )
+        let existingBoundaryOverride = makeOverride(
+            for: series,
+            on: .init(year: 2026, month: 8, day: 12)!,
+            title: "已改期边界"
+        )
+        let futureExceptionKey = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: .init(year: 2026, month: 8, day: 17)!
+        )
+        let futureCompletionKey = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: .init(year: 2026, month: 8, day: 19)!
+        )
+        let futureException = makeOverride(
+            for: series,
+            on: .init(year: 2026, month: 8, day: 18)!,
+            title: "未来改期"
+        )
+        let completedAt = Date(timeIntervalSince1970: 100)
+        let before = RecurrenceGraph(
+            series: [series.id: series],
+            exceptions: [
+                boundary: .modified(existingBoundaryOverride),
+                futureExceptionKey: .modified(futureException)
+            ],
+            completions: [
+                futureCompletionKey: .init(key: futureCompletionKey, completedAt: completedAt)
+            ]
+        )
+        let newSeriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000236")!
+        let selectedDestination = CalendarDate(year: 2026, month: 8, day: 13)!
+
+        let after = try SeriesMutationEngine.apply(
+            edit: .patch(.init(displayedDate: selectedDestination)),
+            to: boundary,
+            scope: .thisAndFuture,
+            in: before,
+            newSeriesID: newSeriesID,
+            now: .now
+        )
+
+        let shiftedBoundaryKey = OccurrenceKey(seriesID: newSeriesID, originalDate: selectedDestination)
+        guard case let .some(.modified(boundaryOverride)) = after.exceptions[shiftedBoundaryKey] else {
+            Issue.record("Expected the moved boundary override in the new series")
+            return
+        }
+        #expect(boundaryOverride.displayedDate == selectedDestination)
+        #expect(boundaryOverride.displayedDate != existingBoundaryOverride.displayedDate.addingDays(3))
+
+        let shiftedFutureExceptionKey = OccurrenceKey(
+            seriesID: newSeriesID,
+            originalDate: futureExceptionKey.originalDate.addingDays(3)
+        )
+        #expect(after.exceptions[shiftedFutureExceptionKey] == .modified(.init(
+            displayedDate: futureException.displayedDate.addingDays(3),
+            title: futureException.title,
+            kind: futureException.kind,
+            categoryID: futureException.categoryID,
+            timeRange: futureException.timeRange
+        )))
+        let shiftedFutureCompletionKey = OccurrenceKey(
+            seriesID: newSeriesID,
+            originalDate: futureCompletionKey.originalDate.addingDays(3)
+        )
+        #expect(after.completions[shiftedFutureCompletionKey] == .init(
+            key: shiftedFutureCompletionKey,
+            completedAt: completedAt
+        ))
+        #expect(after.exceptions[boundary] == nil)
+        #expect(after.exceptions[futureExceptionKey] == nil)
+        #expect(after.completions[futureCompletionKey] == nil)
+    }
+
     @Test func titleOnlyFuturePatchOnMovedBoundaryDoesNotShiftWeekdays() throws {
         let series = try WeeklySeries(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000222")!,
