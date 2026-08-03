@@ -24,10 +24,10 @@
 | --- | --- | --- |
 | `Scripts/test.sh` | PASS | 302 tests / 24 suites |
 | `Scripts/test-build-app-archive.sh` | PASS | ZIP 新鲜解包与只读 DMG 中 app 均严格签名，且 CDHash 相同 |
-| `Scripts/test-build-app-failures.sh` | PASS | 创建失败、发布中断、验证失败、两个有效签名但 CDHash 不同、首次发布失败及尽力启动副本失败均保持或恢复权威 pair；mount-point 缺失与首次 detach 失败都会按捕获的 device/mount 重试清理，测试结束无临时 image-path 挂载 |
+| `Scripts/test-build-app-failures.sh` | PASS | 创建失败、发布中断、验证失败、两个有效签名但 CDHash 不同、首次发布失败及尽力启动副本失败均保持或恢复权威 pair；正式 published DMG 的 mount-point 元数据缺失、首次 detach 失败，以及 rollback verify 自身首次 detach 失败均由完整 attachment 集合保留身份并最终清理，旧 pair 精确字节不变，测试结束无临时 image-path/device/mount 残留 |
 | `Scripts/test-build-app-symlink.sh` | PASS | symlink dist、非普通 ZIP 目标、symlink DMG 目标均拒绝，sentinel 不变 |
 | `Scripts/build-app.sh` | PASS | 同一事务发布正式 ZIP/DMG pair |
-| `swift build --product PersonalCalendar` | PASS | debug 产品构建完成 |
+| `swift build -c release --product PersonalCalendar` | PASS | release 产品构建完成 |
 
 清理复核命令 `rg 'MonthProjection|MonthGridBuilder|dropDestination|@available.*deprecated|deprecated' Sources Tests` 只剩 `WeekRowView` 的两个真实 `.dropDestination` 消费点；没有 deprecated API 命中。已删除：
 
@@ -44,8 +44,8 @@
 
 | 制品 | 绝对路径 | SHA-256 |
 | --- | --- | --- |
-| 权威 ZIP | `/Users/oreal/Documents/个人管理工具/.worktrees/calendar-v1/dist/个人月历.app.zip` | `e79a201e192bab13bad42b2988a7400fecf3fff7312cde53d1122b8501cdeca7` |
-| Finder 友好 DMG | `/Users/oreal/Documents/个人管理工具/.worktrees/calendar-v1/dist/个人月历.dmg` | `9c5df671d7cd3b3f681304adcef40459d66c59a250417ef764b1d967fafa0983` |
+| 权威 ZIP | `/Users/oreal/Documents/个人管理工具/.worktrees/calendar-v1/dist/个人月历.app.zip` | `7082168e8f2e86e34aea072a9f943137936adf75a35e22df06d5c7ec1ec3d304` |
+| Finder 友好 DMG | `/Users/oreal/Documents/个人管理工具/.worktrees/calendar-v1/dist/个人月历.dmg` | `43aef36bd5df096bed65852080ff7a83d5b12fd76e3938b4bd28a13e32386576` |
 
 - ZIP 新鲜解包 app CDHash：`7f2d81c00ab594e1d8931c74af8256df6f9db0a6`
 - DMG 只读挂载 app CDHash：`7f2d81c00ab594e1d8931c74af8256df6f9db0a6`

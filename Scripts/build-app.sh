@@ -18,10 +18,11 @@ CANDIDATE_ZIP=""
 CANDIDATE_DMG=""
 BACKUP_ZIP=""
 BACKUP_DMG=""
-ACTIVE_MOUNT_POINT=""
-ACTIVE_DEVICE_ENTRY=""
+typeset -A ACTIVE_MOUNT_BY_TARGET
+typeset -A ACTIVE_IMAGE_BY_TARGET
 LAST_VERIFIED_ZIP_CDHASH=""
 LAST_VERIFIED_DMG_CDHASH=""
+LAST_DMG_CONTENT_VERIFIED=false
 PUBLICATION_PENDING=false
 PRIOR_ZIP_EXISTS=false
 PRIOR_DMG_EXISTS=false
@@ -95,47 +96,96 @@ mounted_value() {
   return 1
 }
 
-detach_active_image() {
-  local detach_target="$ACTIVE_DEVICE_ENTRY"
-  [[ -n "$detach_target" ]] || detach_target="$ACTIVE_MOUNT_POINT"
-  [[ -n "$detach_target" ]] || return 0
+track_active_image() {
+  local device="$1"
+  local mount_point="$2"
+  local image_path="$3"
+  local detach_target="$device"
+  [[ -n "$detach_target" ]] || detach_target="$mount_point"
+  [[ -n "$detach_target" ]] || return 1
+  ACTIVE_MOUNT_BY_TARGET[$detach_target]="$mount_point"
+  ACTIVE_IMAGE_BY_TARGET[$detach_target]="$image_path"
+}
+
+forget_active_image() {
+  local detach_target="$1"
+  unset "ACTIVE_MOUNT_BY_TARGET[$detach_target]"
+  unset "ACTIVE_IMAGE_BY_TARGET[$detach_target]"
+}
+
+detach_tracked_image() {
+  local detach_target="$1"
+  local mount_point="${ACTIVE_MOUNT_BY_TARGET[$detach_target]-}"
+  local image_path="${ACTIVE_IMAGE_BY_TARGET[$detach_target]-}"
   if hdiutil detach "$detach_target" >/dev/null; then
-    ACTIVE_DEVICE_ENTRY=""
-    ACTIVE_MOUNT_POINT=""
+    forget_active_image "$detach_target"
     return 0
   fi
-  echo "Could not detach active DMG device=$ACTIVE_DEVICE_ENTRY mount=$ACTIVE_MOUNT_POINT" >&2
+  echo "Could not detach active DMG target=$detach_target mount=$mount_point image=$image_path" >&2
   return 1
+}
+
+detach_all_active_images() {
+  local detach_target
+  local targets=("${(@k)ACTIVE_MOUNT_BY_TARGET}")
+  for detach_target in "${targets[@]}"; do
+    detach_tracked_image "$detach_target" || true
+  done
+
+  targets=("${(@k)ACTIVE_MOUNT_BY_TARGET}")
+  for detach_target in "${targets[@]}"; do
+    local mount_point="${ACTIVE_MOUNT_BY_TARGET[$detach_target]-}"
+    local image_path="${ACTIVE_IMAGE_BY_TARGET[$detach_target]-}"
+    if hdiutil detach -force "$detach_target" >/dev/null; then
+      forget_active_image "$detach_target"
+    else
+      echo "Could not force-detach active DMG target=$detach_target mount=$mount_point image=$image_path" >&2
+    fi
+  done
+  targets=("${(@k)ACTIVE_MOUNT_BY_TARGET}")
+  [[ "${#targets[@]}" == 0 ]]
 }
 
 verify_dmg() {
   local dmg="$1"
   local verify_root="$2"
   local attach_plist="$verify_root/attach.plist"
+  LAST_DMG_CONTENT_VERIFIED=false
   [[ -f "$dmg" && ! -L "$dmg" ]] || return 1
   if [[ -e "$verify_root" || -L "$verify_root" ]]; then
     find "$verify_root" -depth -delete || return 1
   fi
   mkdir -p "$verify_root" || return 1
   hdiutil attach -readonly -nobrowse -plist "$dmg" > "$attach_plist" || return 1
-  ACTIVE_DEVICE_ENTRY=$(mounted_value "$attach_plist" dev-entry) || ACTIVE_DEVICE_ENTRY=""
-  ACTIVE_MOUNT_POINT=$(mounted_value "$attach_plist" mount-point) || {
-    echo "DMG attach did not report a mount point: $dmg (device=$ACTIVE_DEVICE_ENTRY)" >&2
+  local active_device active_mount detach_target
+  active_device=$(mounted_value "$attach_plist" dev-entry) || active_device=""
+  active_mount=$(mounted_value "$attach_plist" mount-point) || active_mount=""
+  detach_target="$active_device"
+  [[ -n "$detach_target" ]] || detach_target="$active_mount"
+  track_active_image "$active_device" "$active_mount" "$dmg" || {
+    echo "DMG attach did not report a detachable device or mount point: $dmg" >&2
+    return 1
+  }
+  [[ -n "$active_mount" ]] || {
+    echo "DMG attach did not report a mount point: $dmg (device=$active_device)" >&2
     return 1
   }
 
   local result=0
-  local mounted_app="$ACTIVE_MOUNT_POINT/个人月历.app"
+  local mounted_app="$active_mount/个人月历.app"
   verify_app "$mounted_app" || result=1
   if [[ "$result" == 0 ]]; then
     LAST_VERIFIED_DMG_CDHASH=$(app_cdhash "$mounted_app") || result=1
   fi
-  if [[ ! -L "$ACTIVE_MOUNT_POINT/Applications" ]] || \
-     [[ "$(readlink "$ACTIVE_MOUNT_POINT/Applications")" != "/Applications" ]]; then
+  if [[ ! -L "$active_mount/Applications" ]] || \
+     [[ "$(readlink "$active_mount/Applications")" != "/Applications" ]]; then
     echo "DMG is missing the Finder Applications shortcut." >&2
     result=1
   fi
-  detach_active_image || result=1
+  if [[ "$result" == 0 ]]; then
+    LAST_DMG_CONTENT_VERIFIED=true
+  fi
+  detach_tracked_image "$detach_target" || result=1
   return "$result"
 }
 
@@ -145,8 +195,14 @@ verify_pair() {
   local suffix="$3"
   LAST_VERIFIED_ZIP_CDHASH=""
   LAST_VERIFIED_DMG_CDHASH=""
+  LAST_DMG_CONTENT_VERIFIED=false
   verify_zip "$zip" "$ZIP_VERIFY_ROOT-$suffix" || return 1
-  verify_dmg "$dmg" "$DMG_VERIFY_ROOT-$suffix" || return 1
+  if ! verify_dmg "$dmg" "$DMG_VERIFY_ROOT-$suffix"; then
+    if [[ "$suffix" != rollback || "$LAST_DMG_CONTENT_VERIFIED" != true ]]; then
+      return 1
+    fi
+    echo "Rollback DMG content verified; deferring its failed detach to final cleanup." >&2
+  fi
   if [[ "$LAST_VERIFIED_ZIP_CDHASH" != "$LAST_VERIFIED_DMG_CDHASH" ]]; then
     echo "ZIP/DMG app CDHash mismatch: ZIP=$LAST_VERIFIED_ZIP_CDHASH DMG=$LAST_VERIFIED_DMG_CDHASH" >&2
     return 1
@@ -191,12 +247,13 @@ rollback_publication() {
 
 cleanup() {
   trap '' HUP INT TERM
-  if [[ -n "$ACTIVE_DEVICE_ENTRY" || -n "$ACTIVE_MOUNT_POINT" ]]; then
-    detach_active_image >/dev/null 2>&1 || true
-  fi
+  detach_all_active_images || true
   if [[ "$PUBLICATION_PENDING" == true ]]; then
     rollback_publication || true
   fi
+  # Rollback verification can mount the restored DMG after the first pass.
+  # Always make one final attempt over the complete retained attachment set.
+  detach_all_active_images || true
   for package_path in "$CANDIDATE_ZIP" "$CANDIDATE_DMG"; do
     [[ -n "$package_path" ]] && remove_explicit_file "$package_path" || true
   done

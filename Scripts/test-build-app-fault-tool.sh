@@ -56,10 +56,9 @@ case "${0:t}" in
         [[ -n "$recorded_device" ]] || recorded_device=$(plutil -extract "system-entities.$index.dev-entry" raw -o - "$attach_plist" 2>/dev/null || true)
         [[ -n "$recorded_mount" ]] || recorded_mount=$(plutil -extract "system-entities.$index.mount-point" raw -o - "$attach_plist" 2>/dev/null || true)
       done
-      print -r -- "$recorded_device" > "$BUILD_APP_FAULT_HDIUTIL_STATE_FILE"
-      print -r -- "$recorded_mount" >> "$BUILD_APP_FAULT_HDIUTIL_STATE_FILE"
-      print -r -- "$last_arg" >> "$BUILD_APP_FAULT_HDIUTIL_STATE_FILE"
-      if [[ "${BUILD_APP_FAULT_HDIUTIL_OMIT_MOUNT_POINT_ONCE:-}" == true && \
+      print -r -- "$recorded_device"$'\t'"$recorded_mount"$'\t'"$last_arg" >> "$BUILD_APP_FAULT_HDIUTIL_STATE_FILE"
+      if [[ ( "${BUILD_APP_FAULT_HDIUTIL_OMIT_MOUNT_POINT_ONCE:-}" == true || \
+          "${BUILD_APP_FAULT_HDIUTIL_OMIT_MOUNT_POINT_SOURCE:-}" == "$last_arg" ) && \
         ( -z "${BUILD_APP_FAULT_ONCE_MARKER:-}" || ! -e "$BUILD_APP_FAULT_ONCE_MARKER" ) ]]; then
         [[ -z "${BUILD_APP_FAULT_ONCE_MARKER:-}" ]] || print -n fired > "$BUILD_APP_FAULT_ONCE_MARKER"
         for index in {0..20}; do
@@ -81,8 +80,33 @@ case "${0:t}" in
         exec /usr/bin/hdiutil "${@:1:$#-1}" "$replacement"
       fi
     fi
+    recorded_attach_source=""
+    recorded_attach_source_occurrence=0
+    if [[ -n "${BUILD_APP_FAULT_HDIUTIL_STATE_FILE:-}" && -f "$BUILD_APP_FAULT_HDIUTIL_STATE_FILE" ]]; then
+      recorded_attach_source=$(awk -F '\t' 'END { print $3 }' "$BUILD_APP_FAULT_HDIUTIL_STATE_FILE")
+      recorded_attach_source_occurrence=$(awk -F '\t' -v source="$recorded_attach_source" \
+        '$3 == source { count += 1 } END { print count + 0 }' \
+        "$BUILD_APP_FAULT_HDIUTIL_STATE_FILE")
+    fi
+    detach_source_occurrence_fault=false
+    if [[ -n "${BUILD_APP_FAULT_HDIUTIL_DETACH_SOURCE:-}" && \
+      "${BUILD_APP_FAULT_HDIUTIL_DETACH_SOURCE:-}" == "$recorded_attach_source" && \
+      -n "${BUILD_APP_FAULT_HDIUTIL_DETACH_SOURCE_OCCURRENCE:-}" && \
+      "${BUILD_APP_FAULT_HDIUTIL_DETACH_SOURCE_OCCURRENCE:-}" == "$recorded_attach_source_occurrence" && \
+      ( -z "${BUILD_APP_FAULT_HDIUTIL_DETACH_OCCURRENCE_MARKER:-}" || \
+        ! -e "$BUILD_APP_FAULT_HDIUTIL_DETACH_OCCURRENCE_MARKER" ) ]]; then
+      detach_source_occurrence_fault=true
+    fi
     if [[ "${1:-}" == "detach" && \
-      "${BUILD_APP_FAULT_HDIUTIL_DETACH_ONCE:-}" == true && \
+      "$detach_source_occurrence_fault" == true ]]; then
+      [[ -z "${BUILD_APP_FAULT_HDIUTIL_DETACH_OCCURRENCE_MARKER:-}" ]] || \
+        print -n fired > "$BUILD_APP_FAULT_HDIUTIL_DETACH_OCCURRENCE_MARKER"
+      exit 1
+    fi
+    if [[ "${1:-}" == "detach" && \
+      ( "${BUILD_APP_FAULT_HDIUTIL_DETACH_ONCE:-}" == true || \
+        ( -n "${BUILD_APP_FAULT_HDIUTIL_DETACH_ONCE_AFTER_SOURCE:-}" && \
+          "${BUILD_APP_FAULT_HDIUTIL_DETACH_ONCE_AFTER_SOURCE:-}" == "$recorded_attach_source" ) ) && \
       ( -z "${BUILD_APP_FAULT_ONCE_MARKER:-}" || ! -e "$BUILD_APP_FAULT_ONCE_MARKER" ) ]]; then
       [[ -z "${BUILD_APP_FAULT_ONCE_MARKER:-}" ]] || print -n fired > "$BUILD_APP_FAULT_ONCE_MARKER"
       exit 1
@@ -97,6 +121,13 @@ case "${0:t}" in
       /bin/rm "$@"
       kill -TERM "$PPID"
       exit 143
+    fi
+    if [[ "${BUILD_APP_FAULT_RM_ONCE_TARGET:-}" == "$last_arg" && \
+      ( -z "${BUILD_APP_FAULT_RM_ONCE_MARKER:-}" || \
+        ! -e "$BUILD_APP_FAULT_RM_ONCE_MARKER" ) ]]; then
+      [[ -z "${BUILD_APP_FAULT_RM_ONCE_MARKER:-}" ]] || \
+        print -n fired > "$BUILD_APP_FAULT_RM_ONCE_MARKER"
+      exit 1
     fi
     if [[ "${BUILD_APP_FAULT_RM_TARGET:-}" == "$last_arg" ]]; then
       exit 1
