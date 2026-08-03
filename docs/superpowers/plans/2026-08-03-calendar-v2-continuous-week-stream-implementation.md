@@ -134,7 +134,7 @@ public struct CalendarSchedule: Codable, Equatable, Hashable, Sendable {
 }
 ```
 
-Replace `CalendarItem.date/timeRange` with `schedule`, update validation/Codable, and preserve task/event completion invariants.
+Replace persisted V2 `CalendarItem.date/timeRange` with `schedule`, update validation/Codable, and preserve task/event completion invariants. Until Tasks 5 and 12 migrate every consumer, retain a deprecated same-day initializer plus read-only `date` and `timeRange` compatibility projections so unchanged V1 views/tests still compile; these adapters must delegate to `schedule`, cannot mutate a second source of truth, and are removed in Task 12.
 
 - [ ] **Step 4: Add reducer RED tests for moving and completing a span**
 
@@ -221,7 +221,7 @@ Expected: compile failure because series and occurrence span fields do not exist
 
 - [ ] **Step 2: Implement V2 recurrence model and engine**
 
-Construct each natural occurrence from `originalDate` plus `durationDays - 1`; a modified exception uses its full override schedule. Keep `OccurrenceKey.originalDate` unchanged and derive completion from that key.
+Construct each natural occurrence from `originalDate` plus `durationDays - 1`; a modified exception uses its full override schedule. Keep `OccurrenceKey.originalDate` unchanged and derive completion from that key. Until Tasks 5 and 12 migrate every consumer, retain deprecated V1-named initializers and read-only `startDate/endDate/timeRange/displayedDate` projections that delegate to the V2 fields; they must not be independently persisted or mutated.
 
 ```swift
 let schedule = try CalendarSchedule(
@@ -386,11 +386,11 @@ Run: `Scripts/test.sh --filter JSONCalendarRepositoryTests`
 
 Expected: persistence suite passes, including all V1 fault tests.
 
-- [ ] **Step 5: Run domain + persistence regression**
+- [ ] **Step 5: Run the full regression after schema cutover**
 
-Run: `Scripts/test.sh --filter 'CalendarDomainTests|CalendarPersistenceTests'`
+Run: `Scripts/test.sh`
 
-Expected: all selected tests pass.
+Expected: the complete suite passes; old UI consumers remain operational through the single-source compatibility projections until their scheduled migration.
 
 - [ ] **Step 6: Commit Task 3**
 
@@ -1105,7 +1105,7 @@ Expected: FAIL if any cross-layer migration, persistence, identity or undo wirin
 
 - [ ] **Step 2: Remove old business-truth paths and run full automated suite**
 
-Use `rg 'MonthProjection|MonthGridBuilder|dropDestination' Sources Tests` to resolve remaining production references. Delete obsolete fixed-grid paths; retain `Transferable` only if it has a real compatibility consumer.
+Use `rg 'MonthProjection|MonthGridBuilder|dropDestination|@available.*deprecated|deprecated' Sources Tests` to resolve remaining production references. Delete obsolete fixed-grid paths and the temporary V1 model initializers/projections; retain `Transferable` only if it has a real compatibility consumer.
 
 Run: `Scripts/test.sh`
 
