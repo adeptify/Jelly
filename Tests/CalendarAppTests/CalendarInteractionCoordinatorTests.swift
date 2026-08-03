@@ -54,6 +54,114 @@ struct CalendarInteractionCoordinatorTests {
         #expect(trailing.previewSchedule == expectedTrailing)
     }
 
+    @Test func overnightLeadingResizeDirectJumpAndSampledPathClampIdentically() throws {
+        let overnight = try timedProjectedItem(
+            startDay: 6,
+            endDay: 8,
+            startHour: 23,
+            endHour: 1
+        )
+        let direct = CalendarInteractionCoordinator()
+        direct.pointerDown(
+            on: date(6),
+            target: .leadingHandle,
+            source: .item(overnight),
+            point: .zero
+        )
+        _ = direct.updatePointer(point: CGPoint(x: 20, y: 0), over: date(10))
+
+        let sampled = CalendarInteractionCoordinator()
+        sampled.pointerDown(
+            on: date(6),
+            target: .leadingHandle,
+            source: .item(overnight),
+            point: .zero
+        )
+        _ = sampled.updatePointer(point: CGPoint(x: 10, y: 0), over: date(7))
+        _ = sampled.updatePointer(point: CGPoint(x: 20, y: 0), over: date(10))
+
+        let expected = try timedSchedule(7, 8, startHour: 23, endHour: 1)
+        #expect(direct.previewSchedule == expected)
+        #expect(sampled.previewSchedule == expected)
+        #expect(direct.pointerUp(at: CGPoint(x: 20, y: 0), over: date(10))?.pendingSchedule == expected)
+        #expect(sampled.pointerUp(at: CGPoint(x: 20, y: 0), over: date(10))?.pendingSchedule == expected)
+    }
+
+    @Test func overnightTrailingResizeDirectJumpAndSampledPathClampIdentically() throws {
+        let overnight = try timedProjectedItem(
+            startDay: 6,
+            endDay: 8,
+            startHour: 23,
+            endHour: 1
+        )
+        let direct = CalendarInteractionCoordinator()
+        direct.pointerDown(
+            on: date(8),
+            target: .trailingHandle,
+            source: .item(overnight),
+            point: .zero
+        )
+        _ = direct.updatePointer(point: CGPoint(x: 20, y: 0), over: date(4))
+
+        let sampled = CalendarInteractionCoordinator()
+        sampled.pointerDown(
+            on: date(8),
+            target: .trailingHandle,
+            source: .item(overnight),
+            point: .zero
+        )
+        _ = sampled.updatePointer(point: CGPoint(x: 10, y: 0), over: date(7))
+        _ = sampled.updatePointer(point: CGPoint(x: 20, y: 0), over: date(4))
+
+        let expected = try timedSchedule(6, 7, startHour: 23, endHour: 1)
+        #expect(direct.previewSchedule == expected)
+        #expect(sampled.previewSchedule == expected)
+        #expect(direct.pointerUp(at: CGPoint(x: 20, y: 0), over: date(4))?.pendingSchedule == expected)
+        #expect(sampled.pointerUp(at: CGPoint(x: 20, y: 0), over: date(4))?.pendingSchedule == expected)
+    }
+
+    @Test func forwardSameDayTimesStillAllowResizeToOneCalendarDay() throws {
+        let daytime = try timedProjectedItem(
+            startDay: 6,
+            endDay: 8,
+            startHour: 9,
+            endHour: 10
+        )
+        let coordinator = CalendarInteractionCoordinator()
+        coordinator.pointerDown(
+            on: date(6),
+            target: .leadingHandle,
+            source: .item(daytime),
+            point: .zero
+        )
+
+        _ = coordinator.updatePointer(point: CGPoint(x: 20, y: 0), over: date(10))
+
+        let expected = try timedSchedule(8, 8, startHour: 9, endHour: 10)
+        #expect(coordinator.previewSchedule == expected)
+    }
+
+    @Test func equalClockTimesRequireAtLeastTwoCalendarDays() throws {
+        let equalClock = try timedProjectedItem(
+            startDay: 6,
+            endDay: 8,
+            startHour: 23,
+            endHour: 23
+        )
+        let coordinator = CalendarInteractionCoordinator()
+        coordinator.pointerDown(
+            on: date(8),
+            target: .trailingHandle,
+            source: .item(equalClock),
+            point: .zero
+        )
+
+        _ = coordinator.updatePointer(point: CGPoint(x: 20, y: 0), over: date(4))
+
+        let expected = try timedSchedule(6, 7, startHour: 23, endHour: 23)
+        #expect(coordinator.previewSchedule == expected)
+    }
+
     @Test func oneDayItemCanMoveAndResizeWithoutBecomingInvalid() throws {
         let item = try makeProjectedItem(startDay: 6, endDay: 6)
         let coordinator = CalendarInteractionCoordinator()
@@ -93,6 +201,22 @@ struct CalendarInteractionCoordinatorTests {
         #expect(pending.operation == .move)
         #expect(pending.originalSchedule == originalSchedule)
         #expect(pending.previewSchedule == previewSchedule)
+        #expect(coordinator.state == .idle)
+    }
+
+    @Test func itemPointerUpWithoutPreviewNeverFallsThroughToQuickCreate() throws {
+        let item = try makeProjectedItem(startDay: 6, endDay: 8)
+        let coordinator = CalendarInteractionCoordinator()
+        coordinator.pointerDown(
+            on: date(6),
+            target: .barBody,
+            source: .item(item),
+            point: .zero
+        )
+
+        let action = coordinator.pointerUp(at: CGPoint(x: 20, y: 0), over: date(11))
+
+        #expect(action == nil)
         #expect(coordinator.state == .idle)
     }
 
@@ -399,6 +523,51 @@ struct CalendarInteractionCoordinatorTests {
             createdAt: .distantPast,
             updatedAt: .distantPast
         )
+    }
+
+    private func timedProjectedItem(
+        startDay: Int,
+        endDay: Int,
+        startHour: Int,
+        endHour: Int
+    ) throws -> CalendarItem {
+        try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "定时跨日事项",
+            categoryID: UUID(),
+            schedule: timedSchedule(
+                startDay,
+                endDay,
+                startHour: startHour,
+                endHour: endHour
+            ),
+            creationTimeZoneIdentifier: "Asia/Shanghai",
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+    }
+
+    private func timedSchedule(
+        _ startDay: Int,
+        _ endDay: Int,
+        startHour: Int,
+        endHour: Int
+    ) throws -> CalendarSchedule {
+        try CalendarSchedule(
+            startDate: date(startDay),
+            endDate: date(endDay),
+            startTime: MinuteOfDay(hour: startHour, minute: 0)!,
+            endTime: MinuteOfDay(hour: endHour, minute: 0)!
+        )
+    }
+}
+
+private extension CalendarInteractionAction {
+    var pendingSchedule: CalendarSchedule? {
+        guard case let .submitMutation(pending) = self else { return nil }
+        return pending.previewSchedule
     }
 }
 

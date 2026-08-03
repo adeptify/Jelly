@@ -389,6 +389,7 @@ final class CalendarInteractionCoordinator: ObservableObject {
                 previewSchedule: previewSchedule
             ))
         }
+        guard press.source == nil else { return nil }
         return .openCreate(
             Self.normalizedRange(from: press.date, through: releaseDate),
             anchor: releaseDate
@@ -447,25 +448,34 @@ final class CalendarInteractionCoordinator: ObservableObject {
         switch press.target {
         case .barBody:
             let delta = press.date.days(until: date)
-            guard let schedule = try? source.schedule.shifted(byDays: delta) else { return }
+            let schedule = makeValidatedPreviewSchedule(
+                startDate: source.schedule.startDate.addingDays(delta),
+                endDate: source.schedule.endDate.addingDays(delta),
+                startTime: source.schedule.startTime,
+                endTime: source.schedule.endTime
+            )
             state = .movingItem(source: source.id, previewSchedule: schedule)
         case .leadingHandle:
-            let start = min(date, source.schedule.endDate)
-            guard let schedule = try? CalendarSchedule(
+            let minimumDurationDays = minimumDurationDays(for: source.schedule)
+            let latestStart = source.schedule.endDate.addingDays(-(minimumDurationDays - 1))
+            let start = min(date, latestStart)
+            let schedule = makeValidatedPreviewSchedule(
                 startDate: start,
                 endDate: source.schedule.endDate,
                 startTime: source.schedule.startTime,
                 endTime: source.schedule.endTime
-            ) else { return }
+            )
             state = .resizingLeading(source: source.id, previewSchedule: schedule)
         case .trailingHandle:
-            let end = max(date, source.schedule.startDate)
-            guard let schedule = try? CalendarSchedule(
+            let minimumDurationDays = minimumDurationDays(for: source.schedule)
+            let earliestEnd = source.schedule.startDate.addingDays(minimumDurationDays - 1)
+            let end = max(date, earliestEnd)
+            let schedule = makeValidatedPreviewSchedule(
                 startDate: source.schedule.startDate,
                 endDate: end,
                 startTime: source.schedule.startTime,
                 endTime: source.schedule.endTime
-            ) else { return }
+            )
             state = .resizingTrailing(source: source.id, previewSchedule: schedule)
         case .completionButton, .dateNumber, .overflow, .emptyCell:
             break
@@ -480,6 +490,33 @@ final class CalendarInteractionCoordinator: ObservableObject {
         case .leadingHandle: .resizeLeading
         case .trailingHandle: .resizeTrailing
         case .completionButton, .dateNumber, .overflow, .emptyCell: nil
+        }
+    }
+
+    private func minimumDurationDays(for schedule: CalendarSchedule) -> Int {
+        guard let startTime = schedule.startTime,
+              let endTime = schedule.endTime
+        else {
+            return 1
+        }
+        return endTime > startTime ? 1 : 2
+    }
+
+    private func makeValidatedPreviewSchedule(
+        startDate: CalendarDate,
+        endDate: CalendarDate,
+        startTime: MinuteOfDay?,
+        endTime: MinuteOfDay?
+    ) -> CalendarSchedule {
+        do {
+            return try CalendarSchedule(
+                startDate: startDate,
+                endDate: endDate,
+                startTime: startTime,
+                endTime: endTime
+            )
+        } catch {
+            preconditionFailure("Deterministically clamped item preview must remain valid: \(error)")
         }
     }
 

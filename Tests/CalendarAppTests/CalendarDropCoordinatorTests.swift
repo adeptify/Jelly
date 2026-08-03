@@ -7,6 +7,26 @@ import Testing
 @Suite("CalendarDropCoordinatorTests")
 @MainActor
 struct CalendarDropCoordinatorTests {
+    @Test func recentMutationIDCacheEvictsOldestAndRetainsRecentDuplicates() {
+        let oldest = UUID()
+        let middle = UUID()
+        let newest = UUID()
+        var cache = RecentMutationIDCache(capacity: 2)
+
+        cache.insert(oldest)
+        cache.insert(middle)
+        #expect(cache.contains(oldest))
+        #expect(cache.contains(middle))
+
+        cache.insert(newest)
+
+        #expect(!cache.contains(oldest))
+        #expect(cache.contains(middle))
+        #expect(cache.contains(newest))
+        cache.insert(middle)
+        #expect(cache.count == 2)
+    }
+
     @Test func ordinaryRangeResizePersistsExactlyOnceAndRegistersOneUndo() async throws {
         var original = makeEmptyState()
         let item = try CalendarItem(

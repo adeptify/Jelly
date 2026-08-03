@@ -14,8 +14,40 @@ struct RecurringDropResolution: Equatable {
     let scope: SeriesScope
 }
 
+struct RecentMutationIDCache {
+    private let capacity: Int
+    private var orderedIDs: [UUID] = []
+    private var membership = Set<UUID>()
+
+    init(capacity: Int) {
+        precondition(capacity > 0, "Recent mutation cache capacity must be positive.")
+        self.capacity = capacity
+    }
+
+    var count: Int { orderedIDs.count }
+
+    func contains(_ id: UUID) -> Bool {
+        membership.contains(id)
+    }
+
+    mutating func insert(_ id: UUID) {
+        if membership.contains(id) {
+            orderedIDs.removeAll(where: { $0 == id })
+            orderedIDs.append(id)
+            return
+        }
+        if orderedIDs.count == capacity, let evicted = orderedIDs.first {
+            orderedIDs.removeFirst()
+            membership.remove(evicted)
+        }
+        orderedIDs.append(id)
+        membership.insert(id)
+    }
+}
+
 @MainActor
 final class CalendarDropCoordinator: ObservableObject {
+    private static let recentMutationIDCapacity = 256
     private let store: CalendarStore
     @Published var pendingRecurringDrop: PendingRecurringDrop?
     @Published private(set) var pendingCalendarMutation: PendingCalendarMutation?
@@ -23,7 +55,9 @@ final class CalendarDropCoordinator: ObservableObject {
     private(set) var isResolvingRecurringDrop = false
     private var activeResolution: RecurringDropResolution?
     private var submittingMutationIDs = Set<UUID>()
-    private var committedMutationIDs = Set<UUID>()
+    private var committedMutationIDs = RecentMutationIDCache(
+        capacity: recentMutationIDCapacity
+    )
 
     init(store: CalendarStore) {
         self.store = store

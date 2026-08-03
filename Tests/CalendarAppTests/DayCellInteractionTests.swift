@@ -173,6 +173,69 @@ struct DayCellInteractionTests {
         #expect(recorder.clicks == [.completionButton])
     }
 
+    @Test func appKitItemSurfaceDirectOvernightJumpUsesDeterministicCoordinatorClamp() throws {
+        let weekStart = CalendarDate(year: 2026, month: 8, day: 3)!
+        let source = try CalendarItem(
+            id: UUID(),
+            kind: .event,
+            title: "跨夜",
+            categoryID: UUID(),
+            schedule: try CalendarSchedule(
+                startDate: weekStart.addingDays(3),
+                endDate: weekStart.addingDays(5),
+                startTime: MinuteOfDay(hour: 23, minute: 0)!,
+                endTime: MinuteOfDay(hour: 1, minute: 0)!
+            ),
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let coordinator = CalendarInteractionCoordinator()
+        var submitted: PendingCalendarMutation?
+        let directTarget = CalendarDate(year: 2026, month: 8, day: 10)!
+        let surface = WeekRowItemGestureSurfaceView(
+            source: .item(source),
+            weekStart: weekStart,
+            startColumn: 3,
+            endColumn: 5,
+            columnWidth: 40,
+            rootOrigin: .zero,
+            showsLeadingHandle: true,
+            showsTrailingHandle: false,
+            onItemGesture: { gesture in
+                switch gesture {
+                case let .began(date, target, entry, point):
+                    coordinator.pointerDown(on: date, target: target, source: entry, point: point)
+                case let .changed(point):
+                    _ = coordinator.updatePointer(point: point, over: directTarget)
+                case let .ended(point):
+                    if case let .submitMutation(pending) = coordinator.pointerUp(
+                        at: point,
+                        over: directTarget
+                    ) {
+                        submitted = pending
+                    }
+                }
+            },
+            onClick: { _ in }
+        )
+        surface.frame = CGRect(x: 0, y: 0, width: 120, height: 20)
+
+        try sendMouseDrag(
+            to: surface,
+            from: CGPoint(x: 2, y: 10),
+            through: CGPoint(x: 100, y: 10)
+        )
+
+        let expected = try CalendarSchedule(
+            startDate: CalendarDate(year: 2026, month: 8, day: 7)!,
+            endDate: CalendarDate(year: 2026, month: 8, day: 8)!,
+            startTime: MinuteOfDay(hour: 23, minute: 0)!,
+            endTime: MinuteOfDay(hour: 1, minute: 0)!
+        )
+        #expect(submitted?.previewSchedule == expected)
+    }
+
     @Test func flippedParentMapsTopAndBottomMouseLocationsIntoTheSwiftUIRootCoordinateSystem() throws {
         let date = CalendarDate(year: 2026, month: 8, day: 10)!
         let recorder = RangeGestureRecorder()
@@ -262,6 +325,49 @@ struct DayCellInteractionTests {
         ))
 
         view.mouseDown(with: down)
+        view.mouseUp(with: up)
+    }
+
+    private func sendMouseDrag(
+        to view: NSView,
+        from start: CGPoint,
+        through end: CGPoint
+    ) throws {
+        let down = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: start,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ))
+        let dragged = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDragged,
+            location: end,
+            modifierFlags: [],
+            timestamp: 0.1,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ))
+        let up = try #require(NSEvent.mouseEvent(
+            with: .leftMouseUp,
+            location: end,
+            modifierFlags: [],
+            timestamp: 0.2,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ))
+        view.mouseDown(with: down)
+        view.mouseDragged(with: dragged)
         view.mouseUp(with: up)
     }
 }
