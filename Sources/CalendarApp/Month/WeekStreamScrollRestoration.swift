@@ -148,6 +148,59 @@ struct WeekStreamCenteringState: Equatable {
     }
 }
 
+struct WeekStreamCenteringCoordinator: Equatable {
+    private var state = WeekStreamCenteringState()
+    private var latestFrames: [WeekRowViewportFrame] = []
+    private var latestViewportHeight: CGFloat?
+
+    var blocksViewportUpdates: Bool { state.blocksViewportUpdates }
+    var pendingRequest: WeekStreamCenteringRequest? { state.pendingRequest }
+
+    @discardableResult
+    mutating func begin(
+        weekStart: CalendarDate,
+        windowRevision: WeekStreamWindowRevision
+    ) -> WeekStreamCenteringRequest {
+        state.begin(weekStart: weekStart, windowRevision: windowRevision)
+    }
+
+    @discardableResult
+    mutating func markScrollIssued(
+        for request: WeekStreamCenteringRequest,
+        animated: Bool = false
+    ) -> Bool {
+        state.markScrollIssued(for: request, animated: animated)
+    }
+
+    @discardableResult
+    mutating func markAnimationSettled(for request: WeekStreamCenteringRequest) -> Bool {
+        state.markAnimationSettled(for: request)
+    }
+
+    mutating func receiveViewport(
+        frames: [WeekRowViewportFrame],
+        viewportHeight: CGFloat
+    ) -> WeekStreamCenteringAction {
+        latestFrames = frames
+        latestViewportHeight = viewportHeight
+        return state.receive(frames: frames, viewportHeight: viewportHeight)
+    }
+
+    mutating func confirmDeferredCentering(
+        for request: WeekStreamCenteringRequest
+    ) -> WeekStreamCenteringAction {
+        guard state.pendingRequest == request,
+              let latestViewportHeight
+        else {
+            return .wait
+        }
+        return state.receive(
+            frames: latestFrames,
+            viewportHeight: latestViewportHeight
+        )
+    }
+}
+
 enum WeekStreamRestorationAction: Equatable {
     case wait
     case adjustContentOffset(WeekStreamScrollCorrection)

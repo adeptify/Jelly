@@ -376,6 +376,101 @@ struct WeekRowPresentationTests {
             == .retry(reducedRequest))
     }
 
+    @Test @MainActor func cachedDeferredConfirmationReleasesRepeatedNoOpTodayRequestsBeforeManualFocusMoves() throws {
+        let todayWeek = CalendarDate(year: 2026, month: 8, day: 3)!
+        let revision = WeekStreamWindowRevision(
+            first: todayWeek.addingDays(-364),
+            last: todayWeek.addingDays(364),
+            count: 105
+        )
+        let centeredFrames = [WeekRowViewportFrame(
+            weekStart: todayWeek,
+            minY: 258,
+            maxY: 510,
+            windowRevision: revision
+        )]
+        var coordinator = WeekStreamCenteringCoordinator()
+
+        // The existing preference is all a no-op scrollTo will leave behind.
+        #expect(coordinator.receiveViewport(frames: centeredFrames, viewportHeight: 768) == .ready)
+        let firstToday = coordinator.begin(weekStart: todayWeek, windowRevision: revision)
+        let firstIssued = coordinator.markScrollIssued(for: firstToday)
+        #expect(firstIssued)
+        #expect(coordinator.confirmDeferredCentering(for: firstToday) == .ready)
+        #expect(coordinator.blocksViewportUpdates == false)
+
+        let secondToday = coordinator.begin(weekStart: todayWeek, windowRevision: revision)
+        let secondIssued = coordinator.markScrollIssued(for: secondToday)
+        #expect(secondIssued)
+        #expect(coordinator.confirmDeferredCentering(for: secondToday) == .ready)
+        #expect(coordinator.blocksViewportUpdates == false)
+
+        let septemberWeek = todayWeek.addingDays(28)
+        let manualViewportAction = coordinator.receiveViewport(
+            frames: [
+                .init(
+                    weekStart: todayWeek.addingDays(21),
+                    minY: -128,
+                    maxY: 124,
+                    windowRevision: revision
+                ),
+                .init(
+                    weekStart: septemberWeek,
+                    minY: 124,
+                    maxY: 376,
+                    windowRevision: revision
+                )
+            ],
+            viewportHeight: 500
+        )
+        #expect(manualViewportAction == .ready)
+        let manualFocus = try #require(WeekStreamViewport.focusWeek(
+            in: [
+                .init(
+                    weekStart: todayWeek.addingDays(21),
+                    minY: -128,
+                    maxY: 124,
+                    windowRevision: revision
+                ),
+                .init(
+                    weekStart: septemberWeek,
+                    minY: 124,
+                    maxY: 376,
+                    windowRevision: revision
+                )
+            ],
+            viewportHeight: 500
+        ))
+        #expect(manualFocus == septemberWeek)
+        let state = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let model = MonthViewModel(
+            centeredOn: todayWeek,
+            state: state,
+            hiddenCategoryIDs: [],
+            today: todayWeek
+        )
+        model.updateFocus(toWeekStarting: manualFocus)
+        #expect(model.monthTitleDate == CalendarDate(year: 2026, month: 9, day: 3)!)
+    }
+
+    @Test func monthViewWiresTheSharedDeferredCenteringCoordinator() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appending(path: "Sources/CalendarApp/Month/MonthView.swift"),
+            encoding: .utf8
+        )
+
+        #expect(source.contains("@State private var weekStreamCentering: WeekStreamCenteringCoordinator"))
+        #expect(source.contains("weekStreamCentering.receiveViewport("))
+        #expect(source.contains("weekStreamCentering.confirmDeferredCentering(for: request)"))
+        #expect(source.contains(
+            "await Task.yield()\n            confirmDeferredCentering(for: request, using: proxy)"
+        ))
+    }
+
     @Test func nearLeadingWindowEdgeRequestsExtensionAndPreservesTheVisibleWeekAnchor() {
         let first = CalendarDate(year: 2026, month: 8, day: 3)!
         let second = CalendarDate(year: 2026, month: 8, day: 10)!

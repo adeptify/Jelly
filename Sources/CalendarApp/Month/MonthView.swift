@@ -244,9 +244,7 @@ struct MonthView: View {
     @State private var selectedItem: ProjectedItem?
     @State private var recurringDropPresentation = RecurringDropPresentationController()
     @State private var requestedCenterRequest: WeekStreamScrollRequest?
-    @State private var weekStreamCentering: WeekStreamCenteringState
-    @State private var latestWeekStreamFrames: [WeekRowViewportFrame] = []
-    @State private var latestWeekStreamViewportHeight: CGFloat?
+    @State private var weekStreamCentering: WeekStreamCenteringCoordinator
 
     private var theme: CalendarSemanticAppearance {
         CalendarTheme.appearance(for: colorScheme)
@@ -280,7 +278,7 @@ struct MonthView: View {
             [weak restoration] adjustment in
             restoration?.recordAppliedAdjustment(adjustment)
         })
-        var initialCentering = WeekStreamCenteringState()
+        var initialCentering = WeekStreamCenteringCoordinator()
         _ = initialCentering.begin(
             weekStart: initialWeekStream.focusWeek,
             windowRevision: initialWeekStream.windowRevision
@@ -704,8 +702,6 @@ struct MonthView: View {
                 )
             }
             .onPreferenceChange(WeekRowFramePreferenceKey.self) { frames in
-                latestWeekStreamFrames = frames
-                latestWeekStreamViewportHeight = viewportHeight
                 handleWeekStreamViewport(
                     frames: frames,
                     viewportHeight: viewportHeight,
@@ -915,15 +911,10 @@ struct MonthView: View {
         for request: WeekStreamCenteringRequest,
         using proxy: ScrollViewProxy
     ) {
-        guard weekStreamCentering.pendingRequest == request,
-              let viewportHeight = latestWeekStreamViewportHeight
-        else {
+        guard weekStreamCentering.pendingRequest == request else {
             return
         }
-        switch weekStreamCentering.receive(
-            frames: latestWeekStreamFrames,
-            viewportHeight: viewportHeight
-        ) {
+        switch weekStreamCentering.confirmDeferredCentering(for: request) {
         case .wait, .ready:
             return
         case let .retry(request):
@@ -984,7 +975,7 @@ struct MonthView: View {
         viewportHeight: CGFloat,
         scrollProxy: ScrollViewProxy
     ) {
-        switch weekStreamCentering.receive(
+        switch weekStreamCentering.receiveViewport(
             frames: frames,
             viewportHeight: viewportHeight
         ) {
