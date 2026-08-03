@@ -11,7 +11,6 @@ enum CalendarTheme {
     static let categoryItemBackgroundOpacity = 0.14
     static let categoryTextMinimumContrast = 4.5
     static let categoryAccentMinimumContrast = 3.0
-    static let completedTaskAccentOpacity = 0.45
 
     static let toolbarHeight: CGFloat = 52
     static let weekdayHeaderHeight: CGFloat = 28
@@ -24,14 +23,9 @@ enum CalendarTheme {
     static let itemFont = Font.system(size: 12)
     static let gridStroke = Color(nsColor: .separatorColor).opacity(0.55)
     static let selectedDay = Color.accentColor.opacity(0.10)
-    static let completedText = Color(nsColor: .secondaryLabelColor)
 
     static func itemBackground(_ category: Color) -> Color {
         category.opacity(categoryItemBackgroundOpacity)
-    }
-    static func completedTaskBackground(_ category: Color) -> Color { category.opacity(0.07) }
-    static func completedTaskAccent(_ category: Color) -> Color {
-        category.opacity(completedTaskAccentOpacity)
     }
 
     static func categoryColor(_ hex: String) -> Color {
@@ -52,6 +46,14 @@ enum CalendarTheme {
 
     static func categoryRoles(_ hex: String, appearance: CalendarAppearance) -> CategoryColorRoles? {
         try? CategoryColorResolver.roles(for: hex, appearance: appearance)
+    }
+
+    static func categoryItemRoles(
+        _ hex: String,
+        isCompleted: Bool,
+        appearance: CalendarAppearance
+    ) -> CategoryRenderedColorRoles? {
+        categoryRoles(hex, appearance: appearance)?.rendered(isCompleted: isCompleted)
     }
 
     static func categoryAccent(_ hex: String, appearance: CalendarAppearance) -> Color {
@@ -82,21 +84,18 @@ enum CalendarTheme {
         return categoryColor(role)
     }
 
-    static func accentNeedsOutline(_ hex: String, appearance: CalendarAppearance) -> Bool {
-        itemAccentNeedsOutline(hex, isCompletedTask: false, appearance: appearance)
-    }
-
     static func itemAccentNeedsOutline(
         _ hex: String,
         isCompletedTask: Bool,
         appearance: CalendarAppearance
     ) -> Bool {
-        (try? CategoryColorValidator.accentNeedsOutline(
-            colorHex: hex,
-            appearance: appearance,
-            renderingOpacity: isCompletedTask ? completedTaskAccentOpacity : 1
-        )) ?? false
+        guard let roles = categoryItemRoles(
+            hex,
+            isCompleted: isCompletedTask,
+            appearance: appearance
+        ) else {
+            return true
+        }
+        return roles.accentContrast < categoryAccentMinimumContrast
     }
-
-    static let itemAccentOutline = Color.primary
 }

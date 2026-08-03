@@ -109,9 +109,40 @@ struct CategoryColorRoles: Equatable, Sendable {
     let outline: SRGBColor
     let text: SRGBColor
     let canvas: SRGBColor
+    let completed: CategoryRenderedColorRoles
 
     var accentContrast: Double { accent.contrastRatio(with: softBackground) }
     var textContrast: Double { text.contrastRatio(with: softBackground) }
+
+    var normal: CategoryRenderedColorRoles {
+        CategoryRenderedColorRoles(
+            accent: accent,
+            background: softBackground,
+            outline: outline,
+            text: text
+        )
+    }
+
+    func rendered(isCompleted: Bool) -> CategoryRenderedColorRoles {
+        isCompleted ? completed : normal
+    }
+}
+
+struct CategoryRenderedColorRoles: Equatable, Sendable {
+    let accent: SRGBColor
+    let background: SRGBColor
+    let outline: SRGBColor
+    let text: SRGBColor
+
+    var accentContrast: Double { accent.contrastRatio(with: background) }
+    var outlineContrast: Double { outline.contrastRatio(with: background) }
+    var textContrast: Double { text.contrastRatio(with: background) }
+}
+
+struct CategoryColorCalibrationDrift: Equatable, Sendable {
+    let hueDegrees: Double
+    let lightness: Double
+    let chroma: Double
 }
 
 enum CategoryColorResolver {
@@ -148,7 +179,43 @@ enum CategoryColorResolver {
             softBackground: softBackground,
             outline: outline,
             text: text,
-            canvas: canvas
+            canvas: canvas,
+            completed: CategoryRenderedColorRoles(
+                // Completion is expressed by the checkbox glyph and strikethrough in the row.
+                // It deliberately keeps the contrast-safe colors instead of fading them.
+                accent: accent,
+                background: softBackground,
+                outline: outline,
+                text: text
+            )
+        )
+    }
+
+    static func calibrationDrift(
+        for colorHex: String,
+        appearance: CalendarAppearance
+    ) throws -> CategoryColorCalibrationDrift {
+        let baseline = try contrastOnlyAccent(for: colorHex, appearance: appearance)
+        let rendered = try roles(for: colorHex, appearance: appearance).accent
+        return baseline.calibrationDrift(to: rendered)
+    }
+
+    private static func contrastOnlyAccent(
+        for colorHex: String,
+        appearance: CalendarAppearance
+    ) throws -> SRGBColor {
+        let base = try SRGBColor(hex: colorHex)
+        let canvas = try SRGBColor(hex: appearance == .light
+            ? CalendarTheme.previewLightCanvasHex
+            : CalendarTheme.previewDarkCanvasHex)
+        let surface = base.composited(
+            over: canvas,
+            alpha: CalendarTheme.categoryItemBackgroundOpacity
+        )
+        return accentMeetingMinimumContrast(
+            from: base,
+            surface: surface,
+            appearance: appearance
         )
     }
 
@@ -359,11 +426,25 @@ struct SRGBColor: Equatable, Sendable {
     }
 
     func simulated(_ simulation: ColorVisionSimulation) -> SRGBColor {
+        // Machado, Oliveira & Fernandes (2009), severity 1.0 precomputed matrices
+        // published in the 2010 supplemental table and exposed by Colour Science as
+        // CVD_MATRICES_MACHADO2010. Domain: linear RGB. Pipeline: sRGB decode ->
+        // 3x3 matrix -> gamut clamp -> sRGB encode.
+        // https://doi.org/10.1109/TVCG.2009.113
+        // https://colour.readthedocs.io/en/develop/generated/colour.CVD_MATRICES_MACHADO2010.html
         let matrix: [[Double]] = switch simulation {
         case .protanopia:
-            [[0.56667, 0.43333, 0], [0.55833, 0.44167, 0], [0, 0.24167, 0.75833]]
+            [
+                [0.152286, 1.052583, -0.204868],
+                [0.114503, 0.786281, 0.099216],
+                [-0.003882, -0.048116, 1.051998]
+            ]
         case .deuteranopia:
-            [[0.625, 0.375, 0], [0.7, 0.3, 0], [0, 0.3, 0.7]]
+            [
+                [0.367322, 0.860646, -0.227968],
+                [0.280085, 0.672501, 0.047413],
+                [-0.011820, 0.042940, 0.968881]
+            ]
         }
         let linearComponents = [Self.linear(red), Self.linear(green), Self.linear(blue)]
         let transformed = matrix.map { row in
@@ -391,28 +472,12 @@ struct SRGBColor: Equatable, Sendable {
         saturationMultiplier: Double,
         lightnessOffset: Double
     ) -> SRGBColor {
-        let maximum = max(red, green, blue)
-        let minimum = min(red, green, blue)
-        let delta = maximum - minimum
-        var hue = 0.0
-        let lightness = (maximum + minimum) / 2
-        let saturation: Double
-        if delta == 0 {
-            saturation = 0
-        } else {
-            saturation = delta / (1 - abs(2 * lightness - 1))
-            if maximum == red {
-                hue = 60 * ((green - blue) / delta).truncatingRemainder(dividingBy: 6)
-            } else if maximum == green {
-                hue = 60 * ((blue - red) / delta + 2)
-            } else {
-                hue = 60 * ((red - green) / delta + 4)
-            }
-        }
+        let hsl = hslComponents
+        var hue = hsl.hueDegrees
         hue = (hue + hueDegrees).truncatingRemainder(dividingBy: 360)
         if hue < 0 { hue += 360 }
-        let adjustedSaturation = Self.clamp(saturation * saturationMultiplier)
-        let adjustedLightness = Self.clamp(lightness + lightnessOffset)
+        let adjustedSaturation = Self.clamp(hsl.saturation * saturationMultiplier)
+        let adjustedLightness = Self.clamp(hsl.lightness + lightnessOffset)
         let chroma = (1 - abs(2 * adjustedLightness - 1)) * adjustedSaturation
         let x = chroma * (1 - abs((hue / 60).truncatingRemainder(dividingBy: 2) - 1))
         let offset = adjustedLightness - chroma / 2
@@ -431,8 +496,41 @@ struct SRGBColor: Equatable, Sendable {
         )
     }
 
+    func calibrationDrift(to other: SRGBColor) -> CategoryColorCalibrationDrift {
+        let first = hslComponents
+        let second = other.hslComponents
+        let directHueDistance = abs(first.hueDegrees - second.hueDegrees)
+        return CategoryColorCalibrationDrift(
+            hueDegrees: min(directHueDistance, 360 - directHueDistance),
+            lightness: abs(first.lightness - second.lightness),
+            chroma: abs(chroma - other.chroma)
+        )
+    }
+
     private var relativeLuminance: Double {
         0.2126 * Self.linear(red) + 0.7152 * Self.linear(green) + 0.0722 * Self.linear(blue)
+    }
+
+    private var chroma: Double {
+        max(red, green, blue) - min(red, green, blue)
+    }
+
+    private var hslComponents: (hueDegrees: Double, saturation: Double, lightness: Double) {
+        let maximum = max(red, green, blue)
+        let minimum = min(red, green, blue)
+        let delta = maximum - minimum
+        let lightness = (maximum + minimum) / 2
+        guard delta > 0 else { return (0, 0, lightness) }
+        let saturation = delta / (1 - abs(2 * lightness - 1))
+        let hue: Double
+        if maximum == red {
+            hue = 60 * ((green - blue) / delta).truncatingRemainder(dividingBy: 6)
+        } else if maximum == green {
+            hue = 60 * ((blue - red) / delta + 2)
+        } else {
+            hue = 60 * ((red - green) / delta + 4)
+        }
+        return (hue < 0 ? hue + 360 : hue, saturation, lightness)
     }
 
     private var lab: (l: Double, a: Double, b: Double) {

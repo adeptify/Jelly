@@ -100,18 +100,6 @@ enum CategoryColorValidator {
         }
     }
 
-    static func accentNeedsOutline(
-        colorHex: String,
-        appearance: CalendarAppearance,
-        palette: CategoryPreviewPalette = .production,
-        renderingOpacity: Double = 1
-    ) throws -> Bool {
-        let category = try SRGBColor(hex: colorHex)
-        let canvas = try SRGBColor(hex: canvasHex(for: appearance, palette: palette))
-        let renderedAccent = category.composited(over: canvas, alpha: renderingOpacity)
-        return renderedAccent.contrastRatio(with: canvas) < CalendarTheme.categoryAccentMinimumContrast
-    }
-
     private static func canvasHex(
         for appearance: CalendarAppearance,
         palette: CategoryPreviewPalette

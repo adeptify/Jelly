@@ -48,37 +48,16 @@ struct CategoryManagerViewModelTests {
         #expect(CalendarTheme.previewDarkTextHex == "#F4EDE4")
     }
 
-    @Test func extremeAccentColorsReceiveVisibleOutline() throws {
-        #expect(try CategoryColorValidator.accentNeedsOutline(colorHex: "#FFFFFF", appearance: .light))
-        #expect(try CategoryColorValidator.accentNeedsOutline(colorHex: "#000000", appearance: .dark))
-        #expect(try CategoryColorValidator.accentNeedsOutline(colorHex: "#FFFFFF", appearance: .dark) == false)
-        #expect(try CategoryColorValidator.accentNeedsOutline(colorHex: "#000000", appearance: .light) == false)
-    }
-
-    @Test func completedTaskAccentUsesRenderedOpacityWhenDecidingItsOutline() throws {
-        #expect(CalendarTheme.completedTaskAccentOpacity == 0.45)
-        #expect(try CategoryColorValidator.accentNeedsOutline(
-            colorHex: "#4F7FFF", appearance: .light
-        ) == false)
-        #expect(try CategoryColorValidator.accentNeedsOutline(
-            colorHex: "#4F7FFF", appearance: .dark
-        ) == false)
-        #expect(try CategoryColorValidator.accentNeedsOutline(
-            colorHex: "#4F7FFF",
-            appearance: .light,
-            renderingOpacity: CalendarTheme.completedTaskAccentOpacity
-        ))
-        #expect(try CategoryColorValidator.accentNeedsOutline(
-            colorHex: "#4F7FFF",
-            appearance: .dark,
-            renderingOpacity: CalendarTheme.completedTaskAccentOpacity
-        ))
-        #expect(CalendarTheme.itemAccentNeedsOutline(
-            "#4F7FFF", isCompletedTask: true, appearance: .light
-        ))
-        #expect(CalendarTheme.itemAccentNeedsOutline(
-            "#4F7FFF", isCompletedTask: true, appearance: .dark
-        ))
+    @Test func completedTaskOutlineDecisionUsesFinalAccentAndActualSurface() throws {
+        for appearance in [CalendarAppearance.light, .dark] {
+            let roles = try CategoryColorResolver
+                .roles(for: "#4F7FFF", appearance: appearance)
+                .rendered(isCompleted: true)
+            #expect(roles.accentContrast >= 3.0)
+            #expect(CalendarTheme.itemAccentNeedsOutline(
+                "#4F7FFF", isCompletedTask: true, appearance: appearance
+            ) == false)
+        }
     }
 
     @Test func defaultPaletteUsesTheSameReadabilityValidation() throws {

@@ -54,6 +54,47 @@ struct CategoryPaletteTests {
         }
     }
 
+    @Test func machadoFullSeverityLinearRGBSimulationMatchesIndependentReferenceVectors() throws {
+        // Machado, Oliveira & Fernandes (2009), precomputed 2010 matrices,
+        // severity 1.0. Expected values below were independently calculated as:
+        // sRGB decode -> matrix in linear RGB -> gamut clamp -> sRGB encode.
+        let samples: [(String, ColorVisionSimulation, (Double, Double, Double))] = [
+            ("#FF0000", .protanopia, (0.4266084717, 0.3726542774, 0.0)),
+            ("#00FF00", .protanopia, (1.0, 0.8994280662, 0.0)),
+            ("#0000FF", .protanopia, (0.0, 0.3478668262, 1.0)),
+            ("#FF0000", .deuteranopia, (0.6400595552, 0.5658069412, 0.0)),
+            ("#00FF00", .deuteranopia, (0.9360510456, 0.8392477354, 0.2291918656)),
+            ("#0000FF", .deuteranopia, (0.0, 0.2411713588, 0.9861943658))
+        ]
+        for (hex, simulation, expected) in samples {
+            let actual = try SRGBColor(hex: hex).simulated(simulation)
+            #expect(abs(actual.red - expected.0) < 0.000_001)
+            #expect(abs(actual.green - expected.1) < 0.000_001)
+            #expect(abs(actual.blue - expected.2) < 0.000_001)
+        }
+        for simulation in [ColorVisionSimulation.protanopia, .deuteranopia] {
+            #expect(SRGBColor.black.simulated(simulation) == .black)
+            let white = SRGBColor.white.simulated(simulation)
+            #expect(abs(white.red - 1) < 0.000_001)
+            #expect(abs(white.green - 1) < 0.000_001)
+            #expect(abs(white.blue - 1) < 0.000_001)
+        }
+    }
+
+    @Test func completedItemsUseExplicitFinalRolesThatPassOnTheirActualSurface() throws {
+        let colors = CategoryPalette.families.flatMap(\.colors) + ["#FFFFFF", "#000000"]
+        for hex in colors {
+            for appearance in [CalendarAppearance.light, .dark] {
+                let completed = try CategoryColorResolver
+                    .roles(for: hex, appearance: appearance)
+                    .rendered(isCompleted: true)
+                #expect(completed.accent.contrastRatio(with: completed.background) >= 3.0)
+                #expect(completed.outline.contrastRatio(with: completed.background) >= 3.0)
+                #expect(completed.text.contrastRatio(with: completed.background) >= 4.5)
+            }
+        }
+    }
+
     @Test func eachFamilyRemainsDistinguishableUnderCommonRedGreenDeficiencySimulation() throws {
         for family in CategoryPalette.families {
             for appearance in [CalendarAppearance.light, .dark] {
@@ -67,6 +108,20 @@ struct CategoryPaletteTests {
                 )
                 #expect(protanopia >= 3.0)
                 #expect(deuteranopia >= 3.0)
+            }
+        }
+    }
+
+    @Test func familyCalibrationStaysInsideTheDeclaredIdentityDriftBudget() throws {
+        for hex in CategoryPalette.families.flatMap(\.colors) {
+            for appearance in [CalendarAppearance.light, .dark] {
+                let drift = try CategoryColorResolver.calibrationDrift(
+                    for: hex,
+                    appearance: appearance
+                )
+                #expect(drift.hueDegrees <= 3.000_001)
+                #expect(drift.lightness <= 0.030_001)
+                #expect(drift.chroma <= 0.050_001)
             }
         }
     }

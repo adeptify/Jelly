@@ -208,20 +208,32 @@ struct CalendarItemRow: View {
         category?.colorHex ?? "#8C8F96"
     }
 
+    private var itemColorRoles: CategoryRenderedColorRoles? {
+        CalendarTheme.categoryItemRoles(
+            categoryHex,
+            isCompleted: isCompletedTask,
+            appearance: appearance
+        )
+    }
+
     private var categoryColor: Color {
-        CalendarTheme.categoryAccent(categoryHex, appearance: appearance)
+        itemColorRoles.map { CalendarTheme.categoryColor($0.accent) }
+            ?? CalendarTheme.categoryColor(categoryHex)
     }
 
     private var categoryBackground: Color {
-        CalendarTheme.categorySoftBackground(categoryHex, appearance: appearance)
+        itemColorRoles.map { CalendarTheme.categoryColor($0.background) }
+            ?? CalendarTheme.itemBackground(CalendarTheme.categoryColor(categoryHex))
     }
 
     private var categoryText: Color {
-        CalendarTheme.categoryText(categoryHex, appearance: appearance)
+        itemColorRoles.map { CalendarTheme.categoryColor($0.text) }
+            ?? .primary
     }
 
     private var categoryOutline: Color {
-        CalendarTheme.categoryOutline(categoryHex, appearance: appearance)
+        itemColorRoles.map { CalendarTheme.categoryColor($0.outline) }
+            ?? .primary
     }
 
     private var isCompletedTask: Bool {
@@ -237,7 +249,7 @@ struct CalendarItemRow: View {
                 handleMarker(label: "调整开始日期")
             }
             RoundedRectangle(cornerRadius: 1)
-                .fill(isCompletedTask ? CalendarTheme.completedTaskAccent(categoryColor) : categoryColor)
+                .fill(categoryColor)
                 .frame(width: 3)
                 .overlay {
                     if accentNeedsOutline {
@@ -259,9 +271,7 @@ struct CalendarItemRow: View {
                 } label: {
                     Image(systemName: isCompletedTask ? "checkmark.square.fill" : "square")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(
-                            isCompletedTask ? CalendarTheme.completedTaskAccent(categoryColor) : categoryColor
-                        )
+                        .foregroundStyle(categoryColor)
                 }
                 .buttonStyle(.plain)
             }
@@ -318,7 +328,8 @@ struct CalendarItemRow: View {
                     .font(.system(size: presentation.layout.textFontSize))
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 }
-                .foregroundStyle(isCompletedTask ? CalendarTheme.completedText : categoryText)
+                .foregroundStyle(categoryText)
+                .strikethrough(isCompletedTask, color: categoryText)
             }
             .accessibilityLabel(
                 accessibilityLabelOverride ?? CalendarItemRowPresentation.rowBodyAccessibilityLabel(
@@ -341,10 +352,7 @@ struct CalendarItemRow: View {
         .padding(.horizontal, 4)
         .frame(height: CalendarTheme.itemRowHeight)
         .background(
-            (isCompletedTask
-                ? CalendarTheme.completedTaskBackground(categoryColor)
-                : categoryBackground
-            ),
+            categoryBackground,
             in: RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius)
         )
         .draggable(transferPayload)
