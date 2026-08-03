@@ -205,6 +205,61 @@ struct ItemEditorViewModelTests {
         #expect(patch.title == "更新后的周会")
     }
 
+    @Test func editingMovedOccurrenceWithExplicitWeekdaysPersistsSelectedRulesAndUndo() async throws {
+        var original = makeEmptyState()
+        let series = try WeeklySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000801")!,
+            kind: .task,
+            title: "周计划",
+            categoryID: original.uncategorizedID,
+            startDate: .init(year: 2026, month: 8, day: 3)!,
+            endDate: nil,
+            weekdays: [.monday, .wednesday],
+            timeRange: nil,
+            creationTimeZoneIdentifier: "Asia/Shanghai",
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let boundary = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: .init(year: 2026, month: 8, day: 10)!
+        )
+        original.recurrence.series[series.id] = series
+        let newSeriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000802")!
+        let vm = ItemEditorViewModel(
+            mode: .editOccurrence(series: series, key: boundary, scope: .thisAndFuture),
+            draft: ItemDraft(series: series, date: boundary.originalDate)
+        )
+        vm.draft.date = .init(year: 2026, month: 8, day: 11)!
+        vm.draft.weekdays = [.tuesday, .thursday]
+
+        let command = try vm.makeCommand(
+            now: .now,
+            newItemID: UUID(),
+            newSeriesID: newSeriesID,
+            timeZoneIdentifier: "Asia/Shanghai"
+        )
+        guard case let .mutateSeries(_, _, .patch(patch), _) = command else {
+            Issue.record("Expected a recurring series patch")
+            return
+        }
+        #expect(patch.displayedDate == CalendarDate(year: 2026, month: 8, day: 11)!)
+        #expect(patch.weekdays == [.tuesday, .thursday])
+
+        let (store, repository) = try await makeReadyStore(initialState: original)
+        try await store.send(command, undoLabel: "已更新事项")
+
+        #expect(store.state.recurrence.series[newSeriesID]?.weekdays == [.tuesday, .thursday])
+        #expect(await repository.persistedState == store.state)
+        #expect(store.canUndo)
+
+        try await store.undo()
+
+        #expect(store.state == original)
+        #expect(await repository.persistedState == original)
+        #expect(store.canUndo == false)
+    }
+
     @Test func editingMovedExceptionTitleDoesNotShiftFuturePattern() throws {
         let series = try makeSeries()
         let key = OccurrenceKey(seriesID: series.id, originalDate: series.startDate)

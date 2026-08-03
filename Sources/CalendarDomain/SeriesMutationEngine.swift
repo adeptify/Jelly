@@ -228,9 +228,13 @@ public enum SeriesMutationEngine {
         id: UUID,
         now: Date
     ) throws -> WeeklySeries {
-        var weekdays = patch.weekdays ?? series.weekdays
-        if dayDelta != 0 {
-            weekdays = Set(weekdays.map { shiftedWeekday($0, by: dayDelta) })
+        let weekdays: Set<Weekday>
+        if let explicitWeekdays = patch.weekdays {
+            weekdays = explicitWeekdays
+        } else if dayDelta != 0 {
+            weekdays = Set(series.weekdays.map { shiftedWeekday($0, by: dayDelta) })
+        } else {
+            weekdays = series.weekdays
         }
 
         let shiftedEndDate = series.endDate?.addingDays(dayDelta)

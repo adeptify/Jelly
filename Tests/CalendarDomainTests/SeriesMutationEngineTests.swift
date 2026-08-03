@@ -205,6 +205,33 @@ struct SeriesMutationEngineTests {
         #expect(future.weekdays == [.tuesday, .thursday])
     }
 
+    @Test func thisAndFutureMoveWithExplicitWeekdaysKeepsSelectedWeekdays() throws {
+        let series = try makeMondayWednesdaySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000227")!
+        )
+        let boundary = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: .init(year: 2026, month: 8, day: 10)!
+        )
+        let before = RecurrenceGraph(series: [series.id: series], exceptions: [:], completions: [:])
+
+        let after = try SeriesMutationEngine.apply(
+            edit: .patch(.init(
+                displayedDate: .init(year: 2026, month: 8, day: 11)!,
+                weekdays: [.tuesday, .thursday]
+            )),
+            to: boundary,
+            scope: .thisAndFuture,
+            in: before,
+            newSeriesID: UUID(uuidString: "00000000-0000-0000-0000-000000000237")!,
+            now: .now
+        )
+
+        let future = try #require(after.series.values.first { $0.id != series.id })
+        #expect(future.startDate == CalendarDate(year: 2026, month: 8, day: 11)!)
+        #expect(future.weekdays == [.tuesday, .thursday])
+    }
+
     @Test func splittingPreservesPastAndMigratesFutureExceptions() throws {
         let series = try makeMondayWednesdaySeries(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000207")!
