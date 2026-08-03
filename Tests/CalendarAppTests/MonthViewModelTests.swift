@@ -150,4 +150,109 @@ struct MonthViewModelTests {
         #expect(cell.items.map(\.title) == ["显示"])
         #expect(model.overflowCount(in: cell, capacity: 1) == 0)
     }
+
+    @Test func compatibilityFacadeUsesTheLoadedWeekRangeForProjectionLayoutAndLookup() throws {
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000502")!
+        let center = CalendarDate(year: 2026, month: 8, day: 6)!
+        let empty = CalendarState.empty(uncategorizedID: categoryID, now: .distantPast)
+        let model = MonthViewModel(
+            displayedMonth: center, state: empty, hiddenCategoryIDs: [], today: center
+        )
+        let range = model.loadedRange
+        let enteringItem = try CalendarItem(
+            id: UUID(), kind: .task, title: "从窗口外延续",
+            categoryID: categoryID,
+            schedule: try CalendarSchedule(
+                startDate: range.start.previousDay,
+                endDate: range.start,
+                startTime: nil,
+                endTime: nil
+            ),
+            creationTimeZoneIdentifier: "Asia/Shanghai",
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        var state = empty
+        state.items[enteringItem.id] = enteringItem
+
+        model.update(state: state, hiddenCategoryIDs: [], today: center)
+
+        #expect(model.weekStarts.first == range.start)
+        #expect(model.weekStarts.last?.addingDays(6) == range.end)
+        #expect(model.projectedEntries.map(\.id) == [.item(enteringItem.id)])
+        #expect(model.item(withID: "item:\(enteringItem.id.uuidString)")?.id == "item:\(enteringItem.id.uuidString)")
+        let firstLayout = try #require(model.weekLayouts(laneCapacity: 1).first)
+        #expect(firstLayout.segments.map(\.source) == [.item(enteringItem.id)])
+    }
+
+    @Test func changingTheWeekWindowReprojectsTheNewlyLoadedRangeWithoutChangingItemIdentity() throws {
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000503")!
+        let center = CalendarDate(year: 2026, month: 8, day: 6)!
+        let empty = CalendarState.empty(uncategorizedID: categoryID, now: .distantPast)
+        let model = MonthViewModel(
+            displayedMonth: center, state: empty, hiddenCategoryIDs: [], today: center
+        )
+        let itemDate = model.loadedRange.end.addingDays(7)
+        let item = try makeItem(categoryID: categoryID, title: "扩展后可见", date: itemDate)
+        var state = empty
+        state.items[item.id] = item
+        model.update(state: state, hiddenCategoryIDs: [], today: center)
+
+        #expect(model.projectedEntries.isEmpty)
+        let anchor = model.extendLater(visibleWeek: model.weekStarts.last!, pixelOffset: 23)
+
+        #expect(anchor == .init(weekStart: model.weekStarts[104], pixelOffset: 23))
+        #expect(model.projectedEntries.map(\.id) == [.item(item.id)])
+        #expect(model.item(withID: "item:\(item.id.uuidString)")?.id == "item:\(item.id.uuidString)")
+    }
+
+    @Test func todayRefreshMovesOnlyTheTodayMarkerWithoutResettingTheFocusedMonth() {
+        let august = CalendarDate(year: 2026, month: 8, day: 17)!
+        let tomorrow = CalendarDate(year: 2026, month: 8, day: 18)!
+        let model = MonthViewModel(
+            displayedMonth: august,
+            state: makeEmptyState(),
+            hiddenCategoryIDs: [],
+            today: august
+        )
+        model.goToPreviousMonth()
+        let focusedMonth = model.displayedMonth
+
+        model.update(state: makeEmptyState(), hiddenCategoryIDs: [], today: tomorrow)
+
+        #expect(model.displayedMonth == focusedMonth)
+        #expect(model.cell(for: august).isToday == false)
+        #expect(model.cell(for: tomorrow).isToday)
+    }
+
+    @Test func compatibilityFacadePlacesAnEnteringSpanOnTheFirstLegacyGridDate() throws {
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000504")!
+        let displayedMonth = CalendarDate(year: 2026, month: 8, day: 10)!
+        let firstGridDate = CalendarDate(year: 2026, month: 7, day: 27)!
+        let enteringItem = try CalendarItem(
+            id: UUID(), kind: .task, title: "跨入本月",
+            categoryID: categoryID,
+            schedule: try CalendarSchedule(
+                startDate: firstGridDate.previousDay,
+                endDate: firstGridDate.addingDays(2),
+                startTime: nil,
+                endTime: nil
+            ),
+            creationTimeZoneIdentifier: "Asia/Shanghai",
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        var state = CalendarState.empty(uncategorizedID: categoryID, now: .distantPast)
+        state.items[enteringItem.id] = enteringItem
+        let model = MonthViewModel(
+            displayedMonth: displayedMonth,
+            state: state,
+            hiddenCategoryIDs: [],
+            today: displayedMonth
+        )
+
+        #expect(model.cell(for: firstGridDate).items.map(\.id) == ["item:\(enteringItem.id.uuidString)"])
+    }
 }

@@ -19,13 +19,25 @@ enum MonthLayout {
 
 @MainActor
 final class MonthViewModel: ObservableObject {
-    @Published private(set) var displayedMonth: CalendarDate
-    @Published var selectedDate: CalendarDate?
     @Published private(set) var state: CalendarState
     @Published private(set) var hiddenCategoryIDs: Set<UUID>
     @Published private(set) var today: CalendarDate
 
-    private var projection: MonthProjection
+    private(set) var weekStream: WeekStreamModel
+    private(set) var loadedRange: CalendarDateRange
+
+    private var timelineProjection = TimelineProjection(entries: [])
+    private var compatibilityItemsByDate: [CalendarDate: [ProjectedItem]] = [:]
+    private var compatibilityItemLookup: [String: ProjectedItem] = [:]
+
+    /// Deprecated through Task 12. The old grid's selection surface delegates to the week stream.
+    var selectedDate: CalendarDate? {
+        get { weekStream.selectedDate }
+        set {
+            objectWillChange.send()
+            weekStream.updateSelection(to: newValue)
+        }
+    }
 
     init(
         displayedMonth: CalendarDate,
@@ -33,16 +45,34 @@ final class MonthViewModel: ObservableObject {
         hiddenCategoryIDs: Set<UUID>,
         today: CalendarDate
     ) {
-        let monthStart = Self.monthStart(displayedMonth)
-        self.displayedMonth = monthStart
+        let stream = WeekStreamModel(centeredOn: displayedMonth)
+        weekStream = stream
+        loadedRange = Self.range(for: stream.weekStarts)
         self.state = state
         self.hiddenCategoryIDs = hiddenCategoryIDs
         self.today = today
-        projection = MonthProjection.make(
-            monthContaining: monthStart,
-            state: state,
-            hiddenCategoryIDs: hiddenCategoryIDs
-        )
+        rebuildProjection()
+    }
+
+    var weekStarts: [CalendarDate] {
+        weekStream.weekStarts
+    }
+
+    /// Deprecated through Task 12. The old grid's displayed month follows the focus week.
+    var displayedMonth: CalendarDate {
+        Self.monthStart(weekStream.monthTitleDate)
+    }
+
+    var focusWeek: CalendarDate {
+        weekStream.focusWeek
+    }
+
+    var monthTitleDate: CalendarDate {
+        weekStream.monthTitleDate
+    }
+
+    var projectedEntries: [ProjectedEntry] {
+        timelineProjection.entries
     }
 
     func cell(for date: CalendarDate) -> MonthCellModel {
@@ -50,7 +80,7 @@ final class MonthViewModel: ObservableObject {
             date: date,
             isInDisplayedMonth: date.year == displayedMonth.year && date.month == displayedMonth.month,
             isToday: date == today,
-            items: projection.day(date).items
+            items: compatibilityItemsByDate[date, default: []]
         )
     }
 
@@ -67,7 +97,15 @@ final class MonthViewModel: ObservableObject {
     }
 
     func item(withID id: String) -> ProjectedItem? {
-        projection.days.lazy.flatMap(\.items).first(where: { $0.id == id })
+        compatibilityItemLookup[id]
+    }
+
+    func weekLayouts(laneCapacity: Int) -> [WeekLayout] {
+        WeekSegmentLayout.make(
+            entries: projectedEntries,
+            weekStarts: weekStarts,
+            laneCapacity: laneCapacity
+        )
     }
 
     func update(
@@ -78,39 +116,124 @@ final class MonthViewModel: ObservableObject {
         self.state = state
         self.hiddenCategoryIDs = hiddenCategoryIDs
         self.today = today
-        projection = MonthProjection.make(
-            monthContaining: displayedMonth,
-            state: state,
-            hiddenCategoryIDs: hiddenCategoryIDs
+        rebuildProjection()
+    }
+
+    func updateFocus(toWeekStarting week: CalendarDate) {
+        objectWillChange.send()
+        weekStream.updateFocus(toWeekStarting: week)
+    }
+
+    func extendEarlier(visibleWeek: CalendarDate, pixelOffset: CGFloat) -> WeekStreamAnchor {
+        objectWillChange.send()
+        let anchor = weekStream.extendEarlier(
+            visibleWeek: visibleWeek,
+            pixelOffset: pixelOffset
+        )
+        rebuildProjection()
+        return anchor
+    }
+
+    func extendLater(visibleWeek: CalendarDate, pixelOffset: CGFloat) -> WeekStreamAnchor {
+        objectWillChange.send()
+        let anchor = weekStream.extendLater(
+            visibleWeek: visibleWeek,
+            pixelOffset: pixelOffset
+        )
+        rebuildProjection()
+        return anchor
+    }
+
+    /// Deprecated through Task 12. It forwards month navigation to the focus-aware week stream.
+    func goToPreviousMonth() {
+        moveFocus(to: weekStream.jumpTargetForPreviousMonth(), preservingCivilDayIntent: true)
+    }
+
+    /// Deprecated through Task 12. It forwards month navigation to the focus-aware week stream.
+    func goToNextMonth() {
+        moveFocus(to: weekStream.jumpTargetForNextMonth(), preservingCivilDayIntent: true)
+    }
+
+    /// Deprecated through Task 12. It forwards Today to the focus-aware week stream.
+    func goToToday(_ today: CalendarDate) {
+        self.today = today
+        selectedDate = today
+        moveFocus(
+            to: weekStream.todayTarget(today),
+            preservingCivilDayIntent: false
         )
     }
 
-    func goToPreviousMonth() {
-        displayedMonth = Self.monthStart(displayedMonth.addingDays(-1))
+    private func moveFocus(to date: CalendarDate, preservingCivilDayIntent: Bool) {
+        objectWillChange.send()
+        ensureWeekIsLoaded(WeekStreamModel.weekStart(containing: date))
+        weekStream.moveFocus(to: date, preservingCivilDayIntent: preservingCivilDayIntent)
         rebuildProjection()
     }
 
-    func goToNextMonth() {
-        displayedMonth = Self.monthStart(displayedMonth.addingDays(32))
-        rebuildProjection()
-    }
-
-    func goToToday(_ today: CalendarDate) {
-        self.today = today
-        displayedMonth = Self.monthStart(today)
-        selectedDate = today
-        rebuildProjection()
+    private func ensureWeekIsLoaded(_ weekStart: CalendarDate) {
+        while weekStart < weekStarts[0] {
+            _ = weekStream.extendEarlier(visibleWeek: weekStarts[0], pixelOffset: 0)
+        }
+        while weekStart > weekStarts[weekStarts.count - 1] {
+            _ = weekStream.extendLater(visibleWeek: weekStarts[weekStarts.count - 1], pixelOffset: 0)
+        }
     }
 
     private func rebuildProjection() {
-        projection = MonthProjection.make(
-            monthContaining: displayedMonth,
+        let range = Self.range(for: weekStarts)
+        let projection = TimelineProjection.make(
+            in: range,
             state: state,
             hiddenCategoryIDs: hiddenCategoryIDs
         )
+        let legacyGridRange = Self.legacyGridRange(for: displayedMonth)
+        var itemsByDate: [CalendarDate: [ProjectedItem]] = [:]
+        var itemLookup: [String: ProjectedItem] = [:]
+
+        for entry in projection.entries {
+            let item = ProjectedItem(entry: entry)
+            itemLookup[item.id] = item
+            guard entry.schedule.startDate <= legacyGridRange.end,
+                  legacyGridRange.start <= entry.schedule.endDate
+            else {
+                continue
+            }
+            let displayDate = max(entry.schedule.startDate, legacyGridRange.start)
+            itemsByDate[displayDate, default: []].append(item)
+        }
+
+        loadedRange = range
+        timelineProjection = projection
+        compatibilityItemsByDate = itemsByDate
+        compatibilityItemLookup = itemLookup
+    }
+
+    private static func range(for weekStarts: [CalendarDate]) -> CalendarDateRange {
+        CalendarDateRange(
+            start: weekStarts[0],
+            end: weekStarts[weekStarts.count - 1].addingDays(6)
+        )
+    }
+
+    private static func legacyGridRange(for displayedMonth: CalendarDate) -> CalendarDateRange {
+        let firstOfMonth = monthStart(displayedMonth)
+        let firstGridDate = firstOfMonth.addingDays(-(firstOfMonth.weekday.rawValue - 1))
+        return CalendarDateRange(start: firstGridDate, end: firstGridDate.addingDays(41))
     }
 
     private static func monthStart(_ date: CalendarDate) -> CalendarDate {
         CalendarDate(year: date.year, month: date.month, day: 1)!
+    }
+}
+
+private extension ProjectedItem {
+    init(entry: ProjectedEntry) {
+        switch entry {
+        case let .item(item):
+            self = .item(item)
+        case let .occurrence(occurrence):
+            self = .occurrence(occurrence)
+        }
     }
 }
