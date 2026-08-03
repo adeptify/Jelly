@@ -298,6 +298,7 @@ git commit -m "feat: 支持重复事项跨日跨度"
 - Modify: `Sources/CalendarPersistence/JSONCalendarRepository.swift`
 - Modify: `Sources/CalendarPersistence/BackupService.swift`
 - Test: `Tests/CalendarPersistenceTests/JSONCalendarRepositoryTests.swift`
+- Test: `Tests/CalendarAppTests/CalendarStoreTests.swift`
 
 **Interfaces:**
 - Consumes: Task 1–2 V2 domain models.
@@ -363,14 +364,15 @@ default:
     #expect(try Data(contentsOf: rollbackURL) == beforeRollback)
 }
 
-@Test func rollbackFailureLeavesOriginalPrimaryBytesAndDoesNotPublishMigratedState() async throws {
+@Test func rollbackFailureLeavesOriginalPrimaryAndRollbackBytesUnchanged() async throws {
     let beforePrimary = try Data(contentsOf: repository.fileURL)
+    let beforeRollback = try Data(contentsOf: rollbackURL)
     rollbackWriter.failNextWrite = true
     await #expect(throws: BackupError.rollbackWriteFailed) {
         try await service.restore(from: validV1URL, repository: repository, rollbackURL: rollbackURL)
     }
     #expect(try Data(contentsOf: repository.fileURL) == beforePrimary)
-    #expect(store.state == stateBeforeRestore)
+    #expect(try Data(contentsOf: rollbackURL) == beforeRollback)
 }
 ```
 
@@ -381,6 +383,20 @@ Expected: FAIL until restore uses migrated validation before any writes.
 - [ ] **Step 4: Make restore migration transactional and run GREEN**
 
 Enforce this order: schema envelope → version DTO decode → migrate → full V2 validation → write original current-primary bytes to rollback → atomically write V2 primary → publish memory. Decode/validation/rollback/atomic-write failures must leave primary bytes and published state unchanged.
+
+In `CalendarStoreTests`, verify the app-layer publication boundary with the real Store target:
+
+```swift
+@Test func failedV1RestoreDoesNotPublishMigratedState() async throws {
+    let before = store.state
+    backupService.failRollbackWrite = true
+    await #expect(throws: StoreError.restoreFailed) {
+        try await store.restore(from: validV1URL, using: backupService, rollbackURL: rollbackURL)
+    }
+    #expect(store.state == before)
+    #expect(store.phase == .ready)
+}
+```
 
 Run: `Scripts/test.sh --filter JSONCalendarRepositoryTests`
 
@@ -640,7 +656,7 @@ Normalize every week start to Monday. Initialize 52 earlier + center + 52 later 
 
 - [ ] **Step 3: Connect `MonthViewModel` to arbitrary visible range**
 
-Replace `displayedMonth`/42-cell projection with a week stream and a projection covering the loaded first Monday through final Sunday. Preserve hidden-category and today refresh behavior.
+Introduce the week stream and projection covering the loaded first Monday through final Sunday, while retaining a deprecated `MonthViewModel` compatibility façade through Task 6. The façade must keep the existing initializer plus `displayedMonth`, `goToPreviousMonth()`, `goToNextMonth()`, `goToToday(_:)`, `cell(for:)`, `visibleItems`, `overflowCount`, and `item(withID:)`, all delegating to the new week-stream/projection state. Preserve hidden-category and today refresh behavior. Task 7 migrates `MonthView` to the new APIs; Task 12 removes the façade.
 
 - [ ] **Step 4: Run model GREEN**
 
