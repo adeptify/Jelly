@@ -2,7 +2,7 @@ import CalendarDomain
 import Combine
 import Foundation
 
-enum CalendarAppearance: Sendable {
+enum CalendarAppearance: Hashable, Sendable {
     case light
     case dark
 }
@@ -79,9 +79,9 @@ enum CategoryColorValidator {
         appearance: CalendarAppearance,
         palette: CategoryPreviewPalette = .production
     ) throws -> Double {
-        let category = try color(for: colorHex)
-        let canvas = try color(for: canvasHex(for: appearance, palette: palette))
-        let text = try color(for: textHex(for: appearance, palette: palette))
+        let category = try SRGBColor(hex: colorHex)
+        let canvas = try SRGBColor(hex: canvasHex(for: appearance, palette: palette))
+        let text = try SRGBColor(hex: textHex(for: appearance, palette: palette))
         let composite = category.composited(over: canvas, alpha: palette.categoryBackgroundOpacity)
         return composite.contrastRatio(with: text)
     }
@@ -106,8 +106,8 @@ enum CategoryColorValidator {
         palette: CategoryPreviewPalette = .production,
         renderingOpacity: Double = 1
     ) throws -> Bool {
-        let category = try color(for: colorHex)
-        let canvas = try color(for: canvasHex(for: appearance, palette: palette))
+        let category = try SRGBColor(hex: colorHex)
+        let canvas = try SRGBColor(hex: canvasHex(for: appearance, palette: palette))
         let renderedAccent = category.composited(over: canvas, alpha: renderingOpacity)
         return renderedAccent.contrastRatio(with: canvas) < CalendarTheme.categoryAccentMinimumContrast
     }
@@ -126,54 +126,11 @@ enum CategoryColorValidator {
         appearance == .light ? palette.lightTextHex : palette.darkTextHex
     }
 
-    private static func color(for hex: String) throws -> SRGBColor {
-        let normalized = try normalizedHex(hex)
-        let value = UInt64(normalized.dropFirst(), radix: 16)!
-        return SRGBColor(
-            red: Double((value >> 16) & 0xFF) / 255,
-            green: Double((value >> 8) & 0xFF) / 255,
-            blue: Double(value & 0xFF) / 255
-        )
-    }
-
-    private struct SRGBColor {
-        let red: Double
-        let green: Double
-        let blue: Double
-
-        func composited(over canvas: SRGBColor, alpha: Double) -> SRGBColor {
-            let clampedAlpha = min(max(alpha, 0), 1)
-            return SRGBColor(
-                red: red * clampedAlpha + canvas.red * (1 - clampedAlpha),
-                green: green * clampedAlpha + canvas.green * (1 - clampedAlpha),
-                blue: blue * clampedAlpha + canvas.blue * (1 - clampedAlpha)
-            )
-        }
-
-        func contrastRatio(with other: SRGBColor) -> Double {
-            let first = relativeLuminance
-            let second = other.relativeLuminance
-            return (max(first, second) + 0.05) / (min(first, second) + 0.05)
-        }
-
-        private var relativeLuminance: Double {
-            0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
-        }
-
-        private func linear(_ component: Double) -> Double {
-            component <= 0.04045
-                ? component / 12.92
-                : pow((component + 0.055) / 1.055, 2.4)
-        }
-    }
 }
 
 @MainActor
 final class CategoryManagerViewModel: ObservableObject {
-    static let defaultPalette = [
-        "#4F7FFF", "#7A67D8", "#D65E73", "#D9893D",
-        "#53A66F", "#2E9DA7", "#8A6A4A", "#8E8E93"
-    ]
+    static let defaultPalette = CategoryPalette.families[0].colors
 
     private let store: CalendarStore
     private let previewPalette: CategoryPreviewPalette
@@ -181,6 +138,7 @@ final class CategoryManagerViewModel: ObservableObject {
 
     @Published var draftName = ""
     @Published var draftColorHex = "#4F7FFF"
+    @Published private(set) var selectedFamilyID: CategoryColorFamilyID = .basic
     @Published var categoryToDelete: CalendarCategory?
     @Published var migrationTargetID: UUID?
 
@@ -261,13 +219,26 @@ final class CategoryManagerViewModel: ObservableObject {
     func beginEditing(_ category: CalendarCategory) {
         draftName = category.name
         draftColorHex = category.colorHex
+        if let family = CategoryPalette.families.first(where: { $0.colors.contains(category.colorHex.uppercased()) }) {
+            selectedFamilyID = family.id
+        }
         editingBaseline = .init(category: category)
     }
 
     func beginCreating() {
         draftName = ""
         draftColorHex = Self.defaultPalette[0]
+        selectedFamilyID = .basic
         editingBaseline = nil
+    }
+
+    func selectFamily(_ familyID: CategoryColorFamilyID) {
+        selectedFamilyID = familyID
+    }
+
+    func selectPreset(_ colorHex: String) {
+        guard let preset = CategoryPalette.preset(hex: colorHex) else { return }
+        draftColorHex = preset.hex
     }
 
     func synchronizeDraftFromStore(_ category: CalendarCategory) {

@@ -4,10 +4,10 @@ import SwiftUI
 enum CalendarTheme {
     // Fixed sRGB values make category validation and previews deterministic.
     // The runtime views below continue to use the matching semantic system colors.
-    static let previewLightCanvasHex = "#FFFFFF"
-    static let previewLightTextHex = "#1D1D1F"
-    static let previewDarkCanvasHex = "#1C1C1E"
-    static let previewDarkTextHex = "#F5F5F7"
+    static let previewLightCanvasHex = "#F7F1E7"
+    static let previewLightTextHex = "#2A2420"
+    static let previewDarkCanvasHex = "#1E1A18"
+    static let previewDarkTextHex = "#F4EDE4"
     static let categoryItemBackgroundOpacity = 0.14
     static let categoryTextMinimumContrast = 4.5
     static let categoryAccentMinimumContrast = 3.0
@@ -44,6 +44,42 @@ enum CalendarTheme {
             green: Double((value >> 8) & 0xFF) / 255,
             blue: Double(value & 0xFF) / 255
         )
+    }
+
+    static func categoryColor(_ color: SRGBColor) -> Color {
+        Color(red: color.red, green: color.green, blue: color.blue)
+    }
+
+    static func categoryRoles(_ hex: String, appearance: CalendarAppearance) -> CategoryColorRoles? {
+        try? CategoryColorResolver.roles(for: hex, appearance: appearance)
+    }
+
+    static func categoryAccent(_ hex: String, appearance: CalendarAppearance) -> Color {
+        guard let role = categoryRoles(hex, appearance: appearance)?.accent else {
+            return categoryColor(hex)
+        }
+        return categoryColor(role)
+    }
+
+    static func categorySoftBackground(_ hex: String, appearance: CalendarAppearance) -> Color {
+        guard let roles = categoryRoles(hex, appearance: appearance) else {
+            return itemBackground(categoryColor(hex))
+        }
+        return categoryColor(roles.softBackground)
+    }
+
+    static func categoryText(_ hex: String, appearance: CalendarAppearance) -> Color {
+        guard let role = categoryRoles(hex, appearance: appearance)?.text else {
+            return categoryColor(appearance == .light ? previewLightTextHex : previewDarkTextHex)
+        }
+        return categoryColor(role)
+    }
+
+    static func categoryOutline(_ hex: String, appearance: CalendarAppearance) -> Color {
+        guard let role = categoryRoles(hex, appearance: appearance)?.outline else {
+            return categoryColor(hex)
+        }
+        return categoryColor(role)
     }
 
     static func accentNeedsOutline(_ hex: String, appearance: CalendarAppearance) -> Bool {

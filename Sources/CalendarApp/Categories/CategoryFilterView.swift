@@ -5,6 +5,7 @@ struct CategoryFilterView: View {
     let categories: [CalendarCategory]
     @Binding var hiddenCategoryIDs: Set<UUID>
     @AppStorage("calendar.hiddenCategoryIDs") private var storedHiddenCategoryIDs = ""
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Section("分类筛选") {
@@ -15,7 +16,10 @@ struct CategoryFilterView: View {
                 Toggle(isOn: visibilityBinding(for: category.id)) {
                     HStack(spacing: 6) {
                         Circle()
-                            .fill(CalendarTheme.categoryColor(category.colorHex))
+                            .fill(CalendarTheme.categoryAccent(
+                                category.colorHex,
+                                appearance: colorScheme == .dark ? .dark : .light
+                            ))
                             .frame(width: 9, height: 9)
                         Text(category.name)
                     }

@@ -7,6 +7,7 @@ struct CategoryManagerView: View {
     @StateObject private var model: CategoryManagerViewModel
     @State private var editingCategoryID: UUID?
     @State private var localError: String?
+    @Environment(\.colorScheme) private var colorScheme
 
     init(store: CalendarStore) {
         self.store = store
@@ -88,7 +89,10 @@ struct CategoryManagerView: View {
                             Image(systemName: "line.3.horizontal")
                                 .foregroundStyle(.tertiary)
                             Circle()
-                                .fill(CalendarTheme.categoryColor(category.colorHex))
+                                .fill(CalendarTheme.categoryAccent(
+                                    category.colorHex,
+                                    appearance: colorScheme == .dark ? .dark : .light
+                                ))
                                 .frame(width: 10, height: 10)
                             Text(category.name)
                                 .lineLimit(1)
@@ -136,27 +140,49 @@ struct CategoryManagerView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("颜色")
                     .font(.subheadline.weight(.medium))
+                Picker("色系", selection: familySelection) {
+                    ForEach(CategoryPalette.families) { family in
+                        Text(family.name).tag(family.id)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .disabled(isProtectedCategory)
+                .accessibilityLabel("分类色系")
+
                 LazyVGrid(
-                    columns: Array(repeating: GridItem(.fixed(26), spacing: 8), count: 4),
+                    columns: Array(repeating: GridItem(.fixed(28), spacing: 8), count: 8),
                     spacing: 8
                 ) {
-                    ForEach(CategoryManagerViewModel.defaultPalette, id: \.self) { colorHex in
+                    ForEach(selectedFamily.presets) { preset in
                         Button {
-                            model.draftColorHex = colorHex
+                            model.selectPreset(preset.hex)
                         } label: {
-                            Circle()
-                                .fill(CalendarTheme.categoryColor(colorHex))
-                                .frame(width: 24, height: 24)
+                            ZStack {
+                                Circle()
+                                    .fill(CalendarTheme.categoryColor(preset.hex))
+                                if model.draftColorHex.uppercased() == preset.hex {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundStyle(swatchCheckColor(for: preset.hex))
+                                }
+                            }
+                                .frame(width: 26, height: 26)
                                 .overlay {
                                     Circle().stroke(
-                                        model.draftColorHex.uppercased() == colorHex ? Color.primary : .clear,
-                                        lineWidth: 2
+                                        model.draftColorHex.uppercased() == preset.hex
+                                            ? Color.primary.opacity(0.85)
+                                            : Color.primary.opacity(0.12),
+                                        lineWidth: model.draftColorHex.uppercased() == preset.hex ? 2 : 1
                                     )
                                 }
                         }
                         .buttonStyle(.plain)
                         .disabled(isProtectedCategory)
-                        .accessibilityLabel("选择 \(colorHex)")
+                        .accessibilityLabel("选择\(selectedFamily.name)色系的\(preset.accessibilityName)")
+                        .accessibilityValue(
+                            model.draftColorHex.uppercased() == preset.hex ? "已选中" : "未选中"
+                        )
                     }
                 }
                 ColorPicker("自定义颜色", selection: colorBinding, supportsOpacity: false)
@@ -200,13 +226,17 @@ struct CategoryManagerView: View {
     }
 
     private func preview(appearance: CalendarAppearance, title: String) -> some View {
-        let canvasHex = appearance == .light
+        let roles = try? CategoryColorResolver.roles(for: model.draftColorHex, appearance: appearance)
+        let canvasHex = roles?.canvas.hex ?? (appearance == .light
             ? CalendarTheme.previewLightCanvasHex
-            : CalendarTheme.previewDarkCanvasHex
-        let textHex = appearance == .light
+            : CalendarTheme.previewDarkCanvasHex)
+        let textHex = roles?.text.hex ?? (appearance == .light
             ? CalendarTheme.previewLightTextHex
-            : CalendarTheme.previewDarkTextHex
-        let needsOutline = CalendarTheme.accentNeedsOutline(model.draftColorHex, appearance: appearance)
+            : CalendarTheme.previewDarkTextHex)
+        let accentColor = roles.map { CalendarTheme.categoryColor($0.accent) }
+            ?? CalendarTheme.categoryColor(model.draftColorHex)
+        let backgroundColor = roles.map { CalendarTheme.categoryColor($0.softBackground) }
+            ?? CalendarTheme.categoryColor(canvasHex)
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(title)
@@ -217,14 +247,8 @@ struct CategoryManagerView: View {
             .font(.caption)
             HStack(spacing: 6) {
                 RoundedRectangle(cornerRadius: 1)
-                    .fill(CalendarTheme.categoryColor(model.draftColorHex))
+                    .fill(accentColor)
                     .frame(width: 3, height: 22)
-                    .overlay {
-                        if needsOutline {
-                            RoundedRectangle(cornerRadius: 1)
-                                .stroke(CalendarTheme.categoryColor(textHex), lineWidth: 1)
-                        }
-                    }
                 Text(model.draftName.isEmpty ? "分类事项" : model.draftName)
                     .lineLimit(1)
                     .foregroundStyle(CalendarTheme.categoryColor(textHex))
@@ -234,12 +258,7 @@ struct CategoryManagerView: View {
             .padding(.horizontal, 6)
             .frame(height: CalendarTheme.itemRowHeight)
             .background(
-                CalendarTheme.categoryColor(model.draftColorHex)
-                    .opacity(CalendarTheme.categoryItemBackgroundOpacity),
-                in: RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius)
-            )
-            .background(
-                CalendarTheme.categoryColor(canvasHex),
+                backgroundColor,
                 in: RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius)
             )
         }
@@ -257,6 +276,29 @@ struct CategoryManagerView: View {
                 }
             }
         )
+    }
+
+    private var familySelection: Binding<CategoryColorFamilyID> {
+        Binding(
+            get: { model.selectedFamilyID },
+            set: { model.selectFamily($0) }
+        )
+    }
+
+    private var selectedFamily: CategoryColorFamily {
+        CategoryPalette.family(id: model.selectedFamilyID)
+    }
+
+    private func swatchCheckColor(for hex: String) -> Color {
+        guard let base = try? SRGBColor(hex: hex),
+              let white = try? SRGBColor(hex: "#FFFFFF"),
+              let black = try? SRGBColor(hex: "#231F1C")
+        else {
+            return .primary
+        }
+        return base.contrastRatio(with: white) >= base.contrastRatio(with: black)
+            ? .white
+            : CalendarTheme.categoryColor("#231F1C")
     }
 
     private var editingCategory: CalendarCategory? {
@@ -300,7 +342,7 @@ struct CategoryManagerView: View {
         }
         switch validationError {
         case nil:
-            return "浅色 \(contrastText(for: .light))，深色 \(contrastText(for: .dark))；两种外观均满足 4.5:1。"
+            return "浅色 \(contrastText(for: .light))，深色 \(contrastText(for: .dark))；两种外观均满足文字 4.5:1、强调 3:1。"
         case .emptyName:
             return "请填写分类名称。"
         case .duplicateName:
@@ -416,13 +458,13 @@ struct CategoryManagerView: View {
     }
 
     private func contrastText(for appearance: CalendarAppearance) -> String {
-        guard let ratio = try? CategoryColorValidator.itemContrastRatio(
-            colorHex: model.draftColorHex,
+        guard let roles = try? CategoryColorResolver.roles(
+            for: model.draftColorHex,
             appearance: appearance
         ) else {
             return "—"
         }
-        return String(format: "%.2f:1", ratio)
+        return String(format: "文字 %.2f:1 · 强调 %.2f:1", roles.textContrast, roles.accentContrast)
     }
 
     private func message(for error: Error) -> String {

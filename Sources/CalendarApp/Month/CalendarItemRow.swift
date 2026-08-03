@@ -200,8 +200,28 @@ struct CalendarItemRow: View {
     var showsTrailingHandle = false
     @Environment(\.colorScheme) private var colorScheme
 
+    private var appearance: CalendarAppearance {
+        colorScheme == .dark ? .dark : .light
+    }
+
+    private var categoryHex: String {
+        category?.colorHex ?? "#8C8F96"
+    }
+
     private var categoryColor: Color {
-        CalendarTheme.categoryColor(category?.colorHex ?? "#8E8E93")
+        CalendarTheme.categoryAccent(categoryHex, appearance: appearance)
+    }
+
+    private var categoryBackground: Color {
+        CalendarTheme.categorySoftBackground(categoryHex, appearance: appearance)
+    }
+
+    private var categoryText: Color {
+        CalendarTheme.categoryText(categoryHex, appearance: appearance)
+    }
+
+    private var categoryOutline: Color {
+        CalendarTheme.categoryOutline(categoryHex, appearance: appearance)
     }
 
     private var isCompletedTask: Bool {
@@ -222,7 +242,7 @@ struct CalendarItemRow: View {
                 .overlay {
                     if accentNeedsOutline {
                         RoundedRectangle(cornerRadius: 1)
-                            .stroke(CalendarTheme.itemAccentOutline, lineWidth: 1)
+                            .stroke(categoryOutline, lineWidth: 1)
                     }
                 }
 
@@ -298,7 +318,7 @@ struct CalendarItemRow: View {
                     .font(.system(size: presentation.layout.textFontSize))
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 }
-                .foregroundStyle(isCompletedTask ? CalendarTheme.completedText : .primary)
+                .foregroundStyle(isCompletedTask ? CalendarTheme.completedText : categoryText)
             }
             .accessibilityLabel(
                 accessibilityLabelOverride ?? CalendarItemRowPresentation.rowBodyAccessibilityLabel(
@@ -323,7 +343,7 @@ struct CalendarItemRow: View {
         .background(
             (isCompletedTask
                 ? CalendarTheme.completedTaskBackground(categoryColor)
-                : CalendarTheme.itemBackground(categoryColor)
+                : categoryBackground
             ),
             in: RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius)
         )
@@ -332,7 +352,7 @@ struct CalendarItemRow: View {
 
     private var accentNeedsOutline: Bool {
         CalendarTheme.itemAccentNeedsOutline(
-            category?.colorHex ?? "#8E8E93",
+            categoryHex,
             isCompletedTask: isCompletedTask,
             appearance: colorScheme == .dark ? .dark : .light
         )

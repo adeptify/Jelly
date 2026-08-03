@@ -87,6 +87,7 @@ struct QuickCreatePopover: View {
     private let availableWidth: CGFloat
     private let maximumContentHeight: CGFloat?
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.colorScheme) private var colorScheme
     @FocusState private var titleFocused: Bool
     @StateObject private var model: ItemEditorViewModel
     @State private var categoryOption: String
@@ -167,7 +168,10 @@ struct QuickCreatePopover: View {
                 ForEach(categories) { category in
                     HStack(spacing: 6) {
                         Circle()
-                            .fill(CalendarTheme.categoryColor(category.colorHex))
+                            .fill(CalendarTheme.categoryAccent(
+                                category.colorHex,
+                                appearance: colorScheme == .dark ? .dark : .light
+                            ))
                             .frame(width: 8, height: 8)
                         Text(category.name)
                     }

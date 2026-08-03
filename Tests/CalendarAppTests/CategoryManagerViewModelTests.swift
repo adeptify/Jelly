@@ -42,10 +42,10 @@ struct CategoryManagerViewModelTests {
         #expect(light >= 4.5)
         #expect(dark >= 4.5)
         #expect(CalendarTheme.categoryItemBackgroundOpacity == 0.14)
-        #expect(CalendarTheme.previewLightCanvasHex == "#FFFFFF")
-        #expect(CalendarTheme.previewLightTextHex == "#1D1D1F")
-        #expect(CalendarTheme.previewDarkCanvasHex == "#1C1C1E")
-        #expect(CalendarTheme.previewDarkTextHex == "#F5F5F7")
+        #expect(CalendarTheme.previewLightCanvasHex == "#F7F1E7")
+        #expect(CalendarTheme.previewLightTextHex == "#2A2420")
+        #expect(CalendarTheme.previewDarkCanvasHex == "#1E1A18")
+        #expect(CalendarTheme.previewDarkTextHex == "#F4EDE4")
     }
 
     @Test func extremeAccentColorsReceiveVisibleOutline() throws {
@@ -82,13 +82,54 @@ struct CategoryManagerViewModelTests {
     }
 
     @Test func defaultPaletteUsesTheSameReadabilityValidation() throws {
-        #expect(CategoryManagerViewModel.defaultPalette == [
-            "#4F7FFF", "#7A67D8", "#D65E73", "#D9893D",
-            "#53A66F", "#2E9DA7", "#8A6A4A", "#8E8E93"
-        ])
+        #expect(CategoryManagerViewModel.defaultPalette == CategoryPalette.families[0].colors)
         for color in CategoryManagerViewModel.defaultPalette {
             try CategoryColorValidator.validateReadableInBothAppearances(color)
         }
+    }
+
+    @Test func changingFamilyDoesNotChangeDraftUntilAColorIsChosen() async throws {
+        var state = makeEmptyState()
+        let work = makeCategory(name: "工作")
+        state.categories[work.id] = work
+        let (store, _) = try await makeReadyStore(initialState: state)
+        let vm = CategoryManagerViewModel(store: store)
+
+        vm.beginEditing(work)
+        vm.selectFamily(.macaron)
+        #expect(vm.selectedFamilyID == .macaron)
+        #expect(vm.draftColorHex == work.colorHex)
+
+        vm.selectPreset("#8FB8F4")
+        #expect(vm.draftColorHex == "#8FB8F4")
+    }
+
+    @Test func selectingFamilyPreservesExistingPresetAndCustomDrafts() async throws {
+        let (store, _) = try await makeReadyStore(initialState: makeEmptyState())
+        let vm = CategoryManagerViewModel(store: store)
+
+        vm.draftColorHex = "#A9A2E8"
+        vm.selectFamily(.nature)
+        #expect(vm.draftColorHex == "#A9A2E8")
+
+        vm.draftColorHex = "#123456"
+        vm.selectFamily(.vivid)
+        #expect(vm.draftColorHex == "#123456")
+    }
+
+    @Test func presetAndCustomColorsPersistOnlyTheirBaseHex() async throws {
+        let (store, _) = try await makeReadyStore(initialState: makeEmptyState())
+        let vm = CategoryManagerViewModel(store: store)
+
+        vm.draftName = "预设"
+        vm.selectPreset("#8FB8F4")
+        try await vm.create()
+        #expect(store.state.categories.values.contains { $0.name == "预设" && $0.colorHex == "#8FB8F4" })
+
+        vm.draftName = "自定义"
+        vm.draftColorHex = "#123456"
+        try await vm.create()
+        #expect(store.state.categories.values.contains { $0.name == "自定义" && $0.colorHex == "#123456" })
     }
 
     @Test func uncategorizedIsProtectedButCanUseTheSharedReorderAction() async throws {
