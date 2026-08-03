@@ -256,6 +256,58 @@ struct WeekRowPresentationTests {
         #expect(focus == next)
     }
 
+    @Test func centeringBlocksOldAndTemporaryFramesUntilTheCurrentTargetIsCentered() {
+        let target = CalendarDate(year: 2026, month: 8, day: 3)!
+        let oldRevision = WeekStreamWindowRevision(
+            first: target.addingDays(-7),
+            last: target.addingDays(7),
+            count: 3
+        )
+        let currentRevision = WeekStreamWindowRevision(
+            first: target.addingDays(-364),
+            last: target.addingDays(364),
+            count: 105
+        )
+        var state = WeekStreamCenteringState()
+        let request = state.begin(weekStart: target, windowRevision: currentRevision)
+
+        #expect(state.blocksViewportUpdates)
+        #expect(state.receive(frames: [
+            .init(weekStart: target, minY: 258, maxY: 510, windowRevision: oldRevision)
+        ], viewportHeight: 768) == .wait)
+        let didIssueInitialScroll = state.markScrollIssued(for: request)
+        #expect(didIssueInitialScroll)
+        #expect(state.receive(frames: [
+            .init(weekStart: target, minY: 258, maxY: 510, windowRevision: oldRevision)
+        ], viewportHeight: 768) == .wait)
+        #expect(state.receive(frames: [
+            .init(weekStart: target, minY: 0, maxY: 252, windowRevision: currentRevision)
+        ], viewportHeight: 768) == .retry(request))
+        #expect(state.blocksViewportUpdates)
+        #expect(state.receive(frames: [
+            .init(weekStart: target, minY: 258, maxY: 510, windowRevision: currentRevision)
+        ], viewportHeight: 768) == .ready)
+        #expect(state.blocksViewportUpdates == false)
+    }
+
+    @Test func repeatedCenteringRequestsForTheSameTodayTargetAreNeverDeduplicated() {
+        let target = CalendarDate(year: 2026, month: 8, day: 3)!
+        let revision = WeekStreamWindowRevision(
+            first: target.addingDays(-364),
+            last: target.addingDays(364),
+            count: 105
+        )
+        var state = WeekStreamCenteringState()
+        let first = state.begin(weekStart: target, windowRevision: revision)
+        let second = state.begin(weekStart: target, windowRevision: revision)
+
+        #expect(first != second)
+        let staleIssueAccepted = state.markScrollIssued(for: first)
+        let latestIssueAccepted = state.markScrollIssued(for: second)
+        #expect(staleIssueAccepted == false)
+        #expect(latestIssueAccepted)
+    }
+
     @Test func nearLeadingWindowEdgeRequestsExtensionAndPreservesTheVisibleWeekAnchor() {
         let first = CalendarDate(year: 2026, month: 8, day: 3)!
         let second = CalendarDate(year: 2026, month: 8, day: 10)!

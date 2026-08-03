@@ -127,7 +127,9 @@ final class MonthViewModel: ObservableObject {
     private func moveFocus(to date: CalendarDate, preservingCivilDayIntent: Bool) {
         objectWillChange.send()
         weekStream.moveFocus(to: date, preservingCivilDayIntent: preservingCivilDayIntent)
-        ensureWeekIsLoaded(weekStream.focusWeek)
+        if !weekStream.recenterWindowAroundFocusIfNeeded() {
+            ensureWeekIsLoaded(weekStream.focusWeek)
+        }
         rebuildProjection()
     }
 

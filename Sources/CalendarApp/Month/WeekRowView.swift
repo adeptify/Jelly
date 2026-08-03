@@ -381,6 +381,7 @@ final class WeekRowRangeGestureSurfaceView: NSView {
     private var date: CalendarDate
     private var hitSurface: WeekRowHitSurface
     private var rootOrigin: CGPoint
+    private var blockedLaneIndexes: Set<Int>
     private var onRangeGesture: (WeekRowRangeGesture) -> Void
     private var isTrackingRange = false
 
@@ -390,11 +391,13 @@ final class WeekRowRangeGestureSurfaceView: NSView {
         date: CalendarDate,
         hitSurface: WeekRowHitSurface,
         rootOrigin: CGPoint,
+        blockedLaneIndexes: Set<Int> = [],
         onRangeGesture: @escaping (WeekRowRangeGesture) -> Void
     ) {
         self.date = date
         self.hitSurface = hitSurface
         self.rootOrigin = rootOrigin
+        self.blockedLaneIndexes = blockedLaneIndexes
         self.onRangeGesture = onRangeGesture
         super.init(frame: .zero)
     }
@@ -407,12 +410,23 @@ final class WeekRowRangeGestureSurfaceView: NSView {
         date: CalendarDate,
         hitSurface: WeekRowHitSurface,
         rootOrigin: CGPoint,
+        blockedLaneIndexes: Set<Int> = [],
         onRangeGesture: @escaping (WeekRowRangeGesture) -> Void
     ) {
         self.date = date
         self.hitSurface = hitSurface
         self.rootOrigin = rootOrigin
+        self.blockedLaneIndexes = blockedLaneIndexes
         self.onRangeGesture = onRangeGesture
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard point.y >= WeekRowMetrics.dateHeaderHeight,
+              !blockedLaneIndexes.contains(where: { blockedLaneContains($0, point: point) })
+        else {
+            return nil
+        }
+        return super.hitTest(point)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -446,11 +460,17 @@ final class WeekRowRangeGestureSurfaceView: NSView {
             y: rootOrigin.y + localPoint.y
         )
     }
+
+    private func blockedLaneContains(_ lane: Int, point: NSPoint) -> Bool {
+        let top = WeekRowMetrics.laneOffset(lane)
+        return point.y >= top && point.y < top + WeekRowMetrics.laneHeight
+    }
 }
 
 private struct WeekRowEmptyRangeGestureSurface: NSViewRepresentable {
     let date: CalendarDate
     let rootOrigin: CGPoint
+    let blockedLaneIndexes: Set<Int>
     let onRangeGesture: (WeekRowRangeGesture) -> Void
 
     func makeNSView(context _: Context) -> WeekRowRangeGestureSurfaceView {
@@ -458,6 +478,7 @@ private struct WeekRowEmptyRangeGestureSurface: NSViewRepresentable {
             date: date,
             hitSurface: .emptySurface,
             rootOrigin: rootOrigin,
+            blockedLaneIndexes: blockedLaneIndexes,
             onRangeGesture: onRangeGesture
         )
     }
@@ -467,6 +488,7 @@ private struct WeekRowEmptyRangeGestureSurface: NSViewRepresentable {
             date: date,
             hitSurface: .emptySurface,
             rootOrigin: rootOrigin,
+            blockedLaneIndexes: blockedLaneIndexes,
             onRangeGesture: onRangeGesture
         )
     }
@@ -694,6 +716,9 @@ struct WeekRowView: View {
                             isSelected: date == selectedDate,
                             isInSelection: selectionRange.map { $0.start <= date && date <= $0.end } ?? false,
                             overflow: presentation.overflowCount(for: date),
+                            blockedLaneIndexes: Set(layout.visibleSegments.compactMap { segment in
+                                (segment.startColumn...segment.endColumn).contains(column) ? segment.lane : nil
+                            }),
                             dropCoordinator: dropCoordinator,
                             onAction: onAction,
                             onRangeGesture: onRangeGesture
@@ -752,6 +777,7 @@ private struct WeekRowDateCell: View {
     let isSelected: Bool
     let isInSelection: Bool
     let overflow: Int
+    let blockedLaneIndexes: Set<Int>
     @ObservedObject var dropCoordinator: CalendarDropCoordinator
     let onAction: (DayCellAction) -> Void
     let onRangeGesture: (WeekRowRangeGesture) -> Void
@@ -815,24 +841,22 @@ private struct WeekRowDateCell: View {
             }
             .padding(.horizontal, CalendarTheme.cellPadding)
             .frame(height: WeekRowMetrics.dateHeaderHeight)
-            Spacer(minLength: 0)
+            GeometryReader { proxy in
+                WeekRowEmptyRangeGestureSurface(
+                    date: date,
+                    rootOrigin: proxy.frame(
+                        in: .named(CalendarInteractionCoordinateSpace.root)
+                    ).origin,
+                    blockedLaneIndexes: blockedLaneIndexes,
+                    onRangeGesture: onRangeGesture
+                )
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .contentShape(Rectangle())
         .background {
             Rectangle()
                 .fill(isInSelection ? theme.rangePreviewFill : theme.canvas)
-                .overlay {
-                    GeometryReader { proxy in
-                        WeekRowEmptyRangeGestureSurface(
-                            date: date,
-                            rootOrigin: proxy.frame(
-                                in: .named(CalendarInteractionCoordinateSpace.root)
-                            ).origin,
-                            onRangeGesture: onRangeGesture
-                        )
-                    }
-                }
         }
         .background {
             GeometryReader { proxy in

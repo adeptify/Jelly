@@ -84,7 +84,8 @@ struct CalendarThemeTests {
         )
         #expect(monthView.contains("@Environment(\\.accessibilityReduceMotion)"))
         #expect(monthView.contains("CalendarMotionPolicy(reduceMotion: accessibilityReduceMotion)"))
-        #expect(monthView.contains("withAnimation(motionPolicy.snapAnimation)"))
+        #expect(monthView.contains("let animation = motionPolicy.snapAnimation"))
+        #expect(monthView.contains("withAnimation(animation)"))
         #expect(monthView.contains("withAnimation(motionPolicy.overlayAnimation)"))
         #expect(monthView.contains("transaction.disablesAnimations = true"))
     }

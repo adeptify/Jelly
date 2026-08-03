@@ -259,7 +259,7 @@ struct MonthViewModelTests {
         #expect(model.today == tomorrow)
     }
 
-    @Test func todayDestinationLoadsDistantFutureAndPastWeeksWithoutStalling() {
+    @Test func todayDestinationRecentersDistantFutureAndPastWeeksWithFiftyTwoWeeksOnBothSides() {
         let center = CalendarDate(year: 2026, month: 8, day: 6)!
         let model = MonthViewModel(
             centeredOn: center,
@@ -272,7 +272,9 @@ struct MonthViewModelTests {
         model.moveWeekStreamFocus(to: .today(distantFuture))
         #expect(model.focusWeek == CalendarDate(year: 2031, month: 1, day: 27)!)
         #expect(model.weekStarts.contains(model.focusWeek))
-        #expect(model.weekStarts.count == 157)
+        #expect(model.weekStarts.count == 105)
+        #expect(model.weekStarts.first == model.focusWeek.addingDays(-364))
+        #expect(model.weekStarts.last == model.focusWeek.addingDays(364))
         for (earlier, later) in zip(model.weekStarts, model.weekStarts.dropFirst()) {
             #expect(earlier.addingDays(7) == later)
         }
@@ -281,7 +283,9 @@ struct MonthViewModelTests {
         model.moveWeekStreamFocus(to: .today(distantPast))
         #expect(model.focusWeek == CalendarDate(year: 2019, month: 12, day: 30)!)
         #expect(model.weekStarts.contains(model.focusWeek))
-        #expect(model.weekStarts.count == 157)
+        #expect(model.weekStarts.count == 105)
+        #expect(model.weekStarts.first == model.focusWeek.addingDays(-364))
+        #expect(model.weekStarts.last == model.focusWeek.addingDays(364))
         for (earlier, later) in zip(model.weekStarts, model.weekStarts.dropFirst()) {
             #expect(earlier.addingDays(7) == later)
         }
@@ -302,7 +306,9 @@ struct MonthViewModelTests {
         #expect(model.monthTitleDate.year == 2031)
         #expect(model.monthTitleDate.month == 2)
         #expect(model.weekStarts.contains(model.focusWeek))
-        #expect(model.weekStarts.count == 157)
+        #expect(model.weekStarts.count == 105)
+        #expect(model.weekStarts.first == model.focusWeek.addingDays(-364))
+        #expect(model.weekStarts.last == model.focusWeek.addingDays(364))
         for (earlier, later) in zip(model.weekStarts, model.weekStarts.dropFirst()) {
             #expect(earlier.addingDays(7) == later)
         }

@@ -1,5 +1,6 @@
 import AppKit
 import CalendarDomain
+import SwiftUI
 import Testing
 @testable import CalendarApp
 
@@ -128,6 +129,115 @@ struct DayCellInteractionTests {
         scrollSurface.scrollWheel(with: wheelEvent)
 
         #expect(scrollRecorder.records.isEmpty)
+    }
+
+    @Test func hostedWeekRowRoutesEmptyBodyToRangeSurfaceWithoutCoveringHeaderOrItem() throws {
+        let weekStart = CalendarDate(year: 2026, month: 8, day: 3)!
+        var state = makeEmptyState()
+        let item = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "前景事项",
+            categoryID: state.uncategorizedID,
+            schedule: try CalendarSchedule(
+                startDate: weekStart.addingDays(1),
+                endDate: weekStart.addingDays(2),
+                startTime: nil,
+                endTime: nil
+            ),
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        state.items[item.id] = item
+
+        let store = CalendarStore(
+            initialState: state,
+            repository: InMemoryCalendarRepository(initialState: state)
+        )
+        let rangeRecorder = RangeGestureRecorder()
+        let itemRecorder = ItemGestureRecorder()
+        let layout = try #require(WeekSegmentLayout.make(
+            entries: [.item(item)],
+            weekStarts: [weekStart],
+            laneCapacity: 10
+        ).first)
+        let host = NSHostingView(rootView: WeekRowView(
+            layout: layout,
+            today: weekStart,
+            selectedDate: nil,
+            categories: state.categories,
+            dropCoordinator: CalendarDropCoordinator(store: store),
+            onAction: { _ in },
+            onCompletion: { _ in },
+            selectionRange: nil,
+            onRangeGesture: rangeRecorder.record,
+            onItemGesture: itemRecorder.record,
+            height: WeekRowMetrics.defaultHeight
+        ))
+        host.frame = NSRect(x: 0, y: 0, width: 700, height: WeekRowMetrics.defaultHeight)
+        let window = NSWindow(
+            contentRect: host.bounds,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = host
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil as Any?)
+            window.contentView = nil
+        }
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+
+        let emptySurface = try #require(
+            descendants(of: host, as: WeekRowRangeGestureSurfaceView.self).first
+        )
+        let itemSurface = try #require(
+            descendants(of: host, as: WeekRowItemGestureSurfaceView.self).first
+        )
+        let emptyBodyPoint = emptySurface.convert(
+            CGPoint(x: emptySurface.bounds.midX, y: emptySurface.bounds.midY),
+            to: host
+        )
+        let headerPoint = emptySurface.convert(
+            CGPoint(x: emptySurface.bounds.midX, y: -1),
+            to: host
+        )
+        let itemPoint = itemSurface.convert(
+            CGPoint(x: itemSurface.bounds.midX, y: itemSurface.bounds.midY),
+            to: host
+        )
+        let completionPoint = itemSurface.convert(
+            CGPoint(x: 12, y: itemSurface.bounds.midY),
+            to: host
+        )
+        let leadingHandlePoint = itemSurface.convert(
+            CGPoint(x: 2, y: itemSurface.bounds.midY),
+            to: host
+        )
+        let trailingHandlePoint = itemSurface.convert(
+            CGPoint(x: itemSurface.bounds.maxX - 2, y: itemSurface.bounds.midY),
+            to: host
+        )
+
+        #expect(host.hitTest(emptyBodyPoint) === emptySurface)
+        #expect(host.hitTest(headerPoint) !== emptySurface)
+        #expect(!(host.hitTest(itemPoint) is WeekRowRangeGestureSurfaceView))
+        #expect(!(host.hitTest(completionPoint) is WeekRowRangeGestureSurfaceView))
+        #expect(!(host.hitTest(leadingHandlePoint) is WeekRowRangeGestureSurfaceView))
+        #expect(!(host.hitTest(trailingHandlePoint) is WeekRowRangeGestureSurfaceView))
+
+        try sendMouseClick(
+            to: try #require(host.hitTest(emptyBodyPoint) as? WeekRowRangeGestureSurfaceView),
+            atWindowLocation: emptySurface.convert(
+                CGPoint(x: emptySurface.bounds.midX, y: emptySurface.bounds.midY),
+                to: nil as NSView?
+            )
+        )
+        #expect(rangeRecorder.records.map(\.kind) == [.began, .ended])
+        #expect(itemRecorder.kinds.isEmpty)
     }
 
     @Test func appKitItemSurfaceDispatchesProductionTargetDateDragAndClickRouting() throws {
@@ -298,6 +408,13 @@ struct DayCellInteractionTests {
         view.mouseDown(with: down)
         view.mouseDragged(with: dragged)
         view.mouseUp(with: up)
+    }
+
+    private func descendants<View: NSView>(of root: NSView, as _: View.Type) -> [View] {
+        root.subviews.flatMap { child in
+            let match = (child as? View).map { [$0] } ?? []
+            return match + descendants(of: child, as: View.self)
+        }
     }
 
     private func sendMouseClick(to view: NSView, atWindowLocation location: CGPoint) throws {

@@ -56,6 +56,19 @@ struct WeekStreamModel: Equatable, Sendable {
         }
     }
 
+    @discardableResult
+    mutating func recenterWindowAroundFocusIfNeeded() -> Bool {
+        let requiredFirst = focusWeek.addingDays(-Self.initialHalfWindowWeeks * 7)
+        let requiredLast = focusWeek.addingDays(Self.initialHalfWindowWeeks * 7)
+        guard weekStarts[0] > requiredFirst || weekStarts[weekStarts.count - 1] < requiredLast else {
+            return false
+        }
+        weekStarts = (-Self.initialHalfWindowWeeks...Self.initialHalfWindowWeeks).map {
+            focusWeek.addingDays($0 * 7)
+        }
+        return true
+    }
+
     func jumpTargetForPreviousMonth() -> CalendarDate {
         monthTarget(offset: -1)
     }

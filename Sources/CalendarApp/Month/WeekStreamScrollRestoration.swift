@@ -45,6 +45,95 @@ struct WeekStreamScrollCorrection: Equatable, Sendable {
     }
 }
 
+struct WeekStreamCenteringRequest: Equatable, Sendable {
+    let id: UUID
+    let weekStart: CalendarDate
+    let windowRevision: WeekStreamWindowRevision
+
+    init(
+        id: UUID = UUID(),
+        weekStart: CalendarDate,
+        windowRevision: WeekStreamWindowRevision
+    ) {
+        self.id = id
+        self.weekStart = weekStart
+        self.windowRevision = windowRevision
+    }
+}
+
+enum WeekStreamCenteringAction: Equatable {
+    case wait
+    case retry(WeekStreamCenteringRequest)
+    case ready
+}
+
+struct WeekStreamCenteringState: Equatable {
+    private enum Phase: Equatable {
+        case pending
+        case centering
+    }
+
+    private static let confirmationTolerance: CGFloat = 0.5
+    private var request: WeekStreamCenteringRequest?
+    private var phase: Phase?
+    private var retryScheduled = false
+
+    var blocksViewportUpdates: Bool { request != nil }
+    var pendingRequest: WeekStreamCenteringRequest? { request }
+
+    @discardableResult
+    mutating func begin(
+        weekStart: CalendarDate,
+        windowRevision: WeekStreamWindowRevision
+    ) -> WeekStreamCenteringRequest {
+        let request = WeekStreamCenteringRequest(
+            weekStart: weekStart,
+            windowRevision: windowRevision
+        )
+        self.request = request
+        phase = .pending
+        retryScheduled = false
+        return request
+    }
+
+    @discardableResult
+    mutating func markScrollIssued(for request: WeekStreamCenteringRequest) -> Bool {
+        guard self.request == request else { return false }
+        phase = .centering
+        retryScheduled = false
+        return true
+    }
+
+    mutating func receive(
+        frames: [WeekRowViewportFrame],
+        viewportHeight: CGFloat
+    ) -> WeekStreamCenteringAction {
+        guard let request else { return .ready }
+        guard phase == .centering else { return .wait }
+
+        let currentFrames = frames.filter { $0.windowRevision == request.windowRevision }
+        guard !currentFrames.isEmpty else { return .wait }
+        guard let targetFrame = currentFrames.first(where: { $0.weekStart == request.weekStart }) else {
+            return scheduleRetry(for: request)
+        }
+        let viewportCenter = viewportHeight / 2
+        guard abs(targetFrame.centerY - viewportCenter) <= Self.confirmationTolerance else {
+            return scheduleRetry(for: request)
+        }
+
+        self.request = nil
+        phase = nil
+        retryScheduled = false
+        return .ready
+    }
+
+    private mutating func scheduleRetry(for request: WeekStreamCenteringRequest) -> WeekStreamCenteringAction {
+        guard !retryScheduled else { return .wait }
+        retryScheduled = true
+        return .retry(request)
+    }
+}
+
 enum WeekStreamRestorationAction: Equatable {
     case wait
     case adjustContentOffset(WeekStreamScrollCorrection)
