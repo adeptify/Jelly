@@ -65,6 +65,7 @@ struct MonthView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model: MonthViewModel
     @StateObject private var dropCoordinator: CalendarDropCoordinator
+    @StateObject private var weekStreamScrollCoordinator = WeekStreamScrollCoordinator()
     @AppStorage("calendar.hiddenCategoryIDs") private var storedHiddenCategoryIDs = ""
     @State private var hiddenCategoryIDs: Set<UUID> = []
     @State private var quickCreateDate: CalendarDate?
@@ -72,7 +73,7 @@ struct MonthView: View {
     @State private var selectedItem: ProjectedItem?
     @State private var recurringDropPresentation = RecurringDropPresentationController()
     @State private var requestedCenterRequest: WeekStreamScrollRequest?
-    @State private var isExtendingWeekStream = false
+    @State private var weekStreamRestoration = WeekStreamRestorationState()
 
     init(
         store: CalendarStore,
@@ -380,6 +381,7 @@ struct MonthView: View {
     }
 
     private func weekStream(viewportHeight: CGFloat) -> some View {
+        let windowRevision = WeekStreamWindowRevision(weekStarts: model.weekStarts)
         let layouts = Dictionary(uniqueKeysWithValues: model.weekLayouts(
             laneCapacity: WeekRowMetrics.itemCapacity(height: WeekRowMetrics.defaultHeight)
         ).map { ($0.weekStart, $0) })
@@ -406,13 +408,18 @@ struct MonthView: View {
                                         value: [.init(
                                             weekStart: weekStart,
                                             minY: rowProxy.frame(in: .named("week-stream-viewport")).minY,
-                                            maxY: rowProxy.frame(in: .named("week-stream-viewport")).maxY
+                                            maxY: rowProxy.frame(in: .named("week-stream-viewport")).maxY,
+                                            windowRevision: windowRevision
                                         )]
                                     )
                                 }
                             }
                         }
                     }
+                }
+                .background {
+                    WeekStreamScrollResolver(coordinator: weekStreamScrollCoordinator)
+                        .frame(width: 0, height: 0)
                 }
             }
             .coordinateSpace(name: "week-stream-viewport")
@@ -426,34 +433,55 @@ struct MonthView: View {
             .onPreferenceChange(WeekRowFramePreferenceKey.self) { frames in
                 handleWeekStreamViewport(
                     frames: frames,
-                    viewportHeight: viewportHeight,
-                    scrollProxy: scrollProxy
+                    viewportHeight: viewportHeight
                 )
             }
         }
     }
 
+    private var isExtendingWeekStream: Bool {
+        weekStreamRestoration.isLocked
+    }
+
     private func handleWeekStreamViewport(
         frames: [WeekRowViewportFrame],
-        viewportHeight: CGFloat,
-        scrollProxy: ScrollViewProxy
+        viewportHeight: CGFloat
     ) {
-        if let focusWeek = WeekStreamViewport.focusWeek(in: frames, viewportHeight: viewportHeight),
+        if isExtendingWeekStream {
+            switch weekStreamRestoration.receive(frames: frames) {
+            case .wait, .confirmed:
+                return
+            case let .adjustContentOffset(viewportDeltaY):
+                if let adjustment = weekStreamScrollCoordinator.adjustViewport(by: viewportDeltaY) {
+                    weekStreamRestoration.recordAppliedAdjustment(
+                        requestedViewportDeltaY: adjustment.requestedViewportDeltaY,
+                        appliedViewportDeltaY: adjustment.appliedViewportDeltaY
+                    )
+                }
+                return
+            }
+        }
+
+        let windowRevision = WeekStreamWindowRevision(weekStarts: model.weekStarts)
+        let currentFrames = frames.filter { $0.windowRevision == windowRevision }
+        if let focusWeek = WeekStreamViewport.focusWeek(
+            in: currentFrames,
+            viewportHeight: viewportHeight
+        ),
            focusWeek != model.focusWeek {
             model.updateFocus(toWeekStarting: focusWeek)
         }
 
-        guard !isExtendingWeekStream,
-              let request = WeekStreamViewport.extensionRequest(
-                in: frames,
+        guard let request = WeekStreamViewport.extensionRequest(
+                in: currentFrames,
                 loadedWeekStarts: model.weekStarts,
                 viewportHeight: viewportHeight
-              )
+              ),
+              weekStreamRestoration.begin(request: request)
         else {
             return
         }
 
-        isExtendingWeekStream = true
         let anchor: WeekStreamAnchor
         switch request.direction {
         case .earlier:
@@ -467,11 +495,9 @@ struct MonthView: View {
                 pixelOffset: request.anchor.pixelOffset
             )
         }
-        let restoration = WeekStreamViewport.restorationIntent(for: anchor)
-        scrollProxy.scrollTo(restoration.weekStart, anchor: .top)
-        Task { @MainActor in
-            await Task.yield()
-            isExtendingWeekStream = false
-        }
+        weekStreamRestoration.expect(
+            anchor: anchor,
+            windowRevision: WeekStreamWindowRevision(weekStarts: model.weekStarts)
+        )
     }
 }

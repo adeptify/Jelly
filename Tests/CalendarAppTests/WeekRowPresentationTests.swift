@@ -128,8 +128,252 @@ struct WeekRowPresentationTests {
         )
 
         #expect(request == .init(direction: .earlier, anchor: .init(weekStart: first, pixelOffset: 180)))
+        #expect(request?.desiredMinY == -180)
         #expect(WeekStreamViewport.restorationIntent(for: request!.anchor)
             == .init(weekStart: first, pixelOffset: 180))
+    }
+
+    @Test func offscreenBoundaryFramesDoNotExtendButAnIntersectingTrailingEdgeDoes() throws {
+        let first = CalendarDate(year: 2026, month: 8, day: 3)!
+        let middle = CalendarDate(year: 2026, month: 8, day: 10)!
+        let last = CalendarDate(year: 2026, month: 8, day: 17)!
+
+        let offscreen = WeekStreamViewport.extensionRequest(
+            in: [
+                .init(weekStart: first, minY: -1_000, maxY: -748),
+                .init(weekStart: last, minY: 1_000, maxY: 1_252)
+            ],
+            loadedWeekStarts: [first, middle, last],
+            viewportHeight: 500
+        )
+        #expect(offscreen == nil)
+
+        let trailing = try #require(WeekStreamViewport.extensionRequest(
+            in: [
+                .init(weekStart: middle, minY: 198, maxY: 450),
+                .init(weekStart: last, minY: 450, maxY: 702)
+            ],
+            loadedWeekStarts: [first, middle, last],
+            viewportHeight: 500
+        ))
+        #expect(trailing.direction == .later)
+        #expect(trailing.anchor == .init(weekStart: middle, pixelOffset: 0))
+        #expect(trailing.desiredMinY == 198)
+    }
+
+    @Test func prependRestorationWaitsForNewLayoutAppliesOnceAndUnlocksOnlyAfterConfirmation() throws {
+        let anchorWeek = CalendarDate(year: 2026, month: 8, day: 3)!
+        let oldRevision = WeekStreamWindowRevision(first: anchorWeek, last: anchorWeek, count: 1)
+        let newRevision = WeekStreamWindowRevision(
+            first: anchorWeek.addingDays(-364),
+            last: anchorWeek,
+            count: 53
+        )
+        let request = WeekStreamExtensionRequest(
+            direction: .earlier,
+            anchor: .init(weekStart: anchorWeek, pixelOffset: 180),
+            desiredMinY: -180
+        )
+        var restoration = WeekStreamRestorationState()
+
+        let didBegin = restoration.begin(request: request)
+        #expect(didBegin)
+        restoration.expect(anchor: request.anchor, windowRevision: newRevision)
+        #expect(restoration.isLocked)
+        #expect(restoration.receive(frames: [
+            .init(weekStart: anchorWeek, minY: -180, maxY: 72, windowRevision: oldRevision)
+        ]) == .wait)
+
+        #expect(restoration.receive(frames: [
+            .init(weekStart: anchorWeek, minY: 126, maxY: 378, windowRevision: newRevision)
+        ]) == .adjustContentOffset(viewportDeltaY: 306))
+        restoration.recordAppliedAdjustment(
+            requestedViewportDeltaY: 306,
+            appliedViewportDeltaY: 306
+        )
+        #expect(restoration.isLocked)
+        #expect(restoration.receive(frames: [
+            .init(weekStart: anchorWeek, minY: 126, maxY: 378, windowRevision: newRevision)
+        ]) == .wait)
+        #expect(restoration.isLocked)
+
+        #expect(restoration.receive(frames: [
+            .init(weekStart: anchorWeek, minY: -180, maxY: 72, windowRevision: newRevision)
+        ]) == .confirmed)
+        #expect(restoration.isLocked == false)
+    }
+
+    @Test func unresolvedScrollViewLeavesTheCorrectionRetryable() {
+        let anchorWeek = CalendarDate(year: 2026, month: 8, day: 3)!
+        let revision = WeekStreamWindowRevision(first: anchorWeek, last: anchorWeek, count: 1)
+        let request = WeekStreamExtensionRequest(
+            direction: .earlier,
+            anchor: .init(weekStart: anchorWeek, pixelOffset: 180),
+            desiredMinY: -180
+        )
+        let frames = [WeekRowViewportFrame(
+            weekStart: anchorWeek,
+            minY: 126,
+            maxY: 378,
+            windowRevision: revision
+        )]
+        var restoration = WeekStreamRestorationState()
+
+        let didBegin = restoration.begin(request: request)
+        #expect(didBegin)
+        restoration.expect(anchor: request.anchor, windowRevision: revision)
+        #expect(restoration.receive(frames: frames) == .adjustContentOffset(viewportDeltaY: 306))
+
+        // An unavailable coordinator reports no applied adjustment, so the same frame can retry.
+        #expect(restoration.receive(frames: frames) == .adjustContentOffset(viewportDeltaY: 306))
+        #expect(restoration.isLocked)
+    }
+
+    @Test func clampedScrollProgressRetriesTheRemainderThenRecoversWithoutPermanentLock() {
+        let anchorWeek = CalendarDate(year: 2026, month: 8, day: 3)!
+        let revision = WeekStreamWindowRevision(first: anchorWeek, last: anchorWeek, count: 1)
+        let request = WeekStreamExtensionRequest(
+            direction: .earlier,
+            anchor: .init(weekStart: anchorWeek, pixelOffset: 0),
+            desiredMinY: 0
+        )
+        var restoration = WeekStreamRestorationState()
+
+        let didBegin = restoration.begin(request: request)
+        #expect(didBegin)
+        restoration.expect(anchor: request.anchor, windowRevision: revision)
+        #expect(restoration.receive(frames: [
+            .init(weekStart: anchorWeek, minY: 200, maxY: 452, windowRevision: revision)
+        ]) == .adjustContentOffset(viewportDeltaY: 200))
+        restoration.recordAppliedAdjustment(
+            requestedViewportDeltaY: 200,
+            appliedViewportDeltaY: 50
+        )
+
+        // Do not apply twice while geometry still reports the pre-scroll frame.
+        #expect(restoration.receive(frames: [
+            .init(weekStart: anchorWeek, minY: 200, maxY: 452, windowRevision: revision)
+        ]) == .wait)
+        #expect(restoration.receive(frames: [
+            .init(weekStart: anchorWeek, minY: 150, maxY: 402, windowRevision: revision)
+        ]) == .adjustContentOffset(viewportDeltaY: 150))
+        restoration.recordAppliedAdjustment(
+            requestedViewportDeltaY: 150,
+            appliedViewportDeltaY: 0
+        )
+        #expect(restoration.isLocked == false)
+
+        var fullyClamped = WeekStreamRestorationState()
+        let didBeginFullyClamped = fullyClamped.begin(request: request)
+        #expect(didBeginFullyClamped)
+        fullyClamped.expect(anchor: request.anchor, windowRevision: revision)
+        #expect(fullyClamped.receive(frames: [
+            .init(weekStart: anchorWeek, minY: 200, maxY: 452, windowRevision: revision)
+        ]) == .adjustContentOffset(viewportDeltaY: 200))
+        fullyClamped.recordAppliedAdjustment(
+            requestedViewportDeltaY: 200,
+            appliedViewportDeltaY: 0
+        )
+        #expect(fullyClamped.isLocked == false)
+    }
+
+    @Test func laterAppendWithUnchangedAnchorConfirmsWithoutMovingViewport() {
+        let anchorWeek = CalendarDate(year: 2026, month: 8, day: 10)!
+        let newRevision = WeekStreamWindowRevision(
+            first: CalendarDate(year: 2026, month: 1, day: 5)!,
+            last: CalendarDate(year: 2027, month: 8, day: 2)!,
+            count: 83
+        )
+        let request = WeekStreamExtensionRequest(
+            direction: .later,
+            anchor: .init(weekStart: anchorWeek, pixelOffset: 0),
+            desiredMinY: 36
+        )
+        var restoration = WeekStreamRestorationState()
+
+        let didBegin = restoration.begin(request: request)
+        #expect(didBegin)
+        restoration.expect(anchor: request.anchor, windowRevision: newRevision)
+
+        #expect(restoration.receive(frames: [
+            .init(weekStart: anchorWeek, minY: 36, maxY: 288, windowRevision: newRevision)
+        ]) == .confirmed)
+        #expect(restoration.isLocked == false)
+    }
+
+    @Test func farSideTrimRestoresSignedAnchorPosition() {
+        let anchorWeek = CalendarDate(year: 2027, month: 8, day: 2)!
+        let revision = WeekStreamWindowRevision(
+            first: CalendarDate(year: 2026, month: 8, day: 3)!,
+            last: CalendarDate(year: 2029, month: 8, day: 6)!,
+            count: 157
+        )
+        let request = WeekStreamExtensionRequest(
+            direction: .later,
+            anchor: .init(weekStart: anchorWeek, pixelOffset: 0),
+            desiredMinY: 40
+        )
+        var restoration = WeekStreamRestorationState()
+        let didBegin = restoration.begin(request: request)
+        #expect(didBegin)
+        restoration.expect(anchor: request.anchor, windowRevision: revision)
+
+        #expect(restoration.receive(frames: [
+            .init(weekStart: anchorWeek, minY: -212, maxY: 40, windowRevision: revision)
+        ]) == .adjustContentOffset(viewportDeltaY: -252))
+        #expect(restoration.receive(frames: [
+            .init(weekStart: anchorWeek, minY: 40, maxY: 292, windowRevision: revision)
+        ]) == .confirmed)
+    }
+
+    @Test func lockedRestorationRejectsRepeatedExtensionBegins() {
+        let week = CalendarDate(year: 2026, month: 8, day: 3)!
+        let request = WeekStreamExtensionRequest(
+            direction: .earlier,
+            anchor: .init(weekStart: week, pixelOffset: 0),
+            desiredMinY: 0
+        )
+        var restoration = WeekStreamRestorationState()
+
+        let firstBegin = restoration.begin(request: request)
+        let repeatedBegin = restoration.begin(request: request)
+        #expect(firstBegin)
+        #expect(repeatedBegin == false)
+        #expect(restoration.isLocked)
+    }
+
+    @Test func scrollOffsetMathUsesDocumentOrientationAndClamps() {
+        #expect(WeekStreamScrollOffset.adjustedOriginY(
+            currentOriginY: 100,
+            viewportDeltaY: 306,
+            documentHeight: 2_000,
+            viewportHeight: 500,
+            documentIsFlipped: true
+        ) == 406)
+        #expect(WeekStreamScrollOffset.adjustedOriginY(
+            currentOriginY: 400,
+            viewportDeltaY: 306,
+            documentHeight: 2_000,
+            viewportHeight: 500,
+            documentIsFlipped: false
+        ) == 94)
+        #expect(WeekStreamScrollOffset.adjustedOriginY(
+            currentOriginY: 1_450,
+            viewportDeltaY: 200,
+            documentHeight: 2_000,
+            viewportHeight: 500,
+            documentIsFlipped: true
+        ) == 1_500)
+        #expect(WeekStreamScrollOffset.appliedViewportDeltaY(
+            fromOriginY: 1_450,
+            toOriginY: 1_500,
+            documentIsFlipped: true
+        ) == 50)
+        #expect(WeekStreamScrollOffset.appliedViewportDeltaY(
+            fromOriginY: 400,
+            toOriginY: 94,
+            documentIsFlipped: false
+        ) == 306)
     }
 
     @Test func aDropOverAnySegmentColumnResolvesToThatColumnDate() {

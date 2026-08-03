@@ -147,6 +147,19 @@ struct WeekRowViewportFrame: Equatable, Identifiable {
     let weekStart: CalendarDate
     let minY: CGFloat
     let maxY: CGFloat
+    let windowRevision: WeekStreamWindowRevision?
+
+    init(
+        weekStart: CalendarDate,
+        minY: CGFloat,
+        maxY: CGFloat,
+        windowRevision: WeekStreamWindowRevision? = nil
+    ) {
+        self.weekStart = weekStart
+        self.minY = minY
+        self.maxY = maxY
+        self.windowRevision = windowRevision
+    }
 
     var id: CalendarDate { weekStart }
     var centerY: CGFloat { (minY + maxY) / 2 }
@@ -160,6 +173,17 @@ enum WeekStreamExtensionDirection: Equatable {
 struct WeekStreamExtensionRequest: Equatable {
     let direction: WeekStreamExtensionDirection
     let anchor: WeekStreamAnchor
+    let desiredMinY: CGFloat
+
+    init(
+        direction: WeekStreamExtensionDirection,
+        anchor: WeekStreamAnchor,
+        desiredMinY: CGFloat? = nil
+    ) {
+        self.direction = direction
+        self.anchor = anchor
+        self.desiredMinY = desiredMinY ?? -anchor.pixelOffset
+    }
 }
 
 struct WeekStreamRestorationIntent: Equatable {
@@ -197,23 +221,40 @@ enum WeekStreamViewport {
         }
 
         let framesByWeek = Dictionary(uniqueKeysWithValues: frames.map { ($0.weekStart, $0) })
-        if let firstFrame = framesByWeek[firstLoadedWeek], firstFrame.maxY <= edgeThreshold {
+        let visibleFrames = frames
+            .filter { $0.maxY >= 0 && $0.minY <= viewportHeight }
+            .sorted {
+                if $0.minY == $1.minY {
+                    return $0.weekStart < $1.weekStart
+                }
+                return $0.minY < $1.minY
+            }
+        guard let stableAnchor = visibleFrames.first else {
+            return nil
+        }
+
+        if let firstFrame = framesByWeek[firstLoadedWeek],
+           firstFrame.maxY >= 0,
+           firstFrame.minY <= edgeThreshold {
             return WeekStreamExtensionRequest(
                 direction: .earlier,
                 anchor: .init(
-                    weekStart: firstLoadedWeek,
-                    pixelOffset: max(0, -firstFrame.minY)
-                )
+                    weekStart: stableAnchor.weekStart,
+                    pixelOffset: max(0, -stableAnchor.minY)
+                ),
+                desiredMinY: stableAnchor.minY
             )
         }
         if let lastFrame = framesByWeek[lastLoadedWeek],
-           lastFrame.minY >= viewportHeight - edgeThreshold {
+           lastFrame.minY <= viewportHeight,
+           lastFrame.maxY >= viewportHeight - edgeThreshold {
             return WeekStreamExtensionRequest(
                 direction: .later,
                 anchor: .init(
-                    weekStart: lastLoadedWeek,
-                    pixelOffset: max(0, -lastFrame.minY)
-                )
+                    weekStart: stableAnchor.weekStart,
+                    pixelOffset: max(0, -stableAnchor.minY)
+                ),
+                desiredMinY: stableAnchor.minY
             )
         }
         return nil
