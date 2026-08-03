@@ -45,6 +45,11 @@ struct DayCellView: View {
     @ObservedObject var dropCoordinator: CalendarDropCoordinator
     let onAction: (DayCellAction) -> Void
     let onCompletion: (CalendarCommand) -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: CalendarSemanticAppearance {
+        CalendarTheme.appearance(for: colorScheme)
+    }
 
     var body: some View {
         let visibleItems = model.visibleItems(in: cell, capacity: capacity)
@@ -57,11 +62,17 @@ struct DayCellView: View {
                 } label: {
                     Text("\(cell.date.day)")
                         .font(CalendarTheme.dateFont)
-                        .foregroundStyle(cell.isInDisplayedMonth ? .primary : .secondary)
+                        .foregroundStyle(cell.isInDisplayedMonth ? theme.primaryText : theme.secondaryText)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
-                        .background(cell.isToday || model.selectedDate == cell.date ? CalendarTheme.selectedDay : .clear)
+                        .background(cell.isToday ? theme.todayFill : (model.selectedDate == cell.date ? theme.selectionFill : .clear))
                         .clipShape(Capsule())
+                        .overlay {
+                            Capsule().stroke(
+                                cell.isToday ? theme.todayOutline : theme.selectionOutline,
+                                lineWidth: cell.isToday || model.selectedDate == cell.date ? 1 : 0
+                            )
+                        }
                 }
                 .buttonStyle(.plain)
                 Spacer(minLength: 0)
@@ -83,7 +94,7 @@ struct DayCellView: View {
                 }
                 .buttonStyle(.plain)
                 .font(CalendarTheme.itemFont)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.secondaryText)
                 .padding(.leading, 4)
             }
             Spacer(minLength: 0)
@@ -92,22 +103,23 @@ struct DayCellView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background {
             Rectangle()
-                .fill(Color(nsColor: .windowBackgroundColor))
+                .fill(theme.canvas)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     onAction(DayCellSurfaceInteraction.backgroundAction(for: cell.date))
                 }
         }
-        .overlay(Rectangle().stroke(CalendarTheme.gridStroke, lineWidth: 0.5))
+        .overlay(Rectangle().stroke(theme.separator, lineWidth: 0.5))
         .overlay {
             if dropCoordinator.dropTargetDate == cell.date {
                 Rectangle()
-                    .fill(Color.accentColor.opacity(0.16))
+                    .fill(theme.dragPreviewFill)
                     .allowsHitTesting(false)
+                    .overlay(Rectangle().inset(by: 1).stroke(theme.dragPreviewOutline, lineWidth: 1.5))
                     .overlay(alignment: .bottomLeading) {
                         Text("移到 \(cell.date.month)月\(cell.date.day)日")
                             .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(Color.accentColor)
+                            .foregroundStyle(theme.primaryText)
                             .padding(4)
                     }
             }

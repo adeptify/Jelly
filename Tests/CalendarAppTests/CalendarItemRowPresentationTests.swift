@@ -1,4 +1,5 @@
 import CalendarDomain
+import Foundation
 import Testing
 @testable import CalendarApp
 
@@ -228,5 +229,38 @@ struct CalendarItemRowPresentationTests {
         #expect(compact.layout.categoryMinimumWidth == compact.layout.categoryMaximumWidth)
         #expect(compact.layout.categoryLayoutPriority > compact.layout.titleLayoutPriority)
         #expect(compact.layout.titleMinimumWidth == 20)
+    }
+
+    @Test func completeItemAccessibilityIncludesAllScheduleStateAndStableSourceValue() throws {
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000901")!
+        let item = try CalendarItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000902")!,
+            kind: .task,
+            title: "跨夜发布",
+            categoryID: categoryID,
+            schedule: try CalendarSchedule(
+                startDate: CalendarDate(year: 2026, month: 8, day: 29)!,
+                endDate: CalendarDate(year: 2026, month: 8, day: 30)!,
+                startTime: MinuteOfDay(hour: 23, minute: 0)!,
+                endTime: MinuteOfDay(hour: 1, minute: 0)!
+            ),
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+
+        let accessibility = CalendarItemAccessibility.make(
+            item: .item(item),
+            categoryName: "工作"
+        )
+
+        #expect(accessibility.label.contains("待办"))
+        #expect(accessibility.label.contains("工作"))
+        #expect(accessibility.label.contains("跨夜发布"))
+        #expect(accessibility.label.contains("8月29日 23:00至8月30日 01:00"))
+        #expect(accessibility.label.contains("未完成"))
+        #expect(accessibility.value == "来源事项 item:\(item.id.uuidString)")
+        #expect(CalendarItemAccessibility.completionLabel(isCompleted: false) == "标记为已完成")
+        #expect(CalendarItemAccessibility.completionLabel(isCompleted: true) == "标记为未完成")
     }
 }

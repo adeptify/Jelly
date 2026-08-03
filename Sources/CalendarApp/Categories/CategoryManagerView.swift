@@ -9,6 +9,10 @@ struct CategoryManagerView: View {
     @State private var localError: String?
     @Environment(\.colorScheme) private var colorScheme
 
+    private var theme: CalendarSemanticAppearance {
+        CalendarTheme.appearance(for: colorScheme)
+    }
+
     init(store: CalendarStore) {
         self.store = store
         _model = StateObject(wrappedValue: CategoryManagerViewModel(store: store))
@@ -23,6 +27,9 @@ struct CategoryManagerView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .padding(20)
         }
+        .background(theme.canvas)
+        .foregroundStyle(theme.primaryText)
+        .tint(theme.controlAccent)
         .confirmationDialog(
             "删除分类并迁移事项",
             isPresented: deleteDialogPresented,
@@ -87,7 +94,7 @@ struct CategoryManagerView: View {
                     } label: {
                         HStack(spacing: 8) {
                             Image(systemName: "line.3.horizontal")
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(theme.secondaryText.opacity(0.72))
                             Circle()
                                 .fill(CalendarTheme.categoryAccent(
                                     category.colorHex,
@@ -104,15 +111,16 @@ struct CategoryManagerView: View {
                     .padding(.vertical, 3)
                     .listRowBackground(
                         category.id == editingCategoryID
-                            ? Color.accentColor.opacity(0.16)
+                            ? theme.selectionFill
                             : Color.clear
                     )
                 }
                 .onMove(perform: moveCategories)
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
         }
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(theme.elevatedSurface)
     }
 
     private var editor: some View {
@@ -130,7 +138,7 @@ struct CategoryManagerView: View {
             if isProtectedCategory {
                 Label("“未分类”是系统分类，名称、颜色和删除受到保护；你仍可在左侧拖动它调整顺序。", systemImage: "lock.fill")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.secondaryText)
             }
 
             TextField("分类名称", text: $model.draftName)
@@ -171,8 +179,8 @@ struct CategoryManagerView: View {
                                 .overlay {
                                     Circle().stroke(
                                         model.draftColorHex.uppercased() == preset.hex
-                                            ? Color.primary.opacity(0.85)
-                                            : Color.primary.opacity(0.12),
+                                            ? theme.selectionOutline
+                                            : theme.subtleBorder,
                                         lineWidth: model.draftColorHex.uppercased() == preset.hex ? 2 : 1
                                     )
                                 }
@@ -197,12 +205,12 @@ struct CategoryManagerView: View {
             if let validationMessage {
                 Text(validationMessage)
                     .font(.footnote)
-                    .foregroundStyle(validationError == nil ? Color.secondary : Color.red)
+                    .foregroundStyle(validationError == nil ? theme.secondaryText : theme.error)
             }
             if let localError {
                 Text(localError)
                     .font(.footnote)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(theme.error)
             }
 
             HStack {
@@ -226,6 +234,7 @@ struct CategoryManagerView: View {
     }
 
     private func preview(appearance: CalendarAppearance, title: String) -> some View {
+        let previewTheme = appearance == .light ? CalendarTheme.light : CalendarTheme.dark
         let roles = try? CategoryColorResolver.roles(for: model.draftColorHex, appearance: appearance)
         let canvasHex = roles?.canvas.hex ?? (appearance == .light
             ? CalendarTheme.previewLightCanvasHex
@@ -264,7 +273,7 @@ struct CategoryManagerView: View {
         }
         .padding(8)
         .background(CalendarTheme.categoryColor(canvasHex), in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(previewTheme.subtleBorder))
     }
 
     private var colorBinding: Binding<Color> {
@@ -291,14 +300,14 @@ struct CategoryManagerView: View {
 
     private func swatchCheckColor(for hex: String) -> Color {
         guard let base = try? SRGBColor(hex: hex),
-              let white = try? SRGBColor(hex: "#FFFFFF"),
-              let black = try? SRGBColor(hex: "#231F1C")
+              let warmLight = try? SRGBColor(hex: CalendarTheme.dark.primaryTextHex),
+              let warmDark = try? SRGBColor(hex: CalendarTheme.light.primaryTextHex)
         else {
-            return .primary
+            return theme.primaryText
         }
-        return base.contrastRatio(with: white) >= base.contrastRatio(with: black)
-            ? .white
-            : CalendarTheme.categoryColor("#231F1C")
+        return base.contrastRatio(with: warmLight) >= base.contrastRatio(with: warmDark)
+            ? CalendarTheme.dark.primaryText
+            : CalendarTheme.light.primaryText
     }
 
     private var editingCategory: CalendarCategory? {

@@ -23,6 +23,73 @@ enum CalendarItemRowHitTarget {
     case rowBody
 }
 
+struct CalendarItemAccessibility: Equatable {
+    let label: String
+    let value: String
+
+    static func make(item: ProjectedItem, categoryName: String) -> CalendarItemAccessibility {
+        let kind = item.kind == .task ? "待办" : "日程"
+        var components = [kind, categoryName, item.title, dateTimeRangeText(for: item.schedule)]
+        if item.kind == .task {
+            components.append(item.completedAt == nil ? "未完成" : "已完成")
+        }
+        return CalendarItemAccessibility(
+            label: components.joined(separator: "，"),
+            value: sourceValue(for: item)
+        )
+    }
+
+    static func sourceValue(for item: ProjectedItem) -> String {
+        "来源事项 \(sourceIdentifier(for: item))"
+    }
+
+    static func completionLabel(isCompleted: Bool) -> String {
+        isCompleted ? "标记为未完成" : "标记为已完成"
+    }
+
+    static func sourceIdentifier(for item: ProjectedItem) -> String {
+        switch item {
+        case let .item(item):
+            "item:\(item.id.uuidString)"
+        case let .occurrence(occurrence):
+            "occurrence:\(occurrence.key.seriesID.uuidString):\(dateIdentifier(occurrence.key.originalDate))"
+        }
+    }
+
+    static func dateTimeRangeText(for schedule: CalendarSchedule) -> String {
+        let includesYear = schedule.startDate.year != schedule.endDate.year
+        let startDate = dateText(schedule.startDate, includesYear: includesYear)
+        let endDate = dateText(schedule.endDate, includesYear: includesYear)
+        guard let startTime = schedule.startTime, let endTime = schedule.endTime else {
+            return schedule.startDate == schedule.endDate
+                ? startDate
+                : "\(startDate)至\(endDate)"
+        }
+        if schedule.startDate == schedule.endDate {
+            return "\(startDate) \(timeText(startTime))至\(timeText(endTime))"
+        }
+        return "\(startDate) \(timeText(startTime))至\(endDate) \(timeText(endTime))"
+    }
+
+    static func fullDateText(_ date: CalendarDate) -> String {
+        dateText(date, includesYear: true)
+    }
+
+    private static func dateText(_ date: CalendarDate, includesYear: Bool) -> String {
+        includesYear
+            ? "\(date.year)年\(date.month)月\(date.day)日"
+            : "\(date.month)月\(date.day)日"
+    }
+
+    private static func timeText(_ time: MinuteOfDay) -> String {
+        String(format: "%02d:%02d", time.value / 60, time.value % 60)
+    }
+
+    private static func dateIdentifier(_ date: CalendarDate) -> String {
+        String(format: "%04d-%02d-%02d", date.year, date.month, date.day)
+    }
+}
+
 struct CalendarItemRowInteraction {
     let completionCommand: CalendarCommand?
     let selectedDetailID: String?
@@ -194,11 +261,18 @@ struct CalendarItemRow: View {
     var onCompletion: ((CalendarCommand) -> Void)?
     var onOpenDetail: ((ProjectedItem) -> Void)?
     var accessibilityLabelOverride: String?
+    var accessibilityValueOverride: String?
     var continuesBefore = false
     var continuesAfter = false
     var showsLeadingHandle = false
     var showsTrailingHandle = false
+    var leadingHandleAccessibility: CalendarResizeHandleAccessibility?
+    var trailingHandleAccessibility: CalendarResizeHandleAccessibility?
     @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: CalendarSemanticAppearance {
+        CalendarTheme.appearance(for: colorScheme)
+    }
 
     private var appearance: CalendarAppearance {
         colorScheme == .dark ? .dark : .light
@@ -228,12 +302,12 @@ struct CalendarItemRow: View {
 
     private var categoryText: Color {
         itemColorRoles.map { CalendarTheme.categoryColor($0.text) }
-            ?? .primary
+            ?? theme.primaryText
     }
 
     private var categoryOutline: Color {
         itemColorRoles.map { CalendarTheme.categoryColor($0.outline) }
-            ?? .primary
+            ?? theme.primaryText
     }
 
     private var isCompletedTask: Bool {
@@ -246,7 +320,10 @@ struct CalendarItemRow: View {
                 continuationMarker(systemName: "arrow.left")
             }
             if showsLeadingHandle {
-                handleMarker(label: "调整开始日期")
+                handleMarker(
+                    leadingHandleAccessibility
+                        ?? .init(label: "调整开始日期", value: CalendarItemAccessibility.fullDateText(item.schedule.startDate))
+                )
             }
             RoundedRectangle(cornerRadius: 1)
                 .fill(categoryColor)
@@ -274,6 +351,8 @@ struct CalendarItemRow: View {
                         .foregroundStyle(categoryColor)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(CalendarItemAccessibility.completionLabel(isCompleted: isCompletedTask))
+                .accessibilityValue(isCompletedTask ? "已完成" : "未完成")
             }
 
             Button {
@@ -332,17 +411,27 @@ struct CalendarItemRow: View {
                 .strikethrough(isCompletedTask, color: categoryText)
             }
             .accessibilityLabel(
-                accessibilityLabelOverride ?? CalendarItemRowPresentation.rowBodyAccessibilityLabel(
-                    categoryName: category?.name ?? "未分类",
-                    schedule: item.schedule,
-                    title: item.title
-                )
+                accessibilityLabelOverride
+                    ?? CalendarItemAccessibility.make(
+                        item: item,
+                        categoryName: category?.name ?? "未分类"
+                    ).label
+            )
+            .accessibilityValue(
+                accessibilityValueOverride
+                    ?? CalendarItemAccessibility.make(
+                        item: item,
+                        categoryName: category?.name ?? "未分类"
+                    ).value
             )
             .buttonStyle(.plain)
             .frame(maxWidth: .infinity, alignment: .leading)
 
             if showsTrailingHandle {
-                handleMarker(label: "调整结束日期")
+                handleMarker(
+                    trailingHandleAccessibility
+                        ?? .init(label: "调整结束日期", value: CalendarItemAccessibility.fullDateText(item.schedule.endDate))
+                )
             }
             if continuesAfter {
                 continuationMarker(systemName: "arrow.right")
@@ -355,6 +444,11 @@ struct CalendarItemRow: View {
             categoryBackground,
             in: RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius)
         )
+        .overlay {
+            RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius)
+                .stroke(categoryOutline.opacity(0.42), lineWidth: 0.5)
+                .accessibilityHidden(true)
+        }
         .draggable(transferPayload)
     }
 
@@ -379,16 +473,17 @@ struct CalendarItemRow: View {
     private func continuationMarker(systemName: String) -> some View {
         Image(systemName: systemName)
             .font(.system(size: 8, weight: .bold))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(theme.secondaryText)
             .accessibilityHidden(true)
     }
 
     @ViewBuilder
-    private func handleMarker(label: String) -> some View {
+    private func handleMarker(_ accessibility: CalendarResizeHandleAccessibility) -> some View {
         Capsule()
             .fill(categoryColor)
             .frame(width: 3, height: 12)
-            .accessibilityLabel(label)
-            .help(label)
+            .accessibilityLabel(accessibility.label)
+            .accessibilityValue(accessibility.value)
+            .help("\(accessibility.label)，\(accessibility.value)")
     }
 }

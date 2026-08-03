@@ -93,6 +93,10 @@ struct QuickCreatePopover: View {
     @State private var categoryOption: String
     @State private var localError: String?
 
+    private var theme: CalendarSemanticAppearance {
+        CalendarTheme.appearance(for: colorScheme)
+    }
+
     private static let categoryManagerOption = "__category_manager__"
 
     init(
@@ -127,6 +131,9 @@ struct QuickCreatePopover: View {
             }
         }
             .frame(width: availableWidth)
+            .background(theme.elevatedSurface)
+            .foregroundStyle(theme.primaryText)
+            .tint(theme.controlAccent)
             .onAppear { titleFocused = true }
             .onKeyPress(.return) {
                 save()
@@ -217,7 +224,7 @@ struct QuickCreatePopover: View {
             if let message = localError ?? model.validationMessage {
                 Text(message)
                     .font(.footnote)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(theme.error)
             }
             HStack {
                 Spacer()
@@ -241,7 +248,7 @@ struct QuickCreatePopover: View {
                     }
                 }
                 .buttonStyle(.bordered)
-                .tint(model.draft.weekdays.contains(weekday) ? .accentColor : .gray)
+                .tint(model.draft.weekdays.contains(weekday) ? theme.controlAccent : theme.secondaryText)
             }
         }
     }

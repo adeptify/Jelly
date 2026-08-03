@@ -44,7 +44,7 @@ struct CategoryManagerViewModelTests {
         #expect(CalendarTheme.categoryItemBackgroundOpacity == 0.14)
         #expect(CalendarTheme.previewLightCanvasHex == "#F7F1E7")
         #expect(CalendarTheme.previewLightTextHex == "#2A2420")
-        #expect(CalendarTheme.previewDarkCanvasHex == "#1E1A18")
+        #expect(CalendarTheme.previewDarkCanvasHex == "#211E1B")
         #expect(CalendarTheme.previewDarkTextHex == "#F4EDE4")
     }
 

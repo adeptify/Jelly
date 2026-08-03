@@ -10,6 +10,11 @@ struct ItemDetailPopover: View {
     @State private var editorConfiguration: EditorConfiguration?
     @State private var deleteConfirmationShown = false
     @State private var localError: String?
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: CalendarSemanticAppearance {
+        CalendarTheme.appearance(for: colorScheme)
+    }
 
     var body: some View {
         Group {
@@ -26,6 +31,9 @@ struct ItemDetailPopover: View {
             }
         }
         .frame(width: 370)
+        .background(theme.elevatedSurface)
+        .foregroundStyle(theme.primaryText)
+        .tint(theme.controlAccent)
         .confirmationDialog("选择应用范围", isPresented: scopeConfirmationBinding, titleVisibility: .visible) {
             Button("仅本次") { apply(scope: .onlyThis) }
             Button("本次及以后") { apply(scope: .thisAndFuture) }
@@ -47,19 +55,19 @@ struct ItemDetailPopover: View {
                     .buttonStyle(.plain)
             }
             Text(item.kind == .task ? "待办" : "日程")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.secondaryText)
             Text("\(Self.dateString(item.schedule.startDate)) 至 \(Self.dateString(item.schedule.endDate))")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.secondaryText)
             if let startTime = item.schedule.startTime,
                let endTime = item.schedule.endTime {
                 Text("\(Self.timeString(startTime))–\(Self.timeString(endTime))")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.secondaryText)
             } else {
                 Text("全天")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.secondaryText)
             }
             if let message = localError {
-                Text(message).font(.footnote).foregroundStyle(.red)
+                Text(message).font(.footnote).foregroundStyle(theme.error)
             }
             Divider()
             HStack {
@@ -215,6 +223,11 @@ private struct ItemEditForm: View {
     @FocusState private var titleFocused: Bool
     @StateObject private var model: ItemEditorViewModel
     @State private var localError: String?
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: CalendarSemanticAppearance {
+        CalendarTheme.appearance(for: colorScheme)
+    }
 
     init(
         configuration: EditorConfiguration,
@@ -269,7 +282,7 @@ private struct ItemEditForm: View {
                 }
             }
             if let message = localError ?? model.validationMessage {
-                Text(message).font(.footnote).foregroundStyle(.red)
+                Text(message).font(.footnote).foregroundStyle(theme.error)
             }
             HStack {
                 Spacer()
@@ -280,6 +293,9 @@ private struct ItemEditForm: View {
             }
         }
         .padding(18)
+        .background(theme.elevatedSurface)
+        .foregroundStyle(theme.primaryText)
+        .tint(theme.controlAccent)
         .onAppear { titleFocused = true }
         .onKeyPress(.return) { save(); return .handled }
         .onKeyPress(.escape) { onCancel(); return .handled }
@@ -296,7 +312,7 @@ private struct ItemEditForm: View {
                     }
                 }
                 .buttonStyle(.bordered)
-                .tint(model.draft.weekdays.contains(weekday) ? .accentColor : .gray)
+                .tint(model.draft.weekdays.contains(weekday) ? theme.controlAccent : theme.secondaryText)
             }
         }
     }

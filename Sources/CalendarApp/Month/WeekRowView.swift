@@ -39,6 +39,9 @@ struct WeekRowSegmentPresentation: Identifiable, Equatable {
     let showsLeadingHandle: Bool
     let showsTrailingHandle: Bool
     let accessibilityLabel: String
+    let accessibilityValue: String
+    let leadingHandleAccessibility: CalendarResizeHandleAccessibility?
+    let trailingHandleAccessibility: CalendarResizeHandleAccessibility?
 
     var leadingContinuation: Bool { continuesBefore }
     var trailingContinuation: Bool { continuesAfter }
@@ -60,6 +63,27 @@ struct WeekRowSegmentPresentation: Identifiable, Equatable {
             continuesBefore: continuesBefore,
             continuesAfter: continuesAfter
         )
+        accessibilityValue = Self.makeAccessibilityValue(entry: segment.entry)
+        leadingHandleAccessibility = segment.showsLeadingHandle
+            ? .init(
+                label: "调整开始日期",
+                value: CalendarItemAccessibility.fullDateText(segment.entry.schedule.startDate)
+            )
+            : nil
+        trailingHandleAccessibility = segment.showsTrailingHandle
+            ? .init(
+                label: "调整结束日期",
+                value: CalendarItemAccessibility.fullDateText(segment.entry.schedule.endDate)
+            )
+            : nil
+    }
+
+    private static func makeAccessibilityValue(entry: ProjectedEntry) -> String {
+        let item: ProjectedItem = switch entry {
+        case let .item(item): .item(item)
+        case let .occurrence(occurrence): .occurrence(occurrence)
+        }
+        return CalendarItemAccessibility.sourceValue(for: item)
     }
 
     private static func makeAccessibilityLabel(
@@ -72,7 +96,7 @@ struct WeekRowSegmentPresentation: Identifiable, Equatable {
             entry.kind == .task ? "待办" : "日程",
             categoryName,
             entry.title,
-            dateTimeRangeText(for: entry.schedule)
+            CalendarItemAccessibility.dateTimeRangeText(for: entry.schedule)
         ]
         if continuesBefore {
             components.append("从前一周继续")
@@ -86,33 +110,11 @@ struct WeekRowSegmentPresentation: Identifiable, Equatable {
         return components.joined(separator: "，")
     }
 
-    private static func dateTimeRangeText(for schedule: CalendarSchedule) -> String {
-        let includesYear = schedule.startDate.year != schedule.endDate.year
-        let startDate = dateText(schedule.startDate, includesYear: includesYear)
-        let endDate = dateText(schedule.endDate, includesYear: includesYear)
+}
 
-        guard let startTime = schedule.startTime, let endTime = schedule.endTime else {
-            return schedule.startDate == schedule.endDate
-                ? startDate
-                : "\(startDate)至\(endDate)"
-        }
-
-        if schedule.startDate == schedule.endDate {
-            return "\(startDate) \(timeText(startTime))至\(timeText(endTime))"
-        }
-        return "\(startDate) \(timeText(startTime))至\(endDate) \(timeText(endTime))"
-    }
-
-    private static func dateText(_ date: CalendarDate, includesYear: Bool) -> String {
-        if includesYear {
-            return "\(date.year)年\(date.month)月\(date.day)日"
-        }
-        return "\(date.month)月\(date.day)日"
-    }
-
-    private static func timeText(_ time: MinuteOfDay) -> String {
-        String(format: "%02d:%02d", time.value / 60, time.value % 60)
-    }
+struct CalendarResizeHandleAccessibility: Equatable {
+    let label: String
+    let value: String
 }
 
 struct WeekRowPresentation: Equatable {
@@ -725,6 +727,11 @@ private struct WeekRowDateCell: View {
     @ObservedObject var dropCoordinator: CalendarDropCoordinator
     let onAction: (DayCellAction) -> Void
     let onRangeGesture: (WeekRowRangeGesture) -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: CalendarSemanticAppearance {
+        CalendarTheme.appearance(for: colorScheme)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -732,12 +739,18 @@ private struct WeekRowDateCell: View {
                 Button {
                     sendDayAction(for: .dateNumber)
                 } label: {
-                    Text("\(date.day)")
+                    let dayText = String(date.day)
+                    Text(dayText)
                         .font(CalendarTheme.dateFont)
+                        .foregroundStyle(theme.primaryText)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
-                        .background(isToday || isSelected ? CalendarTheme.selectedDay : .clear)
+                        .background(dateBadgeFill)
                         .clipShape(Capsule())
+                        .overlay {
+                            Capsule()
+                                .stroke(dateBadgeOutline, lineWidth: isToday || isSelected ? 1 : 0)
+                        }
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("\(date.month)月\(date.day)日，打开当天事项")
@@ -750,7 +763,7 @@ private struct WeekRowDateCell: View {
                     }
                     .buttonStyle(.plain)
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.secondaryText)
                     .accessibilityLabel("\(date.month)月\(date.day)日，还有 \(overflow) 项，打开当天事项")
                 }
             }
@@ -762,7 +775,7 @@ private struct WeekRowDateCell: View {
         .contentShape(Rectangle())
         .background {
             Rectangle()
-                .fill(isInSelection ? Color.accentColor.opacity(0.14) : Color(nsColor: .windowBackgroundColor))
+                .fill(isInSelection ? theme.rangePreviewFill : theme.canvas)
                 .overlay {
                     GeometryReader { proxy in
                         WeekRowEmptyRangeGestureSurface(
@@ -786,16 +799,28 @@ private struct WeekRowDateCell: View {
                 )
             }
         }
-        .overlay(Rectangle().stroke(CalendarTheme.gridStroke, lineWidth: 0.5))
+        .overlay {
+            Rectangle().stroke(theme.separator, lineWidth: 0.5)
+            if isInSelection {
+                Rectangle()
+                    .inset(by: 2)
+                    .stroke(
+                        theme.rangePreviewOutline,
+                        style: StrokeStyle(lineWidth: 1, dash: [4, 3])
+                    )
+                    .accessibilityHidden(true)
+            }
+        }
         .overlay {
             if dropCoordinator.dropTargetDate == date {
                 Rectangle()
-                    .fill(Color.accentColor.opacity(0.16))
+                    .fill(theme.dragPreviewFill)
                     .allowsHitTesting(false)
+                    .overlay(Rectangle().inset(by: 1).stroke(theme.dragPreviewOutline, lineWidth: 1.5))
                     .overlay(alignment: .bottomLeading) {
                         Text("移到 \(date.month)月\(date.day)日")
                             .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(Color.accentColor)
+                            .foregroundStyle(theme.primaryText)
                             .padding(4)
                     }
             }
@@ -809,6 +834,16 @@ private struct WeekRowDateCell: View {
         } isTargeted: { isTargeted in
             dropCoordinator.setTargeted(isTargeted, date: date)
         }
+    }
+
+    private var dateBadgeFill: Color {
+        if isToday { return theme.todayFill }
+        if isSelected { return theme.selectionFill }
+        return .clear
+    }
+
+    private var dateBadgeOutline: Color {
+        isToday ? theme.todayOutline : theme.selectionOutline
     }
 
     private func sendDayAction(for surface: WeekRowHitSurface) {
@@ -833,12 +868,16 @@ private struct WeekRowSegmentBar: View {
             onCompletion: onCompletion,
             onOpenDetail: onOpenDetail,
             accessibilityLabelOverride: segment.accessibilityLabel,
+            accessibilityValueOverride: segment.accessibilityValue,
             continuesBefore: segment.continuesBefore,
             continuesAfter: segment.continuesAfter,
             showsLeadingHandle: segment.showsLeadingHandle,
-            showsTrailingHandle: segment.showsTrailingHandle
+            showsTrailingHandle: segment.showsTrailingHandle,
+            leadingHandleAccessibility: segment.leadingHandleAccessibility,
+            trailingHandleAccessibility: segment.trailingHandleAccessibility
         )
         .accessibilityIdentifier(stableAccessibilityIdentifier)
+        .accessibilityValue(segment.accessibilityValue)
         .overlay {
             GeometryReader { proxy in
                 WeekRowItemGestureSurface(

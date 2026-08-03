@@ -206,6 +206,8 @@ struct MonthView: View {
     private let todayRefreshController: MonthViewTodayRefreshController
     @Environment(\.openWindow) private var openWindow
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @StateObject private var model: MonthViewModel
     @StateObject private var dropCoordinator: CalendarDropCoordinator
     @StateObject private var interactionCoordinator: CalendarInteractionCoordinator
@@ -223,6 +225,14 @@ struct MonthView: View {
     @State private var selectedItem: ProjectedItem?
     @State private var recurringDropPresentation = RecurringDropPresentationController()
     @State private var requestedCenterRequest: WeekStreamScrollRequest?
+
+    private var theme: CalendarSemanticAppearance {
+        CalendarTheme.appearance(for: colorScheme)
+    }
+
+    private var motionPolicy: CalendarMotionPolicy {
+        CalendarMotionPolicy(reduceMotion: accessibilityReduceMotion)
+    }
 
     init(
         store: CalendarStore,
@@ -258,7 +268,14 @@ struct MonthView: View {
                 weekStream(viewportBounds: proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root)))
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(theme.canvas)
+        .foregroundStyle(theme.primaryText)
+        .tint(theme.controlAccent)
+        .transaction { transaction in
+            if accessibilityReduceMotion {
+                transaction.disablesAnimations = true
+            }
+        }
         .coordinateSpace(name: CalendarInteractionCoordinateSpace.root)
         .onAppear {
             hiddenCategoryIDs = CategoryFilterView.decode(storedHiddenCategoryIDs)
@@ -312,7 +329,11 @@ struct MonthView: View {
                     store: store,
                     categories: store.state.categories,
                     hiddenCategoryIDs: hiddenCategoryIDs,
-                    onClose: { selectedDayDrawerDate = nil },
+                    onClose: {
+                        withAnimation(motionPolicy.overlayAnimation) {
+                            selectedDayDrawerDate = nil
+                        }
+                    },
                     onQuickCreate: { openQuickCreate(on: $0) },
                     onOpenDetail: { selectedItem = $0 }
                 )
@@ -341,8 +362,12 @@ struct MonthView: View {
                         onClose: dismissQuickCreate
                     )
                     .frame(width: overlayPresentation.placement.frame.width)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                    .shadow(color: .black.opacity(0.16), radius: 14, y: 5)
+                    .background(theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 12))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(theme.subtleBorder, lineWidth: 1)
+                    }
+                    .shadow(color: theme.subtleShadow.opacity(0.20), radius: 14, y: 5)
                     .position(
                         x: overlayPresentation.placement.frame.midX,
                         y: overlayPresentation.placement.frame.midY
@@ -361,7 +386,9 @@ struct MonthView: View {
                 .font(.system(size: 12, weight: .medium))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(.regularMaterial, in: Capsule())
+                .foregroundStyle(theme.primaryText)
+                .background(theme.elevatedSurface, in: Capsule())
+                .overlay(Capsule().stroke(theme.subtleBorder, lineWidth: 0.5))
                 .padding(.bottom, 16)
                 .transition(.opacity)
             }
@@ -381,7 +408,7 @@ struct MonthView: View {
                 if MonthEmptyStateHintPolicy.shouldShow(phase: store.phase, state: store.state) {
                     Text("点击日期开始创建")
                         .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.secondaryText)
                 }
             }
             Spacer()
@@ -414,13 +441,13 @@ struct MonthView: View {
             ForEach(["一", "二", "三", "四", "五", "六", "日"], id: \.self) { weekday in
                 Text(weekday)
                     .font(CalendarTheme.dateFont)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.secondaryText)
                     .frame(maxWidth: .infinity)
             }
         }
         .frame(height: CalendarTheme.weekdayHeaderHeight)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(CalendarTheme.gridStroke).frame(height: 0.5)
+            Rectangle().fill(theme.separator).frame(height: 0.5)
         }
     }
 
@@ -468,7 +495,9 @@ struct MonthView: View {
         switch action {
         case let .openDay(date):
             model.selectedDate = date
-            selectedDayDrawerDate = date
+            withAnimation(motionPolicy.overlayAnimation) {
+                selectedDayDrawerDate = date
+            }
         case let .quickCreate(date):
             openQuickCreate(on: date)
         case let .openItem(id):
@@ -624,11 +653,11 @@ struct MonthView: View {
             }
             .coordinateSpace(name: "week-stream-viewport")
             .onAppear {
-                scrollProxy.scrollTo(model.focusWeek, anchor: .center)
+                align(scrollProxy, to: model.focusWeek, anchor: .center)
             }
             .onChange(of: requestedCenterRequest) { _, request in
                 guard let request else { return }
-                scrollProxy.scrollTo(request.weekStart, anchor: .center)
+                align(scrollProxy, to: request.weekStart, anchor: .center)
             }
             .onPreferenceChange(WeekRowFramePreferenceKey.self) { frames in
                 handleWeekStreamViewport(
@@ -788,7 +817,9 @@ struct MonthView: View {
             return
         }
         cancelRangeAutoScroll()
-        quickCreatePresentation = presentation
+        withAnimation(motionPolicy.overlayAnimation) {
+            quickCreatePresentation = presentation
+        }
         lastEditorAnchorFrame = dateFrameMap.frame(for: presentation.anchorDate)
         quickCreateMeasuredContentSize = .zero
         interactionCoordinator.openEditor(for: presentation.range, anchor: presentation.anchorDate)
@@ -796,10 +827,23 @@ struct MonthView: View {
 
     private func dismissQuickCreate() {
         cancelRangeAutoScroll()
-        quickCreatePresentation = nil
+        withAnimation(motionPolicy.overlayAnimation) {
+            quickCreatePresentation = nil
+        }
         lastEditorAnchorFrame = nil
         quickCreateMeasuredContentSize = .zero
         interactionCoordinator.cancel()
+    }
+
+    private func align(
+        _ proxy: ScrollViewProxy,
+        to weekStart: CalendarDate,
+        anchor: UnitPoint
+    ) {
+        guard motionPolicy.shouldAlignToWeek else { return }
+        withAnimation(motionPolicy.snapAnimation) {
+            proxy.scrollTo(weekStart, anchor: anchor)
+        }
     }
 
     private func cancelRangeAutoScroll() {

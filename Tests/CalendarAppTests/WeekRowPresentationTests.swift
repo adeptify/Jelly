@@ -60,6 +60,71 @@ struct WeekRowPresentationTests {
             == "待办，工作，产品发布，8月29日至9月2日，延续到下一周，未完成")
     }
 
+    @Test func continuationAccessibilityNamesFullRangeBothDirectionsAndStableSourceIdentity() throws {
+        let fixture = try makeCrossMonthFixture()
+        let longItem = try CalendarItem(
+            id: fixture.item.id,
+            kind: fixture.item.kind,
+            title: fixture.item.title,
+            categoryID: fixture.item.categoryID,
+            schedule: try CalendarSchedule(
+                startDate: CalendarDate(year: 2026, month: 8, day: 20)!,
+                endDate: CalendarDate(year: 2026, month: 9, day: 12)!,
+                startTime: MinuteOfDay(hour: 9, minute: 15)!,
+                endTime: MinuteOfDay(hour: 18, minute: 30)!
+            ),
+            completedAt: Date(timeIntervalSince1970: 1),
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let middleWeek = CalendarDate(year: 2026, month: 8, day: 24)!
+        let nextWeek = middleWeek.addingDays(7)
+        let layouts = WeekSegmentLayout.make(
+            entries: [.item(longItem)],
+            weekStarts: [middleWeek, nextWeek],
+            laneCapacity: 10
+        )
+        let firstLayout = try #require(layouts.first)
+        let secondLayout = try #require(layouts.last)
+        let first = try #require(WeekRowPresentation(
+            layout: firstLayout,
+            categories: [fixture.category.id: fixture.category]
+        ).segment(.item(longItem.id)))
+        let second = try #require(WeekRowPresentation(
+            layout: secondLayout,
+            categories: [fixture.category.id: fixture.category]
+        ).segment(.item(longItem.id)))
+
+        #expect(first.accessibilityLabel.contains("8月20日 09:15至9月12日 18:30"))
+        #expect(first.accessibilityLabel.contains("从前一周继续"))
+        #expect(first.accessibilityLabel.contains("延续到下一周"))
+        #expect(first.accessibilityLabel.contains("已完成"))
+        #expect(first.accessibilityValue == second.accessibilityValue)
+        #expect(first.accessibilityValue == "来源事项 item:\(longItem.id.uuidString)")
+    }
+
+    @Test func onlyTrueOuterHandlesExposePurposeAndCurrentDate() throws {
+        let fixture = try makeCrossMonthFixture()
+        let layouts = WeekSegmentLayout.make(
+            entries: [.item(fixture.item)],
+            weekStarts: [fixture.firstWeek, fixture.secondWeek],
+            laneCapacity: 10
+        )
+        let firstLayout = try #require(layouts.first)
+        let secondLayout = try #require(layouts.last)
+        let first = try #require(WeekRowPresentation(layout: firstLayout)
+            .segment(.item(fixture.item.id)))
+        let second = try #require(WeekRowPresentation(layout: secondLayout)
+            .segment(.item(fixture.item.id)))
+
+        #expect(first.leadingHandleAccessibility?.label == "调整开始日期")
+        #expect(first.leadingHandleAccessibility?.value == "2026年8月29日")
+        #expect(first.trailingHandleAccessibility == nil)
+        #expect(second.leadingHandleAccessibility == nil)
+        #expect(second.trailingHandleAccessibility?.label == "调整结束日期")
+        #expect(second.trailingHandleAccessibility?.value == "2026年9月2日")
+    }
+
     @Test func accessibilityReadsBothDatesAndTimesForAContinuationAcrossYears() throws {
         let category = CalendarCategory(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000705")!,
