@@ -18,7 +18,7 @@ public enum RecurrenceEngine {
         exceptions: [OccurrenceKey: OccurrenceExceptionKind],
         completions: [OccurrenceKey: OccurrenceCompletion]
     ) -> [CalendarOccurrence] {
-        let projectionStart = series.ruleStartDate
+        let projectionStart = naturalProjectionStart(of: series, in: range)
         let projectionEnd = min(series.recurrenceEndDate ?? range.end, range.end)
         var consumedKeys = Set<OccurrenceKey>()
         var occurrencesByKey = [OccurrenceKey: CalendarOccurrence]()
@@ -82,6 +82,16 @@ public enum RecurrenceEngine {
         }
 
         return occurrencesByKey.values.sorted(by: isOrderedBefore)
+    }
+
+    static func naturalProjectionStart(
+        of series: WeeklySeries,
+        in range: CalendarDateRange
+    ) -> CalendarDate {
+        max(
+            series.ruleStartDate,
+            range.start.addingDays(-(series.durationDays - 1))
+        )
     }
 
     private static func makeOccurrence(

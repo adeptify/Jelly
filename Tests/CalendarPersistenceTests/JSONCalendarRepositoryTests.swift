@@ -305,6 +305,102 @@ struct JSONCalendarRepositoryTests {
         }
     }
 
+    @Test func weeklySeriesDecoderRejectsMissingV2CoreFields() throws {
+        let state = try makePopulatedState()
+        let series = try #require(state.recurrence.series.values.first)
+        var payload = try encodedJSONDictionary(series)
+        payload.removeValue(forKey: "durationDays")
+
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(WeeklySeries.self, from: try jsonData(payload))
+        }
+    }
+
+    @Test func weeklySeriesDecoderTreatsEveryV2ScheduleKeyAsV2Shape() throws {
+        let state = try makePopulatedState()
+        let series = try #require(state.recurrence.series.values.first)
+        var legacyBase = try encodedJSONDictionary(series)
+        legacyBase["startDate"] = legacyBase.removeValue(forKey: "ruleStartDate")
+        legacyBase["endDate"] = legacyBase.removeValue(forKey: "recurrenceEndDate")
+        legacyBase.removeValue(forKey: "durationDays")
+
+        var isolatedRecurrenceEnd = legacyBase
+        isolatedRecurrenceEnd["recurrenceEndDate"] = ["year": 2026, "month": 8, "day": 31]
+        var isolatedStartTime = legacyBase
+        isolatedStartTime["startTime"] = ["value": 540]
+        var isolatedEndTime = legacyBase
+        isolatedEndTime["endTime"] = ["value": 600]
+
+        for payload in [isolatedRecurrenceEnd, isolatedStartTime, isolatedEndTime] {
+            #expect(throws: DecodingError.self) {
+                try JSONDecoder().decode(WeeklySeries.self, from: try jsonData(payload))
+            }
+        }
+    }
+
+    @Test func weeklySeriesDecoderAcceptsOnlyEquivalentMixedRepresentations() throws {
+        let state = try makePopulatedState()
+        let series = try #require(state.recurrence.series.values.first)
+        var equivalent = try encodedJSONDictionary(series)
+        equivalent["startDate"] = equivalent["ruleStartDate"]
+        equivalent["endDate"] = equivalent["recurrenceEndDate"]
+
+        #expect(
+            try JSONDecoder().decode(WeeklySeries.self, from: jsonData(equivalent)) == series
+        )
+
+        var conflictingDuration = equivalent
+        conflictingDuration["durationDays"] = 2
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(
+                WeeklySeries.self,
+                from: try jsonData(conflictingDuration)
+            )
+        }
+    }
+
+    @Test func occurrenceOverrideDecoderRejectsConflictingDualSchedules() throws {
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000400")!
+        let displayedDate = CalendarDate(year: 2026, month: 8, day: 11)!
+        let v2TimeRange = try LocalTimeRange(
+            start: MinuteOfDay(hour: 9, minute: 0)!,
+            end: MinuteOfDay(hour: 10, minute: 0)!
+        )
+        let override = OccurrenceOverride(
+            displayedSchedule: try CalendarSchedule(
+                startDate: displayedDate,
+                endDate: displayedDate,
+                startTime: v2TimeRange.start,
+                endTime: v2TimeRange.end
+            ),
+            title: "改期复盘",
+            kind: .task,
+            categoryID: categoryID
+        )
+        let base = try encodedJSONDictionary(override)
+
+        var dateConflict = base
+        dateConflict["displayedDate"] = try encodedJSONValue(
+            CalendarDate(year: 2026, month: 8, day: 12)!
+        )
+        dateConflict["timeRange"] = try encodedJSONValue(v2TimeRange)
+
+        var timeConflict = base
+        timeConflict["displayedDate"] = try encodedJSONValue(displayedDate)
+        timeConflict["timeRange"] = try encodedJSONValue(
+            LocalTimeRange(
+                start: MinuteOfDay(hour: 11, minute: 0)!,
+                end: MinuteOfDay(hour: 12, minute: 0)!
+            )
+        )
+
+        for payload in [dateConflict, timeConflict] {
+            #expect(throws: DecodingError.self) {
+                try JSONDecoder().decode(OccurrenceOverride.self, from: try jsonData(payload))
+            }
+        }
+    }
+
     @Test func decodablePartialOrReversedTimeIsRejected() async throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
@@ -564,6 +660,23 @@ private func mutatedDocumentData(
     var document = try JSONSerialization.jsonObject(with: source) as! [String: Any]
     try mutation(&document)
     return try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys])
+}
+
+private func encodedJSONDictionary<Value: Encodable>(_ value: Value) throws -> [String: Any] {
+    guard let dictionary = try JSONSerialization.jsonObject(
+        with: JSONEncoder().encode(value)
+    ) as? [String: Any] else {
+        throw RawJSONMutationError.unexpectedShape
+    }
+    return dictionary
+}
+
+private func encodedJSONValue<Value: Encodable>(_ value: Value) throws -> Any {
+    try JSONSerialization.jsonObject(with: JSONEncoder().encode(value))
+}
+
+private func jsonData(_ value: [String: Any]) throws -> Data {
+    try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
 }
 
 private func requiredItemID(in state: CalendarState) throws -> UUID {

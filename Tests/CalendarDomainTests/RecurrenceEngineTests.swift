@@ -351,6 +351,35 @@ struct RecurrenceEngineTests {
         #expect(try #require(result.first).schedule.endDate == CalendarDate(year: 2026, month: 8, day: 7)!)
     }
 
+    @Test func naturalProjectionUsesOnlyTheLookbackNeededForAnIntersectingTail() throws {
+        let series = try makeV2Series(
+            ruleStartDate: .init(year: 2020, month: 1, day: 1)!,
+            weekdays: [.wednesday],
+            durationDays: 3
+        )
+        let range = CalendarDateRange(
+            start: .init(year: 2026, month: 8, day: 7)!,
+            end: .init(year: 2026, month: 8, day: 7)!
+        )
+
+        #expect(
+            RecurrenceEngine.naturalProjectionStart(of: series, in: range) ==
+                CalendarDate(year: 2026, month: 8, day: 5)!
+        )
+
+        let result = RecurrenceEngine.occurrences(
+            of: series,
+            in: range,
+            exceptions: [:],
+            completions: [:]
+        )
+
+        #expect(result.map(\.key.originalDate) == [
+            CalendarDate(year: 2026, month: 8, day: 5)!
+        ])
+        #expect(try #require(result.first).schedule.endDate == range.end)
+    }
+
     private func makeSeries(
         id: UUID = UUID(uuidString: "00000000-0000-0000-0000-000000000201")!,
         kind: ItemKind = .task,
