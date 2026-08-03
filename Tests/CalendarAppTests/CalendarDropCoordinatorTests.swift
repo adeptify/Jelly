@@ -7,6 +7,255 @@ import Testing
 @Suite("CalendarDropCoordinatorTests")
 @MainActor
 struct CalendarDropCoordinatorTests {
+    @Test func ordinaryRangeResizePersistsExactlyOnceAndRegistersOneUndo() async throws {
+        var original = makeEmptyState()
+        let item = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "跨周普通事项",
+            categoryID: original.uncategorizedID,
+            schedule: try schedule(6, 8),
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        original.items[item.id] = item
+        let repository = InMemoryCalendarRepository(initialState: original)
+        let store = CalendarStore(initialState: original, repository: repository)
+        await store.load()
+        let coordinator = CalendarDropCoordinator(store: store)
+        let pending = PendingCalendarMutation(
+            source: .item(item),
+            operation: .resizeTrailing,
+            originalSchedule: item.schedule,
+            previewSchedule: try schedule(6, 15)
+        )
+
+        try await coordinator.accept(pending)
+
+        #expect(store.state.items[item.id]?.schedule == pending.previewSchedule)
+        #expect(await repository.saveCount == 1)
+        #expect(store.canUndo)
+        try await store.undo()
+        #expect(store.state == original)
+        #expect(await repository.saveCount == 2)
+        #expect(!store.canUndo)
+    }
+
+    @Test func duplicateCapturedOrdinaryMutationSubmitsExactlyOnce() async throws {
+        var original = makeEmptyState()
+        let item = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "只提交一次",
+            categoryID: original.uncategorizedID,
+            schedule: try schedule(6, 8),
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        original.items[item.id] = item
+        let repository = InMemoryCalendarRepository(initialState: original)
+        let store = CalendarStore(initialState: original, repository: repository)
+        await store.load()
+        let coordinator = CalendarDropCoordinator(store: store)
+        let pending = PendingCalendarMutation(
+            source: .item(item),
+            operation: .move,
+            originalSchedule: item.schedule,
+            previewSchedule: try schedule(11, 13)
+        )
+        await repository.suspendNextSave()
+
+        let first = Task { @MainActor in try await coordinator.accept(pending) }
+        await repository.waitForSaveToStart()
+        try await coordinator.accept(pending)
+        await repository.resumeSave()
+        try await first.value
+        try await coordinator.accept(pending)
+
+        #expect(await repository.saveCount == 1)
+        #expect(store.state.items[item.id]?.schedule == pending.previewSchedule)
+        #expect(store.canUndo)
+    }
+
+    @Test func recurringOnlyThisLeadingResizeKeepsOccurrenceIdentity() async throws {
+        let harness = try makeRangeMutationHarness()
+        let (store, repository, coordinator) = await makeCoordinator(state: harness.originalState)
+        let preview = try schedule(11, 12)
+
+        try await coordinator.accept(.init(
+            source: .occurrence(harness.boundaryOccurrence),
+            operation: .resizeLeading,
+            originalSchedule: harness.boundaryOccurrence.schedule,
+            previewSchedule: preview
+        ))
+
+        #expect(await repository.saveCount == 0)
+        #expect(store.state == harness.originalState)
+        try await coordinator.resolve(scope: .onlyThis)
+
+        guard case let .some(.modified(override)) =
+            store.state.recurrence.exceptions[harness.boundaryOccurrence.key]
+        else {
+            Issue.record("Expected stable-key boundary override")
+            return
+        }
+        #expect(override.displayedSchedule == preview)
+        #expect(store.state.recurrence.series[harness.series.id] == harness.series)
+        #expect(await repository.saveCount == 1)
+    }
+
+    @Test func recurringOnlyThisTrailingResizeKeepsOccurrenceIdentityAndStart() async throws {
+        let harness = try makeRangeMutationHarness()
+        let (store, repository, coordinator) = await makeCoordinator(state: harness.originalState)
+        let preview = try schedule(10, 15)
+        try await coordinator.accept(.init(
+            source: .occurrence(harness.boundaryOccurrence),
+            operation: .resizeTrailing,
+            originalSchedule: harness.boundaryOccurrence.schedule,
+            previewSchedule: preview
+        ))
+
+        try await coordinator.resolve(scope: .onlyThis)
+
+        guard case let .some(.modified(override)) =
+            store.state.recurrence.exceptions[harness.boundaryOccurrence.key]
+        else {
+            Issue.record("Expected stable-key trailing override")
+            return
+        }
+        #expect(override.displayedSchedule == preview)
+        #expect(store.state.recurrence.series[harness.series.id] == harness.series)
+        #expect(await repository.saveCount == 1)
+    }
+
+    @Test func recurringFutureLeadingResizeShiftsPatternDeadlineExceptionsAndCompletions() async throws {
+        let harness = try makeRangeMutationHarness()
+        let (store, repository, coordinator) = await makeCoordinator(state: harness.originalState)
+        let preview = try schedule(11, 12)
+        try await coordinator.accept(.init(
+            source: .occurrence(harness.boundaryOccurrence),
+            operation: .resizeLeading,
+            originalSchedule: harness.boundaryOccurrence.schedule,
+            previewSchedule: preview
+        ))
+        let newSeriesID = try #require(coordinator.pendingRecurringDrop?.newSeriesID)
+
+        try await coordinator.resolve(scope: .thisAndFuture)
+
+        let future = try #require(store.state.recurrence.series[newSeriesID])
+        #expect(future.ruleStartDate == date(11))
+        #expect(future.recurrenceEndDate == CalendarDate(year: 2026, month: 9, day: 1)!)
+        #expect(future.weekdays == [.tuesday, .thursday])
+        #expect(future.durationDays == 2)
+        let shiftedExceptionKey = OccurrenceKey(
+            seriesID: newSeriesID,
+            originalDate: harness.futureExceptionKey.originalDate.addingDays(1)
+        )
+        guard case let .some(.modified(override)) =
+            store.state.recurrence.exceptions[shiftedExceptionKey]
+        else {
+            Issue.record("Expected shifted future exception")
+            return
+        }
+        let expectedShiftedExceptionSchedule = try schedule(19, 22)
+        #expect(override.displayedSchedule == expectedShiftedExceptionSchedule)
+        let shiftedCompletionKey = OccurrenceKey(
+            seriesID: newSeriesID,
+            originalDate: harness.futureCompletionKey.originalDate.addingDays(1)
+        )
+        #expect(store.state.recurrence.completions[shiftedCompletionKey]?.completedAt == harness.completedAt)
+        #expect(await repository.saveCount == 1)
+        #expect(store.canUndo)
+    }
+
+    @Test func recurringFutureTrailingResizeChangesOnlyDuration() async throws {
+        let harness = try makeRangeMutationHarness()
+        let (store, repository, coordinator) = await makeCoordinator(state: harness.originalState)
+        try await coordinator.accept(.init(
+            source: .occurrence(harness.boundaryOccurrence),
+            operation: .resizeTrailing,
+            originalSchedule: harness.boundaryOccurrence.schedule,
+            previewSchedule: try schedule(10, 15)
+        ))
+        let newSeriesID = try #require(coordinator.pendingRecurringDrop?.newSeriesID)
+
+        try await coordinator.resolve(scope: .thisAndFuture)
+
+        let future = try #require(store.state.recurrence.series[newSeriesID])
+        #expect(future.ruleStartDate == date(10))
+        #expect(future.recurrenceEndDate == date(31))
+        #expect(future.weekdays == harness.series.weekdays)
+        #expect(future.durationDays == 6)
+        let migratedExceptionKey = OccurrenceKey(
+            seriesID: newSeriesID,
+            originalDate: harness.futureExceptionKey.originalDate
+        )
+        guard case let .some(.modified(override)) =
+            store.state.recurrence.exceptions[migratedExceptionKey]
+        else {
+            Issue.record("Expected unshifted future exception")
+            return
+        }
+        let expectedUnshiftedExceptionSchedule = try schedule(18, 21)
+        #expect(override.displayedSchedule == expectedUnshiftedExceptionSchedule)
+        let migratedCompletionKey = OccurrenceKey(
+            seriesID: newSeriesID,
+            originalDate: harness.futureCompletionKey.originalDate
+        )
+        #expect(store.state.recurrence.completions[migratedCompletionKey]?.completedAt == harness.completedAt)
+        #expect(await repository.saveCount == 1)
+    }
+
+    @Test func failedCapturedResizeRollsBackWithoutHalfSplitAndRemainsRetryable() async throws {
+        let harness = try makeRangeMutationHarness()
+        let (store, repository, coordinator) = await makeCoordinator(state: harness.originalState)
+        try await coordinator.accept(.init(
+            source: .occurrence(harness.boundaryOccurrence),
+            operation: .resizeLeading,
+            originalSchedule: harness.boundaryOccurrence.schedule,
+            previewSchedule: try schedule(11, 12)
+        ))
+        await repository.failNextSave()
+
+        do {
+            try await coordinator.resolve(scope: .thisAndFuture)
+            Issue.record("A failed range mutation must throw")
+        } catch let error as StoreError {
+            #expect(error == .persistenceFailed)
+        }
+
+        #expect(store.state == harness.originalState)
+        #expect(await repository.persistedState == harness.originalState)
+        #expect(await repository.saveCount == 0)
+        #expect(!store.canUndo)
+        #expect(coordinator.pendingCalendarMutation != nil)
+
+        try await coordinator.resolve(scope: .thisAndFuture)
+        #expect(await repository.saveCount == 1)
+        #expect(coordinator.pendingCalendarMutation == nil)
+        #expect(store.canUndo)
+    }
+
+    @Test func cancellingCapturedRecurringResizeLeavesStateDiskAndUndoUntouched() async throws {
+        let harness = try makeRangeMutationHarness()
+        let (store, repository, coordinator) = await makeCoordinator(state: harness.originalState)
+        try await coordinator.accept(.init(
+            source: .occurrence(harness.boundaryOccurrence),
+            operation: .resizeTrailing,
+            originalSchedule: harness.boundaryOccurrence.schedule,
+            previewSchedule: try schedule(10, 15)
+        ))
+
+        coordinator.cancel()
+
+        #expect(store.state == harness.originalState)
+        #expect(await repository.persistedState == harness.originalState)
+        #expect(await repository.saveCount == 0)
+        #expect(!store.canUndo)
+    }
+
     @Test func oneOffDropPreservesTimeAndRegistersOneUndo() async throws {
         let uncategorizedID = UUID(uuidString: "00000000-0000-0000-0000-000000000801")!
         var original = CalendarState.empty(
@@ -361,6 +610,92 @@ struct CalendarDropCoordinatorTests {
         #expect(store.state == original)
         #expect(await repository.saveCount == 0)
     }
+}
+
+private struct RangeMutationHarness {
+    let originalState: CalendarState
+    let series: WeeklySeries
+    let boundaryOccurrence: CalendarOccurrence
+    let futureExceptionKey: OccurrenceKey
+    let futureCompletionKey: OccurrenceKey
+    let completedAt: Date
+}
+
+private func makeRangeMutationHarness() throws -> RangeMutationHarness {
+    let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000890")!
+    let seriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000891")!
+    let series = try WeeklySeries(
+        id: seriesID,
+        kind: .task,
+        title: "跨日重复事项",
+        categoryID: categoryID,
+        ruleStartDate: date(3),
+        recurrenceEndDate: date(31),
+        weekdays: [.monday, .wednesday],
+        durationDays: 3,
+        startTime: nil,
+        endTime: nil,
+        creationTimeZoneIdentifier: "Asia/Shanghai",
+        createdAt: .distantPast,
+        updatedAt: .distantPast
+    )
+    let boundaryKey = OccurrenceKey(seriesID: seriesID, originalDate: date(10))
+    let boundaryOccurrence = CalendarOccurrence(
+        key: boundaryKey,
+        schedule: try schedule(10, 12),
+        title: series.title,
+        kind: series.kind,
+        categoryID: series.categoryID,
+        creationTimeZoneIdentifier: series.creationTimeZoneIdentifier,
+        completedAt: nil,
+        createdAt: series.createdAt
+    )
+    let futureExceptionKey = OccurrenceKey(seriesID: seriesID, originalDate: date(17))
+    let futureCompletionKey = OccurrenceKey(seriesID: seriesID, originalDate: date(19))
+    let completedAt = Date(timeIntervalSince1970: 900)
+    var state = CalendarState.empty(uncategorizedID: categoryID, now: .distantPast)
+    state.recurrence.series[seriesID] = series
+    state.recurrence.exceptions[futureExceptionKey] = .modified(.init(
+        displayedSchedule: try schedule(18, 21),
+        title: "未来例外",
+        kind: .task,
+        categoryID: categoryID
+    ))
+    state.recurrence.completions[futureCompletionKey] = .init(
+        key: futureCompletionKey,
+        completedAt: completedAt
+    )
+    return .init(
+        originalState: state,
+        series: series,
+        boundaryOccurrence: boundaryOccurrence,
+        futureExceptionKey: futureExceptionKey,
+        futureCompletionKey: futureCompletionKey,
+        completedAt: completedAt
+    )
+}
+
+@MainActor
+private func makeCoordinator(
+    state: CalendarState
+) async -> (CalendarStore, InMemoryCalendarRepository, CalendarDropCoordinator) {
+    let repository = InMemoryCalendarRepository(initialState: state)
+    let store = CalendarStore(initialState: state, repository: repository)
+    await store.load()
+    return (store, repository, CalendarDropCoordinator(store: store))
+}
+
+private func date(_ day: Int) -> CalendarDate {
+    CalendarDate(year: 2026, month: 8, day: day)!
+}
+
+private func schedule(_ startDay: Int, _ endDay: Int) throws -> CalendarSchedule {
+    try CalendarSchedule(
+        startDate: date(startDay),
+        endDate: date(endDay),
+        startTime: nil,
+        endTime: nil
+    )
 }
 
 private struct DropHarness {

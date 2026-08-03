@@ -321,6 +321,31 @@ enum WeekRowHitRouting {
     }
 }
 
+enum WeekRowItemHitRouting {
+    static let handleHitWidth: CGFloat = 14
+    static let completionHitRange: ClosedRange<CGFloat> = 10...34
+
+    static func target(
+        atX x: CGFloat,
+        width: CGFloat,
+        kind: ItemKind,
+        showsLeadingHandle: Bool,
+        showsTrailingHandle: Bool
+    ) -> CalendarInteractionHitTarget {
+        let clampedX = min(max(x, 0), max(0, width))
+        if kind == .task, completionHitRange.contains(clampedX) {
+            return .completionButton
+        }
+        if showsLeadingHandle, clampedX <= handleHitWidth {
+            return .leadingHandle
+        }
+        if showsTrailingHandle, clampedX >= max(0, width - handleHitWidth) {
+            return .trailingHandle
+        }
+        return .barBody
+    }
+}
+
 @MainActor
 final class WeekRowRangeGestureSurfaceView: NSView {
     private var date: CalendarDate
@@ -417,6 +442,173 @@ private struct WeekRowEmptyRangeGestureSurface: NSViewRepresentable {
     }
 }
 
+@MainActor
+final class WeekRowItemGestureSurfaceView: NSView {
+    private var source: ProjectedEntry
+    private var weekStart: CalendarDate
+    private var startColumn: Int
+    private var endColumn: Int
+    private var columnWidth: CGFloat
+    private var rootOrigin: CGPoint
+    private var showsLeadingHandle: Bool
+    private var showsTrailingHandle: Bool
+    private var onItemGesture: (WeekRowItemGesture) -> Void
+    private var onClick: (CalendarInteractionHitTarget) -> Void
+    private var trackedTarget: CalendarInteractionHitTarget?
+    private var trackedRootPoint: CGPoint?
+
+    override var isFlipped: Bool { true }
+
+    init(
+        source: ProjectedEntry,
+        weekStart: CalendarDate,
+        startColumn: Int,
+        endColumn: Int,
+        columnWidth: CGFloat,
+        rootOrigin: CGPoint,
+        showsLeadingHandle: Bool,
+        showsTrailingHandle: Bool,
+        onItemGesture: @escaping (WeekRowItemGesture) -> Void,
+        onClick: @escaping (CalendarInteractionHitTarget) -> Void
+    ) {
+        self.source = source
+        self.weekStart = weekStart
+        self.startColumn = startColumn
+        self.endColumn = endColumn
+        self.columnWidth = columnWidth
+        self.rootOrigin = rootOrigin
+        self.showsLeadingHandle = showsLeadingHandle
+        self.showsTrailingHandle = showsTrailingHandle
+        self.onItemGesture = onItemGesture
+        self.onClick = onClick
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func update(
+        source: ProjectedEntry,
+        weekStart: CalendarDate,
+        startColumn: Int,
+        endColumn: Int,
+        columnWidth: CGFloat,
+        rootOrigin: CGPoint,
+        showsLeadingHandle: Bool,
+        showsTrailingHandle: Bool,
+        onItemGesture: @escaping (WeekRowItemGesture) -> Void,
+        onClick: @escaping (CalendarInteractionHitTarget) -> Void
+    ) {
+        self.source = source
+        self.weekStart = weekStart
+        self.startColumn = startColumn
+        self.endColumn = endColumn
+        self.columnWidth = columnWidth
+        self.rootOrigin = rootOrigin
+        self.showsLeadingHandle = showsLeadingHandle
+        self.showsTrailingHandle = showsTrailingHandle
+        self.onItemGesture = onItemGesture
+        self.onClick = onClick
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let localPoint = convert(event.locationInWindow, from: nil)
+        let rootPoint = rootPoint(for: localPoint)
+        let target = WeekRowItemHitRouting.target(
+            atX: localPoint.x,
+            width: bounds.width,
+            kind: source.kind,
+            showsLeadingHandle: showsLeadingHandle,
+            showsTrailingHandle: showsTrailingHandle
+        )
+        trackedTarget = target
+        trackedRootPoint = rootPoint
+        onItemGesture(.began(date(atLocalX: localPoint.x), target, source, rootPoint))
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard trackedTarget != nil else { return }
+        onItemGesture(.changed(rootPoint(for: convert(event.locationInWindow, from: nil))))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer {
+            trackedTarget = nil
+            trackedRootPoint = nil
+        }
+        guard let trackedTarget, let trackedRootPoint else { return }
+        let point = rootPoint(for: convert(event.locationInWindow, from: nil))
+        onItemGesture(.ended(point))
+        guard hypot(point.x - trackedRootPoint.x, point.y - trackedRootPoint.y)
+            < CalendarInteractionCoordinator.dragThreshold
+        else {
+            return
+        }
+        onClick(trackedTarget)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        nextResponder?.scrollWheel(with: event)
+    }
+
+    private func date(atLocalX x: CGFloat) -> CalendarDate {
+        guard columnWidth > 0 else { return weekStart.addingDays(startColumn) }
+        let localColumn = min(
+            max(Int(floor(x / columnWidth)), 0),
+            endColumn - startColumn
+        )
+        return weekStart.addingDays(startColumn + localColumn)
+    }
+
+    private func rootPoint(for localPoint: CGPoint) -> CGPoint {
+        CGPoint(x: rootOrigin.x + localPoint.x, y: rootOrigin.y + localPoint.y)
+    }
+}
+
+private struct WeekRowItemGestureSurface: NSViewRepresentable {
+    let source: ProjectedEntry
+    let weekStart: CalendarDate
+    let startColumn: Int
+    let endColumn: Int
+    let columnWidth: CGFloat
+    let rootOrigin: CGPoint
+    let showsLeadingHandle: Bool
+    let showsTrailingHandle: Bool
+    let onItemGesture: (WeekRowItemGesture) -> Void
+    let onClick: (CalendarInteractionHitTarget) -> Void
+
+    func makeNSView(context _: Context) -> WeekRowItemGestureSurfaceView {
+        WeekRowItemGestureSurfaceView(
+            source: source,
+            weekStart: weekStart,
+            startColumn: startColumn,
+            endColumn: endColumn,
+            columnWidth: columnWidth,
+            rootOrigin: rootOrigin,
+            showsLeadingHandle: showsLeadingHandle,
+            showsTrailingHandle: showsTrailingHandle,
+            onItemGesture: onItemGesture,
+            onClick: onClick
+        )
+    }
+
+    func updateNSView(_ view: WeekRowItemGestureSurfaceView, context _: Context) {
+        view.update(
+            source: source,
+            weekStart: weekStart,
+            startColumn: startColumn,
+            endColumn: endColumn,
+            columnWidth: columnWidth,
+            rootOrigin: rootOrigin,
+            showsLeadingHandle: showsLeadingHandle,
+            showsTrailingHandle: showsTrailingHandle,
+            onItemGesture: onItemGesture,
+            onClick: onClick
+        )
+    }
+}
+
 enum WeekRowRangeGesture {
     case began(CalendarDate, CalendarInteractionHitTarget, CGPoint)
     case changed(CGPoint)
@@ -436,6 +628,12 @@ enum WeekRowRangeGesture {
     }
 }
 
+enum WeekRowItemGesture {
+    case began(CalendarDate, CalendarInteractionHitTarget, ProjectedEntry, CGPoint)
+    case changed(CGPoint)
+    case ended(CGPoint)
+}
+
 struct WeekRowView: View {
     let layout: WeekLayout
     let today: CalendarDate
@@ -446,6 +644,7 @@ struct WeekRowView: View {
     let onCompletion: (CalendarCommand) -> Void
     let selectionRange: CalendarDateRange?
     let onRangeGesture: (WeekRowRangeGesture) -> Void
+    let onItemGesture: (WeekRowItemGesture) -> Void
     var height: CGFloat = WeekRowMetrics.defaultHeight
 
     private var presentation: WeekRowPresentation {
@@ -477,6 +676,9 @@ struct WeekRowView: View {
                     WeekRowSegmentBar(
                         segment: segment,
                         category: categories[segment.entry.categoryID],
+                        weekStart: layout.weekStart,
+                        columnWidth: columnWidth,
+                        onItemGesture: onItemGesture,
                         onCompletion: onCompletion,
                         onOpenDetail: { item in
                             onAction(.openItem(item.id))
@@ -618,6 +820,9 @@ private struct WeekRowDateCell: View {
 private struct WeekRowSegmentBar: View {
     let segment: WeekRowSegmentPresentation
     let category: CalendarCategory?
+    let weekStart: CalendarDate
+    let columnWidth: CGFloat
+    let onItemGesture: (WeekRowItemGesture) -> Void
     let onCompletion: (CalendarCommand) -> Void
     let onOpenDetail: (ProjectedItem) -> Void
 
@@ -634,6 +839,38 @@ private struct WeekRowSegmentBar: View {
             showsTrailingHandle: segment.showsTrailingHandle
         )
         .accessibilityIdentifier(stableAccessibilityIdentifier)
+        .overlay {
+            GeometryReader { proxy in
+                WeekRowItemGestureSurface(
+                    source: segment.entry,
+                    weekStart: weekStart,
+                    startColumn: segment.startColumn,
+                    endColumn: segment.endColumn,
+                    columnWidth: columnWidth,
+                    rootOrigin: proxy.frame(
+                        in: .named(CalendarInteractionCoordinateSpace.root)
+                    ).origin,
+                    showsLeadingHandle: segment.showsLeadingHandle,
+                    showsTrailingHandle: segment.showsTrailingHandle,
+                    onItemGesture: onItemGesture,
+                    onClick: routeClick
+                )
+                .accessibilityHidden(true)
+            }
+        }
+    }
+
+    private func routeClick(_ target: CalendarInteractionHitTarget) {
+        switch target {
+        case .completionButton:
+            if let command = ItemCompletionRouter.command(for: projectedItem, now: Date()) {
+                onCompletion(command)
+            }
+        case .barBody:
+            onOpenDetail(projectedItem)
+        case .leadingHandle, .trailingHandle, .dateNumber, .overflow, .emptyCell:
+            break
+        }
     }
 
     private var projectedItem: ProjectedItem {

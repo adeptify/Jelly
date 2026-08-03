@@ -7,6 +7,114 @@ import Testing
 @Suite("CalendarInteractionCoordinatorTests")
 @MainActor
 struct CalendarInteractionCoordinatorTests {
+    @Test func bodyMovePreservesDurationAcrossWeeksWithoutPublishingMutation() throws {
+        let item = try makeProjectedItem(startDay: 6, endDay: 8)
+        let coordinator = CalendarInteractionCoordinator()
+
+        coordinator.pointerDown(
+            on: date(6),
+            target: .barBody,
+            source: .item(item),
+            point: .zero
+        )
+        _ = coordinator.updatePointer(point: CGPoint(x: 20, y: 0), over: date(11))
+        let expected = try schedule(11, 13)
+
+        #expect(coordinator.previewSchedule == expected)
+        #expect(coordinator.previewRange == .init(start: date(11), end: date(13)))
+        #expect(coordinator.state == .movingItem(
+            source: .item(item.id),
+            previewSchedule: try schedule(11, 13)
+        ))
+    }
+
+    @Test func leadingAndTrailingResizeClampToOneDay() throws {
+        let item = try makeProjectedItem(startDay: 6, endDay: 8)
+
+        let leading = CalendarInteractionCoordinator()
+        leading.pointerDown(
+            on: date(6),
+            target: .leadingHandle,
+            source: .item(item),
+            point: .zero
+        )
+        _ = leading.updatePointer(point: CGPoint(x: 20, y: 0), over: date(10))
+        let expectedLeading = try schedule(8, 8)
+        #expect(leading.previewSchedule == expectedLeading)
+
+        let trailing = CalendarInteractionCoordinator()
+        trailing.pointerDown(
+            on: date(8),
+            target: .trailingHandle,
+            source: .item(item),
+            point: .zero
+        )
+        _ = trailing.updatePointer(point: CGPoint(x: 20, y: 0), over: date(4))
+        let expectedTrailing = try schedule(6, 6)
+        #expect(trailing.previewSchedule == expectedTrailing)
+    }
+
+    @Test func oneDayItemCanMoveAndResizeWithoutBecomingInvalid() throws {
+        let item = try makeProjectedItem(startDay: 6, endDay: 6)
+        let coordinator = CalendarInteractionCoordinator()
+        coordinator.pointerDown(
+            on: date(6),
+            target: .trailingHandle,
+            source: .item(item),
+            point: .zero
+        )
+
+        _ = coordinator.updatePointer(point: CGPoint(x: 20, y: 0), over: date(3))
+        let expected = try schedule(6, 6)
+
+        #expect(coordinator.previewSchedule == expected)
+    }
+
+    @Test func itemInteractionDoesNotCommitBeforePointerUpAndReturnsCapturedMutation() throws {
+        let item = try makeProjectedItem(startDay: 6, endDay: 8)
+        let coordinator = CalendarInteractionCoordinator()
+        coordinator.pointerDown(
+            on: date(6),
+            target: .barBody,
+            source: .item(item),
+            point: .zero
+        )
+
+        _ = coordinator.updatePointer(point: CGPoint(x: 20, y: 0), over: date(11))
+        let action = coordinator.pointerUp(at: CGPoint(x: 20, y: 0), over: date(11))
+
+        guard case let .submitMutation(pending) = action else {
+            Issue.record("Expected a captured pending mutation")
+            return
+        }
+        let originalSchedule = try schedule(6, 8)
+        let previewSchedule = try schedule(11, 13)
+        #expect(pending.source == .item(item))
+        #expect(pending.operation == .move)
+        #expect(pending.originalSchedule == originalSchedule)
+        #expect(pending.previewSchedule == previewSchedule)
+        #expect(coordinator.state == .idle)
+    }
+
+    @Test func controlsHandlesBodyAndEmptyCellHaveFixedHitPriority() {
+        #expect(CalendarInteractionHitTarget.completionButton.priority > CalendarInteractionHitTarget.leadingHandle.priority)
+        #expect(CalendarInteractionHitTarget.trailingHandle.priority > CalendarInteractionHitTarget.barBody.priority)
+        #expect(CalendarInteractionHitTarget.barBody.priority > CalendarInteractionHitTarget.emptyCell.priority)
+    }
+
+    @Test func recurringScopePendingBlocksNewGesturesUntilResolvedOrCancelled() {
+        let coordinator = CalendarInteractionCoordinator()
+        coordinator.beginPendingRecurrenceScope()
+
+        #expect(coordinator.state == .pendingRecurrenceScope)
+        coordinator.beginRange(on: date(6), point: .zero)
+        _ = coordinator.updatePointer(point: CGPoint(x: 20, y: 0), over: date(8))
+        #expect(coordinator.state == .pendingRecurrenceScope)
+
+        coordinator.completePendingMutation()
+        #expect(coordinator.state == .idle)
+    }
+
     @Test func emptyPressBelowSevenPointsStaysAClick() {
         let day = date(6)
         let coordinator = CalendarInteractionCoordinator()
@@ -268,6 +376,29 @@ struct CalendarInteractionCoordinatorTests {
 
     private func date(_ day: Int) -> CalendarDate {
         CalendarDate(year: 2026, month: 8, day: day)!
+    }
+
+    private func schedule(_ startDay: Int, _ endDay: Int) throws -> CalendarSchedule {
+        try CalendarSchedule(
+            startDate: date(startDay),
+            endDate: date(endDay),
+            startTime: nil,
+            endTime: nil
+        )
+    }
+
+    private func makeProjectedItem(startDay: Int, endDay: Int) throws -> CalendarItem {
+        try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "跨日事项",
+            categoryID: UUID(),
+            schedule: schedule(startDay, endDay),
+            creationTimeZoneIdentifier: "Asia/Shanghai",
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
     }
 }
 

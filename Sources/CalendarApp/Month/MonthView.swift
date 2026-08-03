@@ -293,7 +293,7 @@ struct MonthView: View {
             )
         }
         .confirmationDialog(
-            "移动重复事项",
+            "修改重复事项",
             isPresented: recurringDropConfirmationPresented,
             titleVisibility: .visible
         ) {
@@ -303,7 +303,7 @@ struct MonthView: View {
                 cancelRecurringDropConfirmation()
             }
         } message: {
-            Text("请选择移动范围")
+            Text("请选择这次修改影响的范围")
         }
         .overlay(alignment: .trailing) {
             if let date = selectedDayDrawerDate {
@@ -486,15 +486,19 @@ struct MonthView: View {
     private func resolveRecurringDrop(scope: SeriesScope) {
         guard recurringDropPresentation.beginScopeSelection() else { return }
         guard let resolution = dropCoordinator.beginResolution(scope: scope) else {
-            recurringDropPresentation.pendingDropDidChange(
+            recurringDropPresentation.scopeSelectionCaptureFailed(
                 hasPendingDrop: dropCoordinator.pendingRecurringDrop != nil
             )
+            if dropCoordinator.pendingRecurringDrop == nil {
+                interactionCoordinator.completePendingMutation()
+            }
             return
         }
         Task {
             do {
                 try await dropCoordinator.submit(resolution)
                 recurringDropPresentation.resolutionSucceeded()
+                interactionCoordinator.completePendingMutation()
             } catch {
                 recurringDropPresentation.resolutionFailed()
             }
@@ -507,12 +511,14 @@ struct MonthView: View {
             await Task.yield()
             guard recurringDropPresentation.settleConfirmationDismissal() else { return }
             dropCoordinator.cancel()
+            interactionCoordinator.completePendingMutation()
         }
     }
 
     private func cancelRecurringDropConfirmation() {
         guard recurringDropPresentation.cancelConfirmation() else { return }
         dropCoordinator.cancel()
+        interactionCoordinator.completePendingMutation()
     }
 
     private func undo() {
@@ -581,6 +587,13 @@ struct MonthView: View {
                                 selectionRange: interactionCoordinator.previewRange,
                                 onRangeGesture: { gesture in
                                     handleRangeGesture(
+                                        gesture,
+                                        viewportBounds: viewportBounds,
+                                        scrollProxy: scrollProxy
+                                    )
+                                },
+                                onItemGesture: { gesture in
+                                    handleItemGesture(
                                         gesture,
                                         viewportBounds: viewportBounds,
                                         scrollProxy: scrollProxy
@@ -667,12 +680,57 @@ struct MonthView: View {
         }
     }
 
+    private func handleItemGesture(
+        _ gesture: WeekRowItemGesture,
+        viewportBounds: CGRect,
+        scrollProxy: ScrollViewProxy
+    ) {
+        switch gesture {
+        case let .began(date, target, source, point):
+            cancelRangeAutoScroll()
+            interactionCoordinator.pointerDown(
+                on: date,
+                target: target,
+                source: source,
+                point: point
+            )
+        case let .changed(point):
+            let date = dateFrameMap.date(at: point) ?? dateFrameMap.nearestDate(to: point)
+            _ = interactionCoordinator.updatePointer(
+                point: point,
+                over: date,
+                viewportBounds: viewportBounds
+            )
+            autoScrollExecutionDriver.cancel()
+            autoScrollDriver.update(direction: interactionCoordinator.autoScrollDirection)
+        case let .ended(point):
+            cancelRangeAutoScroll()
+            let releaseDate = dateFrameMap.date(at: point) ?? dateFrameMap.nearestDate(to: point)
+            guard case let .submitMutation(pending) = interactionCoordinator.pointerUp(
+                at: point,
+                over: releaseDate
+            ) else {
+                return
+            }
+            if case .occurrence = pending.source {
+                interactionCoordinator.beginPendingRecurrenceScope()
+            }
+            Task {
+                do {
+                    try await dropCoordinator.accept(pending)
+                } catch {
+                    interactionCoordinator.completePendingMutation()
+                }
+            }
+        }
+    }
+
     private func advanceRangeAutoScroll(
         _ tick: CalendarInteractionAutoScrollTick,
         viewportBounds: CGRect,
         scrollProxy: ScrollViewProxy
     ) {
-        guard interactionCoordinator.isSelectingRange,
+        guard interactionCoordinator.isDragging,
               interactionCoordinator.autoScrollDirection == tick.direction
         else {
             return
@@ -689,7 +747,7 @@ struct MonthView: View {
         }
 
         let targetDate = cursorDate.addingDays(tick.direction.dayDelta)
-        interactionCoordinator.refreshSelection(over: targetDate)
+        interactionCoordinator.refreshInteraction(over: targetDate)
         let plan = WeekStreamAutoScrollRouting.plan(
             cursorDate: cursorDate,
             direction: tick.direction,

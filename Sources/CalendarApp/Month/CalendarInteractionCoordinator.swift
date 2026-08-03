@@ -40,8 +40,40 @@ enum CalendarInteractionState: Equatable {
     case editing(draft: CalendarDateRange, anchorDate: CalendarDate)
 }
 
+enum CalendarRangeMutationOperation: Equatable, Sendable {
+    case move
+    case resizeLeading
+    case resizeTrailing
+}
+
+struct PendingCalendarMutation: Equatable, Sendable, Identifiable {
+    let id: UUID
+    let source: ProjectedEntry
+    let operation: CalendarRangeMutationOperation
+    let originalSchedule: CalendarSchedule
+    let previewSchedule: CalendarSchedule
+    let newSeriesID: UUID
+
+    init(
+        id: UUID = UUID(),
+        source: ProjectedEntry,
+        operation: CalendarRangeMutationOperation,
+        originalSchedule: CalendarSchedule,
+        previewSchedule: CalendarSchedule,
+        newSeriesID: UUID = UUID()
+    ) {
+        self.id = id
+        self.source = source
+        self.operation = operation
+        self.originalSchedule = originalSchedule
+        self.previewSchedule = previewSchedule
+        self.newSeriesID = newSeriesID
+    }
+}
+
 enum CalendarInteractionAction: Equatable {
     case openCreate(CalendarDateRange, anchor: CalendarDate)
+    case submitMutation(PendingCalendarMutation)
     case scrollEarlier
     case scrollLater
 }
@@ -198,6 +230,8 @@ final class CalendarInteractionCoordinator: ObservableObject {
     private struct Press {
         let date: CalendarDate
         let point: CGPoint
+        let target: CalendarInteractionHitTarget
+        let source: ProjectedEntry?
     }
 
     private let now: () -> TimeInterval
@@ -216,7 +250,22 @@ final class CalendarInteractionCoordinator: ObservableObject {
             Self.normalizedRange(from: anchorDate, through: currentDate)
         case let .editing(draft, _):
             draft
-        case .idle, .movingItem, .resizingLeading, .resizingTrailing, .pendingRecurrenceScope:
+        case let .movingItem(_, schedule),
+             let .resizingLeading(_, schedule),
+             let .resizingTrailing(_, schedule):
+            CalendarDateRange(start: schedule.startDate, end: schedule.endDate)
+        case .idle, .pendingRecurrenceScope:
+            nil
+        }
+    }
+
+    var previewSchedule: CalendarSchedule? {
+        switch state {
+        case let .movingItem(_, schedule),
+             let .resizingLeading(_, schedule),
+             let .resizingTrailing(_, schedule):
+            schedule
+        case .idle, .selectingRange, .pendingRecurrenceScope, .editing:
             nil
         }
     }
@@ -229,12 +278,24 @@ final class CalendarInteractionCoordinator: ObservableObject {
         }
     }
 
+    var isDragging: Bool {
+        switch state {
+        case .selectingRange, .movingItem, .resizingLeading, .resizingTrailing:
+            true
+        case .idle, .pendingRecurrenceScope, .editing:
+            false
+        }
+    }
+
     var latestPointer: CGPoint? { latestPoint }
 
     var selectionCursorDate: CalendarDate? {
         switch state {
         case let .selectingRange(_, currentDate): currentDate
-        case .idle, .movingItem, .resizingLeading, .resizingTrailing, .pendingRecurrenceScope, .editing:
+        case let .movingItem(_, schedule): schedule.startDate
+        case let .resizingLeading(_, schedule): schedule.startDate
+        case let .resizingTrailing(_, schedule): schedule.endDate
+        case .idle, .pendingRecurrenceScope, .editing:
             nil
         }
     }
@@ -246,7 +307,24 @@ final class CalendarInteractionCoordinator: ObservableObject {
         else {
             return
         }
-        press = Press(date: date, point: point)
+        press = Press(date: date, point: point, target: target, source: nil)
+        latestPoint = point
+        latestDate = date
+    }
+
+    func pointerDown(
+        on date: CalendarDate,
+        target: CalendarInteractionHitTarget,
+        source: ProjectedEntry,
+        point: CGPoint
+    ) {
+        guard [.barBody, .leadingHandle, .trailingHandle].contains(target),
+              press == nil,
+              state == .idle
+        else {
+            return
+        }
+        press = Press(date: date, point: point, target: target, source: source)
         latestPoint = point
         latestDate = date
     }
@@ -269,23 +347,23 @@ final class CalendarInteractionCoordinator: ObservableObject {
         guard point.distance(to: press.point) >= Self.dragThreshold else { return [] }
 
         let currentDate = date ?? latestDate ?? press.date
-        state = .selectingRange(anchorDate: press.date, currentDate: currentDate)
+        updatePreview(for: press, over: currentDate)
         autoScrollDirection = edgeDirection(for: point, in: viewportBounds)
         return autoScrollActions(for: point, in: viewportBounds)
     }
 
     func refreshSelection(over date: CalendarDate?) {
-        guard let date,
-              case let .selectingRange(anchorDate, _) = state
-        else {
-            return
-        }
+        refreshInteraction(over: date)
+    }
+
+    func refreshInteraction(over date: CalendarDate?) {
+        guard let date, let press else { return }
         latestDate = date
-        state = .selectingRange(anchorDate: anchorDate, currentDate: date)
+        updatePreview(for: press, over: date)
     }
 
     func pointerUp(at point: CGPoint, over date: CalendarDate?) -> CalendarInteractionAction? {
-        defer { clearSelectionGesture() }
+        defer { clearInteractionGesture() }
         guard let press else { return nil }
 
         latestPoint = point
@@ -294,10 +372,22 @@ final class CalendarInteractionCoordinator: ObservableObject {
         }
         let releaseDate = date ?? latestDate ?? press.date
         if point.distance(to: press.point) < Self.dragThreshold {
+            guard press.target == .emptyCell else { return nil }
             return .openCreate(
                 CalendarDateRange(start: press.date, end: press.date),
                 anchor: press.date
             )
+        }
+
+        if let source = press.source,
+           let operation = operation(for: press.target),
+           let previewSchedule {
+            return .submitMutation(.init(
+                source: source,
+                operation: operation,
+                originalSchedule: source.schedule,
+                previewSchedule: previewSchedule
+            ))
         }
         return .openCreate(
             Self.normalizedRange(from: press.date, through: releaseDate),
@@ -311,12 +401,12 @@ final class CalendarInteractionCoordinator: ObservableObject {
     }
 
     func openEditor(for draft: CalendarDateRange, anchor: CalendarDate) {
-        clearSelectionGesture()
+        clearInteractionGesture()
         state = .editing(draft: draft, anchorDate: anchor)
     }
 
     func cancel() {
-        clearSelectionGesture()
+        clearInteractionGesture()
         state = .idle
     }
 
@@ -324,14 +414,72 @@ final class CalendarInteractionCoordinator: ObservableObject {
         cancel()
     }
 
-    private func clearSelectionGesture() {
+    func beginPendingRecurrenceScope() {
+        clearInteractionGesture()
+        state = .pendingRecurrenceScope
+    }
+
+    func completePendingMutation() {
+        guard case .pendingRecurrenceScope = state else { return }
+        state = .idle
+    }
+
+    private func clearInteractionGesture() {
         press = nil
         latestPoint = nil
         latestDate = nil
         lastAutoScrollAt = nil
         autoScrollDirection = nil
-        if case .selectingRange = state {
+        switch state {
+        case .selectingRange, .movingItem, .resizingLeading, .resizingTrailing:
             state = .idle
+        case .idle, .pendingRecurrenceScope, .editing:
+            break
+        }
+    }
+
+    private func updatePreview(for press: Press, over date: CalendarDate) {
+        guard let source = press.source else {
+            state = .selectingRange(anchorDate: press.date, currentDate: date)
+            return
+        }
+
+        switch press.target {
+        case .barBody:
+            let delta = press.date.days(until: date)
+            guard let schedule = try? source.schedule.shifted(byDays: delta) else { return }
+            state = .movingItem(source: source.id, previewSchedule: schedule)
+        case .leadingHandle:
+            let start = min(date, source.schedule.endDate)
+            guard let schedule = try? CalendarSchedule(
+                startDate: start,
+                endDate: source.schedule.endDate,
+                startTime: source.schedule.startTime,
+                endTime: source.schedule.endTime
+            ) else { return }
+            state = .resizingLeading(source: source.id, previewSchedule: schedule)
+        case .trailingHandle:
+            let end = max(date, source.schedule.startDate)
+            guard let schedule = try? CalendarSchedule(
+                startDate: source.schedule.startDate,
+                endDate: end,
+                startTime: source.schedule.startTime,
+                endTime: source.schedule.endTime
+            ) else { return }
+            state = .resizingTrailing(source: source.id, previewSchedule: schedule)
+        case .completionButton, .dateNumber, .overflow, .emptyCell:
+            break
+        }
+    }
+
+    private func operation(
+        for target: CalendarInteractionHitTarget
+    ) -> CalendarRangeMutationOperation? {
+        switch target {
+        case .barBody: .move
+        case .leadingHandle: .resizeLeading
+        case .trailingHandle: .resizeTrailing
+        case .completionButton, .dateNumber, .overflow, .emptyCell: nil
         }
     }
 

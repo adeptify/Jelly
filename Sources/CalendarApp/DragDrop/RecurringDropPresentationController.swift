@@ -50,6 +50,11 @@ struct RecurringDropPresentationController {
         return true
     }
 
+    mutating func scopeSelectionCaptureFailed(hasPendingDrop: Bool) {
+        guard state == .resolving else { return }
+        state = hasPendingDrop ? .confirming : .hidden
+    }
+
     mutating func resolutionSucceeded() {
         guard state == .resolving else { return }
         state = .hidden

@@ -41,6 +41,37 @@ struct DayCellInteractionTests {
         #expect(WeekRowHitRouting.dayAction(for: .scroll, date: date) == nil)
     }
 
+    @Test func itemHitRoutingExposesOnlyTrueOuterHandlesAndCompletionWinsOverlap() {
+        #expect(WeekRowItemHitRouting.target(
+            atX: 2,
+            width: 140,
+            kind: .event,
+            showsLeadingHandle: true,
+            showsTrailingHandle: false
+        ) == .leadingHandle)
+        #expect(WeekRowItemHitRouting.target(
+            atX: 2,
+            width: 140,
+            kind: .event,
+            showsLeadingHandle: false,
+            showsTrailingHandle: true
+        ) == .barBody)
+        #expect(WeekRowItemHitRouting.target(
+            atX: 138,
+            width: 140,
+            kind: .event,
+            showsLeadingHandle: false,
+            showsTrailingHandle: true
+        ) == .trailingHandle)
+        #expect(WeekRowItemHitRouting.target(
+            atX: 12,
+            width: 140,
+            kind: .task,
+            showsLeadingHandle: true,
+            showsTrailingHandle: false
+        ) == .completionButton)
+    }
+
     @Test func appKitRangeGestureSurfaceEmitsOnlyForTheDedicatedEmptySurface() throws {
         let date = CalendarDate(year: 2026, month: 8, day: 10)!
         let recorder = RangeGestureRecorder()
@@ -97,6 +128,49 @@ struct DayCellInteractionTests {
         scrollSurface.scrollWheel(with: wheelEvent)
 
         #expect(scrollRecorder.records.isEmpty)
+    }
+
+    @Test func appKitItemSurfaceDispatchesProductionTargetDateDragAndClickRouting() throws {
+        let weekStart = CalendarDate(year: 2026, month: 8, day: 3)!
+        let item = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "可拖动事项",
+            categoryID: UUID(),
+            schedule: try CalendarSchedule(
+                startDate: weekStart.addingDays(1),
+                endDate: weekStart.addingDays(3),
+                startTime: nil,
+                endTime: nil
+            ),
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let recorder = ItemGestureRecorder()
+        let surface = WeekRowItemGestureSurfaceView(
+            source: .item(item),
+            weekStart: weekStart,
+            startColumn: 1,
+            endColumn: 3,
+            columnWidth: 40,
+            rootOrigin: CGPoint(x: 100, y: 150),
+            showsLeadingHandle: true,
+            showsTrailingHandle: false,
+            onItemGesture: recorder.record,
+            onClick: recorder.click
+        )
+        surface.frame = CGRect(x: 0, y: 0, width: 120, height: 20)
+
+        try sendMouseSequence(to: surface)
+
+        #expect(recorder.kinds == [.began, .changed, .ended])
+        #expect(recorder.beganDate == weekStart.addingDays(1))
+        #expect(recorder.beganTarget == .completionButton)
+        #expect(recorder.clicks.isEmpty)
+
+        try sendMouseClick(to: surface, atWindowLocation: CGPoint(x: 12, y: 10))
+        #expect(recorder.clicks == [.completionButton])
     }
 
     @Test func flippedParentMapsTopAndBottomMouseLocationsIntoTheSwiftUIRootCoordinateSystem() throws {
@@ -240,4 +314,35 @@ private enum RangeGestureRecordKind: Equatable {
 
 private final class FlippedEventContainer: NSView {
     override var isFlipped: Bool { true }
+}
+
+@MainActor
+private final class ItemGestureRecorder {
+    var kinds: [ItemGestureRecordKind] = []
+    var beganDate: CalendarDate?
+    var beganTarget: CalendarInteractionHitTarget?
+    var clicks: [CalendarInteractionHitTarget] = []
+
+    func record(_ gesture: WeekRowItemGesture) {
+        switch gesture {
+        case let .began(date, target, _, _):
+            kinds.append(.began)
+            beganDate = date
+            beganTarget = target
+        case .changed:
+            kinds.append(.changed)
+        case .ended:
+            kinds.append(.ended)
+        }
+    }
+
+    func click(_ target: CalendarInteractionHitTarget) {
+        clicks.append(target)
+    }
+}
+
+private enum ItemGestureRecordKind: Equatable {
+    case began
+    case changed
+    case ended
 }

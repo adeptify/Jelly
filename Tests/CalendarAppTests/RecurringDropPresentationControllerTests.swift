@@ -63,4 +63,23 @@ struct RecurringDropPresentationControllerTests {
         #expect(!controller.isConfirmationPresented)
         #expect(!controller.isErrorPresented)
     }
+
+    @Test func scopeSelectionClosesConfirmationSynchronouslyAndCaptureFailureRecovers() {
+        var withPending = RecurringDropPresentationController()
+        withPending.pendingDropDidChange(hasPendingDrop: true)
+
+        let withPendingStarted = withPending.beginScopeSelection()
+        #expect(withPendingStarted)
+        #expect(withPending.state == .resolving)
+        #expect(!withPending.isConfirmationPresented)
+        withPending.scopeSelectionCaptureFailed(hasPendingDrop: true)
+        #expect(withPending.state == .confirming)
+
+        var withoutPending = RecurringDropPresentationController()
+        withoutPending.pendingDropDidChange(hasPendingDrop: true)
+        let withoutPendingStarted = withoutPending.beginScopeSelection()
+        #expect(withoutPendingStarted)
+        withoutPending.scopeSelectionCaptureFailed(hasPendingDrop: false)
+        #expect(withoutPending.state == .hidden)
+    }
 }
