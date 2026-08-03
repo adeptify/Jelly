@@ -58,13 +58,41 @@ assert_pair_unchanged() {
   assert_no_publish_residue
 }
 
+assert_single_fired_marker() {
+  local marker_path="$1"
+  [[ -f "$marker_path" && ! -L "$marker_path" ]] || {
+    print -u2 "Expected a regular one-shot fault marker: $marker_path"
+    exit 1
+  }
+  local marker_lines marker_bytes marker_content
+  marker_lines=$(wc -l < "$marker_path" | tr -d '[:space:]')
+  marker_bytes=$(wc -c < "$marker_path" | tr -d '[:space:]')
+  marker_content=$(<"$marker_path")
+  [[ "$marker_lines" == 1 && "$marker_bytes" == 6 && "$marker_content" == fired ]] || {
+    print -u2 "Expected exactly one 'fired' record in fault marker: $marker_path"
+    exit 1
+  }
+}
+
+assert_formal_attach_sequence() {
+  local state_file="$1"
+  local formal_dmg="$2"
+  local actual_sequence
+  actual_sequence=$(awk -F '\t' -v source="$formal_dmg" \
+    '$3 == source { print $4 }' "$state_file" | paste -sd ' ' -)
+  [[ "$actual_sequence" == "1 2" ]] || {
+    print -u2 "Expected formal DMG attach occurrences '1 2', got '$actual_sequence'."
+    exit 1
+  }
+}
+
 assert_recorded_device_detached() {
   local state_file="$1"
-  local device mount_point image_path
+  local device mount_point image_path source_occurrence
   local leaked=false
-  while IFS=$'\t' read -r device mount_point image_path; do
-    [[ -n "$device" && -n "$image_path" ]] || {
-      print -u2 "The attach fault recorded an incomplete device/image identity."
+  while IFS=$'\t' read -r device mount_point image_path source_occurrence; do
+    [[ -n "$device" && -n "$image_path" && "$source_occurrence" == <-> ]] || {
+      print -u2 "The attach fault recorded an incomplete device/image/occurrence identity."
       exit 1
     }
     if /usr/bin/hdiutil info | grep -Fq -- "$device" || \
@@ -110,19 +138,26 @@ assert_pair_unchanged "$baseline_hashes"
 # restored content is still valid, so the exact pair must remain authoritative
 # and cleanup's final detach pass must remove the newly tracked attachment.
 rollback_detach_state="$TEMP_ROOT/rollback-detach-retry.state"
+rollback_published_marker="$TEMP_ROOT/rollback-published-mount-parse-fired"
+rollback_remove_marker="$TEMP_ROOT/rollback-remove-fired"
+rollback_detach_marker="$TEMP_ROOT/rollback-detach-fired"
 if env "${COMMON_ENV[@]}" \
   BUILD_APP_FAULT_HDIUTIL_STATE_FILE="$rollback_detach_state" \
   BUILD_APP_FAULT_HDIUTIL_OMIT_MOUNT_POINT_SOURCE="$DMG_PATH" \
-  BUILD_APP_FAULT_ONCE_MARKER="$TEMP_ROOT/rollback-published-mount-parse-fired" \
+  BUILD_APP_FAULT_ONCE_MARKER="$rollback_published_marker" \
   BUILD_APP_FAULT_RM_ONCE_TARGET="$ARCHIVE_PATH" \
-  BUILD_APP_FAULT_RM_ONCE_MARKER="$TEMP_ROOT/rollback-remove-fired" \
+  BUILD_APP_FAULT_RM_ONCE_MARKER="$rollback_remove_marker" \
   BUILD_APP_FAULT_HDIUTIL_DETACH_SOURCE="$DMG_PATH" \
   BUILD_APP_FAULT_HDIUTIL_DETACH_SOURCE_OCCURRENCE=2 \
-  BUILD_APP_FAULT_HDIUTIL_DETACH_OCCURRENCE_MARKER="$TEMP_ROOT/rollback-detach-fired" \
+  BUILD_APP_FAULT_HDIUTIL_DETACH_OCCURRENCE_MARKER="$rollback_detach_marker" \
   zsh "$BUILD_SCRIPT" >/dev/null 2>&1; then
   print -u2 "Expected published verification and rollback DMG detach failure."
   exit 1
 fi
+assert_single_fired_marker "$rollback_published_marker"
+assert_single_fired_marker "$rollback_remove_marker"
+assert_single_fired_marker "$rollback_detach_marker"
+assert_formal_attach_sequence "$rollback_detach_state" "$DMG_PATH"
 assert_recorded_device_detached "$rollback_detach_state"
 assert_pair_unchanged "$baseline_hashes"
 

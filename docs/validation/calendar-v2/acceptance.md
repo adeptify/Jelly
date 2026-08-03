@@ -24,7 +24,7 @@
 | --- | --- | --- |
 | `Scripts/test.sh` | PASS | 302 tests / 24 suites |
 | `Scripts/test-build-app-archive.sh` | PASS | ZIP 新鲜解包与只读 DMG 中 app 均严格签名，且 CDHash 相同 |
-| `Scripts/test-build-app-failures.sh` | PASS | 创建失败、发布中断、验证失败、两个有效签名但 CDHash 不同、首次发布失败及尽力启动副本失败均保持或恢复权威 pair；正式 published DMG 的 mount-point 元数据缺失、首次 detach 失败，以及 rollback verify 自身首次 detach 失败均由完整 attachment 集合保留身份并最终清理，旧 pair 精确字节不变，测试结束无临时 image-path/device/mount 残留 |
+| `Scripts/test-build-app-failures.sh` | PASS | 创建失败、发布中断、验证失败、两个有效签名但 CDHash 不同、首次发布失败及尽力启动副本失败均保持或恢复权威 pair；正式 published DMG 的 mount-point 元数据缺失、首次 detach 失败，以及 rollback verify 自身首次 detach 失败均由完整 attachment 集合保留身份并最终清理。定点用例硬断言三个 one-shot marker 各为一条 `fired`，正式 DMG attach occurrence 精确为 `1 2`（published／rollback），旧 pair 精确字节不变，测试结束无临时 image-path/device/mount 残留；临时禁用 rollback remove 注入时 mutation gate 按预期因 marker 缺失转红 |
 | `Scripts/test-build-app-symlink.sh` | PASS | symlink dist、非普通 ZIP 目标、symlink DMG 目标均拒绝，sentinel 不变 |
 | `Scripts/build-app.sh` | PASS | 同一事务发布正式 ZIP/DMG pair |
 | `swift build -c release --product PersonalCalendar` | PASS | release 产品构建完成 |
@@ -44,8 +44,8 @@
 
 | 制品 | 绝对路径 | SHA-256 |
 | --- | --- | --- |
-| 权威 ZIP | `/Users/oreal/Documents/个人管理工具/.worktrees/calendar-v1/dist/个人月历.app.zip` | `7082168e8f2e86e34aea072a9f943137936adf75a35e22df06d5c7ec1ec3d304` |
-| Finder 友好 DMG | `/Users/oreal/Documents/个人管理工具/.worktrees/calendar-v1/dist/个人月历.dmg` | `43aef36bd5df096bed65852080ff7a83d5b12fd76e3938b4bd28a13e32386576` |
+| 权威 ZIP | `/Users/oreal/Documents/个人管理工具/.worktrees/calendar-v1/dist/个人月历.app.zip` | `0d633281f79a7c00a8016c17e0f316f1e0e877d4f2f2feabcdcfadcc5e9e86f2` |
+| Finder 友好 DMG | `/Users/oreal/Documents/个人管理工具/.worktrees/calendar-v1/dist/个人月历.dmg` | `5098f5c81a52d2984b73898534eba58f423bb7fbb28d76c06069bfb5af0f2eb1` |
 
 - ZIP 新鲜解包 app CDHash：`7f2d81c00ab594e1d8931c74af8256df6f9db0a6`
 - DMG 只读挂载 app CDHash：`7f2d81c00ab594e1d8931c74af8256df6f9db0a6`
