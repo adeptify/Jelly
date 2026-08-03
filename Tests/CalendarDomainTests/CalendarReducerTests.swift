@@ -4,6 +4,62 @@ import Testing
 
 @Suite("CalendarReducerTests")
 struct CalendarReducerTests {
+    @Test func movingMultiDayItemPreservesInclusiveDurationAndTimes() throws {
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000370")!
+        let original = try makeItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000371")!,
+            categoryID: categoryID,
+            schedule: try CalendarSchedule(
+                startDate: CalendarDate(year: 2026, month: 8, day: 6)!,
+                endDate: CalendarDate(year: 2026, month: 8, day: 8)!,
+                startTime: MinuteOfDay(hour: 23, minute: 0)!,
+                endTime: MinuteOfDay(hour: 1, minute: 0)!
+            )
+        )
+        let expectedSchedule = try CalendarSchedule(
+            startDate: CalendarDate(year: 2026, month: 8, day: 10)!,
+            endDate: CalendarDate(year: 2026, month: 8, day: 12)!,
+            startTime: MinuteOfDay(hour: 23, minute: 0)!,
+            endTime: MinuteOfDay(hour: 1, minute: 0)!
+        )
+
+        let result = try CalendarReducer.reduce(
+            state(containing: original),
+            command: .moveItem(
+                original.id,
+                to: CalendarDate(year: 2026, month: 8, day: 10)!
+            ),
+            now: .now
+        )
+
+        #expect(result.items[original.id]?.schedule == expectedSchedule)
+    }
+
+    @Test func completingMultiDayTaskUpdatesTheSingleSourceItem() throws {
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000372")!
+        let taskID = UUID(uuidString: "00000000-0000-0000-0000-000000000373")!
+        let completedAt = Date(timeIntervalSince1970: 1_754_352_000)
+        let task = try makeItem(
+            id: taskID,
+            categoryID: categoryID,
+            schedule: try CalendarSchedule(
+                startDate: CalendarDate(year: 2026, month: 8, day: 6)!,
+                endDate: CalendarDate(year: 2026, month: 8, day: 8)!,
+                startTime: MinuteOfDay(hour: 23, minute: 0)!,
+                endTime: MinuteOfDay(hour: 1, minute: 0)!
+            )
+        )
+
+        let result = try CalendarReducer.reduce(
+            state(containing: task),
+            command: .setTaskCompleted(taskID, completedAt),
+            now: .now
+        )
+
+        #expect(result.items[taskID]?.completedAt == completedAt)
+        #expect(result.items.count == 1)
+    }
+
     @Test func deletingCategoryMigratesEveryReferenceAtomically() throws {
         let fixture = try makeCategoryReferenceFixture()
         let result = try CalendarReducer.reduce(
@@ -131,7 +187,23 @@ struct CalendarReducerTests {
             end: .init(hour: 10, minute: 0)!
         )
         var state = fixture.state
-        state.items[itemID]?.timeRange = range
+        let existing = try #require(state.items[itemID])
+        state.items[itemID] = try CalendarItem(
+            id: existing.id,
+            kind: existing.kind,
+            title: existing.title,
+            categoryID: existing.categoryID,
+            schedule: CalendarSchedule(
+                startDate: existing.schedule.startDate,
+                endDate: existing.schedule.startDate,
+                startTime: range.start,
+                endTime: range.end
+            ),
+            creationTimeZoneIdentifier: existing.creationTimeZoneIdentifier,
+            completedAt: existing.completedAt,
+            createdAt: existing.createdAt,
+            updatedAt: existing.updatedAt
+        )
         let destination = CalendarDate(year: 2026, month: 8, day: 20)!
 
         let result = try CalendarReducer.reduce(
@@ -139,8 +211,9 @@ struct CalendarReducerTests {
             command: .moveItem(itemID, to: destination),
             now: .now
         )
-        #expect(result.items[itemID]?.date == destination)
-        #expect(result.items[itemID]?.timeRange == range)
+        #expect(result.items[itemID]?.schedule.startDate == destination)
+        #expect(result.items[itemID]?.schedule.startTime == range.start)
+        #expect(result.items[itemID]?.schedule.endTime == range.end)
     }
 
     @Test func completingOneRecurringTaskDoesNotCompleteNext() throws {
@@ -515,19 +588,36 @@ struct CalendarReducerTests {
         categoryID: UUID,
         date: CalendarDate = CalendarDate(year: 2026, month: 8, day: 3)!,
         timeRange: LocalTimeRange? = nil,
+        schedule: CalendarSchedule? = nil,
         createdAt: Date = .init(timeIntervalSince1970: 0)
     ) throws -> CalendarItem {
-        try CalendarItem(
+        let itemSchedule: CalendarSchedule
+        if let schedule {
+            itemSchedule = schedule
+        } else {
+            itemSchedule = try CalendarSchedule(
+                startDate: date,
+                endDate: date,
+                startTime: timeRange?.start,
+                endTime: timeRange?.end
+            )
+        }
+        return try CalendarItem(
             id: id,
             kind: kind,
             title: "事项",
             categoryID: categoryID,
-            date: date,
-            timeRange: timeRange,
+            schedule: itemSchedule,
             completedAt: nil,
             createdAt: createdAt,
             updatedAt: createdAt
         )
+    }
+
+    private func state(containing item: CalendarItem) -> CalendarState {
+        var state = CalendarState.empty(uncategorizedID: item.categoryID, now: .distantPast)
+        state.items[item.id] = item
+        return state
     }
 
     private func makeTimeRange(hour: Int) throws -> LocalTimeRange {

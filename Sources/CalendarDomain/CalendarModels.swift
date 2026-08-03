@@ -6,6 +6,7 @@ public enum ItemKind: String, Codable, Equatable, Hashable, Sendable {
 }
 
 public enum DomainValidationError: Error, Equatable, Sendable {
+    case invalidDateRange
     case invalidTimeRange
     case emptyTitle
     case eventCannotComplete
@@ -45,8 +46,7 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
     public var kind: ItemKind
     public var title: String
     public var categoryID: UUID
-    public var date: CalendarDate
-    public var timeRange: LocalTimeRange?
+    public var schedule: CalendarSchedule
     public var creationTimeZoneIdentifier: String
     public var completedAt: Date?
     public var createdAt: Date
@@ -57,8 +57,7 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         kind: ItemKind,
         title: String,
         categoryID: UUID,
-        date: CalendarDate,
-        timeRange: LocalTimeRange?,
+        schedule: CalendarSchedule,
         creationTimeZoneIdentifier: String = TimeZone.current.identifier,
         completedAt: Date?,
         createdAt: Date,
@@ -79,12 +78,56 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         self.kind = kind
         self.title = trimmedTitle
         self.categoryID = categoryID
-        self.date = date
-        self.timeRange = timeRange
+        self.schedule = schedule
         self.creationTimeZoneIdentifier = creationTimeZoneIdentifier
         self.completedAt = completedAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    @available(*, deprecated, message: "Use the schedule initializer instead.")
+    public init(
+        id: UUID,
+        kind: ItemKind,
+        title: String,
+        categoryID: UUID,
+        date: CalendarDate,
+        timeRange: LocalTimeRange?,
+        creationTimeZoneIdentifier: String = TimeZone.current.identifier,
+        completedAt: Date?,
+        createdAt: Date,
+        updatedAt: Date
+    ) throws {
+        try self.init(
+            id: id,
+            kind: kind,
+            title: title,
+            categoryID: categoryID,
+            schedule: CalendarSchedule(
+                startDate: date,
+                endDate: date,
+                startTime: timeRange?.start,
+                endTime: timeRange?.end
+            ),
+            creationTimeZoneIdentifier: creationTimeZoneIdentifier,
+            completedAt: completedAt,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+
+    @available(*, deprecated, message: "Use schedule.startDate instead.")
+    public var date: CalendarDate {
+        schedule.startDate
+    }
+
+    @available(*, deprecated, message: "Use schedule.startTime and schedule.endTime instead.")
+    public var timeRange: LocalTimeRange? {
+        guard let startTime = schedule.startTime,
+              let endTime = schedule.endTime else {
+            return nil
+        }
+        return try? LocalTimeRange(start: startTime, end: endTime)
     }
 
     public init(from decoder: any Decoder) throws {
@@ -93,8 +136,7 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         let kind = try container.decode(ItemKind.self, forKey: .kind)
         let title = try container.decode(String.self, forKey: .title)
         let categoryID = try container.decode(UUID.self, forKey: .categoryID)
-        let date = try container.decode(CalendarDate.self, forKey: .date)
-        let timeRange = try container.decodeIfPresent(LocalTimeRange.self, forKey: .timeRange)
+        let schedule = try container.decode(CalendarSchedule.self, forKey: .schedule)
         let creationTimeZoneIdentifier = try container.decode(String.self, forKey: .creationTimeZoneIdentifier)
         let completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
         let createdAt = try container.decode(Date.self, forKey: .createdAt)
@@ -106,8 +148,7 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
                 kind: kind,
                 title: title,
                 categoryID: categoryID,
-                date: date,
-                timeRange: timeRange,
+                schedule: schedule,
                 creationTimeZoneIdentifier: creationTimeZoneIdentifier,
                 completedAt: completedAt,
                 createdAt: createdAt,
@@ -128,8 +169,7 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         try container.encode(kind, forKey: .kind)
         try container.encode(title, forKey: .title)
         try container.encode(categoryID, forKey: .categoryID)
-        try container.encode(date, forKey: .date)
-        try container.encodeIfPresent(timeRange, forKey: .timeRange)
+        try container.encode(schedule, forKey: .schedule)
         try container.encode(creationTimeZoneIdentifier, forKey: .creationTimeZoneIdentifier)
         try container.encodeIfPresent(completedAt, forKey: .completedAt)
         try container.encode(createdAt, forKey: .createdAt)
@@ -141,8 +181,7 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         case kind
         case title
         case categoryID
-        case date
-        case timeRange
+        case schedule
         case creationTimeZoneIdentifier
         case completedAt
         case createdAt

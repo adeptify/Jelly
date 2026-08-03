@@ -75,3 +75,84 @@ public struct LocalTimeRange: Codable, Hashable, Sendable {
         case end
     }
 }
+
+public struct CalendarSchedule: Codable, Equatable, Hashable, Sendable {
+    public let startDate: CalendarDate
+    public let endDate: CalendarDate
+    public let startTime: MinuteOfDay?
+    public let endTime: MinuteOfDay?
+
+    public var durationDays: Int {
+        startDate.days(until: endDate) + 1
+    }
+
+    public init(
+        startDate: CalendarDate,
+        endDate: CalendarDate,
+        startTime: MinuteOfDay?,
+        endTime: MinuteOfDay?
+    ) throws {
+        guard endDate >= startDate else {
+            throw DomainValidationError.invalidDateRange
+        }
+        guard (startTime == nil) == (endTime == nil) else {
+            throw DomainValidationError.invalidTimeRange
+        }
+        if startDate == endDate,
+           let startTime,
+           let endTime,
+           endTime <= startTime {
+            throw DomainValidationError.invalidTimeRange
+        }
+        self.startDate = startDate
+        self.endDate = endDate
+        self.startTime = startTime
+        self.endTime = endTime
+    }
+
+    public func shifted(byDays delta: Int) throws -> CalendarSchedule {
+        try CalendarSchedule(
+            startDate: startDate.addingDays(delta),
+            endDate: endDate.addingDays(delta),
+            startTime: startTime,
+            endTime: endTime
+        )
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let startDate = try container.decode(CalendarDate.self, forKey: .startDate)
+        let endDate = try container.decode(CalendarDate.self, forKey: .endDate)
+        let startTime = try container.decodeIfPresent(MinuteOfDay.self, forKey: .startTime)
+        let endTime = try container.decodeIfPresent(MinuteOfDay.self, forKey: .endTime)
+        do {
+            try self.init(
+                startDate: startDate,
+                endDate: endDate,
+                startTime: startTime,
+                endTime: endTime
+            )
+        } catch {
+            throw DecodingError.dataCorruptedError(
+                forKey: .endDate,
+                in: container,
+                debugDescription: "CalendarSchedule violates its date or time-range invariants."
+            )
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(startDate, forKey: .startDate)
+        try container.encode(endDate, forKey: .endDate)
+        try container.encodeIfPresent(startTime, forKey: .startTime)
+        try container.encodeIfPresent(endTime, forKey: .endTime)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case startDate
+        case endDate
+        case startTime
+        case endTime
+    }
+}

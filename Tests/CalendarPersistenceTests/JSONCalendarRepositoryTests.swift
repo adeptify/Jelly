@@ -313,15 +313,17 @@ struct JSONCalendarRepositoryTests {
         let invalidDocuments = try [
             mutatedDocumentData(from: current) { document in
                 try mutateItem(&document, id: itemID) {
-                    $0["timeRange"] = ["start": ["value": 600]]
+                    var schedule = try dictionary(at: "schedule", in: $0)
+                    schedule["startTime"] = ["value": 600]
+                    $0["schedule"] = schedule
                 }
             },
             mutatedDocumentData(from: current) { document in
                 try mutateItem(&document, id: itemID) {
-                    $0["timeRange"] = [
-                        "start": ["value": 600],
-                        "end": ["value": 600]
-                    ]
+                    var schedule = try dictionary(at: "schedule", in: $0)
+                    schedule["startTime"] = ["value": 600]
+                    schedule["endTime"] = ["value": 600]
+                    $0["schedule"] = schedule
                 }
             }
         ]

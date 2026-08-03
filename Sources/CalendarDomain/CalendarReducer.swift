@@ -39,7 +39,8 @@ public enum CalendarReducer {
             guard var item = result.items[id] else {
                 throw ReducerError.missingItem
             }
-            item.date = destination
+            let delta = item.schedule.startDate.days(until: destination)
+            item.schedule = try item.schedule.shifted(byDays: delta)
             item.updatedAt = now
             result.items[id] = item
 
@@ -255,7 +256,7 @@ public enum CalendarStateValidator {
                   state.categories[item.categoryID] != nil,
                   isTrimmedNonEmpty(item.title),
                   TimeZone(identifier: item.creationTimeZoneIdentifier) != nil,
-                  isValidTimeRange(item.timeRange),
+                  isValidSchedule(item.schedule),
                   item.kind != .event || item.completedAt == nil
             else {
                 throw ReducerError.invalidState
@@ -337,6 +338,15 @@ public enum CalendarStateValidator {
 
 private func isTrimmedNonEmpty(_ value: String) -> Bool {
     !value.isEmpty && value == value.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private func isValidSchedule(_ schedule: CalendarSchedule) -> Bool {
+    (try? CalendarSchedule(
+        startDate: schedule.startDate,
+        endDate: schedule.endDate,
+        startTime: schedule.startTime,
+        endTime: schedule.endTime
+    )) == schedule
 }
 
 private func normalizedCategoryName(_ name: String) -> String {

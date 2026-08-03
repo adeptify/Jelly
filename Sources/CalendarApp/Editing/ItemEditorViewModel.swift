@@ -218,7 +218,7 @@ private extension ItemEditorError {
     init(domainError: DomainValidationError) {
         switch domainError {
         case .emptyTitle: self = .emptyTitle
-        case .invalidTimeRange: self = .invalidTimeRange
+        case .invalidDateRange, .invalidTimeRange: self = .invalidTimeRange
         case .emptyWeekdaySet: self = .emptyWeekdays
         case .invalidRecurrenceEnd: self = .invalidRecurrenceEnd
         case .noOccurrenceInRange: self = .noOccurrenceInRange

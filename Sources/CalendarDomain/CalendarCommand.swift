@@ -4,6 +4,7 @@ public enum CalendarCommand: Sendable {
     case createItem(CalendarItem)
     case updateItem(CalendarItem)
     case deleteItem(UUID)
+    /// Shifts an item's entire schedule so that it starts on the destination day.
     case moveItem(UUID, to: CalendarDate)
     case setTaskCompleted(UUID, Date?)
     case setOccurrenceCompleted(OccurrenceKey, Date?)

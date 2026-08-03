@@ -4,6 +4,38 @@ import Testing
 
 @Suite("CoreModelTests")
 struct CoreModelTests {
+    @Test func crossDayScheduleAllowsOvernightClockTimes() throws {
+        let schedule = try CalendarSchedule(
+            startDate: date(2026, 8, 6), endDate: date(2026, 8, 7),
+            startTime: minute(23, 0), endTime: minute(1, 0)
+        )
+        #expect(schedule.durationDays == 2)
+    }
+
+    @Test func sameDayScheduleRejectsEqualOrReversedClockTimes() {
+        #expect(throws: DomainValidationError.invalidTimeRange) {
+            try CalendarSchedule(
+                startDate: date(2026, 8, 6), endDate: date(2026, 8, 6),
+                startTime: minute(9, 0), endTime: minute(9, 0)
+            )
+        }
+    }
+
+    @Test func scheduleRejectsReversedDatesAndPartialTimes() {
+        #expect(throws: DomainValidationError.invalidDateRange) {
+            try CalendarSchedule(
+                startDate: date(2026, 8, 7), endDate: date(2026, 8, 6),
+                startTime: nil, endTime: nil
+            )
+        }
+        #expect(throws: DomainValidationError.invalidTimeRange) {
+            try CalendarSchedule(
+                startDate: date(2026, 8, 6), endDate: date(2026, 8, 7),
+                startTime: minute(9, 0), endTime: nil
+            )
+        }
+    }
+
     @Test func timeRangeRejectsReversedRange() throws {
         #expect(throws: DomainValidationError.invalidTimeRange) {
             try LocalTimeRange(
@@ -117,5 +149,13 @@ struct CoreModelTests {
             createdAt: .now,
             updatedAt: .now
         )
+    }
+
+    private func date(_ year: Int, _ month: Int, _ day: Int) -> CalendarDate {
+        CalendarDate(year: year, month: month, day: day)!
+    }
+
+    private func minute(_ hour: Int, _ minute: Int) -> MinuteOfDay {
+        MinuteOfDay(hour: hour, minute: minute)!
     }
 }
