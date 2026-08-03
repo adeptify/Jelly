@@ -185,6 +185,36 @@ struct MonthViewModelTests {
         #expect(firstLayout.segments.map(\.source) == [.item(enteringItem.id)])
     }
 
+    @Test func weekStreamCanOpenAnItemThatIsVisibleOutsideTheLegacyFortyTwoDayFacade() throws {
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000506")!
+        let center = CalendarDate(year: 2026, month: 8, day: 6)!
+        var state = CalendarState.empty(uncategorizedID: categoryID, now: .distantPast)
+        let model = MonthViewModel(
+            displayedMonth: center, state: state, hiddenCategoryIDs: [], today: center
+        )
+        let farVisibleDate = model.weekStarts[80]
+        let item = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "远处周内事项",
+            categoryID: categoryID,
+            schedule: try CalendarSchedule(
+                startDate: farVisibleDate,
+                endDate: farVisibleDate,
+                startTime: nil,
+                endTime: nil
+            ),
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        state.items[item.id] = item
+
+        model.update(state: state, hiddenCategoryIDs: [], today: center)
+
+        #expect(model.item(withID: "item:\(item.id.uuidString)")?.title == "远处周内事项")
+    }
+
     @Test func changingTheWeekWindowReprojectsTheNewlyLoadedRangeWithoutChangingItemIdentity() throws {
         let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000503")!
         let center = CalendarDate(year: 2026, month: 8, day: 6)!
@@ -302,7 +332,7 @@ struct MonthViewModelTests {
         }
     }
 
-    @Test func updateFocusRederivesCompatibilityCellsOverflowAndLookupForTheNewMonth() throws {
+    @Test func updateFocusRederivesCompatibilityCellsOverflowWhileLookupCoversTheLoadedWeekStream() throws {
         let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000505")!
         let august = CalendarDate(year: 2026, month: 8, day: 3)!
         let october = CalendarDate(year: 2026, month: 10, day: 5)!
@@ -336,7 +366,7 @@ struct MonthViewModelTests {
         let lookupID = "item:\(octoberItems[0].id.uuidString)"
 
         #expect(model.cell(for: october).items.isEmpty)
-        #expect(model.item(withID: lookupID) == nil)
+        #expect(model.item(withID: lookupID)?.id == lookupID)
 
         model.updateFocus(toWeekStarting: october)
 

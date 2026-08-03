@@ -52,6 +52,11 @@ struct MonthViewTodayRefreshController {
     }
 }
 
+private struct WeekStreamScrollRequest: Equatable {
+    let id = UUID()
+    let weekStart: CalendarDate
+}
+
 struct MonthView: View {
     let store: CalendarStore
     private let todayRefreshPolicy: MonthViewTodayRefreshPolicy
@@ -66,6 +71,8 @@ struct MonthView: View {
     @State private var selectedDayDrawerDate: CalendarDate?
     @State private var selectedItem: ProjectedItem?
     @State private var recurringDropPresentation = RecurringDropPresentationController()
+    @State private var requestedCenterRequest: WeekStreamScrollRequest?
+    @State private var isExtendingWeekStream = false
 
     init(
         store: CalendarStore,
@@ -89,15 +96,7 @@ struct MonthView: View {
             toolbar
             weekdayHeader
             GeometryReader { proxy in
-                LazyVGrid(
-                    columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 7),
-                    spacing: 0
-                ) {
-                    ForEach(MonthGridBuilder.cells(containing: model.displayedMonth), id: \.self) { date in
-                        dayCell(for: date, cellHeight: proxy.size.height / 6)
-                        .frame(height: proxy.size.height / 6)
-                    }
-                }
+                weekStream(viewportHeight: proxy.size.height)
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
@@ -200,12 +199,12 @@ struct MonthView: View {
                 }
             }
             Spacer()
-            Button { model.goToPreviousMonth() } label: {
+            Button { navigateToPreviousMonth() } label: {
                 Image(systemName: "chevron.left")
             }
             .help("上个月")
-            Button("今天") { model.goToToday(todayRefreshPolicy.today) }
-            Button { model.goToNextMonth() } label: {
+            Button("今天") { navigateToToday() }
+            Button { navigateToNextMonth() } label: {
                 Image(systemName: "chevron.right")
             }
             .help("下个月")
@@ -240,7 +239,7 @@ struct MonthView: View {
     }
 
     private var monthTitle: String {
-        "\(model.displayedMonth.year)年\(model.displayedMonth.month)月"
+        "\(model.monthTitleDate.year)年\(model.monthTitleDate.month)月"
     }
 
     private var alertPresented: Binding<Bool> {
@@ -284,21 +283,6 @@ struct MonthView: View {
         store.state.categories.values.sorted {
             $0.sortIndex == $1.sortIndex ? $0.name < $1.name : $0.sortIndex < $1.sortIndex
         }
-    }
-
-    @ViewBuilder
-    private func dayCell(for date: CalendarDate, cellHeight: CGFloat) -> some View {
-        let cell = model.cell(for: date)
-        let capacity = MonthLayout.itemCapacity(cellHeight: cellHeight)
-        DayCellView(
-            cell: cell,
-            capacity: capacity,
-            model: model,
-            categories: store.state.categories,
-            dropCoordinator: dropCoordinator,
-            onAction: handle,
-            onCompletion: sendCompletion
-        )
     }
 
     private func handle(_ action: DayCellAction) {
@@ -374,5 +358,120 @@ struct MonthView: View {
             hiddenCategoryIDs: hiddenCategoryIDs,
             today: today
         )
+    }
+
+    private func navigateToPreviousMonth() {
+        model.goToPreviousMonth()
+        requestCentering(on: model.focusWeek)
+    }
+
+    private func navigateToNextMonth() {
+        model.goToNextMonth()
+        requestCentering(on: model.focusWeek)
+    }
+
+    private func navigateToToday() {
+        model.goToToday(todayRefreshPolicy.today)
+        requestCentering(on: model.focusWeek)
+    }
+
+    private func requestCentering(on weekStart: CalendarDate) {
+        requestedCenterRequest = .init(weekStart: weekStart)
+    }
+
+    private func weekStream(viewportHeight: CGFloat) -> some View {
+        let layouts = Dictionary(uniqueKeysWithValues: model.weekLayouts(
+            laneCapacity: WeekRowMetrics.itemCapacity(height: WeekRowMetrics.defaultHeight)
+        ).map { ($0.weekStart, $0) })
+
+        return ScrollViewReader { scrollProxy in
+            ScrollView(.vertical) {
+                LazyVStack(spacing: 0) {
+                    ForEach(model.weekStarts, id: \.self) { weekStart in
+                        if let layout = layouts[weekStart] {
+                            WeekRowView(
+                                layout: layout,
+                                today: model.today,
+                                selectedDate: model.selectedDate,
+                                categories: store.state.categories,
+                                dropCoordinator: dropCoordinator,
+                                onAction: handle,
+                                onCompletion: sendCompletion
+                            )
+                            .id(weekStart)
+                            .background {
+                                GeometryReader { rowProxy in
+                                    Color.clear.preference(
+                                        key: WeekRowFramePreferenceKey.self,
+                                        value: [.init(
+                                            weekStart: weekStart,
+                                            minY: rowProxy.frame(in: .named("week-stream-viewport")).minY,
+                                            maxY: rowProxy.frame(in: .named("week-stream-viewport")).maxY
+                                        )]
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .coordinateSpace(name: "week-stream-viewport")
+            .onAppear {
+                scrollProxy.scrollTo(model.focusWeek, anchor: .center)
+            }
+            .onChange(of: requestedCenterRequest) { _, request in
+                guard let request else { return }
+                scrollProxy.scrollTo(request.weekStart, anchor: .center)
+            }
+            .onPreferenceChange(WeekRowFramePreferenceKey.self) { frames in
+                handleWeekStreamViewport(
+                    frames: frames,
+                    viewportHeight: viewportHeight,
+                    scrollProxy: scrollProxy
+                )
+            }
+        }
+    }
+
+    private func handleWeekStreamViewport(
+        frames: [WeekRowViewportFrame],
+        viewportHeight: CGFloat,
+        scrollProxy: ScrollViewProxy
+    ) {
+        if let focusWeek = WeekStreamViewport.focusWeek(in: frames, viewportHeight: viewportHeight),
+           focusWeek != model.focusWeek {
+            model.updateFocus(toWeekStarting: focusWeek)
+        }
+
+        guard !isExtendingWeekStream,
+              let request = WeekStreamViewport.extensionRequest(
+                in: frames,
+                loadedWeekStarts: model.weekStarts,
+                viewportHeight: viewportHeight
+              )
+        else {
+            return
+        }
+
+        isExtendingWeekStream = true
+        let anchor: WeekStreamAnchor
+        switch request.direction {
+        case .earlier:
+            anchor = model.extendEarlier(
+                visibleWeek: request.anchor.weekStart,
+                pixelOffset: request.anchor.pixelOffset
+            )
+        case .later:
+            anchor = model.extendLater(
+                visibleWeek: request.anchor.weekStart,
+                pixelOffset: request.anchor.pixelOffset
+            )
+        }
+        let restoration = WeekStreamViewport.restorationIntent(for: anchor)
+        scrollProxy.scrollTo(restoration.weekStart, anchor: .top)
+        Task { @MainActor in
+            await Task.yield()
+            isExtendingWeekStream = false
+        }
     }
 }

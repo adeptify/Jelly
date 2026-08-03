@@ -99,18 +99,53 @@ struct CalendarItemRowPresentation: Equatable {
         timeRange: LocalTimeRange?,
         title: String
     ) -> CalendarItemRowPresentation {
-        let isCompactRow = availableContentWidth <= compactRowContentWidth
-        return CalendarItemRowPresentation(
-            categoryName: isCompactRow
-                ? compactCategoryName(from: categoryName)
-                : categoryName,
-            timeText: timeRange.map { timeString($0.start) },
+        make(
+            availableContentWidth: availableContentWidth,
+            categoryName: categoryName,
+            startTime: timeRange?.start,
             title: title,
             accessibilityLabel: rowBodyAccessibilityLabel(
                 categoryName: categoryName,
                 timeRange: timeRange,
                 title: title
-            ),
+            )
+        )
+    }
+
+    static func make(
+        availableContentWidth: Double,
+        categoryName: String,
+        schedule: CalendarSchedule,
+        title: String
+    ) -> CalendarItemRowPresentation {
+        make(
+            availableContentWidth: availableContentWidth,
+            categoryName: categoryName,
+            startTime: schedule.startTime,
+            title: title,
+            accessibilityLabel: rowBodyAccessibilityLabel(
+                categoryName: categoryName,
+                schedule: schedule,
+                title: title
+            )
+        )
+    }
+
+    private static func make(
+        availableContentWidth: Double,
+        categoryName: String,
+        startTime: MinuteOfDay?,
+        title: String,
+        accessibilityLabel: String
+    ) -> CalendarItemRowPresentation {
+        let isCompactRow = availableContentWidth <= compactRowContentWidth
+        return CalendarItemRowPresentation(
+            categoryName: isCompactRow
+                ? compactCategoryName(from: categoryName)
+                : categoryName,
+            timeText: startTime.map(timeString),
+            title: title,
+            accessibilityLabel: accessibilityLabel,
             layout: isCompactRow ? .compact : .standard
         )
     }
@@ -123,6 +158,19 @@ struct CalendarItemRowPresentation: Equatable {
         var components = [categoryName]
         if let timeRange {
             components.append(timeString(timeRange.start))
+        }
+        components.append(title)
+        return components.joined(separator: ", ")
+    }
+
+    static func rowBodyAccessibilityLabel(
+        categoryName: String,
+        schedule: CalendarSchedule,
+        title: String
+    ) -> String {
+        var components = [categoryName]
+        if let startTime = schedule.startTime {
+            components.append(timeString(startTime))
         }
         components.append(title)
         return components.joined(separator: ", ")
@@ -145,6 +193,11 @@ struct CalendarItemRow: View {
     let category: CalendarCategory?
     var onCompletion: ((CalendarCommand) -> Void)?
     var onOpenDetail: ((ProjectedItem) -> Void)?
+    var accessibilityLabelOverride: String?
+    var continuesBefore = false
+    var continuesAfter = false
+    var showsLeadingHandle = false
+    var showsTrailingHandle = false
     @Environment(\.colorScheme) private var colorScheme
 
     private var categoryColor: Color {
@@ -157,6 +210,12 @@ struct CalendarItemRow: View {
 
     var body: some View {
         HStack(spacing: 4) {
+            if continuesBefore {
+                continuationMarker(systemName: "arrow.left")
+            }
+            if showsLeadingHandle {
+                handleMarker(label: "调整开始日期")
+            }
             RoundedRectangle(cornerRadius: 1)
                 .fill(isCompletedTask ? CalendarTheme.completedTaskAccent(categoryColor) : categoryColor)
                 .frame(width: 3)
@@ -201,7 +260,7 @@ struct CalendarItemRow: View {
                     let presentation = CalendarItemRowPresentation.make(
                         availableContentWidth: proxy.size.width,
                         categoryName: category?.name ?? "未分类",
-                        timeRange: item.timeRange,
+                        schedule: item.schedule,
                         title: item.title
                     )
                     HStack(spacing: presentation.layout.inlineSpacing) {
@@ -242,14 +301,21 @@ struct CalendarItemRow: View {
                 .foregroundStyle(isCompletedTask ? CalendarTheme.completedText : .primary)
             }
             .accessibilityLabel(
-                CalendarItemRowPresentation.rowBodyAccessibilityLabel(
+                accessibilityLabelOverride ?? CalendarItemRowPresentation.rowBodyAccessibilityLabel(
                     categoryName: category?.name ?? "未分类",
-                    timeRange: item.timeRange,
+                    schedule: item.schedule,
                     title: item.title
                 )
             )
             .buttonStyle(.plain)
             .frame(maxWidth: .infinity, alignment: .leading)
+
+            if showsTrailingHandle {
+                handleMarker(label: "调整结束日期")
+            }
+            if continuesAfter {
+                continuationMarker(systemName: "arrow.right")
+            }
         }
         .font(CalendarTheme.itemFont)
         .padding(.horizontal, 4)
@@ -279,5 +345,22 @@ struct CalendarItemRow: View {
         case let .occurrence(occurrence):
             .occurrence(occurrence.key)
         }
+    }
+
+    @ViewBuilder
+    private func continuationMarker(systemName: String) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 8, weight: .bold))
+            .foregroundStyle(.secondary)
+            .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func handleMarker(label: String) -> some View {
+        Capsule()
+            .fill(categoryColor)
+            .frame(width: 3, height: 12)
+            .accessibilityLabel(label)
+            .help(label)
     }
 }

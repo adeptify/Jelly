@@ -32,10 +32,17 @@ final class DayDrawerViewModel: ObservableObject {
         state: CalendarState,
         hiddenCategoryIDs: Set<UUID>
     ) -> [ProjectedItem] {
-        MonthProjection.make(
-            monthContaining: date,
+        TimelineProjection.make(
+            in: CalendarDateRange(start: date, end: date),
             state: state,
             hiddenCategoryIDs: hiddenCategoryIDs
-        ).day(date).items
+        ).entries.map { entry in
+            switch entry {
+            case let .item(item):
+                .item(item)
+            case let .occurrence(occurrence):
+                .occurrence(occurrence)
+            }
+        }
     }
 }

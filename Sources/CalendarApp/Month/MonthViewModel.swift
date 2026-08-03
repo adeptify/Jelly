@@ -209,15 +209,15 @@ final class MonthViewModel: ObservableObject {
         var itemLookup: [String: ProjectedItem] = [:]
 
         for entry in timelineProjection.entries {
+            let item = ProjectedItem(entry: entry)
+            itemLookup[item.id] = item
             guard entry.schedule.startDate <= legacyGridRange.end,
                   legacyGridRange.start <= entry.schedule.endDate
             else {
                 continue
             }
-            let item = ProjectedItem(entry: entry)
             let displayDate = max(entry.schedule.startDate, legacyGridRange.start)
             itemsByDate[displayDate, default: []].append(item)
-            itemLookup[item.id] = item
         }
 
         compatibilityItemsByDate = itemsByDate

@@ -190,6 +190,25 @@ struct CalendarItemRowPresentationTests {
         #expect(presentation.accessibilityLabel == "未分类, 收集灵感")
     }
 
+    @Test func scheduleBackedRowKeepsItsStartTimeWhenAnOvernightSpanHasNoLegacyTimeRange() throws {
+        let schedule = try CalendarSchedule(
+            startDate: CalendarDate(year: 2026, month: 8, day: 29)!,
+            endDate: CalendarDate(year: 2026, month: 8, day: 30)!,
+            startTime: MinuteOfDay(hour: 23, minute: 0)!,
+            endTime: MinuteOfDay(hour: 1, minute: 0)!
+        )
+
+        let presentation = CalendarItemRowPresentation.make(
+            availableContentWidth: 112,
+            categoryName: "工作",
+            schedule: schedule,
+            title: "夜间发布"
+        )
+
+        #expect(presentation.timeText == "23:00")
+        #expect(presentation.accessibilityLabel == "工作, 23:00, 夜间发布")
+    }
+
     @Test func narrowUntimedRowAlsoKeepsReadableCategoryPrefixAndTitle() {
         let compact = CalendarItemRowPresentation.make(
             availableContentWidth: 112,
