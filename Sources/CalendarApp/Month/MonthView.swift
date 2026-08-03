@@ -57,6 +57,13 @@ private struct WeekStreamScrollRequest: Equatable {
     let weekStart: CalendarDate
 }
 
+enum MonthQuickCreateRouting {
+    static func presentation(for action: CalendarInteractionAction?) -> QuickCreatePresentation? {
+        guard let action else { return nil }
+        return QuickCreatePresentation(action: action)
+    }
+}
+
 struct MonthView: View {
     let store: CalendarStore
     private let todayRefreshPolicy: MonthViewTodayRefreshPolicy
@@ -65,11 +72,14 @@ struct MonthView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model: MonthViewModel
     @StateObject private var dropCoordinator: CalendarDropCoordinator
+    @StateObject private var interactionCoordinator: CalendarInteractionCoordinator
     @StateObject private var weekStreamScrollCoordinator: WeekStreamScrollCoordinator
     @StateObject private var weekStreamRestoration: WeekStreamRestorationController
     @AppStorage("calendar.hiddenCategoryIDs") private var storedHiddenCategoryIDs = ""
     @State private var hiddenCategoryIDs: Set<UUID> = []
-    @State private var quickCreateDate: CalendarDate?
+    @State private var quickCreatePresentation: QuickCreatePresentation?
+    @State private var dateFrameMap = CalendarDateFrameMap(frames: [])
+    @State private var lastEditorAnchorFrame: CGRect?
     @State private var selectedDayDrawerDate: CalendarDate?
     @State private var selectedItem: ProjectedItem?
     @State private var recurringDropPresentation = RecurringDropPresentationController()
@@ -90,6 +100,7 @@ struct MonthView: View {
             today: today
         ))
         _dropCoordinator = StateObject(wrappedValue: CalendarDropCoordinator(store: store))
+        _interactionCoordinator = StateObject(wrappedValue: CalendarInteractionCoordinator())
         let restoration = WeekStreamRestorationController()
         _weekStreamRestoration = StateObject(wrappedValue: restoration)
         _weekStreamScrollCoordinator = StateObject(wrappedValue: WeekStreamScrollCoordinator {
@@ -103,10 +114,11 @@ struct MonthView: View {
             toolbar
             weekdayHeader
             GeometryReader { proxy in
-                weekStream(viewportHeight: proxy.size.height)
+                weekStream(viewportBounds: proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root)))
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .coordinateSpace(name: CalendarInteractionCoordinateSpace.root)
         .onAppear {
             hiddenCategoryIDs = CategoryFilterView.decode(storedHiddenCategoryIDs)
             refreshProjection()
@@ -126,16 +138,6 @@ struct MonthView: View {
         }
         .onChange(of: dropCoordinator.pendingRecurringDrop) { _, pendingDrop in
             recurringDropPresentation.pendingDropDidChange(hasPendingDrop: pendingDrop != nil)
-        }
-        .popover(isPresented: quickCreatePresented) {
-            if let date = quickCreateDate {
-                QuickCreatePopover(
-                    date: date,
-                    categories: orderedCategories,
-                    store: store,
-                    onClose: { quickCreateDate = nil }
-                )
-            }
         }
         .popover(item: $selectedItem) { item in
             ItemDetailPopover(
@@ -166,10 +168,36 @@ struct MonthView: View {
                     categories: store.state.categories,
                     hiddenCategoryIDs: hiddenCategoryIDs,
                     onClose: { selectedDayDrawerDate = nil },
-                    onQuickCreate: { quickCreateDate = $0 },
+                    onQuickCreate: { openQuickCreate(on: $0) },
                     onOpenDetail: { selectedItem = $0 }
                 )
                 .transition(.move(edge: .trailing))
+            }
+        }
+        .overlay {
+            GeometryReader { proxy in
+                if let presentation = quickCreatePresentation {
+                    let windowBounds = proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root))
+                    let placement = AnchoredEditorLayout.place(
+                        cardSize: QuickCreatePopover.cardSize,
+                        anchorFrame: resolvedEditorAnchorFrame(
+                            for: presentation.anchorDate,
+                            windowBounds: windowBounds
+                        ),
+                        windowBounds: windowBounds
+                    )
+                    QuickCreatePopover(
+                        presentation: presentation,
+                        categories: orderedCategories,
+                        store: store,
+                        onClose: dismissQuickCreate
+                    )
+                    .frame(width: QuickCreatePopover.cardSize.width)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .shadow(color: .black.opacity(0.16), radius: 14, y: 5)
+                    .position(x: placement.frame.midX, y: placement.frame.midY)
+                    .accessibilityIdentifier("quick-create-overlay-card")
+                }
             }
         }
         .overlay(alignment: .bottom) {
@@ -279,13 +307,6 @@ struct MonthView: View {
         )
     }
 
-    private var quickCreatePresented: Binding<Bool> {
-        Binding(
-            get: { quickCreateDate != nil },
-            set: { if !$0 { quickCreateDate = nil } }
-        )
-    }
-
     private var orderedCategories: [CalendarCategory] {
         store.state.categories.values.sorted {
             $0.sortIndex == $1.sortIndex ? $0.name < $1.name : $0.sortIndex < $1.sortIndex
@@ -298,7 +319,7 @@ struct MonthView: View {
             model.selectedDate = date
             selectedDayDrawerDate = date
         case let .quickCreate(date):
-            quickCreateDate = date
+            openQuickCreate(on: date)
         case let .openItem(id):
             selectedItem = model.item(withID: id)
         }
@@ -386,7 +407,8 @@ struct MonthView: View {
         requestedCenterRequest = .init(weekStart: weekStart)
     }
 
-    private func weekStream(viewportHeight: CGFloat) -> some View {
+    private func weekStream(viewportBounds: CGRect) -> some View {
+        let viewportHeight = viewportBounds.height
         let windowRevision = WeekStreamWindowRevision(weekStarts: model.weekStarts)
         let layouts = Dictionary(uniqueKeysWithValues: model.weekLayouts(
             laneCapacity: WeekRowMetrics.itemCapacity(height: WeekRowMetrics.defaultHeight)
@@ -404,7 +426,15 @@ struct MonthView: View {
                                 categories: store.state.categories,
                                 dropCoordinator: dropCoordinator,
                                 onAction: handle,
-                                onCompletion: sendCompletion
+                                onCompletion: sendCompletion,
+                                selectionRange: interactionCoordinator.previewRange,
+                                onRangeGesture: { gesture in
+                                    handleRangeGesture(
+                                        gesture,
+                                        viewportBounds: viewportBounds,
+                                        scrollProxy: scrollProxy
+                                    )
+                                }
                             )
                             .id(weekStart)
                             .background {
@@ -442,7 +472,94 @@ struct MonthView: View {
                     viewportHeight: viewportHeight
                 )
             }
+            .onPreferenceChange(CalendarDateFramePreferenceKey.self) { frames in
+                dateFrameMap = CalendarDateFrameMap(frames: frames)
+                if let anchor = quickCreatePresentation?.anchorDate,
+                   let frame = dateFrameMap.frame(for: anchor) {
+                    lastEditorAnchorFrame = frame
+                }
+            }
         }
+    }
+
+    private func handleRangeGesture(
+        _ gesture: WeekRowRangeGesture,
+        viewportBounds: CGRect,
+        scrollProxy: ScrollViewProxy
+    ) {
+        switch gesture {
+        case let .began(date, point):
+            interactionCoordinator.pointerDown(on: date, target: .emptyCell, point: point)
+        case let .changed(point):
+            let date = dateFrameMap.date(at: point)
+            let actions = interactionCoordinator.updatePointer(
+                point: point,
+                over: date,
+                viewportBounds: viewportBounds
+            )
+            for action in actions {
+                guard let date else { continue }
+                switch action {
+                case .scrollEarlier:
+                    scrollProxy.scrollTo(
+                        WeekStreamModel.weekStart(containing: date).addingDays(-7),
+                        anchor: .top
+                    )
+                case .scrollLater:
+                    scrollProxy.scrollTo(
+                        WeekStreamModel.weekStart(containing: date).addingDays(7),
+                        anchor: .bottom
+                    )
+                case .openCreate:
+                    break
+                }
+            }
+        case let .ended(point):
+            let action = interactionCoordinator.pointerUp(at: point, over: dateFrameMap.date(at: point))
+            presentQuickCreate(for: action)
+        }
+    }
+
+    private func openQuickCreate(on date: CalendarDate) {
+        presentQuickCreate(for: .openCreate(
+            CalendarDateRange(start: date, end: date),
+            anchor: date
+        ))
+    }
+
+    private func presentQuickCreate(for action: CalendarInteractionAction?) {
+        guard let presentation = MonthQuickCreateRouting.presentation(for: action)
+        else {
+            return
+        }
+        quickCreatePresentation = presentation
+        lastEditorAnchorFrame = dateFrameMap.frame(for: presentation.anchorDate)
+        interactionCoordinator.openEditor(for: presentation.range, anchor: presentation.anchorDate)
+    }
+
+    private func dismissQuickCreate() {
+        quickCreatePresentation = nil
+        lastEditorAnchorFrame = nil
+        interactionCoordinator.cancel()
+    }
+
+    private func resolvedEditorAnchorFrame(for date: CalendarDate, windowBounds: CGRect) -> CGRect {
+        if let frame = dateFrameMap.frame(for: date) {
+            return frame
+        }
+        let visibleDates = dateFrameMap.visibleDates
+        if let first = visibleDates.first, date < first {
+            return CGRect(x: windowBounds.midX, y: windowBounds.minY - 1, width: 1, height: 1)
+        }
+        if let last = visibleDates.last, date > last {
+            return CGRect(x: windowBounds.midX, y: windowBounds.maxY + 1, width: 1, height: 1)
+        }
+        return lastEditorAnchorFrame ?? CGRect(
+            x: windowBounds.midX,
+            y: windowBounds.midY,
+            width: 1,
+            height: 1
+        )
     }
 
     private var isExtendingWeekStream: Bool {

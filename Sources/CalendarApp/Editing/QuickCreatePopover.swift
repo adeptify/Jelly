@@ -1,7 +1,28 @@
 import CalendarDomain
 import SwiftUI
 
+struct QuickCreatePresentation: Equatable {
+    let range: CalendarDateRange
+    let anchorDate: CalendarDate
+
+    init(range: CalendarDateRange, anchorDate: CalendarDate) {
+        self.range = range
+        self.anchorDate = anchorDate
+    }
+
+    init?(action: CalendarInteractionAction) {
+        guard case let .openCreate(range, anchor) = action else { return nil }
+        self.init(range: range, anchorDate: anchor)
+    }
+
+    func initialDraft(categoryID: UUID) -> ItemDraft {
+        .newItem(from: range.start, through: range.end, categoryID: categoryID)
+    }
+}
+
 struct QuickCreatePopover: View {
+    static let cardSize = CGSize(width: 370, height: 460)
+
     let store: CalendarStore
     let categories: [CalendarCategory]
     let onClose: () -> Void
@@ -14,7 +35,7 @@ struct QuickCreatePopover: View {
     private static let categoryManagerOption = "__category_manager__"
 
     init(
-        date: CalendarDate,
+        presentation: QuickCreatePresentation,
         categories: [CalendarCategory],
         store: CalendarStore,
         onClose: @escaping () -> Void
@@ -23,7 +44,7 @@ struct QuickCreatePopover: View {
         self.categories = categories
         self.onClose = onClose
         let categoryID = categories.first?.id ?? store.state.uncategorizedID
-        let draft = ItemDraft.newItem(from: date, through: date, categoryID: categoryID)
+        let draft = presentation.initialDraft(categoryID: categoryID)
         _model = StateObject(wrappedValue: ItemEditorViewModel(mode: .create, draft: draft))
         _categoryOption = State(initialValue: categoryID.uuidString)
         _localError = State(initialValue: nil)

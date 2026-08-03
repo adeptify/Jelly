@@ -277,6 +277,37 @@ struct WeekRowFramePreferenceKey: PreferenceKey {
     }
 }
 
+struct CalendarDateFramePreferenceKey: PreferenceKey {
+    static let defaultValue: [CalendarDateFrame] = []
+
+    static func reduce(value: inout [CalendarDateFrame], nextValue: () -> [CalendarDateFrame]) {
+        var frames = Dictionary(uniqueKeysWithValues: value.map { ($0.date, $0) })
+        for frame in nextValue() {
+            frames[frame.date] = frame
+        }
+        value = frames.values.sorted { $0.date < $1.date }
+    }
+}
+
+enum WeekRowRangeGesture {
+    case began(CalendarDate, CGPoint)
+    case changed(CGPoint)
+    case ended(CGPoint)
+
+    static func target(for target: DayCellHitTarget) -> CalendarInteractionHitTarget {
+        switch target {
+        case .emptyArea:
+            .emptyCell
+        case .dateNumber:
+            .dateNumber
+        case .overflow:
+            .overflow
+        case .item:
+            .barBody
+        }
+    }
+}
+
 struct WeekRowView: View {
     let layout: WeekLayout
     let today: CalendarDate
@@ -285,6 +316,8 @@ struct WeekRowView: View {
     @ObservedObject var dropCoordinator: CalendarDropCoordinator
     let onAction: (DayCellAction) -> Void
     let onCompletion: (CalendarCommand) -> Void
+    let selectionRange: CalendarDateRange?
+    let onRangeGesture: (WeekRowRangeGesture) -> Void
     var height: CGFloat = WeekRowMetrics.defaultHeight
 
     private var presentation: WeekRowPresentation {
@@ -302,9 +335,11 @@ struct WeekRowView: View {
                             date: date,
                             isToday: date == today,
                             isSelected: date == selectedDate,
+                            isInSelection: selectionRange.map { $0.start <= date && date <= $0.end } ?? false,
                             overflow: presentation.overflowCount(for: date),
                             dropCoordinator: dropCoordinator,
-                            onAction: onAction
+                            onAction: onAction,
+                            onRangeGesture: onRangeGesture
                         )
                         .frame(width: columnWidth, height: height)
                     }
@@ -355,9 +390,11 @@ private struct WeekRowDateCell: View {
     let date: CalendarDate
     let isToday: Bool
     let isSelected: Bool
+    let isInSelection: Bool
     let overflow: Int
     @ObservedObject var dropCoordinator: CalendarDropCoordinator
     let onAction: (DayCellAction) -> Void
+    let onRangeGesture: (WeekRowRangeGesture) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -395,10 +432,19 @@ private struct WeekRowDateCell: View {
         .contentShape(Rectangle())
         .background {
             Rectangle()
-                .fill(Color(nsColor: .windowBackgroundColor))
-                .onTapGesture {
-                    onAction(DayCellSurfaceInteraction.backgroundAction(for: date))
-                }
+                .fill(isInSelection ? Color.accentColor.opacity(0.14) : Color(nsColor: .windowBackgroundColor))
+                .simultaneousGesture(rangeSelectionGesture)
+        }
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: CalendarDateFramePreferenceKey.self,
+                    value: [.init(
+                        date: date,
+                        frame: proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root))
+                    )]
+                )
+            }
         }
         .overlay(Rectangle().stroke(CalendarTheme.gridStroke, lineWidth: 0.5))
         .overlay {
@@ -423,6 +469,17 @@ private struct WeekRowDateCell: View {
         } isTargeted: { isTargeted in
             dropCoordinator.setTargeted(isTargeted, date: date)
         }
+    }
+
+    private var rangeSelectionGesture: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(CalendarInteractionCoordinateSpace.root))
+            .onChanged { value in
+                onRangeGesture(.began(date, value.startLocation))
+                onRangeGesture(.changed(value.location))
+            }
+            .onEnded { value in
+                onRangeGesture(.ended(value.location))
+            }
     }
 }
 
