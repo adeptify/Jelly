@@ -6,77 +6,191 @@ PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd -P)
 DIST_DIR="$PROJECT_DIR/dist"
 STAGING_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/personal-calendar-build.XXXXXX")
 STAGING_APP="$STAGING_ROOT/个人月历.app"
-STAGING_ARCHIVE="$STAGING_ROOT/个人月历.app.zip"
-VERIFY_ROOT="$STAGING_ROOT/archive-verify"
-CANDIDATE_PATH=""
-BACKUP_PATH=""
-ARCHIVE_PATH=""
-PUBLICATION_PENDING=false
-FORMAL_REPLACED=false
+STAGING_ZIP="$STAGING_ROOT/个人月历.app.zip"
+STAGING_DMG="$STAGING_ROOT/个人月历.dmg"
+DMG_SOURCE="$STAGING_ROOT/dmg-source"
+ZIP_VERIFY_ROOT="$STAGING_ROOT/zip-verify"
+DMG_VERIFY_ROOT="$STAGING_ROOT/dmg-verify"
 
-close_publication_transaction() {
-  PUBLICATION_PENDING=false
-  FORMAL_REPLACED=false
+FORMAL_ZIP=""
+FORMAL_DMG=""
+CANDIDATE_ZIP=""
+CANDIDATE_DMG=""
+BACKUP_ZIP=""
+BACKUP_DMG=""
+ACTIVE_MOUNT_POINT=""
+LAST_VERIFIED_ZIP_CDHASH=""
+LAST_VERIFIED_DMG_CDHASH=""
+PUBLICATION_PENDING=false
+PRIOR_ZIP_EXISTS=false
+PRIOR_DMG_EXISTS=false
+
+remove_explicit_file() {
+  local target_path="$1"
+  if [[ -e "$target_path" || -L "$target_path" ]]; then
+    rm -f "$target_path"
+  fi
 }
 
-remove_formal_archive_for_rollback() {
-  if [[ -n "$ARCHIVE_PATH" && ( -e "$ARCHIVE_PATH" || -L "$ARCHIVE_PATH" ) ]]; then
-    if ! rm -f "$ARCHIVE_PATH"; then
-      echo "Could not remove failed archive candidate from formal output path." >&2
-      return 1
-    fi
+remove_formal_pair() {
+  local result=0
+  remove_explicit_file "$FORMAL_ZIP" || result=1
+  remove_explicit_file "$FORMAL_DMG" || result=1
+  return "$result"
+}
+
+verify_app() {
+  local app="$1"
+  local plist="$app/Contents/Info.plist"
+  [[ -d "$app" && ! -L "$app" ]] || return 1
+  [[ -f "$plist" && ! -L "$plist" ]] || return 1
+  plutil -lint "$plist" >/dev/null || return 1
+  local executable
+  executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist") || return 1
+  [[ -n "$executable" ]] || return 1
+  local executable_path="$app/Contents/MacOS/$executable"
+  [[ -f "$executable_path" && ! -L "$executable_path" && -x "$executable_path" ]] || return 1
+  codesign --verify --deep --strict "$app" || return 1
+}
+
+app_cdhash() {
+  local app="$1"
+  local cdhash
+  cdhash=$(codesign -dv --verbose=4 "$app" 2>&1 | awk -F= '/^CDHash=/{print $2; exit}') || return 1
+  [[ -n "$cdhash" ]] || return 1
+  print -r -- "$cdhash"
+}
+
+verify_zip() {
+  local archive="$1"
+  local verify_root="$2"
+  [[ -f "$archive" && ! -L "$archive" ]] || return 1
+  if [[ -e "$verify_root" || -L "$verify_root" ]]; then
+    find "$verify_root" -depth -delete || return 1
   fi
+  mkdir -p "$verify_root" || return 1
+  ditto -x -k "$archive" "$verify_root" || return 1
+  local app="$verify_root/个人月历.app"
+  if xattr -lr "$app" | grep -E 'com\.apple\.(FinderInfo|fileprovider)' >/dev/null; then
+    echo "ZIP extraction contained FileProvider signing detritus." >&2
+    return 1
+  fi
+  verify_app "$app" || return 1
+  LAST_VERIFIED_ZIP_CDHASH=$(app_cdhash "$app") || return 1
+}
+
+mounted_value() {
+  local plist="$1"
+  local key="$2"
+  local index value
+  for index in {0..20}; do
+    if value=$(plutil -extract "system-entities.$index.$key" raw -o - "$plist" 2>/dev/null); then
+      [[ -n "$value" ]] && {
+        print -r -- "$value"
+        return 0
+      }
+    fi
+  done
+  return 1
+}
+
+verify_dmg() {
+  local dmg="$1"
+  local verify_root="$2"
+  local attach_plist="$verify_root/attach.plist"
+  [[ -f "$dmg" && ! -L "$dmg" ]] || return 1
+  if [[ -e "$verify_root" || -L "$verify_root" ]]; then
+    find "$verify_root" -depth -delete || return 1
+  fi
+  mkdir -p "$verify_root" || return 1
+  hdiutil attach -readonly -nobrowse -plist "$dmg" > "$attach_plist" || return 1
+  ACTIVE_MOUNT_POINT=$(mounted_value "$attach_plist" mount-point) || {
+    echo "DMG attach did not report a mount point: $dmg" >&2
+    return 1
+  }
+
+  local result=0
+  local mounted_app="$ACTIVE_MOUNT_POINT/个人月历.app"
+  verify_app "$mounted_app" || result=1
+  if [[ "$result" == 0 ]]; then
+    LAST_VERIFIED_DMG_CDHASH=$(app_cdhash "$mounted_app") || result=1
+  fi
+  if [[ ! -L "$ACTIVE_MOUNT_POINT/Applications" ]] || \
+     [[ "$(readlink "$ACTIVE_MOUNT_POINT/Applications")" != "/Applications" ]]; then
+    echo "DMG is missing the Finder Applications shortcut." >&2
+    result=1
+  fi
+  hdiutil detach "$ACTIVE_MOUNT_POINT" >/dev/null || result=1
+  ACTIVE_MOUNT_POINT=""
+  return "$result"
+}
+
+verify_pair() {
+  local zip="$1"
+  local dmg="$2"
+  local suffix="$3"
+  LAST_VERIFIED_ZIP_CDHASH=""
+  LAST_VERIFIED_DMG_CDHASH=""
+  verify_zip "$zip" "$ZIP_VERIFY_ROOT-$suffix" || return 1
+  verify_dmg "$dmg" "$DMG_VERIFY_ROOT-$suffix" || return 1
+  if [[ "$LAST_VERIFIED_ZIP_CDHASH" != "$LAST_VERIFIED_DMG_CDHASH" ]]; then
+    echo "ZIP/DMG app CDHash mismatch: ZIP=$LAST_VERIFIED_ZIP_CDHASH DMG=$LAST_VERIFIED_DMG_CDHASH" >&2
+    return 1
+  fi
+}
+
+clear_transaction() {
+  PUBLICATION_PENDING=false
 }
 
 rollback_publication() {
   [[ "$PUBLICATION_PENDING" == true ]] || return 0
   trap '' HUP INT TERM
 
-  if [[ "$FORMAL_REPLACED" != true ]]; then
-    close_publication_transaction
-    if [[ -n "$BACKUP_PATH" && ( -e "$BACKUP_PATH" || -L "$BACKUP_PATH" ) ]]; then
-      if ! rm -f "$BACKUP_PATH"; then
-        echo "Could not remove redundant archive backup after interrupted publication." >&2
-        return 1
-      fi
-      BACKUP_PATH=""
+  local result=0
+  remove_formal_pair || result=1
+  if [[ "$PRIOR_ZIP_EXISTS" == true || "$PRIOR_DMG_EXISTS" == true ]]; then
+    if [[ "$PRIOR_ZIP_EXISTS" == true && -f "$BACKUP_ZIP" ]]; then
+      cp -p "$BACKUP_ZIP" "$FORMAL_ZIP" || result=1
     fi
-    return 0
+    if [[ "$PRIOR_DMG_EXISTS" == true && -f "$BACKUP_DMG" ]]; then
+      cp -p "$BACKUP_DMG" "$FORMAL_DMG" || result=1
+    fi
+    if [[ "$result" == 0 && "$PRIOR_ZIP_EXISTS" == true && "$PRIOR_DMG_EXISTS" == true ]] && \
+       ! verify_pair "$FORMAL_ZIP" "$FORMAL_DMG" rollback; then
+      result=1
+    elif [[ "$result" == 0 && "$PRIOR_ZIP_EXISTS" == true && "$PRIOR_DMG_EXISTS" == false ]] && \
+         ! verify_zip "$FORMAL_ZIP" "$ZIP_VERIFY_ROOT-rollback"; then
+      result=1
+    fi
   fi
 
-  if [[ -n "$BACKUP_PATH" && -f "$BACKUP_PATH" ]]; then
-    if mv -f "$BACKUP_PATH" "$ARCHIVE_PATH"; then
-      close_publication_transaction
-      BACKUP_PATH=""
-      return 0
-    fi
-
-    local preserved_backup_path="$BACKUP_PATH"
-    BACKUP_PATH=""
-    echo "Could not restore the prior archive after publication failure; prior archive preserved at: $preserved_backup_path" >&2
-    if remove_formal_archive_for_rollback; then
-      close_publication_transaction
-    fi
+  if [[ "$result" != 0 ]]; then
+    remove_formal_pair || true
+    echo "Could not restore the prior authoritative ZIP/DMG pair; backups remain at:" >&2
+    echo "$BACKUP_ZIP" >&2
+    echo "$BACKUP_DMG" >&2
     return 1
   fi
-
-  if remove_formal_archive_for_rollback; then
-    close_publication_transaction
-    return 0
-  fi
-  return 1
+  clear_transaction
 }
 
 cleanup() {
   trap '' HUP INT TERM
+  if [[ -n "$ACTIVE_MOUNT_POINT" ]]; then
+    hdiutil detach "$ACTIVE_MOUNT_POINT" >/dev/null 2>&1 || true
+    ACTIVE_MOUNT_POINT=""
+  fi
   if [[ "$PUBLICATION_PENDING" == true ]]; then
     rollback_publication || true
   fi
-  if [[ -n "$CANDIDATE_PATH" && ( -e "$CANDIDATE_PATH" || -L "$CANDIDATE_PATH" ) ]]; then
-    rm -f "$CANDIDATE_PATH" || true
-  fi
-  if [[ -n "$BACKUP_PATH" && ( -e "$BACKUP_PATH" || -L "$BACKUP_PATH" ) ]]; then
-    rm -f "$BACKUP_PATH" || true
+  for package_path in "$CANDIDATE_ZIP" "$CANDIDATE_DMG"; do
+    [[ -n "$package_path" ]] && remove_explicit_file "$package_path" || true
+  done
+  if [[ "$PUBLICATION_PENDING" != true ]]; then
+    for package_path in "$BACKUP_ZIP" "$BACKUP_DMG"; do
+      [[ -n "$package_path" ]] && remove_explicit_file "$package_path" || true
+    done
   fi
   find "$STAGING_ROOT" -depth -delete || true
 }
@@ -84,9 +198,8 @@ cleanup() {
 handle_signal() {
   local signal_name="$1"
   local exit_code="$2"
-
   trap '' HUP INT TERM
-  echo "Received $signal_name during archive publication; rolling back pending output." >&2
+  echo "Received $signal_name during package publication; restoring the authoritative pair." >&2
   rollback_publication || true
   exit "$exit_code"
 }
@@ -101,8 +214,10 @@ if [[ -L "$DIST_DIR" ]]; then
   echo "Refusing symlinked dist directory: $DIST_DIR" >&2
   exit 2
 fi
+
 swift build -c release --product PersonalCalendar
 BIN_DIR=$(swift build -c release --show-bin-path)
+
 if [[ -L "$DIST_DIR" ]]; then
   echo "Refusing symlinked dist directory: $DIST_DIR" >&2
   exit 2
@@ -115,136 +230,102 @@ DIST_REAL=$(cd "$DIST_DIR" && pwd -P)
 }
 
 APP_DIR="$DIST_REAL/个人月历.app"
-ARCHIVE_PATH="$DIST_REAL/个人月历.app.zip"
-CONTENTS_DIR="$STAGING_APP/Contents"
-MACOS_DIR="$CONTENTS_DIR/MacOS"
-[[ "$APP_DIR" == "$PROJECT_DIR/dist/个人月历.app" ]] || {
-  echo "Unexpected app output path: $APP_DIR" >&2
-  exit 2
-}
-[[ "$ARCHIVE_PATH" == "$PROJECT_DIR/dist/个人月历.app.zip" ]] || {
-  echo "Unexpected archive output path: $ARCHIVE_PATH" >&2
-  exit 2
-}
-if [[ -L "$ARCHIVE_PATH" || ( -e "$ARCHIVE_PATH" && ! -f "$ARCHIVE_PATH" ) ]]; then
-  echo "Unexpected archive output target: $ARCHIVE_PATH" >&2
+FORMAL_ZIP="$DIST_REAL/个人月历.app.zip"
+FORMAL_DMG="$DIST_REAL/个人月历.dmg"
+CANDIDATE_ZIP="$DIST_REAL/.个人月历.app.zip.candidate.$$"
+CANDIDATE_DMG="$DIST_REAL/.个人月历.dmg.candidate.$$"
+BACKUP_ZIP="$DIST_REAL/.个人月历.app.zip.backup.$$"
+BACKUP_DMG="$DIST_REAL/.个人月历.dmg.backup.$$"
+
+for formal in "$FORMAL_ZIP" "$FORMAL_DMG"; do
+  if [[ -L "$formal" || ( -e "$formal" && ! -f "$formal" ) ]]; then
+    echo "Unexpected package output target: $formal" >&2
+    exit 2
+  fi
+done
+if [[ -f "$FORMAL_ZIP" && -f "$FORMAL_DMG" ]]; then
+  PRIOR_ZIP_EXISTS=true
+  PRIOR_DMG_EXISTS=true
+elif [[ -f "$FORMAL_ZIP" && ! -e "$FORMAL_DMG" ]]; then
+  # V1 shipped ZIP-only. Preserve that exact legacy state if the first V2 pair
+  # publication fails, then publish both formats together on success.
+  PRIOR_ZIP_EXISTS=true
+elif [[ -e "$FORMAL_DMG" ]]; then
+  echo "Refusing a DMG without its authoritative ZIP peer in dist." >&2
   exit 2
 fi
-CANDIDATE_PATH="$DIST_REAL/.个人月历.app.zip.candidate.$$"
-BACKUP_PATH="$DIST_REAL/.个人月历.app.zip.backup.$$"
-for temporary_archive_path in "$CANDIDATE_PATH" "$BACKUP_PATH"; do
-  if [[ -e "$temporary_archive_path" || -L "$temporary_archive_path" ]]; then
-    echo "Unexpected temporary archive target: $temporary_archive_path" >&2
+for temporary in "$CANDIDATE_ZIP" "$CANDIDATE_DMG" "$BACKUP_ZIP" "$BACKUP_DMG"; do
+  if [[ -e "$temporary" || -L "$temporary" ]]; then
+    echo "Unexpected temporary package target: $temporary" >&2
     exit 2
   fi
 done
 
-verify_archive() {
-  local archive_path="$1"
-  local verify_root="$2"
-  local extracted_app="$verify_root/个人月历.app"
-
-  if [[ -e "$verify_root" || -L "$verify_root" ]]; then
-    find "$verify_root" -depth -delete || return 1
-  fi
-  mkdir -p "$verify_root" || return 1
-  ditto -x -k "$archive_path" "$verify_root" || return 1
-  [[ -d "$extracted_app" ]] || {
-    echo "Archive extraction did not contain an app bundle: $archive_path" >&2
-    return 1
-  }
-  if xattr -lr "$extracted_app" | grep -E 'com\.apple\.(FinderInfo|fileprovider)' >/dev/null; then
-    echo "Archive extraction contained FileProvider signing detritus." >&2
-    return 1
-  fi
-  codesign --verify --deep --strict "$extracted_app"
-}
-
-cleanup_partial_launcher() {
-  if [[ -e "$APP_DIR" || -L "$APP_DIR" ]]; then
-    if ! rm -rf "$APP_DIR"; then
-      echo "Warning: could not clean partial local app copy; use $ARCHIVE_PATH." >&2
-    fi
-  fi
-}
-
-publish_local_launcher() {
-  if ! rm -rf "$APP_DIR"; then
-    echo "Warning: could not clear prior local app copy; skipping launcher and using $ARCHIVE_PATH." >&2
-    return 0
-  fi
-  if [[ -e "$APP_DIR" || -L "$APP_DIR" ]]; then
-    echo "Warning: prior local app copy remains; skipping launcher and using $ARCHIVE_PATH." >&2
-    return 0
-  fi
-  if ! ditto --norsrc "$STAGING_APP" "$APP_DIR"; then
-    echo "Warning: could not publish local app copy; use $ARCHIVE_PATH." >&2
-    cleanup_partial_launcher
-    return 0
-  fi
-  if ! xattr -cr "$APP_DIR"; then
-    echo "Warning: could not clear attributes from local app copy; use $ARCHIVE_PATH." >&2
-    cleanup_partial_launcher
-    return 0
-  fi
-  if ! codesign --verify --deep --strict "$APP_DIR"; then
-    echo "Warning: local app copy was mutated after publication; use $ARCHIVE_PATH." >&2
-    cleanup_partial_launcher
-    return 0
-  fi
-
-  echo "$APP_DIR"
-}
-
+CONTENTS_DIR="$STAGING_APP/Contents"
+MACOS_DIR="$CONTENTS_DIR/MacOS"
 mkdir -p "$MACOS_DIR"
 cp "$BIN_DIR/PersonalCalendar" "$MACOS_DIR/PersonalCalendar"
 cp "$PROJECT_DIR/Support/Info.plist" "$CONTENTS_DIR/Info.plist"
 chmod +x "$MACOS_DIR/PersonalCalendar"
-plutil -lint "$CONTENTS_DIR/Info.plist"
+plutil -lint "$CONTENTS_DIR/Info.plist" >/dev/null
 xattr -cr "$STAGING_APP"
 codesign --force --deep --sign - "$STAGING_APP"
 xattr -cr "$STAGING_APP"
-codesign --verify --deep --strict "$STAGING_APP"
+verify_app "$STAGING_APP"
 
-ditto --norsrc -c -k --keepParent "$STAGING_APP" "$STAGING_ARCHIVE"
-if ! verify_archive "$STAGING_ARCHIVE" "$VERIFY_ROOT"; then
-  echo "Staged archive verification failed; archive was not published." >&2
+ditto --norsrc -c -k --keepParent "$STAGING_APP" "$STAGING_ZIP"
+mkdir -p "$DMG_SOURCE"
+ditto --norsrc "$STAGING_APP" "$DMG_SOURCE/个人月历.app"
+ln -s /Applications "$DMG_SOURCE/Applications"
+hdiutil create -volname "个人月历" -srcfolder "$DMG_SOURCE" -ov -format UDZO "$STAGING_DMG" >/dev/null
+
+verify_pair "$STAGING_ZIP" "$STAGING_DMG" staging || {
+  echo "Staged ZIP/DMG verification failed; neither package was published." >&2
   exit 1
+}
+mv "$STAGING_ZIP" "$CANDIDATE_ZIP"
+mv "$STAGING_DMG" "$CANDIDATE_DMG"
+verify_pair "$CANDIDATE_ZIP" "$CANDIDATE_DMG" candidate || {
+  echo "Candidate ZIP/DMG verification failed; neither package was published." >&2
+  exit 1
+}
+
+if [[ "$PRIOR_ZIP_EXISTS" == true ]]; then
+  cp -p "$FORMAL_ZIP" "$BACKUP_ZIP"
 fi
-if ! mv "$STAGING_ARCHIVE" "$CANDIDATE_PATH"; then
-  echo "Could not stage archive candidate in dist." >&2
-  exit 1
-fi
-if ! verify_archive "$CANDIDATE_PATH" "$VERIFY_ROOT"; then
-  echo "Archive candidate verification failed; archive was not published." >&2
-  exit 1
-fi
-if [[ -f "$ARCHIVE_PATH" ]] && ! cp -p "$ARCHIVE_PATH" "$BACKUP_PATH"; then
-  echo "Could not back up the prior archive; archive was not replaced." >&2
-  exit 1
+if [[ "$PRIOR_DMG_EXISTS" == true ]]; then
+  cp -p "$FORMAL_DMG" "$BACKUP_DMG"
 fi
 PUBLICATION_PENDING=true
-FORMAL_REPLACED=true
-if ! mv -f "$CANDIDATE_PATH" "$ARCHIVE_PATH"; then
-  echo "Could not atomically publish archive candidate." >&2
-  exit 1
-fi
-CANDIDATE_PATH=""
+mv -f "$CANDIDATE_ZIP" "$FORMAL_ZIP"
+CANDIDATE_ZIP=""
+mv -f "$CANDIDATE_DMG" "$FORMAL_DMG"
+CANDIDATE_DMG=""
 
-if ! verify_archive "$ARCHIVE_PATH" "$VERIFY_ROOT"; then
-  echo "Published archive verification failed; rolling back the formal archive path." >&2
+if ! verify_pair "$FORMAL_ZIP" "$FORMAL_DMG" published; then
+  echo "Published pair verification failed; restoring the prior authoritative pair." >&2
   rollback_publication || true
   exit 1
 fi
-close_publication_transaction
-if [[ -f "$BACKUP_PATH" ]] && ! rm -f "$BACKUP_PATH"; then
-  echo "Could not remove archive backup after successful publication." >&2
-  exit 1
-fi
-BACKUP_PATH=""
+clear_transaction
+remove_explicit_file "$BACKUP_ZIP"
+remove_explicit_file "$BACKUP_DMG"
+BACKUP_ZIP=""
+BACKUP_DMG=""
 
-# The archive above is authoritative. A raw app copied into a Documents-backed
-# workspace is a best-effort local launcher and is reported only after it
-# independently clears attributes and passes strict signature verification.
-publish_local_launcher
-echo "$ARCHIVE_PATH"
+# A Documents-backed raw app is only a best-effort launcher. The ZIP and DMG
+# above are the authoritative pair and have already passed independent checks.
+if [[ -e "$APP_DIR" || -L "$APP_DIR" ]]; then
+  rm -rf "$APP_DIR" || true
+fi
+if [[ ! -e "$APP_DIR" && ! -L "$APP_DIR" ]] && \
+   ditto --norsrc "$STAGING_APP" "$APP_DIR" && \
+   xattr -cr "$APP_DIR" && \
+   verify_app "$APP_DIR"; then
+  echo "$APP_DIR"
+elif [[ -e "$APP_DIR" || -L "$APP_DIR" ]]; then
+  rm -rf "$APP_DIR" || true
+fi
+
+echo "$FORMAL_ZIP"
+echo "$FORMAL_DMG"

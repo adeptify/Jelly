@@ -84,10 +84,6 @@ extension ItemDraft {
         )
     }
 
-    @available(*, deprecated, message: "Use newItem(from:through:categoryID:) instead.")
-    static func newItem(on date: CalendarDate, categoryID: UUID) -> ItemDraft {
-        newItem(from: date, through: date, categoryID: categoryID)
-    }
 }
 
 extension CalendarDate {

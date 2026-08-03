@@ -42,10 +42,8 @@ public struct SeriesPatch: Sendable {
         title: String? = nil,
         kind: ItemKind? = nil,
         categoryID: UUID? = nil,
-        timeRange: OptionalPatch<LocalTimeRange> = .unchanged,
-        displayedDate: CalendarDate? = nil,
         weekdays: Set<Weekday>? = nil,
-        endDate: OptionalPatch<CalendarDate> = .unchanged,
+        recurrenceEndDate: OptionalPatch<CalendarDate> = .unchanged,
         displayedStartDate: CalendarDate? = nil,
         durationDays: Int? = nil,
         startTime: OptionalPatch<MinuteOfDay> = .unchanged,
@@ -55,36 +53,11 @@ public struct SeriesPatch: Sendable {
         self.kind = kind
         self.categoryID = categoryID
         self.weekdays = weekdays
-        self.recurrenceEndDate = endDate
-        self.displayedStartDate = displayedStartDate ?? displayedDate
+        self.recurrenceEndDate = recurrenceEndDate
+        self.displayedStartDate = displayedStartDate
         self.durationDays = durationDays
-        switch timeRange {
-        case .unchanged:
-            self.startTime = startTime
-            self.endTime = endTime
-        case let .set(value):
-            self.startTime = Self.isUnchanged(startTime) ? .set(value.start) : startTime
-            self.endTime = Self.isUnchanged(endTime) ? .set(value.end) : endTime
-        case .clear:
-            self.startTime = Self.isUnchanged(startTime) ? .clear : startTime
-            self.endTime = Self.isUnchanged(endTime) ? .clear : endTime
-        }
-    }
-
-    private static func isUnchanged<Value>(_ patch: OptionalPatch<Value>) -> Bool where Value: Sendable {
-        if case .unchanged = patch {
-            return true
-        }
-        return false
-    }
-
-    @available(*, deprecated, message: "Use displayedStartDate instead.")
-    public var displayedDate: CalendarDate? { displayedStartDate }
-
-    @available(*, deprecated, message: "Use recurrenceEndDate instead.")
-    public var endDate: OptionalPatch<CalendarDate> {
-        get { recurrenceEndDate }
-        set { recurrenceEndDate = newValue }
+        self.startTime = startTime
+        self.endTime = endTime
     }
 }
 

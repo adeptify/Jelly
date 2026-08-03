@@ -10,10 +10,12 @@ struct RecurrenceEngineTests {
             kind: .task,
             title: "固定复盘",
             categoryID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
-            startDate: .init(year: 2026, month: 8, day: 4)!, // Tuesday
-            endDate: .init(year: 2026, month: 8, day: 12)!,
+            ruleStartDate: .init(year: 2026, month: 8, day: 4)!, // Tuesday
+            recurrenceEndDate: .init(year: 2026, month: 8, day: 12)!,
             weekdays: [.monday, .wednesday],
-            timeRange: nil,
+            durationDays: 1,
+            startTime: nil,
+            endTime: nil,
             createdAt: Date(timeIntervalSince1970: 0),
             updatedAt: Date(timeIntervalSince1970: 0)
         )
@@ -44,21 +46,24 @@ struct RecurrenceEngineTests {
             kind: .task,
             title: "周计划",
             categoryID: categoryID,
-            startDate: .init(year: 2026, month: 8, day: 3)!,
-            endDate: nil,
+            ruleStartDate: .init(year: 2026, month: 8, day: 3)!,
+            recurrenceEndDate: nil,
             weekdays: [.monday, .wednesday],
-            timeRange: nil,
+            durationDays: 1,
+            startTime: nil,
+            endTime: nil,
             createdAt: Date(timeIntervalSince1970: 0),
             updatedAt: Date(timeIntervalSince1970: 0)
         )
         let monday = CalendarDate(year: 2026, month: 8, day: 3)!
         let key = OccurrenceKey(seriesID: series.id, originalDate: monday)
         let moved = OccurrenceOverride(
-            displayedDate: .init(year: 2026, month: 8, day: 4)!,
+            displayedSchedule: singleDaySchedule(
+                .init(year: 2026, month: 8, day: 4)!
+            ),
             title: series.title,
             kind: series.kind,
-            categoryID: series.categoryID,
-            timeRange: series.timeRange
+            categoryID: series.categoryID
         )
         let result = RecurrenceEngine.occurrences(
             of: series,
@@ -71,8 +76,8 @@ struct RecurrenceEngineTests {
         )
         let matchingKey = result.filter { $0.key == key }
         #expect(matchingKey.count == 1)
-        #expect(matchingKey.first?.displayedDate == moved.displayedDate)
-        #expect(result.filter { $0.displayedDate == monday }.isEmpty)
+        #expect(matchingKey.first?.schedule.startDate == moved.displayedSchedule.startDate)
+        #expect(result.filter { $0.schedule.startDate == monday }.isEmpty)
     }
 
     @Test func inclusiveEndDateProducesOccurrence() throws {
@@ -173,11 +178,10 @@ struct RecurrenceEngineTests {
         )
         let movedDate = CalendarDate(year: 2026, month: 8, day: 5)!
         let moved = OccurrenceOverride(
-            displayedDate: movedDate,
+            displayedSchedule: singleDaySchedule(movedDate),
             title: "拆分后调整",
             kind: .task,
-            categoryID: series.categoryID,
-            timeRange: nil
+            categoryID: series.categoryID
         )
 
         let result = RecurrenceEngine.occurrences(
@@ -192,7 +196,7 @@ struct RecurrenceEngineTests {
 
         let matchingKey = result.filter { $0.key == key }
         #expect(matchingKey.count == 1)
-        #expect(matchingKey[0].displayedDate == movedDate)
+        #expect(matchingKey[0].schedule.startDate == movedDate)
     }
 
     @Test func modifiedExceptionEntersQueryWhenOriginalDateIsOutsideRange() throws {
@@ -201,11 +205,14 @@ struct RecurrenceEngineTests {
         let displayedDate = CalendarDate(year: 2026, month: 8, day: 5)!
         let key = OccurrenceKey(seriesID: series.id, originalDate: originalDate)
         let moved = OccurrenceOverride(
-            displayedDate: displayedDate,
+            displayedSchedule: singleDaySchedule(
+                displayedDate,
+                startTime: series.startTime,
+                endTime: series.endTime
+            ),
             title: series.title,
             kind: series.kind,
-            categoryID: series.categoryID,
-            timeRange: series.timeRange
+            categoryID: series.categoryID
         )
 
         let result = RecurrenceEngine.occurrences(
@@ -216,7 +223,7 @@ struct RecurrenceEngineTests {
         )
 
         #expect(result.map(\.key) == [key])
-        #expect(result[0].displayedDate == displayedDate)
+        #expect(result[0].schedule.startDate == displayedDate)
     }
 
     @Test func occurrencesSortByDisplayedDateUntimedThenStartTimeAndOriginalDate() throws {
@@ -241,11 +248,14 @@ struct RecurrenceEngineTests {
         let movedToFriday: (LocalTimeRange?) -> OccurrenceExceptionKind = { timeRange in
             OccurrenceExceptionKind.modified(
                 OccurrenceOverride(
-                    displayedDate: friday,
+                    displayedSchedule: singleDaySchedule(
+                        friday,
+                        startTime: timeRange?.start,
+                        endTime: timeRange?.end
+                    ),
                     title: series.title,
                     kind: series.kind,
-                    categoryID: series.categoryID,
-                    timeRange: timeRange
+                    categoryID: series.categoryID
                 )
             )
         }
@@ -396,13 +406,28 @@ struct RecurrenceEngineTests {
             kind: kind,
             title: title,
             categoryID: categoryID,
-            startDate: startDate,
-            endDate: endDate,
+            ruleStartDate: startDate,
+            recurrenceEndDate: endDate,
             weekdays: weekdays,
-            timeRange: timeRange,
+            durationDays: 1,
+            startTime: timeRange?.start,
+            endTime: timeRange?.end,
             creationTimeZoneIdentifier: creationTimeZoneIdentifier,
             createdAt: Date(timeIntervalSince1970: 0),
             updatedAt: Date(timeIntervalSince1970: 0)
+        )
+    }
+
+    private func singleDaySchedule(
+        _ date: CalendarDate,
+        startTime: MinuteOfDay? = nil,
+        endTime: MinuteOfDay? = nil
+    ) -> CalendarSchedule {
+        try! CalendarSchedule(
+            startDate: date,
+            endDate: date,
+            startTime: startTime,
+            endTime: endTime
         )
     }
 

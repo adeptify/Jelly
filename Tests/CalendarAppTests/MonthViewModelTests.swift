@@ -6,7 +6,7 @@ import Testing
 @Suite("MonthViewModelTests")
 @MainActor
 struct MonthViewModelTests {
-    @Test func monthViewModelOrdersUntimedBeforeTimedAndComputesOverflow() throws {
+    @Test func monthViewModelOrdersUntimedBeforeTimedInTimelineProjection() throws {
         let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000500")!
         var state = CalendarState.empty(
             uncategorizedID: categoryID,
@@ -20,7 +20,13 @@ struct MonthViewModelTests {
             )
             let item = try CalendarItem(
                 id: UUID(), kind: .task, title: "事项 \(index)",
-                categoryID: categoryID, date: date, timeRange: range,
+                categoryID: categoryID,
+                schedule: try CalendarSchedule(
+                    startDate: date,
+                    endDate: date,
+                    startTime: range?.start,
+                    endTime: range?.end
+                ),
                 completedAt: nil,
                 createdAt: Date(timeIntervalSince1970: TimeInterval(index)),
                 updatedAt: Date(timeIntervalSince1970: TimeInterval(index))
@@ -34,11 +40,8 @@ struct MonthViewModelTests {
             hiddenCategoryIDs: [],
             today: date
         )
-        let cell = model.cell(for: date)
-
-        #expect(cell.items.first?.timeRange == nil)
-        #expect(model.visibleItems(in: cell, capacity: 4).count == 3)
-        #expect(model.overflowCount(in: cell, capacity: 4) == 4)
+        #expect(model.projectedEntries.first?.schedule.startTime == nil)
+        #expect(model.projectedEntries.count == 7)
     }
 
     @Test func monthNavigationAndTodaySelectionUseCivilMonthArithmetic() {
@@ -59,11 +62,6 @@ struct MonthViewModelTests {
         model.goToToday(today)
         #expect(model.displayedMonth == CalendarDate(year: 2026, month: 9, day: 1)!)
         #expect(model.selectedDate == today)
-    }
-
-    @Test func itemCapacityPreservesOneOverflowRow() {
-        #expect(MonthLayout.itemCapacity(cellHeight: 91) == 2)
-        #expect(MonthLayout.itemCapacity(cellHeight: 116) == 3)
     }
 
     @Test func emptyStateHintAppearsOnlyForReadyTrulyEmptyCalendar() throws {
@@ -91,10 +89,12 @@ struct MonthViewModelTests {
             kind: .task,
             title: "重复事项",
             categoryID: empty.uncategorizedID,
-            startDate: CalendarDate(year: 2026, month: 8, day: 3)!,
-            endDate: nil,
+            ruleStartDate: CalendarDate(year: 2026, month: 8, day: 3)!,
+            recurrenceEndDate: nil,
             weekdays: [.monday],
-            timeRange: nil,
+            durationDays: 1,
+            startTime: nil,
+            endTime: nil,
             createdAt: .distantPast,
             updatedAt: .distantPast
         )
@@ -108,7 +108,14 @@ struct MonthViewModelTests {
         var state = CalendarState.empty(uncategorizedID: categoryID, now: .distantPast)
         let item = try CalendarItem(
             id: UUID(), kind: .task, title: "需要刷新",
-            categoryID: categoryID, date: date, timeRange: nil, completedAt: nil,
+            categoryID: categoryID,
+            schedule: try CalendarSchedule(
+                startDate: date,
+                endDate: date,
+                startTime: nil,
+                endTime: nil
+            ),
+            completedAt: nil,
             createdAt: .distantPast, updatedAt: .distantPast
         )
         state.items[item.id] = item
@@ -120,17 +127,15 @@ struct MonthViewModelTests {
         changed.items[item.id]?.completedAt = Date(timeIntervalSince1970: 1)
         changed.categories[categoryID]?.colorHex = "#FF0000"
         model.update(state: changed, hiddenCategoryIDs: [], today: date)
-        let refreshed = model.cell(for: date)
-        #expect(refreshed.items.first?.completedAt == Date(timeIntervalSince1970: 1))
-        #expect(changed.categories[refreshed.items.first!.categoryID]?.colorHex == "#FF0000")
+        let refreshed = try #require(model.projectedEntries.first)
+        #expect(refreshed.completedAt == Date(timeIntervalSince1970: 1))
+        #expect(changed.categories[refreshed.categoryID]?.colorHex == "#FF0000")
 
         model.update(state: changed, hiddenCategoryIDs: [categoryID], today: date)
-        let hidden = model.cell(for: date)
-        #expect(hidden.items.isEmpty)
-        #expect(model.overflowCount(in: hidden, capacity: 1) == 0)
+        #expect(model.projectedEntries.isEmpty)
     }
 
-    @Test func hiddenCategoriesAreExcludedFromFreshProjectionAndOverflow() throws {
+    @Test func hiddenCategoriesAreExcludedFromFreshTimelineProjection() throws {
         let visibleCategory = UUID()
         let hiddenCategory = UUID()
         let date = CalendarDate(year: 2026, month: 8, day: 3)!
@@ -146,12 +151,10 @@ struct MonthViewModelTests {
         let model = MonthViewModel(
             displayedMonth: date, state: state, hiddenCategoryIDs: [hiddenCategory], today: date
         )
-        let cell = model.cell(for: date)
-        #expect(cell.items.map(\.title) == ["显示"])
-        #expect(model.overflowCount(in: cell, capacity: 1) == 0)
+        #expect(model.projectedEntries.map(\.title) == ["显示"])
     }
 
-    @Test func compatibilityFacadeUsesTheLoadedWeekRangeForProjectionAndLayout() throws {
+    @Test func loadedWeekRangeDrivesProjectionAndLayout() throws {
         let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000502")!
         let center = CalendarDate(year: 2026, month: 8, day: 6)!
         let empty = CalendarState.empty(uncategorizedID: categoryID, now: .distantPast)
@@ -250,38 +253,7 @@ struct MonthViewModelTests {
         model.update(state: makeEmptyState(), hiddenCategoryIDs: [], today: tomorrow)
 
         #expect(model.displayedMonth == focusedMonth)
-        #expect(model.cell(for: august).isToday == false)
-        #expect(model.cell(for: tomorrow).isToday)
-    }
-
-    @Test func compatibilityFacadePlacesAnEnteringSpanOnTheFirstLegacyGridDate() throws {
-        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000504")!
-        let displayedMonth = CalendarDate(year: 2026, month: 8, day: 10)!
-        let firstGridDate = CalendarDate(year: 2026, month: 7, day: 27)!
-        let enteringItem = try CalendarItem(
-            id: UUID(), kind: .task, title: "跨入本月",
-            categoryID: categoryID,
-            schedule: try CalendarSchedule(
-                startDate: firstGridDate.previousDay,
-                endDate: firstGridDate.addingDays(2),
-                startTime: nil,
-                endTime: nil
-            ),
-            creationTimeZoneIdentifier: "Asia/Shanghai",
-            completedAt: nil,
-            createdAt: .distantPast,
-            updatedAt: .distantPast
-        )
-        var state = CalendarState.empty(uncategorizedID: categoryID, now: .distantPast)
-        state.items[enteringItem.id] = enteringItem
-        let model = MonthViewModel(
-            displayedMonth: displayedMonth,
-            state: state,
-            hiddenCategoryIDs: [],
-            today: displayedMonth
-        )
-
-        #expect(model.cell(for: firstGridDate).items.map(\.id) == ["item:\(enteringItem.id.uuidString)"])
+        #expect(model.today == tomorrow)
     }
 
     @Test func goToTodayLoadsDistantFutureAndPastWeeksWithoutStalling() {
@@ -332,7 +304,7 @@ struct MonthViewModelTests {
         }
     }
 
-    @Test func updateFocusRederivesCompatibilityCellsOverflowWhileLookupCoversTheLoadedWeekStream() throws {
+    @Test func updateFocusKeepsTimelineIdentityAndLookupAcrossTheLoadedWeekStream() throws {
         let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000505")!
         let august = CalendarDate(year: 2026, month: 8, day: 3)!
         let october = CalendarDate(year: 2026, month: 10, day: 5)!
@@ -365,16 +337,11 @@ struct MonthViewModelTests {
         let projectedIDsBeforeFocusChange = model.projectedEntries.map(\.id)
         let lookupID = "item:\(octoberItems[0].id.uuidString)"
 
-        #expect(model.cell(for: october).items.isEmpty)
         #expect(model.item(withID: lookupID)?.id == lookupID)
 
         model.updateFocus(toWeekStarting: october)
 
-        let octoberCell = model.cell(for: october)
         #expect(model.displayedMonth == CalendarDate(year: 2026, month: 10, day: 1)!)
-        #expect(octoberCell.items.map(\.title) == ["十月事项 0", "十月事项 1", "十月事项 2"])
-        #expect(model.visibleItems(in: octoberCell, capacity: 2).count == 1)
-        #expect(model.overflowCount(in: octoberCell, capacity: 2) == 2)
         #expect(model.item(withID: lookupID)?.id == lookupID)
         #expect(model.projectedEntries.map(\.id) == projectedIDsBeforeFocusChange)
     }

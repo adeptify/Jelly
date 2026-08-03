@@ -291,8 +291,12 @@ struct CalendarDropCoordinatorTests {
             kind: .task,
             title: "专注时段",
             categoryID: uncategorizedID,
-            date: .init(year: 2026, month: 8, day: 3)!,
-            timeRange: originalRange,
+            schedule: CalendarSchedule(
+                startDate: .init(year: 2026, month: 8, day: 3)!,
+                endDate: .init(year: 2026, month: 8, day: 3)!,
+                startTime: originalRange.start,
+                endTime: originalRange.end
+            ),
             creationTimeZoneIdentifier: "Asia/Shanghai",
             completedAt: nil,
             createdAt: Date(timeIntervalSince1970: 0),
@@ -309,8 +313,9 @@ struct CalendarDropCoordinatorTests {
             on: .init(year: 2026, month: 8, day: 8)!
         )
 
-        #expect(store.state.items[item.id]?.date == CalendarDate(year: 2026, month: 8, day: 8)!)
-        #expect(store.state.items[item.id]?.timeRange == originalRange)
+        #expect(store.state.items[item.id]?.schedule.startDate == CalendarDate(year: 2026, month: 8, day: 8)!)
+        #expect(store.state.items[item.id]?.schedule.startTime == originalRange.start)
+        #expect(store.state.items[item.id]?.schedule.endTime == originalRange.end)
         #expect(store.state.items[item.id]?.creationTimeZoneIdentifier == "Asia/Shanghai")
         #expect(store.canUndo)
         #expect(await repository.saveCount == 1)
@@ -356,7 +361,7 @@ struct CalendarDropCoordinatorTests {
             Issue.record("Expected shifted modified exception")
             return
         }
-        #expect(shiftedOverride.displayedDate == harness.futureExceptionDisplayedDate.addingDays(1))
+        #expect(shiftedOverride.displayedSchedule.startDate == harness.futureExceptionDisplayedDate.addingDays(1))
         let shiftedCompletionKey = OccurrenceKey(
             seriesID: pending.newSeriesID,
             originalDate: harness.futureCompletionKey.originalDate.addingDays(1)
@@ -386,11 +391,10 @@ struct CalendarDropCoordinatorTests {
         let selectedDestination = CalendarDate(year: 2026, month: 8, day: 13)!
         var originalState = harness.originalState
         originalState.recurrence.exceptions[harness.boundaryMonday] = .modified(.init(
-            displayedDate: existingBoundaryDate,
+            displayedSchedule: singleDaySchedule(existingBoundaryDate),
             title: "边界已改期",
             kind: .task,
-            categoryID: originalState.uncategorizedID,
-            timeRange: nil
+            categoryID: originalState.uncategorizedID
         ))
         let repository = InMemoryCalendarRepository(initialState: originalState)
         let store = CalendarStore(initialState: originalState, repository: repository)
@@ -411,7 +415,7 @@ struct CalendarDropCoordinatorTests {
             Issue.record("Expected the dragged boundary override in the new series")
             return
         }
-        #expect(boundaryOverride.displayedDate == selectedDestination)
+        #expect(boundaryOverride.displayedSchedule.startDate == selectedDestination)
         #expect(await repository.persistedState == store.state)
         #expect(store.canUndo)
 
@@ -434,11 +438,10 @@ struct CalendarDropCoordinatorTests {
 
         #expect(store.state.recurrence.series[harness.boundaryMonday.seriesID]?.weekdays == [.monday, .wednesday])
         #expect(store.state.recurrence.exceptions[harness.boundaryMonday] == .modified(.init(
-            displayedDate: harness.destinationTuesday,
+            displayedSchedule: singleDaySchedule(harness.destinationTuesday),
             title: "重复专注",
             kind: .task,
-            categoryID: harness.originalState.uncategorizedID,
-            timeRange: nil
+            categoryID: harness.originalState.uncategorizedID
         )))
         #expect(await repository.saveCount == 1)
 
@@ -764,28 +767,28 @@ private func makeMondayWednesdayDropHarness() throws -> DropHarness {
         kind: .task,
         title: "重复专注",
         categoryID: uncategorizedID,
-        startDate: startMonday,
-        endDate: nil,
+        ruleStartDate: startMonday,
+        recurrenceEndDate: nil,
         weekdays: [.monday, .wednesday],
-        timeRange: nil,
+        durationDays: 1,
+        startTime: nil,
+        endTime: nil,
         creationTimeZoneIdentifier: "Asia/Shanghai",
         createdAt: Date(timeIntervalSince1970: 0),
         updatedAt: Date(timeIntervalSince1970: 0)
     )
     originalState.recurrence.series[series.id] = series
     originalState.recurrence.exceptions[futureExceptionKey] = .modified(.init(
-        displayedDate: futureExceptionDisplayedDate,
+        displayedSchedule: singleDaySchedule(futureExceptionDisplayedDate),
         title: "未来改期",
         kind: .task,
-        categoryID: uncategorizedID,
-        timeRange: nil
+        categoryID: uncategorizedID
     ))
     originalState.recurrence.exceptions[pastExceptionKey] = .modified(.init(
-        displayedDate: pastExceptionKey.originalDate,
+        displayedSchedule: singleDaySchedule(pastExceptionKey.originalDate),
         title: "过去改期",
         kind: .task,
-        categoryID: uncategorizedID,
-        timeRange: nil
+        categoryID: uncategorizedID
     ))
     originalState.recurrence.completions[futureCompletionKey] = .init(
         key: futureCompletionKey,
@@ -806,5 +809,14 @@ private func makeMondayWednesdayDropHarness() throws -> DropHarness {
         futureCompletedAt: futureCompletedAt,
         pastExceptionKey: pastExceptionKey,
         pastCompletionKey: pastCompletionKey
+    )
+}
+
+private func singleDaySchedule(_ date: CalendarDate) -> CalendarSchedule {
+    try! CalendarSchedule(
+        startDate: date,
+        endDate: date,
+        startTime: nil,
+        endTime: nil
     )
 }

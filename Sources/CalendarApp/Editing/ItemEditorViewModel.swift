@@ -261,7 +261,7 @@ final class ItemEditorViewModel: ObservableObject {
             weekdays: scope == .thisAndFuture && draft.weekdays != originalDraft.weekdays
                 ? draft.weekdays
                 : nil,
-            endDate: recurrenceEndDate,
+            recurrenceEndDate: recurrenceEndDate,
             displayedStartDate: schedule.startDate == originalSchedule.startDate
                 ? nil
                 : schedule.startDate,

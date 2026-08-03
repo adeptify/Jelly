@@ -381,8 +381,12 @@ struct JSONCalendarRepositoryTests {
             kind: .task,
             title: "排序保持",
             categoryID: expected.uncategorizedID,
-            date: .init(year: 2026, month: 8, day: 3)!,
-            timeRange: nil,
+            schedule: CalendarSchedule(
+                startDate: .init(year: 2026, month: 8, day: 3)!,
+                endDate: .init(year: 2026, month: 8, day: 3)!,
+                startTime: nil,
+                endTime: nil
+            ),
             completedAt: nil,
             createdAt: Date(timeIntervalSince1970: 0.223456),
             updatedAt: Date(timeIntervalSince1970: 0.223456)
@@ -940,8 +944,12 @@ private func makePopulatedState() throws -> CalendarState {
         kind: .task,
         title: "持久化测试",
         categoryID: uncategorizedID,
-        date: .init(year: 2026, month: 8, day: 3)!,
-        timeRange: nil,
+        schedule: CalendarSchedule(
+            startDate: .init(year: 2026, month: 8, day: 3)!,
+            endDate: .init(year: 2026, month: 8, day: 3)!,
+            startTime: nil,
+            endTime: nil
+        ),
         completedAt: nil,
         createdAt: Date(timeIntervalSince1970: 0),
         updatedAt: Date(timeIntervalSince1970: 0)
@@ -952,10 +960,12 @@ private func makePopulatedState() throws -> CalendarState {
         kind: .task,
         title: "周复盘",
         categoryID: uncategorizedID,
-        startDate: .init(year: 2026, month: 8, day: 3)!,
-        endDate: .init(year: 2026, month: 8, day: 31)!,
+        ruleStartDate: .init(year: 2026, month: 8, day: 3)!,
+        recurrenceEndDate: .init(year: 2026, month: 8, day: 31)!,
         weekdays: [.monday, .wednesday],
-        timeRange: nil,
+        durationDays: 1,
+        startTime: nil,
+        endTime: nil,
         creationTimeZoneIdentifier: "Asia/Shanghai",
         createdAt: Date(timeIntervalSince1970: 0.123456),
         updatedAt: Date(timeIntervalSince1970: 0.123456)
@@ -976,11 +986,15 @@ private func makePopulatedState() throws -> CalendarState {
         series: [series.id: series],
         exceptions: [
             modifiedKey: .modified(.init(
-                displayedDate: .init(year: 2026, month: 8, day: 11)!,
+                displayedSchedule: try CalendarSchedule(
+                    startDate: .init(year: 2026, month: 8, day: 11)!,
+                    endDate: .init(year: 2026, month: 8, day: 11)!,
+                    startTime: nil,
+                    endTime: nil
+                ),
                 title: "改期复盘",
                 kind: .task,
-                categoryID: uncategorizedID,
-                timeRange: nil
+                categoryID: uncategorizedID
             )),
             skippedKey: .skipped
         ],

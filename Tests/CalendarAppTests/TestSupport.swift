@@ -35,8 +35,14 @@ func makeItem(
     date: CalendarDate = CalendarDate(year: 2026, month: 8, day: 3)!
 ) throws -> CalendarItem {
     try CalendarItem(
-        id: UUID(), kind: .task, title: title, categoryID: categoryID, date: date,
-        timeRange: nil, completedAt: nil, createdAt: .distantPast, updatedAt: .distantPast
+        id: UUID(), kind: .task, title: title, categoryID: categoryID,
+        schedule: try CalendarSchedule(
+            startDate: date,
+            endDate: date,
+            startTime: nil,
+            endTime: nil
+        ),
+        completedAt: nil, createdAt: .distantPast, updatedAt: .distantPast
     )
 }
 
@@ -68,13 +74,20 @@ func makeCategoryReferenceFixture() throws -> (
     state.items[item.id] = item
     let series = try WeeklySeries(
         id: UUID(), kind: .task, title: "重复事项", categoryID: deleted,
-        startDate: date, endDate: nil, weekdays: [.monday], timeRange: nil,
+        ruleStartDate: date, recurrenceEndDate: nil, weekdays: [.monday],
+        durationDays: 1, startTime: nil, endTime: nil,
         createdAt: .distantPast, updatedAt: .distantPast
     )
     state.recurrence.series[series.id] = series
     let key = OccurrenceKey(seriesID: series.id, originalDate: date)
     state.recurrence.exceptions[key] = .modified(.init(
-        displayedDate: date, title: "改期事项", kind: .task, categoryID: deleted, timeRange: nil
+        displayedSchedule: try CalendarSchedule(
+            startDate: date,
+            endDate: date,
+            startTime: nil,
+            endTime: nil
+        ),
+        title: "改期事项", kind: .task, categoryID: deleted
     ))
     return (state, deleted, target)
 }

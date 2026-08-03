@@ -62,8 +62,12 @@ struct CoreModelTests {
                 kind: .event,
                 title: "评审",
                 categoryID: category,
-                date: CalendarDate(year: 2026, month: 8, day: 3)!,
-                timeRange: nil,
+                schedule: CalendarSchedule(
+                    startDate: CalendarDate(year: 2026, month: 8, day: 3)!,
+                    endDate: CalendarDate(year: 2026, month: 8, day: 3)!,
+                    startTime: nil,
+                    endTime: nil
+                ),
                 completedAt: .now,
                 createdAt: .now,
                 updatedAt: .now
@@ -151,8 +155,12 @@ struct CoreModelTests {
             kind: .task,
             title: title,
             categoryID: UUID(),
-            date: CalendarDate(year: 2026, month: 8, day: 3)!,
-            timeRange: nil,
+            schedule: CalendarSchedule(
+                startDate: CalendarDate(year: 2026, month: 8, day: 3)!,
+                endDate: CalendarDate(year: 2026, month: 8, day: 3)!,
+                startTime: nil,
+                endTime: nil
+            ),
             creationTimeZoneIdentifier: creationTimeZoneIdentifier,
             completedAt: nil,
             createdAt: .now,

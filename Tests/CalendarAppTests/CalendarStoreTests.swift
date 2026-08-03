@@ -7,6 +7,96 @@ import Testing
 @Suite("CalendarStoreTests")
 @MainActor
 struct CalendarStoreTests {
+    @Test func v1PrimaryToV2StoreProjectionAndUndoRoundTripKeepsOneCrossDayIdentity() async throws {
+        let directory = try makeTemporaryCalendarAppDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let documentURL = directory.appendingPathComponent("calendar-v1.json")
+        try Data(schemaOneEmptyCalendarJSON.utf8).write(to: documentURL)
+        let seed = makeEmptyState()
+        let repository = JSONCalendarRepository(documentURL: documentURL, seed: { seed })
+        let store = CalendarStore(initialState: seed, repository: repository)
+
+        await store.load()
+        try #require(store.phase == .ready)
+        let migrated = store.state
+        let item = try CalendarItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000001201")!,
+            kind: .task,
+            title: "跨层跨日事项",
+            categoryID: migrated.uncategorizedID,
+            schedule: CalendarSchedule(
+                startDate: .init(year: 2026, month: 8, day: 30)!,
+                endDate: .init(year: 2026, month: 9, day: 2)!,
+                startTime: nil,
+                endTime: nil
+            ),
+            creationTimeZoneIdentifier: "Asia/Shanghai",
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+
+        try await store.send(.createItem(item), undoLabel: "添加跨日事项")
+
+        let visibleRange = CalendarDateRange(
+            start: .init(year: 2026, month: 8, day: 31)!,
+            end: .init(year: 2026, month: 9, day: 6)!
+        )
+        let projection = TimelineProjection.make(
+            in: visibleRange,
+            state: store.state,
+            hiddenCategoryIDs: []
+        )
+        #expect(projection.entries.filter { $0.id == .item(item.id) }.count == 1)
+        #expect(try await repository.load() == store.state)
+
+        try await store.undo()
+
+        #expect(store.state == migrated)
+        #expect(store.state.items[item.id] == nil)
+        #expect(try await repository.load() == store.state)
+        #expect(try schemaVersionInDocument(at: documentURL) == 2)
+    }
+
+    @Test func v1BackupRestoreMigratesThroughStoreAndCorruptBackupCannotOverwriteIt() async throws {
+        let directory = try makeTemporaryCalendarAppDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let documentURL = directory.appendingPathComponent("calendar-v1.json")
+        let seed = try makeStateWithOneItem()
+        let repository = JSONCalendarRepository(documentURL: documentURL, seed: { seed })
+        let store = CalendarStore(initialState: seed, repository: repository)
+        await store.load()
+        try #require(store.phase == .ready)
+
+        let v1Backup = directory.appendingPathComponent("schema-one-backup.json")
+        try Data(schemaOneEmptyCalendarJSON.utf8).write(to: v1Backup)
+        let rollback = directory.appendingPathComponent("rollback.json")
+        try await store.restore(from: v1Backup, using: BackupService(), rollbackURL: rollback)
+
+        let restored = store.state
+        let restoredBytes = try Data(contentsOf: documentURL)
+        #expect(restored.items.isEmpty)
+        #expect(try await repository.load() == restored)
+        #expect(try schemaVersionInDocument(at: documentURL) == 2)
+
+        let corruptBackup = directory.appendingPathComponent("corrupt-backup.json")
+        try Data("{not-valid-json".utf8).write(to: corruptBackup)
+        let rejectedRollback = directory.appendingPathComponent("rejected-rollback.json")
+
+        await #expect(throws: StoreError.restoreFailed) {
+            try await store.restore(
+                from: corruptBackup,
+                using: BackupService(),
+                rollbackURL: rejectedRollback
+            )
+        }
+
+        #expect(store.state == restored)
+        #expect(try Data(contentsOf: documentURL) == restoredBytes)
+        #expect(try await repository.load() == restored)
+        #expect(FileManager.default.fileExists(atPath: rejectedRollback.path) == false)
+    }
+
     @Test func failedSaveDoesNotPublishOrRegisterUndo() async throws {
         let original = makeEmptyState()
         let (store, repository) = try await makeReadyStore(initialState: original)
@@ -319,6 +409,11 @@ private func decodedBackupState(from url: URL) throws -> CalendarState {
     return try decoder.decode(CalendarDocument.self, from: Data(contentsOf: url)).state
 }
 
+private func schemaVersionInDocument(at url: URL) throws -> Int {
+    let object = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+    return try #require(object?["schemaVersion"] as? Int)
+}
+
 private let schemaOneEmptyCalendarJSON = #"""
 {
   "schemaVersion": 1,
@@ -377,10 +472,12 @@ private func makeCompleteRecurrenceGraphState() throws -> CalendarState {
         kind: .task,
         title: "恢复后的每周复盘",
         categoryID: state.uncategorizedID,
-        startDate: .init(year: 2026, month: 8, day: 3)!,
-        endDate: .init(year: 2026, month: 8, day: 31)!,
+        ruleStartDate: .init(year: 2026, month: 8, day: 3)!,
+        recurrenceEndDate: .init(year: 2026, month: 8, day: 31)!,
         weekdays: [.monday, .wednesday],
-        timeRange: nil,
+        durationDays: 1,
+        startTime: nil,
+        endTime: nil,
         createdAt: .distantPast,
         updatedAt: .distantPast
     )
@@ -396,11 +493,15 @@ private func makeCompleteRecurrenceGraphState() throws -> CalendarState {
         series: [series.id: series],
         exceptions: [
             modifiedKey: .modified(.init(
-                displayedDate: .init(year: 2026, month: 8, day: 11)!,
+                displayedSchedule: try CalendarSchedule(
+                    startDate: .init(year: 2026, month: 8, day: 11)!,
+                    endDate: .init(year: 2026, month: 8, day: 11)!,
+                    startTime: nil,
+                    endTime: nil
+                ),
                 title: "保留的单次例外",
                 kind: .task,
-                categoryID: state.uncategorizedID,
-                timeRange: nil
+                categoryID: state.uncategorizedID
             ))
         ],
         completions: [

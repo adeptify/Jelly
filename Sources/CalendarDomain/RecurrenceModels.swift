@@ -77,51 +77,6 @@ public struct WeeklySeries: Identifiable, Codable, Equatable, Sendable {
         self.updatedAt = updatedAt
     }
 
-    @available(*, deprecated, message: "Use the V2 schedule fields instead.")
-    public init(
-        id: UUID,
-        kind: ItemKind,
-        title: String,
-        categoryID: UUID,
-        startDate: CalendarDate,
-        endDate: CalendarDate?,
-        weekdays: Set<Weekday>,
-        timeRange: LocalTimeRange?,
-        creationTimeZoneIdentifier: String = TimeZone.current.identifier,
-        createdAt: Date,
-        updatedAt: Date
-    ) throws {
-        try self.init(
-            id: id,
-            kind: kind,
-            title: title,
-            categoryID: categoryID,
-            ruleStartDate: startDate,
-            recurrenceEndDate: endDate,
-            weekdays: weekdays,
-            durationDays: 1,
-            startTime: timeRange?.start,
-            endTime: timeRange?.end,
-            creationTimeZoneIdentifier: creationTimeZoneIdentifier,
-            createdAt: createdAt,
-            updatedAt: updatedAt
-        )
-    }
-
-    @available(*, deprecated, message: "Use ruleStartDate instead.")
-    public var startDate: CalendarDate { ruleStartDate }
-
-    @available(*, deprecated, message: "Use recurrenceEndDate instead.")
-    public var endDate: CalendarDate? { recurrenceEndDate }
-
-    @available(*, deprecated, message: "Use startTime and endTime instead.")
-    public var timeRange: LocalTimeRange? {
-        guard let startTime, let endTime else {
-            return nil
-        }
-        return try? LocalTimeRange(start: startTime, end: endTime)
-    }
-
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let id = try container.decode(UUID.self, forKey: .id)
@@ -255,39 +210,6 @@ public struct OccurrenceOverride: Codable, Equatable, Sendable {
         self.categoryID = categoryID
     }
 
-    @available(*, deprecated, message: "Use displayedSchedule instead.")
-    public init(
-        displayedDate: CalendarDate,
-        title: String,
-        kind: ItemKind,
-        categoryID: UUID,
-        timeRange: LocalTimeRange?
-    ) {
-        self.init(
-            displayedSchedule: try! CalendarSchedule(
-                startDate: displayedDate,
-                endDate: displayedDate,
-                startTime: timeRange?.start,
-                endTime: timeRange?.end
-            ),
-            title: title,
-            kind: kind,
-            categoryID: categoryID
-        )
-    }
-
-    @available(*, deprecated, message: "Use displayedSchedule.startDate instead.")
-    public var displayedDate: CalendarDate { displayedSchedule.startDate }
-
-    @available(*, deprecated, message: "Use displayedSchedule.startTime and displayedSchedule.endTime instead.")
-    public var timeRange: LocalTimeRange? {
-        guard let startTime = displayedSchedule.startTime,
-              let endTime = displayedSchedule.endTime else {
-            return nil
-        }
-        return try? LocalTimeRange(start: startTime, end: endTime)
-    }
-
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let title = try container.decode(String.self, forKey: .title)
@@ -369,44 +291,4 @@ public struct CalendarOccurrence: Identifiable, Equatable, Sendable {
         self.createdAt = createdAt
     }
 
-    @available(*, deprecated, message: "Use the schedule initializer instead.")
-    public init(
-        key: OccurrenceKey,
-        displayedDate: CalendarDate,
-        title: String,
-        kind: ItemKind,
-        categoryID: UUID,
-        timeRange: LocalTimeRange?,
-        creationTimeZoneIdentifier: String,
-        completedAt: Date?,
-        createdAt: Date
-    ) {
-        self.init(
-            key: key,
-            schedule: try! CalendarSchedule(
-                startDate: displayedDate,
-                endDate: displayedDate,
-                startTime: timeRange?.start,
-                endTime: timeRange?.end
-            ),
-            title: title,
-            kind: kind,
-            categoryID: categoryID,
-            creationTimeZoneIdentifier: creationTimeZoneIdentifier,
-            completedAt: completedAt,
-            createdAt: createdAt
-        )
-    }
-
-    @available(*, deprecated, message: "Use schedule.startDate instead.")
-    public var displayedDate: CalendarDate { schedule.startDate }
-
-    @available(*, deprecated, message: "Use schedule.startTime and schedule.endTime instead.")
-    public var timeRange: LocalTimeRange? {
-        guard let startTime = schedule.startTime,
-              let endTime = schedule.endTime else {
-            return nil
-        }
-        return try? LocalTimeRange(start: startTime, end: endTime)
-    }
 }

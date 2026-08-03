@@ -9,6 +9,7 @@ SENTINEL_DIR="$TEMP_ROOT/sentinel"
 SENTINEL_APP="$SENTINEL_DIR/个人月历.app"
 SENTINEL_FILE="$SENTINEL_APP/Contents/sentinel.bin"
 SENTINEL_ARCHIVE="$SENTINEL_DIR/个人月历.app.zip"
+SENTINEL_DMG="$SENTINEL_DIR/个人月历.dmg"
 
 cleanup() {
   find "$TEMP_ROOT" -depth -delete
@@ -23,8 +24,10 @@ rsync -a \
 mkdir -p "$SENTINEL_APP/Contents"
 print -n "sentinel app must survive symlink rejection" > "$SENTINEL_FILE"
 print -n "sentinel archive must survive symlink rejection" > "$SENTINEL_ARCHIVE"
+print -n "sentinel dmg must survive symlink rejection" > "$SENTINEL_DMG"
 APP_BEFORE_HASH=$(shasum -a 256 "$SENTINEL_FILE" | awk '{print $1}')
 ARCHIVE_BEFORE_HASH=$(shasum -a 256 "$SENTINEL_ARCHIVE" | awk '{print $1}')
+DMG_BEFORE_HASH=$(shasum -a 256 "$SENTINEL_DMG" | awk '{print $1}')
 
 ln -s "$SENTINEL_DIR" "$PROJECT_COPY/dist"
 
@@ -39,8 +42,36 @@ if [[ $STATUS -ne 2 ]]; then
 fi
 APP_AFTER_HASH=$(shasum -a 256 "$SENTINEL_FILE" | awk '{print $1}')
 ARCHIVE_AFTER_HASH=$(shasum -a 256 "$SENTINEL_ARCHIVE" | awk '{print $1}')
-if [[ "$APP_BEFORE_HASH" != "$APP_AFTER_HASH" || "$ARCHIVE_BEFORE_HASH" != "$ARCHIVE_AFTER_HASH" ]]; then
-  echo "Sentinel app or archive changed despite symlink rejection." >&2
+DMG_AFTER_HASH=$(shasum -a 256 "$SENTINEL_DMG" | awk '{print $1}')
+if [[ "$APP_BEFORE_HASH" != "$APP_AFTER_HASH" || \
+      "$ARCHIVE_BEFORE_HASH" != "$ARCHIVE_AFTER_HASH" || \
+      "$DMG_BEFORE_HASH" != "$DMG_AFTER_HASH" ]]; then
+  echo "Sentinel app, ZIP, or DMG changed despite dist symlink rejection." >&2
   exit 1
 fi
-echo "Packaging symlink regression passed; sentinel app and archive bytes unchanged."
+
+# A non-regular formal ZIP target is rejected without touching its contents.
+/bin/rm "$PROJECT_COPY/dist"
+mkdir -p "$PROJECT_COPY/dist/个人月历.app.zip"
+NONREGULAR_SENTINEL="$PROJECT_COPY/dist/个人月历.app.zip/sentinel"
+print -n "nonregular formal target" > "$NONREGULAR_SENTINEL"
+NONREGULAR_HASH=$(shasum -a 256 "$NONREGULAR_SENTINEL" | awk '{print $1}')
+set +e
+zsh "$PROJECT_COPY/Scripts/build-app.sh" >/dev/null
+STATUS=$?
+set -e
+[[ $STATUS -eq 2 ]]
+[[ "$(shasum -a 256 "$NONREGULAR_SENTINEL" | awk '{print $1}')" == "$NONREGULAR_HASH" ]]
+
+# A symlinked formal DMG cannot redirect publication outside dist.
+find "$PROJECT_COPY/dist/个人月历.app.zip" -depth -delete
+print -n "legacy zip sentinel" > "$PROJECT_COPY/dist/个人月历.app.zip"
+ln -s "$SENTINEL_DMG" "$PROJECT_COPY/dist/个人月历.dmg"
+set +e
+zsh "$PROJECT_COPY/Scripts/build-app.sh" >/dev/null
+STATUS=$?
+set -e
+[[ $STATUS -eq 2 ]]
+[[ "$(shasum -a 256 "$SENTINEL_DMG" | awk '{print $1}')" == "$DMG_BEFORE_HASH" ]]
+
+echo "Packaging symlink/non-regular regressions passed; all sentinels stayed unchanged."

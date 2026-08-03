@@ -19,6 +19,40 @@ case "${0:t}" in
     fi
     exec /usr/bin/ditto "$@"
     ;;
+  hdiutil)
+    if [[ "${1:-}" == "create" && (
+      "${BUILD_APP_FAULT_HDIUTIL_CREATE:-}" == true ||
+      "${BUILD_APP_FAULT_HDIUTIL_CREATE_DESTINATION:-}" == "$last_arg"
+    ) ]]; then
+      exit 1
+    fi
+    if [[ "${1:-}" == "attach" && "${BUILD_APP_FAULT_HDIUTIL_TERM_ATTACH_SOURCE:-}" == "$last_arg" ]]; then
+      kill -TERM "$PPID"
+      exit 143
+    fi
+    if [[ "${1:-}" == "attach" && "${BUILD_APP_FAULT_HDIUTIL_ATTACH_SOURCE:-}" == "$last_arg" ]]; then
+      if [[ -n "${BUILD_APP_FAULT_ONCE_MARKER:-}" ]]; then
+        if [[ ! -e "$BUILD_APP_FAULT_ONCE_MARKER" ]]; then
+          print -n fired > "$BUILD_APP_FAULT_ONCE_MARKER"
+          exit 1
+        fi
+      else
+        exit 1
+      fi
+    fi
+    if [[ "${1:-}" == "attach" && \
+      "${BUILD_APP_FAULT_HDIUTIL_SUBSTITUTE_MATCH:-}" == "$last_arg" && \
+      -n "${BUILD_APP_FAULT_HDIUTIL_SUBSTITUTE_SOURCE:-}" ]]; then
+      if [[ -z "${BUILD_APP_FAULT_ONCE_MARKER:-}" || ! -e "$BUILD_APP_FAULT_ONCE_MARKER" ]]; then
+        if [[ -n "${BUILD_APP_FAULT_ONCE_MARKER:-}" ]]; then
+          print -n fired > "$BUILD_APP_FAULT_ONCE_MARKER"
+        fi
+        replacement="$BUILD_APP_FAULT_HDIUTIL_SUBSTITUTE_SOURCE"
+        exec /usr/bin/hdiutil "${@:1:$#-1}" "$replacement"
+      fi
+    fi
+    exec /usr/bin/hdiutil "$@"
+    ;;
   rm)
     if [[
       "${BUILD_APP_FAULT_RM_TERM_BACKUP:-}" == true &&
@@ -49,7 +83,7 @@ case "${0:t}" in
     source_arg="${2:-}"
     if [[
       "${BUILD_APP_FAULT_MV_TERM_CANDIDATE_DESTINATION:-}" == "$last_arg" &&
-      "$source_arg" == *.个人月历.app.zip.candidate.*
+      "$source_arg" == *.个人月历.*.candidate.*
     ]]; then
       /bin/mv "$@"
       kill -TERM "$PPID"

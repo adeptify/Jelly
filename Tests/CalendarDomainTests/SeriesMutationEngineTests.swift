@@ -179,7 +179,7 @@ struct SeriesMutationEngineTests {
         let before = RecurrenceGraph(series: [series.id: series], exceptions: [:], completions: [:])
 
         let after = try SeriesMutationEngine.apply(
-            edit: .patch(.init(displayedDate: .init(year: 2026, month: 8, day: 4)!)),
+            edit: .patch(.init(displayedStartDate: .init(year: 2026, month: 8, day: 4)!)),
             to: key,
             scope: .onlyThis,
             in: before,
@@ -190,11 +190,14 @@ struct SeriesMutationEngineTests {
         #expect(after.series == before.series)
         #expect(after.exceptions.count == 1)
         #expect(after.exceptions[key] == .modified(.init(
-            displayedDate: .init(year: 2026, month: 8, day: 4)!,
+            displayedSchedule: schedule(
+                on: .init(year: 2026, month: 8, day: 4)!,
+                startTime: series.startTime,
+                endTime: series.endTime
+            ),
             title: series.title,
             kind: series.kind,
-            categoryID: series.categoryID,
-            timeRange: series.timeRange
+            categoryID: series.categoryID
         )))
     }
 
@@ -245,11 +248,14 @@ struct SeriesMutationEngineTests {
             end: .init(hour: 10, minute: 0)!
         )
         let existing = OccurrenceOverride(
-            displayedDate: .init(year: 2026, month: 8, day: 4)!,
+            displayedSchedule: schedule(
+                on: .init(year: 2026, month: 8, day: 4)!,
+                startTime: oneHour.start,
+                endTime: oneHour.end
+            ),
             title: "原有标题",
             kind: .task,
-            categoryID: alternativeCategory,
-            timeRange: oneHour
+            categoryID: alternativeCategory
         )
         let before = RecurrenceGraph(
             series: [series.id: series],
@@ -267,11 +273,10 @@ struct SeriesMutationEngineTests {
         )
 
         #expect(after.exceptions[key] == .modified(.init(
-            displayedDate: existing.displayedDate,
+            displayedSchedule: existing.displayedSchedule,
             title: "只改标题",
             kind: existing.kind,
-            categoryID: existing.categoryID,
-            timeRange: existing.timeRange
+            categoryID: existing.categoryID
         )))
     }
 
@@ -300,11 +305,14 @@ struct SeriesMutationEngineTests {
 
         #expect(after.completions[key] == nil)
         #expect(after.exceptions[key] == .modified(.init(
-            displayedDate: key.originalDate,
+            displayedSchedule: schedule(
+                on: key.originalDate,
+                startTime: series.startTime,
+                endTime: series.endTime
+            ),
             title: series.title,
             kind: .event,
-            categoryID: series.categoryID,
-            timeRange: series.timeRange
+            categoryID: series.categoryID
         )))
     }
 
@@ -312,7 +320,7 @@ struct SeriesMutationEngineTests {
         let series = try makeMondayWednesdaySeries(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000205")!
         )
-        let key = OccurrenceKey(seriesID: series.id, originalDate: series.startDate)
+        let key = OccurrenceKey(seriesID: series.id, originalDate: series.ruleStartDate)
         let before = RecurrenceGraph(series: [series.id: series], exceptions: [:], completions: [:])
 
         #expect(throws: SeriesMutationError.invalidOnlyThisRulePatch) {
@@ -327,7 +335,7 @@ struct SeriesMutationEngineTests {
         }
         #expect(throws: SeriesMutationError.invalidOnlyThisRulePatch) {
             try SeriesMutationEngine.apply(
-                edit: .patch(.init(endDate: .clear)),
+                edit: .patch(.init(recurrenceEndDate: .clear)),
                 to: key,
                 scope: .onlyThis,
                 in: before,
@@ -353,7 +361,7 @@ struct SeriesMutationEngineTests {
         )
         let after = try SeriesMutationEngine.apply(
             edit: .patch(.init(
-                displayedDate: .init(year: 2026, month: 8, day: 11)!
+                displayedStartDate: .init(year: 2026, month: 8, day: 11)!
             )),
             to: boundary,
             scope: .thisAndFuture,
@@ -363,9 +371,9 @@ struct SeriesMutationEngineTests {
         )
 
         let old = try #require(after.series[series.id])
-        #expect(old.endDate == CalendarDate(year: 2026, month: 8, day: 9)!)
+        #expect(old.recurrenceEndDate == CalendarDate(year: 2026, month: 8, day: 9)!)
         let future = try #require(after.series.values.first { $0.id != series.id })
-        #expect(future.startDate == CalendarDate(year: 2026, month: 8, day: 11)!)
+        #expect(future.ruleStartDate == CalendarDate(year: 2026, month: 8, day: 11)!)
         #expect(future.weekdays == [.tuesday, .thursday])
     }
 
@@ -381,8 +389,8 @@ struct SeriesMutationEngineTests {
 
         let after = try SeriesMutationEngine.apply(
             edit: .patch(.init(
-                displayedDate: .init(year: 2026, month: 8, day: 11)!,
-                weekdays: [.tuesday, .thursday]
+                weekdays: [.tuesday, .thursday],
+                displayedStartDate: .init(year: 2026, month: 8, day: 11)!
             )),
             to: boundary,
             scope: .thisAndFuture,
@@ -392,7 +400,7 @@ struct SeriesMutationEngineTests {
         )
 
         let future = try #require(after.series.values.first { $0.id != series.id })
-        #expect(future.startDate == CalendarDate(year: 2026, month: 8, day: 11)!)
+        #expect(future.ruleStartDate == CalendarDate(year: 2026, month: 8, day: 11)!)
         #expect(future.weekdays == [.tuesday, .thursday])
     }
 
@@ -413,11 +421,10 @@ struct SeriesMutationEngineTests {
             originalDate: .init(year: 2026, month: 8, day: 17)!
         )
         let modified = OccurrenceOverride(
-            displayedDate: .init(year: 2026, month: 8, day: 18)!,
+            displayedSchedule: schedule(on: .init(year: 2026, month: 8, day: 18)!),
             title: "已明确改动",
             kind: .task,
-            categoryID: series.categoryID,
-            timeRange: nil
+            categoryID: series.categoryID
         )
         let completedAt = Date(timeIntervalSince1970: 100)
         let graph = RecurrenceGraph(
@@ -430,10 +437,9 @@ struct SeriesMutationEngineTests {
                 title: nil,
                 kind: nil,
                 categoryID: nil,
-                timeRange: .unchanged,
-                displayedDate: nil,
                 weekdays: [.tuesday],
-                endDate: .unchanged
+                recurrenceEndDate: .unchanged,
+                displayedStartDate: nil
             )),
             to: boundaryKey,
             scope: .thisAndFuture,
@@ -449,7 +455,7 @@ struct SeriesMutationEngineTests {
             originalDate: futureKey.originalDate
         )
         #expect(after.exceptions[migratedKey] == .modified(modified))
-        #expect(after.series[series.id]?.endDate ==
+        #expect(after.series[series.id]?.recurrenceEndDate ==
             CalendarDate(year: 2026, month: 8, day: 9)!)
     }
 
@@ -457,7 +463,7 @@ struct SeriesMutationEngineTests {
         let series = try makeMondayWednesdaySeries(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000208")!
         )
-        let pastKey = OccurrenceKey(seriesID: series.id, originalDate: series.startDate)
+        let pastKey = OccurrenceKey(seriesID: series.id, originalDate: series.ruleStartDate)
         let boundary = OccurrenceKey(
             seriesID: series.id,
             originalDate: .init(year: 2026, month: 8, day: 10)!
@@ -488,7 +494,7 @@ struct SeriesMutationEngineTests {
         )
 
         #expect(after.series.count == 1)
-        #expect(after.series[series.id]?.endDate == boundary.originalDate.previousDay)
+        #expect(after.series[series.id]?.recurrenceEndDate == boundary.originalDate.previousDay)
         #expect(after.exceptions[pastKey] != nil)
         #expect(after.completions[pastKey] != nil)
         #expect(after.exceptions.keys.allSatisfy { $0.originalDate < boundary.originalDate })
@@ -499,7 +505,7 @@ struct SeriesMutationEngineTests {
         let series = try makeMondayWednesdaySeries(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000209")!
         )
-        let pastKey = OccurrenceKey(seriesID: series.id, originalDate: series.startDate)
+        let pastKey = OccurrenceKey(seriesID: series.id, originalDate: series.ruleStartDate)
         let boundary = OccurrenceKey(
             seriesID: series.id,
             originalDate: .init(year: 2026, month: 8, day: 10)!
@@ -557,7 +563,7 @@ struct SeriesMutationEngineTests {
         let newSeriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000230")!
 
         let after = try SeriesMutationEngine.apply(
-            edit: .patch(.init(displayedDate: .init(year: 2026, month: 8, day: 11)!)),
+            edit: .patch(.init(displayedStartDate: .init(year: 2026, month: 8, day: 11)!)),
             to: boundary,
             scope: .thisAndFuture,
             in: before,
@@ -570,11 +576,14 @@ struct SeriesMutationEngineTests {
             originalDate: .init(year: 2026, month: 8, day: 18)!
         )
         #expect(after.exceptions[migratedKey] == .modified(.init(
-            displayedDate: .init(year: 2026, month: 8, day: 19)!,
+            displayedSchedule: schedule(
+                on: .init(year: 2026, month: 8, day: 19)!,
+                startTime: modified.displayedSchedule.startTime,
+                endTime: modified.displayedSchedule.endTime
+            ),
             title: modified.title,
             kind: modified.kind,
-            categoryID: modified.categoryID,
-            timeRange: modified.timeRange
+            categoryID: modified.categoryID
         )))
         #expect(after.completions[migratedKey]?.key == migratedKey)
         #expect(after.completions[migratedKey]?.completedAt == Date(timeIntervalSince1970: 100))
@@ -586,7 +595,7 @@ struct SeriesMutationEngineTests {
         let series = try makeMondayWednesdaySeries(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000221")!
         )
-        let boundary = OccurrenceKey(seriesID: series.id, originalDate: series.startDate)
+        let boundary = OccurrenceKey(seriesID: series.id, originalDate: series.ruleStartDate)
         let newSeriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000231")!
         let before = RecurrenceGraph(series: [series.id: series], exceptions: [:], completions: [:])
 
@@ -601,9 +610,9 @@ struct SeriesMutationEngineTests {
 
         #expect(after.series[series.id] == nil)
         #expect(after.series.count == 1)
-        #expect(after.series[newSeriesID]?.startDate == series.startDate)
+        #expect(after.series[newSeriesID]?.ruleStartDate == series.ruleStartDate)
         #expect(after.series.values.allSatisfy {
-            $0.endDate == nil || $0.endDate! >= $0.startDate
+            $0.recurrenceEndDate == nil || $0.recurrenceEndDate! >= $0.ruleStartDate
         })
     }
 
@@ -648,7 +657,7 @@ struct SeriesMutationEngineTests {
         let selectedDestination = CalendarDate(year: 2026, month: 8, day: 13)!
 
         let after = try SeriesMutationEngine.apply(
-            edit: .patch(.init(displayedDate: selectedDestination)),
+            edit: .patch(.init(displayedStartDate: selectedDestination)),
             to: boundary,
             scope: .thisAndFuture,
             in: before,
@@ -661,19 +670,19 @@ struct SeriesMutationEngineTests {
             Issue.record("Expected the moved boundary override in the new series")
             return
         }
-        #expect(boundaryOverride.displayedDate == selectedDestination)
-        #expect(boundaryOverride.displayedDate != existingBoundaryOverride.displayedDate.addingDays(3))
+        #expect(boundaryOverride.displayedSchedule.startDate == selectedDestination)
+        #expect(boundaryOverride.displayedSchedule.startDate != existingBoundaryOverride.displayedSchedule.startDate.addingDays(3))
 
         let shiftedFutureExceptionKey = OccurrenceKey(
             seriesID: newSeriesID,
             originalDate: futureExceptionKey.originalDate.addingDays(3)
         )
+        let shiftedFutureSchedule = try futureException.displayedSchedule.shifted(byDays: 3)
         #expect(after.exceptions[shiftedFutureExceptionKey] == .modified(.init(
-            displayedDate: futureException.displayedDate.addingDays(3),
+            displayedSchedule: shiftedFutureSchedule,
             title: futureException.title,
             kind: futureException.kind,
-            categoryID: futureException.categoryID,
-            timeRange: futureException.timeRange
+            categoryID: futureException.categoryID
         )))
         let shiftedFutureCompletionKey = OccurrenceKey(
             seriesID: newSeriesID,
@@ -694,10 +703,12 @@ struct SeriesMutationEngineTests {
             kind: .task,
             title: "周计划",
             categoryID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
-            startDate: .init(year: 2026, month: 8, day: 3)!,
-            endDate: .init(year: 2026, month: 8, day: 31)!,
+            ruleStartDate: .init(year: 2026, month: 8, day: 3)!,
+            recurrenceEndDate: .init(year: 2026, month: 8, day: 31)!,
             weekdays: [.monday, .wednesday],
-            timeRange: nil,
+            durationDays: 1,
+            startTime: nil,
+            endTime: nil,
             createdAt: Date(timeIntervalSince1970: 0),
             updatedAt: Date(timeIntervalSince1970: 0)
         )
@@ -728,16 +739,15 @@ struct SeriesMutationEngineTests {
 
         let future = try #require(after.series[newSeriesID])
         #expect(future.weekdays == series.weekdays)
-        #expect(future.startDate == boundary.originalDate)
-        #expect(future.endDate == series.endDate)
+        #expect(future.ruleStartDate == boundary.originalDate)
+        #expect(future.recurrenceEndDate == series.recurrenceEndDate)
         #expect(future.title == "未来标题")
         #expect(after.exceptions[OccurrenceKey(seriesID: newSeriesID, originalDate: boundary.originalDate)] ==
             .modified(.init(
-                displayedDate: moved.displayedDate,
+                displayedSchedule: moved.displayedSchedule,
                 title: "未来标题",
                 kind: moved.kind,
-                categoryID: moved.categoryID,
-                timeRange: moved.timeRange
+                categoryID: moved.categoryID
             )))
     }
 
@@ -745,7 +755,7 @@ struct SeriesMutationEngineTests {
         let series = try makeMondayWednesdaySeries(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000223")!
         )
-        let pastKey = OccurrenceKey(seriesID: series.id, originalDate: series.startDate)
+        let pastKey = OccurrenceKey(seriesID: series.id, originalDate: series.ruleStartDate)
         let boundary = OccurrenceKey(
             seriesID: series.id,
             originalDate: .init(year: 2026, month: 8, day: 10)!
@@ -817,14 +827,16 @@ struct SeriesMutationEngineTests {
             kind: .task,
             title: "周计划",
             categoryID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
-            startDate: .init(year: 2026, month: 8, day: 3)!,
-            endDate: .init(year: 2026, month: 8, day: 31)!,
+            ruleStartDate: .init(year: 2026, month: 8, day: 3)!,
+            recurrenceEndDate: .init(year: 2026, month: 8, day: 31)!,
             weekdays: [.monday, .wednesday],
-            timeRange: nil,
+            durationDays: 1,
+            startTime: nil,
+            endTime: nil,
             createdAt: Date(timeIntervalSince1970: 0),
             updatedAt: Date(timeIntervalSince1970: 0)
         )
-        let pastKey = OccurrenceKey(seriesID: series.id, originalDate: series.startDate)
+        let pastKey = OccurrenceKey(seriesID: series.id, originalDate: series.ruleStartDate)
         let boundary = OccurrenceKey(
             seriesID: series.id,
             originalDate: .init(year: 2026, month: 8, day: 10)!
@@ -853,7 +865,7 @@ struct SeriesMutationEngineTests {
         let endDate = CalendarDate(year: 2026, month: 8, day: 19)!
 
         let after = try SeriesMutationEngine.apply(
-            edit: .patch(.init(endDate: .set(endDate))),
+            edit: .patch(.init(recurrenceEndDate: .set(endDate))),
             to: boundary,
             scope: .thisAndFuture,
             in: before,
@@ -864,14 +876,14 @@ struct SeriesMutationEngineTests {
         let future = try #require(after.series[newSeriesID])
         let retainedMigratedKey = OccurrenceKey(seriesID: newSeriesID, originalDate: retainedKey.originalDate)
         let removedMigratedKey = OccurrenceKey(seriesID: newSeriesID, originalDate: removedKey.originalDate)
-        #expect(future.endDate == endDate)
+        #expect(future.recurrenceEndDate == endDate)
         #expect(after.exceptions[retainedMigratedKey] != nil)
         #expect(after.completions[retainedMigratedKey]?.key == retainedMigratedKey)
         #expect(after.exceptions[removedMigratedKey] == nil)
         #expect(after.completions[removedMigratedKey] == nil)
         let projected = RecurrenceEngine.occurrences(
             of: future,
-            in: .init(start: future.startDate, end: .init(year: 2026, month: 8, day: 31)!),
+            in: .init(start: future.ruleStartDate, end: .init(year: 2026, month: 8, day: 31)!),
             exceptions: after.exceptions,
             completions: after.completions
         )
@@ -907,10 +919,12 @@ struct SeriesMutationEngineTests {
             kind: .task,
             title: "周计划",
             categoryID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
-            startDate: .init(year: 2026, month: 8, day: 3)!,
-            endDate: nil,
+            ruleStartDate: .init(year: 2026, month: 8, day: 3)!,
+            recurrenceEndDate: nil,
             weekdays: [.monday, .wednesday],
-            timeRange: nil,
+            durationDays: 1,
+            startTime: nil,
+            endTime: nil,
             createdAt: Date(timeIntervalSince1970: 0),
             updatedAt: Date(timeIntervalSince1970: 0)
         )
@@ -922,11 +936,27 @@ struct SeriesMutationEngineTests {
         title: String? = nil
     ) -> OccurrenceOverride {
         OccurrenceOverride(
-            displayedDate: displayedDate,
+            displayedSchedule: schedule(
+                on: displayedDate,
+                startTime: series.startTime,
+                endTime: series.endTime
+            ),
             title: title ?? series.title,
             kind: series.kind,
-            categoryID: series.categoryID,
-            timeRange: series.timeRange
+            categoryID: series.categoryID
+        )
+    }
+
+    private func schedule(
+        on date: CalendarDate,
+        startTime: MinuteOfDay? = nil,
+        endTime: MinuteOfDay? = nil
+    ) -> CalendarSchedule {
+        try! CalendarSchedule(
+            startDate: date,
+            endDate: date,
+            startTime: startTime,
+            endTime: endTime
         )
     }
 

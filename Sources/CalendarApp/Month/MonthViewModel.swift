@@ -2,21 +2,6 @@ import CalendarDomain
 import Combine
 import Foundation
 
-struct MonthCellModel: Identifiable, Equatable {
-    let date: CalendarDate
-    let isInDisplayedMonth: Bool
-    let isToday: Bool
-    let items: [ProjectedItem]
-
-    var id: CalendarDate { date }
-}
-
-enum MonthLayout {
-    static func itemCapacity(cellHeight: CGFloat) -> Int {
-        max(1, Int(floor((cellHeight - 28 - 6) / 24)))
-    }
-}
-
 @MainActor
 final class MonthViewModel: ObservableObject {
     @Published private(set) var state: CalendarState
@@ -27,10 +12,8 @@ final class MonthViewModel: ObservableObject {
     private(set) var loadedRange: CalendarDateRange
 
     private var timelineProjection = TimelineProjection(entries: [])
-    private var compatibilityItemsByDate: [CalendarDate: [ProjectedItem]] = [:]
-    private var compatibilityItemLookup: [String: ProjectedItem] = [:]
+    private var itemLookup: [String: ProjectedItem] = [:]
 
-    /// Deprecated through Task 12. The old grid's selection surface delegates to the week stream.
     var selectedDate: CalendarDate? {
         get { weekStream.selectedDate }
         set {
@@ -58,7 +41,6 @@ final class MonthViewModel: ObservableObject {
         weekStream.weekStarts
     }
 
-    /// Deprecated through Task 12. The old grid's displayed month follows the focus week.
     var displayedMonth: CalendarDate {
         Self.monthStart(weekStream.monthTitleDate)
     }
@@ -75,29 +57,8 @@ final class MonthViewModel: ObservableObject {
         timelineProjection.entries
     }
 
-    func cell(for date: CalendarDate) -> MonthCellModel {
-        MonthCellModel(
-            date: date,
-            isInDisplayedMonth: date.year == displayedMonth.year && date.month == displayedMonth.month,
-            isToday: date == today,
-            items: compatibilityItemsByDate[date, default: []]
-        )
-    }
-
-    func visibleItems(in cell: MonthCellModel, capacity: Int) -> [ProjectedItem] {
-        let slots = max(1, capacity)
-        guard cell.items.count > slots else {
-            return Array(cell.items.prefix(slots))
-        }
-        return Array(cell.items.prefix(max(0, slots - 1)))
-    }
-
-    func overflowCount(in cell: MonthCellModel, capacity: Int) -> Int {
-        max(0, cell.items.count - visibleItems(in: cell, capacity: capacity).count)
-    }
-
     func item(withID id: String) -> ProjectedItem? {
-        compatibilityItemLookup[id]
+        itemLookup[id]
     }
 
     func weekLayouts(laneCapacity: Int) -> [WeekLayout] {
@@ -122,7 +83,7 @@ final class MonthViewModel: ObservableObject {
     func updateFocus(toWeekStarting week: CalendarDate) {
         objectWillChange.send()
         weekStream.updateFocus(toWeekStarting: week)
-        rebuildCompatibilityFacade()
+        rebuildItemLookup()
     }
 
     func extendEarlier(visibleWeek: CalendarDate, pixelOffset: CGFloat) -> WeekStreamAnchor {
@@ -145,17 +106,14 @@ final class MonthViewModel: ObservableObject {
         return anchor
     }
 
-    /// Deprecated through Task 12. It forwards month navigation to the focus-aware week stream.
     func goToPreviousMonth() {
         moveFocus(to: weekStream.jumpTargetForPreviousMonth(), preservingCivilDayIntent: true)
     }
 
-    /// Deprecated through Task 12. It forwards month navigation to the focus-aware week stream.
     func goToNextMonth() {
         moveFocus(to: weekStream.jumpTargetForNextMonth(), preservingCivilDayIntent: true)
     }
 
-    /// Deprecated through Task 12. It forwards Today to the focus-aware week stream.
     func goToToday(_ today: CalendarDate) {
         self.today = today
         selectedDate = today
@@ -200,28 +158,16 @@ final class MonthViewModel: ObservableObject {
         )
         loadedRange = range
         timelineProjection = projection
-        rebuildCompatibilityFacade()
+        rebuildItemLookup()
     }
 
-    private func rebuildCompatibilityFacade() {
-        let legacyGridRange = Self.legacyGridRange(for: displayedMonth)
-        var itemsByDate: [CalendarDate: [ProjectedItem]] = [:]
-        var itemLookup: [String: ProjectedItem] = [:]
-
-        for entry in timelineProjection.entries {
-            let item = ProjectedItem(entry: entry)
-            itemLookup[item.id] = item
-            guard entry.schedule.startDate <= legacyGridRange.end,
-                  legacyGridRange.start <= entry.schedule.endDate
-            else {
-                continue
+    private func rebuildItemLookup() {
+        itemLookup = Dictionary(
+            uniqueKeysWithValues: timelineProjection.entries.map {
+                let item = ProjectedItem(entry: $0)
+                return (item.id, item)
             }
-            let displayDate = max(entry.schedule.startDate, legacyGridRange.start)
-            itemsByDate[displayDate, default: []].append(item)
-        }
-
-        compatibilityItemsByDate = itemsByDate
-        compatibilityItemLookup = itemLookup
+        )
     }
 
     private static func range(for weekStarts: [CalendarDate]) -> CalendarDateRange {
@@ -229,12 +175,6 @@ final class MonthViewModel: ObservableObject {
             start: weekStarts[0],
             end: weekStarts[weekStarts.count - 1].addingDays(6)
         )
-    }
-
-    private static func legacyGridRange(for displayedMonth: CalendarDate) -> CalendarDateRange {
-        let firstOfMonth = monthStart(displayedMonth)
-        let firstGridDate = firstOfMonth.addingDays(-(firstOfMonth.weekday.rawValue - 1))
-        return CalendarDateRange(start: firstGridDate, end: firstGridDate.addingDays(41))
     }
 
     private static func monthStart(_ date: CalendarDate) -> CalendarDate {

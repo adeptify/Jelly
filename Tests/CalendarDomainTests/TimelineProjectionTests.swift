@@ -63,49 +63,6 @@ struct TimelineProjectionTests {
         #expect(!projection.entries.contains { $0.id == .occurrence(fixture.skippedKey) })
     }
 
-    @Test func monthProjectionAdaptsTheTimelineOrderingInsteadOfResortingEntries() throws {
-        let singleDay = try makeItem(
-            id: uuid("406"),
-            schedule: schedule("2026-08-10", "2026-08-10"),
-            createdAt: .distantPast
-        )
-        let multiDay = try makeItem(
-            id: uuid("407"),
-            schedule: schedule("2026-08-10", "2026-08-11"),
-            createdAt: Date(timeIntervalSince1970: 1)
-        )
-        var calendarState = state(item: singleDay)
-        calendarState.items[multiDay.id] = multiDay
-
-        let projection = MonthProjection.make(
-            monthContaining: date("2026-08-10"),
-            state: calendarState,
-            hiddenCategoryIDs: []
-        )
-
-        #expect(projection.day(date("2026-08-10")).items.map(\.id) == [
-            "item:\(multiDay.id.uuidString)",
-            "item:\(singleDay.id.uuidString)"
-        ])
-    }
-
-    @Test func monthProjectionKeepsAnEntryThatStartsBeforeItsLegacyGridRange() throws {
-        let item = try makeItem(
-            id: uuid("408"),
-            schedule: schedule("2026-07-25", "2026-07-28")
-        )
-
-        let projection = MonthProjection.make(
-            monthContaining: date("2026-08-10"),
-            state: state(item: item),
-            hiddenCategoryIDs: []
-        )
-
-        #expect(projection.day(date("2026-07-27")).items.map(\.id) == [
-            "item:\(item.id.uuidString)"
-        ])
-    }
-
     private func stateWithOverrideEndingOnAugust10() throws -> (state: CalendarState, overrideKey: OccurrenceKey) {
         let series = try makeSeries(id: uuid("402"))
         let overrideKey = OccurrenceKey(seriesID: series.id, originalDate: date("2026-08-03"))

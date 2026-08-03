@@ -128,19 +128,25 @@ struct CalendarReducerTests {
             let categoryID = index < 3 ? fixture.deletedCategoryID : fixture.targetCategoryID
             let item = try CalendarItem(
                 id: UUID(), kind: .task, title: "事项 \(index)",
-                categoryID: categoryID, date: date, timeRange: nil,
+                categoryID: categoryID,
+                schedule: CalendarSchedule(
+                    startDate: date,
+                    endDate: date,
+                    startTime: nil,
+                    endTime: nil
+                ),
                 completedAt: nil,
                 createdAt: Date(timeIntervalSince1970: TimeInterval(index)),
                 updatedAt: Date(timeIntervalSince1970: TimeInterval(index))
             )
             state.items[item.id] = item
         }
-        let projection = MonthProjection.make(
-            monthContaining: .init(year: 2026, month: 8, day: 1)!,
+        let projection = TimelineProjection.make(
+            in: CalendarDateRange(start: date, end: date),
             state: state,
             hiddenCategoryIDs: [fixture.deletedCategoryID]
         )
-        #expect(projection.day(date).items.count == 3)
+        #expect(projection.entries.count == 3)
     }
 
     @Test func completingEventThrows() throws {
@@ -268,13 +274,16 @@ struct CalendarReducerTests {
             now: .now
         )
         #expect(Set(result.recurrence.completions.keys) == [completedKey])
-        let projected = MonthProjection.make(
-            monthContaining: CalendarDate(year: 2026, month: 8, day: 1)!,
+        let projected = TimelineProjection.make(
+            in: CalendarDateRange(
+                start: CalendarDate(year: 2026, month: 8, day: 1)!,
+                end: CalendarDate(year: 2026, month: 8, day: 31)!
+            ),
             state: result,
             hiddenCategoryIDs: []
         )
-        let next = try #require(projected.day(nextKey.originalDate).items.first {
-            $0.id == "occurrence:\(series.id.uuidString):2026-08-10"
+        let next = try #require(projected.entries.first {
+            $0.id == .occurrence(nextKey)
         })
         #expect(next.completedAt == nil)
     }
@@ -340,15 +349,15 @@ struct CalendarReducerTests {
                 timeRange: try makeTimeRange(hour: 10)
             )
         ]
-        let projection = MonthProjection.make(
-            monthContaining: date,
+        let projection = TimelineProjection.make(
+            in: CalendarDateRange(start: date, end: date),
             state: state,
             hiddenCategoryIDs: []
         )
-        #expect(projection.day(date).items.map(\.id) == [
-            "item:\(untimedID.uuidString)",
-            "item:\(earlyTimedID.uuidString)",
-            "item:\(lateTimedID.uuidString)"
+        #expect(projection.entries.map(\.id) == [
+            .item(untimedID),
+            .item(earlyTimedID),
+            .item(lateTimedID)
         ])
     }
 
@@ -375,15 +384,15 @@ struct CalendarReducerTests {
                 timeRange: range, createdAt: Date(timeIntervalSince1970: 1)
             )
         ]
-        let projection = MonthProjection.make(
-            monthContaining: date,
+        let projection = TimelineProjection.make(
+            in: CalendarDateRange(start: date, end: date),
             state: state,
             hiddenCategoryIDs: []
         )
-        #expect(projection.day(date).items.map(\.id) == [
-            "item:\(earlierID.uuidString)",
-            "item:\(stableFirstID.uuidString)",
-            "item:\(stableSecondID.uuidString)"
+        #expect(projection.entries.map(\.id) == [
+            .item(earlierID),
+            .item(stableFirstID),
+            .item(stableSecondID)
         ])
     }
 
@@ -393,7 +402,7 @@ struct CalendarReducerTests {
         let newID = UUID(uuidString: "00000000-0000-0000-0000-000000000340")!
         let graph = try SeriesMutationEngine.apply(
             edit: .patch(.init(title: "新的系列")),
-            to: .init(seriesID: old.id, originalDate: old.startDate),
+            to: .init(seriesID: old.id, originalDate: old.ruleStartDate),
             scope: .thisAndFuture,
             in: state.recurrence,
             newSeriesID: newID,
@@ -404,14 +413,14 @@ struct CalendarReducerTests {
         try CalendarStateValidator.validate(split)
         #expect(split.recurrence.series[old.id] == nil)
         #expect(split.recurrence.series.values.allSatisfy {
-            $0.endDate == nil || $0.endDate! >= $0.startDate
+            $0.recurrenceEndDate == nil || $0.recurrenceEndDate! >= $0.ruleStartDate
         })
     }
 
     @Test func validatorAcceptsFilteredFutureCompletionMigration() throws {
         let state = try makeRecurringTaskState(endDate: CalendarDate(year: 2026, month: 8, day: 31)!)
         let old = try #require(state.recurrence.series.values.first)
-        let pastKey = OccurrenceKey(seriesID: old.id, originalDate: old.startDate)
+        let pastKey = OccurrenceKey(seriesID: old.id, originalDate: old.ruleStartDate)
         let boundary = OccurrenceKey(
             seriesID: old.id,
             originalDate: CalendarDate(year: 2026, month: 8, day: 10)!
@@ -427,11 +436,15 @@ struct CalendarReducerTests {
         let newID = UUID(uuidString: "00000000-0000-0000-0000-000000000341")!
         var graph = state.recurrence
         graph.exceptions[modifiedKey] = .modified(.init(
-            displayedDate: modifiedKey.originalDate,
+            displayedSchedule: try CalendarSchedule(
+                startDate: modifiedKey.originalDate,
+                endDate: modifiedKey.originalDate,
+                startTime: old.startTime,
+                endTime: old.endTime
+            ),
             title: old.title,
             kind: .task,
-            categoryID: old.categoryID,
-            timeRange: old.timeRange
+            categoryID: old.categoryID
         ))
         for (index, key) in [pastKey, naturalKey, modifiedKey].enumerated() {
             graph.completions[key] = .init(
@@ -481,11 +494,15 @@ struct CalendarReducerTests {
         )
         var event = valid
         event.recurrence.exceptions[eventKey] = .modified(.init(
-            displayedDate: eventKey.originalDate,
+            displayedSchedule: try CalendarSchedule(
+                startDate: eventKey.originalDate,
+                endDate: eventKey.originalDate,
+                startTime: nil,
+                endTime: nil
+            ),
             title: "例会",
             kind: .event,
-            categoryID: old.categoryID,
-            timeRange: nil
+            categoryID: old.categoryID
         ))
         event.recurrence.completions[eventKey] = .init(key: eventKey, completedAt: .now)
         #expect(throws: ReducerError.invalidState) {
@@ -605,10 +622,12 @@ struct CalendarReducerTests {
             kind: .task,
             title: "周计划",
             categoryID: uncategorizedID,
-            startDate: CalendarDate(year: 2026, month: 8, day: 3)!,
-            endDate: endDate,
+            ruleStartDate: CalendarDate(year: 2026, month: 8, day: 3)!,
+            recurrenceEndDate: endDate,
             weekdays: [.monday],
-            timeRange: nil,
+            durationDays: 1,
+            startTime: nil,
+            endTime: nil,
             createdAt: .init(timeIntervalSince1970: 0),
             updatedAt: .init(timeIntervalSince1970: 0)
         )
@@ -699,8 +718,12 @@ private func makeCategoryReferenceFixture() throws -> CategoryReferenceFixture {
         kind: .task,
         title: "写方案",
         categoryID: deleted.id,
-        date: .init(year: 2026, month: 8, day: 3)!,
-        timeRange: nil,
+        schedule: CalendarSchedule(
+            startDate: .init(year: 2026, month: 8, day: 3)!,
+            endDate: .init(year: 2026, month: 8, day: 3)!,
+            startTime: nil,
+            endTime: nil
+        ),
         completedAt: nil,
         createdAt: .init(timeIntervalSince1970: 0),
         updatedAt: .init(timeIntervalSince1970: 0)
@@ -710,10 +733,12 @@ private func makeCategoryReferenceFixture() throws -> CategoryReferenceFixture {
         kind: .event,
         title: "例会",
         categoryID: deleted.id,
-        startDate: .init(year: 2026, month: 8, day: 3)!,
-        endDate: nil,
+        ruleStartDate: .init(year: 2026, month: 8, day: 3)!,
+        recurrenceEndDate: nil,
         weekdays: [.monday],
-        timeRange: nil,
+        durationDays: 1,
+        startTime: nil,
+        endTime: nil,
         createdAt: .init(timeIntervalSince1970: 0),
         updatedAt: .init(timeIntervalSince1970: 0)
     )
@@ -722,11 +747,15 @@ private func makeCategoryReferenceFixture() throws -> CategoryReferenceFixture {
         originalDate: .init(year: 2026, month: 8, day: 10)!
     )
     let exception = OccurrenceOverride(
-        displayedDate: exceptionKey.originalDate,
+        displayedSchedule: try CalendarSchedule(
+            startDate: exceptionKey.originalDate,
+            endDate: exceptionKey.originalDate,
+            startTime: nil,
+            endTime: nil
+        ),
         title: "改期例会",
         kind: .event,
-        categoryID: deleted.id,
-        timeRange: nil
+        categoryID: deleted.id
     )
     return .init(
         state: .init(

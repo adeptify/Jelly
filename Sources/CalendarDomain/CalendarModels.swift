@@ -85,51 +85,6 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         self.updatedAt = updatedAt
     }
 
-    @available(*, deprecated, message: "Use the schedule initializer instead.")
-    public init(
-        id: UUID,
-        kind: ItemKind,
-        title: String,
-        categoryID: UUID,
-        date: CalendarDate,
-        timeRange: LocalTimeRange?,
-        creationTimeZoneIdentifier: String = TimeZone.current.identifier,
-        completedAt: Date?,
-        createdAt: Date,
-        updatedAt: Date
-    ) throws {
-        try self.init(
-            id: id,
-            kind: kind,
-            title: title,
-            categoryID: categoryID,
-            schedule: CalendarSchedule(
-                startDate: date,
-                endDate: date,
-                startTime: timeRange?.start,
-                endTime: timeRange?.end
-            ),
-            creationTimeZoneIdentifier: creationTimeZoneIdentifier,
-            completedAt: completedAt,
-            createdAt: createdAt,
-            updatedAt: updatedAt
-        )
-    }
-
-    @available(*, deprecated, message: "Use schedule.startDate instead.")
-    public var date: CalendarDate {
-        schedule.startDate
-    }
-
-    @available(*, deprecated, message: "Use schedule.startTime and schedule.endTime instead.")
-    public var timeRange: LocalTimeRange? {
-        guard let startTime = schedule.startTime,
-              let endTime = schedule.endTime else {
-            return nil
-        }
-        return try? LocalTimeRange(start: startTime, end: endTime)
-    }
-
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let id = try container.decode(UUID.self, forKey: .id)
