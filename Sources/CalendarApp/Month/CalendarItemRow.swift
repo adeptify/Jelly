@@ -46,10 +46,41 @@ enum CalendarItemRowInteractionRouter {
     }
 }
 
+struct CalendarItemRowLayout: Equatable {
+    let categoryMinimumWidth: CGFloat?
+    let categoryMaximumWidth: CGFloat?
+    let titleMinimumWidth: CGFloat?
+    let timeLayoutPriority: Double
+    let categoryLayoutPriority: Double
+    let titleLayoutPriority: Double
+
+    static let standard = CalendarItemRowLayout(
+        categoryMinimumWidth: nil,
+        categoryMaximumWidth: nil,
+        titleMinimumWidth: nil,
+        timeLayoutPriority: 2,
+        categoryLayoutPriority: 0,
+        titleLayoutPriority: 1
+    )
+
+    static let compact = CalendarItemRowLayout(
+        categoryMinimumWidth: 24,
+        categoryMaximumWidth: 36,
+        titleMinimumWidth: 20,
+        timeLayoutPriority: 4,
+        categoryLayoutPriority: 3,
+        titleLayoutPriority: 1
+    )
+}
+
 struct CalendarItemRowPresentation: Equatable {
     let categoryName: String?
     let timeText: String?
     let title: String
+    let layout: CalendarItemRowLayout
+
+    private static let compactRowContentWidth = 120.0
+    private static let compactCategoryCharacterLimit = 2
 
     static func make(
         availableContentWidth: Double,
@@ -57,12 +88,22 @@ struct CalendarItemRowPresentation: Equatable {
         timeRange: LocalTimeRange?,
         title: String
     ) -> CalendarItemRowPresentation {
-        let isCompactTimedRow = timeRange != nil && availableContentWidth < 120
+        let isCompactRow = availableContentWidth < compactRowContentWidth
         return CalendarItemRowPresentation(
-            categoryName: isCompactTimedRow ? nil : categoryName,
+            categoryName: isCompactRow
+                ? compactCategoryName(from: categoryName)
+                : categoryName,
             timeText: timeRange.map { timeString($0.start) },
-            title: title
+            title: title,
+            layout: isCompactRow ? .compact : .standard
         )
+    }
+
+    private static func compactCategoryName(from categoryName: String) -> String {
+        guard categoryName.count > compactCategoryCharacterLimit else {
+            return categoryName
+        }
+        return "\(categoryName.prefix(compactCategoryCharacterLimit))…"
     }
 
     private static func timeString(_ minute: MinuteOfDay) -> String {
@@ -138,16 +179,29 @@ struct CalendarItemRow: View {
                         if let categoryName = presentation.categoryName {
                             Text(categoryName)
                                 .lineLimit(1)
+                                .truncationMode(.tail)
+                                .frame(
+                                    minWidth: presentation.layout.categoryMinimumWidth,
+                                    maxWidth: presentation.layout.categoryMaximumWidth,
+                                    alignment: .leading
+                                )
+                                .fixedSize(
+                                    horizontal: presentation.layout.categoryMinimumWidth != nil,
+                                    vertical: false
+                                )
+                                .layoutPriority(presentation.layout.categoryLayoutPriority)
                         }
                         if let timeText = presentation.timeText {
                             Text(timeText)
                                 .monospacedDigit()
                                 .fixedSize(horizontal: true, vertical: false)
-                                .layoutPriority(2)
+                                .layoutPriority(presentation.layout.timeLayoutPriority)
                         }
                         Text(presentation.title)
                             .lineLimit(1)
-                            .layoutPriority(1)
+                            .truncationMode(.tail)
+                            .frame(minWidth: presentation.layout.titleMinimumWidth, alignment: .leading)
+                            .layoutPriority(presentation.layout.titleLayoutPriority)
                         Spacer(minLength: 0)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)

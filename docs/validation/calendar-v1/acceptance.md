@@ -2,8 +2,8 @@
 
 验收日期：2026-08-03
 
-打包目标：`dist/个人月历.app`
-证据原则：自动化测试只证明其覆盖的语义；涉及真实窗口、交互、外观、重启或文件面板的条目，必须以打包 App 的实际操作和对应 PNG/命令证据确认，不能由源码检查替代。
+权威交付物：`dist/个人月历.app.zip`。`dist/个人月历.app` 只是本机启动和归档前的中间副本；该工作目录位于 Documents 时，FileProvider 扩展属性可能污染裸 App，故不得把它写成权威交付物或权威签名包。
+证据原则：自动化测试只证明其覆盖的语义；涉及真实窗口、交互、外观、重启或文件面板的条目，必须以从权威 ZIP 解出的 App 的实际操作和对应 PNG/命令证据确认，不能由源码检查替代。
 
 | # | 场景 | Expected | Automated evidence | Manual evidence | Result |
 | --- | --- | --- | --- | --- | --- |
@@ -24,7 +24,7 @@
 | 15 | 月份导航/今天/选中日 | 上月、下月、今天正确改变月份；今天和选中日期有清晰标识 | `MonthGridBuilderTests.august2026ProducesMondayFirstFortyTwoCellGrid`、`MonthViewModelTests.monthNavigationAndTodaySelectionUseCivilMonthArithmetic` | 真实上月到 2026 年 7 月、下月回 8 月、今天回当前月 | 通过 |
 | 16 | 关闭重启后持久化 | 分类、事项、重复例外与完成状态在进程重启后仍完整 | `JSONCalendarRepositoryTests.saveThenReopenRoundTripsState`、`completeGraphRoundTripsExactly` | 多次 quit/relaunch；有效恢复后再次重启，4 分类/7 事项/2 系列、8/12 完成、8/20 单次例外均完整 | 通过 |
 | 17 | 导出、无效恢复和有效 rollback 恢复 | 导出本应用备份；无效文件零覆盖；有效恢复前保存原始 rollback（含无法读取 primary 时的原始字节），恢复后完整替换并清 undo | `JSONCalendarRepositoryTests.invalidBackupNeverOverwritesCurrentState`、`decodableDanglingCategoryBackupIsRejected`、`validRestoreWritesRollbackBeforeReplacement`、`corruptPrimarySnapshotPreservesRawBytes`；`CalendarStoreTests.invalidSemanticRestoreKeepsMemoryDiskAndRollbackUntouched`、`successfulRestorePublishesOnceAndClearsUndo`、`corruptPrimaryCanRestoreValidBackup` | File 菜单真实导出 `/private/tmp/calendar-v1-manual-backup.json`；ready-state 修改后恢复，确认显示 `分类 4 个，事项 7 项，重复系列 2 个 → 4/7/2`、完整替换说明和精确 Rollbacks 路径；恢复后任务回到未完成且 stale undo 清空，成功 alert 给出 rollback。语义无效 JSON 报“当前数据未修改”，primary SHA-256 前后同为 `674f43d245fb8f3f017ce16cf5306b1acefede591ed6695dcd84cf61d53d8a19`。另真实覆盖 loadFailed：安全保存 primary 后以 16 字节 `{not-valid-json\\n` 损坏，启动 alert 显示“无法读取本地日历。请检查备份后再尝试恢复。”；导出禁用、恢复启用。选择有效备份后确认精确显示“当前数据无法读取 → 分类4/事项7/系列2”、完整替换和原始字节保留；rollback 与损坏 primary 逐字节相同（SHA-256 均为 `a8cc9214dcbbe1dfaa07fb707820a6585f169a2f31116e2943ffdfc4a10bf6c7`），恢复后的 primary 与有效备份逐字节相同（SHA-256 均为 `674f43d245fb8f3f017ce16cf5306b1acefede591ed6695dcd84cf61d53d8a19`） | 通过 |
-| 18 | 浅色/深色可读性与月格密度 | 浅深外观下分类色+文字均可读；任务/日程可辨；完成任务降权但可读；最小尺寸无裁切，六周月和“还有 N 项”可扫读 | `CategoryManagerViewModelTests.readabilityForCustomColorMatchesRenderedTheme`、`completedTaskAccentUsesRenderedOpacityWhenDecidingItsOutline`、`MonthViewModelTests.itemCapacityPreservesOneOverflowRow`、`CalendarItemRowPresentationTests.compactTimedRowKeepsFullStartTimeAndPrioritizesTitleOverCategory` | 最终同一 fixture 的浅/深、1180 宽/980 宽均真实采集；六周、多色、任务/日程/完成、溢出与完整 `09:00` 均可读。CUA 虚拟显示限制使 1180 图像实际为 1180×712、980 图为 980×712（包含标题栏、内容最小高 680），不是 820px 总高 | 通过（视觉与最小内容高度已验；截图总高度受 CUA 环境限制，未声称 820px 像素图） |
+| 18 | 浅色/深色可读性与月格密度 | 浅深外观下分类色+文字均可读；任务/日程可辨；完成任务降权但可读；最小尺寸无裁切，六周月和“还有 N 项”可扫读 | `CategoryManagerViewModelTests.readabilityForCustomColorMatchesRenderedTheme`、`completedTaskAccentUsesRenderedOpacityWhenDecidingItsOutline`、`MonthViewModelTests.itemCapacityPreservesOneOverflowRow`、`CalendarItemRowPresentationTests.compactTimedRowKeepsFullStartTimeReadableCategoryAndTitle`、`compactTimedRowUsesReadableCategoryPrefixInsteadOfMeaninglessEllipsis`、`narrowUntimedRowAlsoKeepsReadableCategoryPrefixAndTitle` | 主控从权威 `dist/个人月历.app.zip` 解出 App 后，以真实 CUA 在同一 fixture 重采浅/深 980 图。两种外观下，定时行同时显示分类色条、可辨“工作”、完整 `09:00` 与标题“产品同步会”；无时间任务也显示分类文字与标题；六周、多分类色、完成态和月格均无裁切。截图实际为 980×768（含标题栏；内容高度不低于 680），系统外观最终恢复深色。 | 通过 |
 
 ## 截图清单与检查点
 
@@ -32,11 +32,11 @@
 | --- | --- | --- |
 | `light-1180x820.png` | 打包 App 浅色、1180×820、六周月份、无时间任务、定时日程、完成任务、多分类色及“还有 N 项” | 已采集并目检：最终浅色 fixture、实际像素 1180×712；CUA 虚拟显示限制，内容最小高 680，非 820px 总高 |
 | `dark-1180x820.png` | 同一真实 fixture 的深色、1180×820 | 已采集并目检：最终深色 fixture、实际像素 1180×712；同受 CUA 虚拟显示限制 |
-| `light-980x680.png` | 打包 App 浅色最小窗口、同一完整 fixture、无裁切 | 已采集并目检：最终浅色最小窗口、实际像素 980×712；定时行完整 `09:00` |
-| `dark-980x680.png` | 打包 App 深色最小窗口、同一完整 fixture、无裁切 | 已采集并目检：最终深色最小窗口、实际像素 980×712；定时行完整 `09:00` |
+| `light-980x680.png` | 从权威 ZIP 解出的 App：浅色最小窗口、同一完整 fixture、无裁切 | 已重采并目检：实际 980×768；分类色与文字、完整 `09:00`、标题、六周月格均可读 |
+| `dark-980x680.png` | 从权威 ZIP 解出的 App：深色最小窗口、同一完整 fixture、无裁切 | 已重采并目检：实际 980×768；与浅色使用同一 fixture，分类语义和标题均未丢失 |
 | `quick-create-focus-light.png` | 浅色日期格旁快速创建浮层，标题插入点/焦点明显 | 已采集并目检：实际像素 1180×712；快速创建浮层、标题文本和蓝色焦点框可见 |
 | `day-drawer-980x680.png` | 最小窗口拥挤日期的“还有 N 项”与完整当天抽屉 | 已采集并目检：实际像素 980×712；月格“还有 3 项”和右侧当天完整抽屉可见 |
 | `category-manager-previews.png` | 独立分类管理窗口，同时显示浅/深色预览和对比值 | 已采集并目检：实际像素 900×552；浅/深预览同时显示，对比值为 14.38:1 与 13.12:1 |
 | `recurring-scope-dialog.png` | 月格上方的“仅本次 / 本次及以后 / 取消”确认 | 已采集并目检：实际像素 3024×1964；三个范围选项清晰可见 |
 
-最终结论：18 条场景中，16 条已完成自动化与真实手动路径并通过；#8 重复事项整段拖拽、#10 普通事项拖拽的真实 `sky.drag` 手势未触发，故保留为“部分通过/真实手势未确认”，不把它们写成全绿。#1 的排序需求已由真实可访问备用入口与 Command-Z 完成。四张基础截图受 CUA 虚拟显示限制为 712px 总高，已如实记录；这不影响已确认的最小内容高度和可见视觉合同。
+最终结论：18 条场景中，16 条已完成自动化与真实手动路径并通过；#8 重复事项整段拖拽、#10 普通事项拖拽仍为“部分通过/真实手势未确认”，不把它们写成全绿。#18 已由权威 ZIP 解出的 App 在浅/深 980 最小窗口下重采并通过；新图实际为 980×768，内容高度满足不低于 680 的合同。#1 的排序需求已由真实可访问备用入口与 Command-Z 完成。

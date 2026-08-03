@@ -7,9 +7,57 @@ enum MonthEmptyStateHintPolicy {
     }
 }
 
+struct MonthViewTodayRefreshPolicy {
+    let now: () -> Date
+    let calendar: Calendar
+
+    static let calendarDayChangedNotification = Notification.Name.NSCalendarDayChanged
+
+    var today: CalendarDate {
+        CalendarDate.localDay(containing: now(), in: calendar.timeZone)
+    }
+
+    static func shouldRefresh(for scenePhase: ScenePhase) -> Bool {
+        scenePhase == .active
+    }
+
+    static var live: MonthViewTodayRefreshPolicy {
+        MonthViewTodayRefreshPolicy(now: Date.init, calendar: .autoupdatingCurrent)
+    }
+}
+
+enum MonthViewTodayRefreshEvent {
+    case calendarDayChanged
+    case scenePhaseChanged(ScenePhase)
+}
+
+struct MonthViewTodayRefreshController {
+    let policy: MonthViewTodayRefreshPolicy
+
+    func handle(
+        _ event: MonthViewTodayRefreshEvent,
+        updateToday: (CalendarDate) -> Void
+    ) {
+        guard shouldRefresh(for: event) else { return }
+        updateToday(policy.today)
+    }
+
+    private func shouldRefresh(for event: MonthViewTodayRefreshEvent) -> Bool {
+        switch event {
+        case .calendarDayChanged:
+            true
+        case let .scenePhaseChanged(scenePhase):
+            MonthViewTodayRefreshPolicy.shouldRefresh(for: scenePhase)
+        }
+    }
+}
+
 struct MonthView: View {
     let store: CalendarStore
+    private let todayRefreshPolicy: MonthViewTodayRefreshPolicy
+    private let todayRefreshController: MonthViewTodayRefreshController
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model: MonthViewModel
     @StateObject private var dropCoordinator: CalendarDropCoordinator
     @AppStorage("calendar.hiddenCategoryIDs") private var storedHiddenCategoryIDs = ""
@@ -19,9 +67,14 @@ struct MonthView: View {
     @State private var selectedItem: ProjectedItem?
     @State private var isRecurringDropConfirmationPresented = false
 
-    init(store: CalendarStore) {
+    init(
+        store: CalendarStore,
+        todayRefreshPolicy: MonthViewTodayRefreshPolicy = .live
+    ) {
         self.store = store
-        let today = CalendarDate.localDay(containing: Date(), in: .current)
+        self.todayRefreshPolicy = todayRefreshPolicy
+        todayRefreshController = MonthViewTodayRefreshController(policy: todayRefreshPolicy)
+        let today = todayRefreshPolicy.today
         _model = StateObject(wrappedValue: MonthViewModel(
             displayedMonth: today,
             state: store.state,
@@ -51,6 +104,14 @@ struct MonthView: View {
         .onAppear {
             hiddenCategoryIDs = CategoryFilterView.decode(storedHiddenCategoryIDs)
             refreshProjection()
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: MonthViewTodayRefreshPolicy.calendarDayChangedNotification
+        )) { _ in
+            refreshToday(for: .calendarDayChanged)
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            refreshToday(for: .scenePhaseChanged(newPhase))
         }
         .onChange(of: store.state) { _, _ in refreshProjection() }
         .onChange(of: hiddenCategoryIDs) { _, _ in refreshProjection() }
@@ -144,7 +205,7 @@ struct MonthView: View {
                 Image(systemName: "chevron.left")
             }
             .help("上个月")
-            Button("今天") { model.goToToday(CalendarDate.localDay(containing: Date(), in: .current)) }
+            Button("今天") { model.goToToday(todayRefreshPolicy.today) }
             Button { model.goToNextMonth() } label: {
                 Image(systemName: "chevron.right")
             }
@@ -256,10 +317,20 @@ struct MonthView: View {
     }
 
     private func refreshProjection() {
+        refreshProjection(today: todayRefreshPolicy.today)
+    }
+
+    private func refreshToday(for event: MonthViewTodayRefreshEvent) {
+        todayRefreshController.handle(event) { today in
+            refreshProjection(today: today)
+        }
+    }
+
+    private func refreshProjection(today: CalendarDate) {
         model.update(
             state: store.state,
             hiddenCategoryIDs: hiddenCategoryIDs,
-            today: CalendarDate.localDay(containing: Date(), in: .current)
+            today: today
         )
     }
 }
