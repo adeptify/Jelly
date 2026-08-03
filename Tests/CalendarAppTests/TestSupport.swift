@@ -136,15 +136,20 @@ actor InMemoryCalendarRepository: CalendarRepository {
         saveCount += 1
     }
 
-    func snapshotCurrentDocument(to destination: URL) async throws {
+    func currentDocumentData() async throws -> Data {
         if suspendSnapshot {
             signalSnapshotStarted()
             await waitForSnapshotResume()
         }
+        return rawDocument
+    }
+
+    func snapshotCurrentDocument(to destination: URL) async throws {
+        let data = try await currentDocumentData()
         try FileManager.default.createDirectory(
             at: destination.deletingLastPathComponent(), withIntermediateDirectories: true
         )
-        try rawDocument.write(to: destination)
+        try data.write(to: destination)
     }
 
     func failNextSave() { failSave = true }

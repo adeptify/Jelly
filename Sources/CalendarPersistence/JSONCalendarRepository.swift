@@ -41,13 +41,16 @@ public actor JSONCalendarRepository: CalendarRepository {
         }
     }
 
-    public func snapshotCurrentDocument(to destination: URL) async throws {
-        let data: Data
+    public func currentDocumentData() async throws -> Data {
         do {
-            data = try Data(contentsOf: documentURL)
+            return try Data(contentsOf: documentURL)
         } catch {
             throw BackupError.atomicWriteFailed
         }
+    }
+
+    public func snapshotCurrentDocument(to destination: URL) async throws {
+        let data = try await currentDocumentData()
         do {
             try writer.replaceAtomically(data: data, at: destination)
         } catch {

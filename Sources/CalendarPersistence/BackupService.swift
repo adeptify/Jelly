@@ -33,6 +33,12 @@ public actor BackupService {
         rollbackURL: URL
     ) async throws -> CalendarState {
         let restored = try await validatedState(from: source)
+        let primaryBytes: Data
+        do {
+            primaryBytes = try await repository.currentDocumentData()
+        } catch {
+            throw BackupError.rollbackWriteFailed
+        }
         let rollbackParent = rollbackURL.deletingLastPathComponent()
 
         do {
@@ -42,7 +48,7 @@ public actor BackupService {
                     withIntermediateDirectories: true
                 )
             }
-            try await repository.snapshotCurrentDocument(to: rollbackURL)
+            try writer.replaceAtomically(data: primaryBytes, at: rollbackURL)
         } catch {
             throw BackupError.rollbackWriteFailed
         }

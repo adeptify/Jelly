@@ -128,96 +128,18 @@ public struct WeeklySeries: Identifiable, Codable, Equatable, Sendable {
         let kind = try container.decode(ItemKind.self, forKey: .kind)
         let title = try container.decode(String.self, forKey: .title)
         let categoryID = try container.decode(UUID.self, forKey: .categoryID)
-        let usesV2Fields = [
-            CodingKeys.ruleStartDate,
-            .recurrenceEndDate,
-            .durationDays,
-            .startTime,
-            .endTime
-        ].contains(where: container.contains)
-        let usesLegacyFields = [
-            CodingKeys.startDate,
-            .endDate,
-            .timeRange
-        ].contains(where: container.contains)
-
-        guard usesV2Fields || usesLegacyFields else {
+        guard ![CodingKeys.startDate, .endDate, .timeRange].contains(where: container.contains) else {
             throw DecodingError.dataCorruptedError(
                 forKey: .ruleStartDate,
                 in: container,
-                debugDescription: "WeeklySeries is missing its schedule representation."
+                debugDescription: "WeeklySeries schema 2 cannot contain schema 1 schedule fields."
             )
         }
-
-        let v2RuleStartDate = usesV2Fields
-            ? try container.decode(CalendarDate.self, forKey: .ruleStartDate)
-            : nil
-        let v2RecurrenceEndDate = usesV2Fields
-            ? try container.decodeIfPresent(CalendarDate.self, forKey: .recurrenceEndDate)
-            : nil
-        let v2DurationDays = usesV2Fields
-            ? try container.decode(Int.self, forKey: .durationDays)
-            : nil
-        let v2StartTime = usesV2Fields
-            ? try container.decodeIfPresent(MinuteOfDay.self, forKey: .startTime)
-            : nil
-        let v2EndTime = usesV2Fields
-            ? try container.decodeIfPresent(MinuteOfDay.self, forKey: .endTime)
-            : nil
-
-        let legacyStartDate = usesLegacyFields
-            ? try container.decode(CalendarDate.self, forKey: .startDate)
-            : nil
-        let legacyEndDate = usesLegacyFields
-            ? try container.decodeIfPresent(CalendarDate.self, forKey: .endDate)
-            : nil
-        let legacyTimeRange = usesLegacyFields
-            ? try container.decodeIfPresent(LocalTimeRange.self, forKey: .timeRange)
-            : nil
-
-        if usesV2Fields && usesLegacyFields {
-            guard v2RuleStartDate == legacyStartDate else {
-                throw DecodingError.dataCorruptedError(
-                    forKey: .startDate,
-                    in: container,
-                    debugDescription: "WeeklySeries contains conflicting V1 and V2 rule start dates."
-                )
-            }
-            guard v2RecurrenceEndDate == legacyEndDate else {
-                throw DecodingError.dataCorruptedError(
-                    forKey: .endDate,
-                    in: container,
-                    debugDescription: "WeeklySeries contains conflicting V1 and V2 recurrence end dates."
-                )
-            }
-            guard v2DurationDays == 1 else {
-                throw DecodingError.dataCorruptedError(
-                    forKey: .durationDays,
-                    in: container,
-                    debugDescription: "WeeklySeries V1 representation conflicts with its V2 duration."
-                )
-            }
-            guard v2StartTime == legacyTimeRange?.start,
-                  v2EndTime == legacyTimeRange?.end else {
-                throw DecodingError.dataCorruptedError(
-                    forKey: .timeRange,
-                    in: container,
-                    debugDescription: "WeeklySeries contains conflicting V1 and V2 times."
-                )
-            }
-        }
-
-        guard let ruleStartDate = v2RuleStartDate ?? legacyStartDate else {
-            throw DecodingError.dataCorruptedError(
-                forKey: .ruleStartDate,
-                in: container,
-                debugDescription: "WeeklySeries is missing its rule start date."
-            )
-        }
-        let recurrenceEndDate = usesV2Fields ? v2RecurrenceEndDate : legacyEndDate
-        let durationDays = v2DurationDays ?? 1
-        let startTime = usesV2Fields ? v2StartTime : legacyTimeRange?.start
-        let endTime = usesV2Fields ? v2EndTime : legacyTimeRange?.end
+        let ruleStartDate = try container.decode(CalendarDate.self, forKey: .ruleStartDate)
+        let recurrenceEndDate = try container.decodeIfPresent(CalendarDate.self, forKey: .recurrenceEndDate)
+        let durationDays = try container.decode(Int.self, forKey: .durationDays)
+        let startTime = try container.decodeIfPresent(MinuteOfDay.self, forKey: .startTime)
+        let endTime = try container.decodeIfPresent(MinuteOfDay.self, forKey: .endTime)
         let weekdays = try container.decode(Set<Weekday>.self, forKey: .weekdays)
         let creationTimeZoneIdentifier = try container.decode(String.self, forKey: .creationTimeZoneIdentifier)
         let createdAt = try container.decode(Date.self, forKey: .createdAt)
@@ -371,46 +293,14 @@ public struct OccurrenceOverride: Codable, Equatable, Sendable {
         let title = try container.decode(String.self, forKey: .title)
         let kind = try container.decode(ItemKind.self, forKey: .kind)
         let categoryID = try container.decode(UUID.self, forKey: .categoryID)
-        let usesV2Schedule = container.contains(.displayedSchedule)
-        let usesLegacySchedule = container.contains(.displayedDate) || container.contains(.timeRange)
-        guard usesV2Schedule || usesLegacySchedule else {
+        guard ![CodingKeys.displayedDate, .timeRange].contains(where: container.contains) else {
             throw DecodingError.dataCorruptedError(
                 forKey: .displayedSchedule,
                 in: container,
-                debugDescription: "OccurrenceOverride is missing its displayed schedule."
+                debugDescription: "OccurrenceOverride schema 2 cannot contain schema 1 schedule fields."
             )
         }
-
-        let v2Schedule = usesV2Schedule
-            ? try container.decode(CalendarSchedule.self, forKey: .displayedSchedule)
-            : nil
-        let legacySchedule: CalendarSchedule?
-        if usesLegacySchedule {
-            let displayedDate = try container.decode(CalendarDate.self, forKey: .displayedDate)
-            let timeRange = try container.decodeIfPresent(LocalTimeRange.self, forKey: .timeRange)
-            legacySchedule = try CalendarSchedule(
-                startDate: displayedDate,
-                endDate: displayedDate,
-                startTime: timeRange?.start,
-                endTime: timeRange?.end
-            )
-        } else {
-            legacySchedule = nil
-        }
-        if let v2Schedule, let legacySchedule, v2Schedule != legacySchedule {
-            throw DecodingError.dataCorruptedError(
-                forKey: .displayedSchedule,
-                in: container,
-                debugDescription: "OccurrenceOverride contains conflicting V1 and V2 displayed schedules."
-            )
-        }
-        guard let displayedSchedule = v2Schedule ?? legacySchedule else {
-            throw DecodingError.dataCorruptedError(
-                forKey: .displayedSchedule,
-                in: container,
-                debugDescription: "OccurrenceOverride is missing its displayed schedule."
-            )
-        }
+        let displayedSchedule = try container.decode(CalendarSchedule.self, forKey: .displayedSchedule)
         self.init(
             displayedSchedule: displayedSchedule,
             title: title,

@@ -210,6 +210,35 @@ struct CalendarStoreTests {
         #expect(FileManager.default.fileExists(atPath: rollback.deletingLastPathComponent().path) == false)
     }
 
+    @Test func failedV1RestoreDoesNotPublishMigratedState() async throws {
+        let stored = try makeStateWithOneItem()
+        let (store, repository) = try await makeReadyStore(initialState: stored)
+        let beforeState = store.state
+        let beforePublicationGeneration = store.statePublicationGeneration
+        let beforePrimary = await repository.rawDocumentData()
+        let sourceDirectory = try makeTemporaryCalendarAppDirectory()
+        defer { try? FileManager.default.removeItem(at: sourceDirectory) }
+        let source = sourceDirectory.appendingPathComponent("schema-one-backup.json")
+        let rollback = sourceDirectory.appendingPathComponent("rollback.json")
+        try Data(schemaOneEmptyCalendarJSON.utf8).write(to: source)
+        let rollbackWriter = StoreFailingRollbackWriter()
+        rollbackWriter.failNextWrite = true
+
+        await #expect(throws: StoreError.restoreFailed) {
+            try await store.restore(
+                from: source,
+                using: BackupService(writer: rollbackWriter),
+                rollbackURL: rollback
+            )
+        }
+
+        #expect(store.state == beforeState)
+        #expect(store.statePublicationGeneration == beforePublicationGeneration)
+        #expect(store.phase == .ready)
+        #expect(await repository.rawDocumentData() == beforePrimary)
+        #expect(await repository.saveCount == 0)
+    }
+
     @Test func successfulRestorePublishesOnceAndClearsUndo() async throws {
         let original = makeEmptyState()
         let restored = try makeCompleteRecurrenceGraphState()
@@ -259,6 +288,57 @@ private func decodedBackupState(from url: URL) throws -> CalendarState {
     let decoder = JSONDecoder()
     decoder.dateDecodingStrategy = .millisecondsSince1970
     return try decoder.decode(CalendarDocument.self, from: Data(contentsOf: url)).state
+}
+
+private let schemaOneEmptyCalendarJSON = #"""
+{
+  "schemaVersion": 1,
+  "state": {
+    "categories": [
+      "00000000-0000-0000-0000-000000000601",
+      {
+        "id": "00000000-0000-0000-0000-000000000601",
+        "name": "未分类",
+        "colorHex": "#8E8E93",
+        "sortIndex": 0,
+        "createdAt": -63114076800000,
+        "updatedAt": -63114076800000
+      }
+    ],
+    "items": [],
+    "recurrence": {
+      "series": [],
+      "exceptions": [],
+      "completions": []
+    },
+    "uncategorizedID": "00000000-0000-0000-0000-000000000601"
+  }
+}
+"""#
+
+private final class StoreFailingRollbackWriter: AtomicFileWriting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var shouldFailNextWrite = false
+
+    var failNextWrite: Bool {
+        get { lock.withLock { shouldFailNextWrite } }
+        set { lock.withLock { shouldFailNextWrite = newValue } }
+    }
+
+    func replaceAtomically(data: Data, at destination: URL) throws {
+        let shouldFail = lock.withLock {
+            defer { shouldFailNextWrite = false }
+            return shouldFailNextWrite
+        }
+        if shouldFail {
+            throw StoreRollbackWriteError.failed
+        }
+        try FoundationAtomicFileWriter().replaceAtomically(data: data, at: destination)
+    }
+}
+
+private enum StoreRollbackWriteError: Error {
+    case failed
 }
 
 private func makeCompleteRecurrenceGraphState() throws -> CalendarState {

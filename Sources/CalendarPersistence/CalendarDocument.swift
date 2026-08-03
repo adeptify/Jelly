@@ -2,7 +2,7 @@ import CalendarDomain
 import Foundation
 
 public struct CalendarDocument: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public var schemaVersion: Int
     public var state: CalendarState
@@ -55,10 +55,33 @@ enum CalendarDocumentCodec {
         } catch {
             throw BackupError.invalidDocument
         }
-        guard schemaVersion == CalendarDocument.currentSchemaVersion else {
+        switch schemaVersion {
+        case 1:
+            return try decodeAndMigrateV1(data, using: decoder)
+        case CalendarDocument.currentSchemaVersion:
+            return try decodeAndValidateV2(data, using: decoder)
+        default:
             throw BackupError.unsupportedSchema(schemaVersion)
         }
+    }
 
+    private static func decodeAndMigrateV1(_ data: Data, using decoder: JSONDecoder) throws -> CalendarState {
+        let document: V1CalendarDocument
+        do {
+            document = try decoder.decode(V1CalendarDocument.self, from: data)
+        } catch {
+            throw BackupError.invalidDocument
+        }
+        do {
+            let migrated = try document.migratedState()
+            try CalendarStateValidator.validate(migrated)
+            return migrated
+        } catch {
+            throw BackupError.invalidDocument
+        }
+    }
+
+    private static func decodeAndValidateV2(_ data: Data, using decoder: JSONDecoder) throws -> CalendarState {
         let document: CalendarDocument
         do {
             document = try decoder.decode(CalendarDocument.self, from: data)

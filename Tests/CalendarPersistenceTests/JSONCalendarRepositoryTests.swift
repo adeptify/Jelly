@@ -20,6 +20,69 @@ struct JSONCalendarRepositoryTests {
         #expect(try await reader.load() == expected)
     }
 
+    @Test func schemaOneMigratesSingleDayItemsSeriesOverridesAndCompletionsWithoutChangingIdentity() throws {
+        let originalBytes = Data(V1CompleteGraphFixture.json.utf8)
+
+        let state = try CalendarDocumentCodec.decode(originalBytes)
+        let expectedItemSchedule = try schedule("2026-08-06", "2026-08-06", 9, 0, 10, 0)
+        let expectedMovedSchedule = try schedule("2026-08-13", "2026-08-13", 11, 0, 12, 0)
+
+        let item = try #require(state.items[V1CompleteGraphFixture.itemID])
+        #expect(item.id == V1CompleteGraphFixture.itemID)
+        #expect(item.schedule == expectedItemSchedule)
+        #expect(item.completedAt == V1CompleteGraphFixture.itemCompletionDate)
+        #expect(item.createdAt == V1CompleteGraphFixture.itemCreatedAt)
+        #expect(item.updatedAt == V1CompleteGraphFixture.itemUpdatedAt)
+        let category = try #require(state.categories[V1CompleteGraphFixture.categoryID])
+        #expect(category.id == V1CompleteGraphFixture.categoryID)
+        #expect(category.createdAt == V1CompleteGraphFixture.categoryCreatedAt)
+        #expect(category.updatedAt == V1CompleteGraphFixture.categoryUpdatedAt)
+        let series = try #require(state.recurrence.series[V1CompleteGraphFixture.seriesID])
+        #expect(series.id == V1CompleteGraphFixture.seriesID)
+        #expect(series.ruleStartDate == CalendarDate(year: 2026, month: 8, day: 3)!)
+        #expect(series.recurrenceEndDate == CalendarDate(year: 2026, month: 8, day: 31)!)
+        #expect(series.durationDays == 1)
+        #expect(series.startTime == MinuteOfDay(hour: 9, minute: 30))
+        #expect(series.endTime == MinuteOfDay(hour: 10, minute: 15))
+        #expect(series.createdAt == V1CompleteGraphFixture.seriesCreatedAt)
+        #expect(series.updatedAt == V1CompleteGraphFixture.seriesUpdatedAt)
+        let moved = try #require(state.recurrence.exceptions[V1CompleteGraphFixture.movedKey])
+        guard case let .modified(override) = moved else {
+            Issue.record("The V1 modified exception must remain modified.")
+            return
+        }
+        #expect(override.displayedSchedule == expectedMovedSchedule)
+        #expect(override.title == "已移动")
+        #expect(override.kind == .task)
+        #expect(override.categoryID == V1CompleteGraphFixture.categoryID)
+        #expect(state.recurrence.exceptions[V1CompleteGraphFixture.skippedKey] == .skipped)
+        #expect(
+            state.recurrence.completions[V1CompleteGraphFixture.completionKey]?.completedAt
+                == V1CompleteGraphFixture.occurrenceCompletionDate
+        )
+        #expect(originalBytes == Data(V1CompleteGraphFixture.json.utf8))
+    }
+
+    @Test func loadingSchemaOneDoesNotRewritePrimaryUntilNormalSave() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let primary = directory.file("calendar.json")
+        let v1Bytes = Data(V1CompleteGraphFixture.json.utf8)
+        try v1Bytes.write(to: primary)
+        let repository = JSONCalendarRepository(documentURL: primary) {
+            CalendarState.empty(
+                uncategorizedID: V1CompleteGraphFixture.categoryID,
+                now: .distantPast
+            )
+        }
+
+        let migrated = try await repository.load()
+
+        #expect(try Data(contentsOf: primary) == v1Bytes)
+        try await repository.save(migrated)
+        #expect(try schemaVersion(at: primary) == 2)
+    }
+
     @Test func invalidBackupNeverOverwritesCurrentState() async throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
@@ -113,6 +176,66 @@ struct JSONCalendarRepositoryTests {
         #expect(try Data(contentsOf: rollback) == previousPrimary)
         #expect(try decodedDocumentState(from: rollback) == current)
         #expect(try await repository.load() == restored)
+    }
+
+    @Test func malformedV1SpanMigrationDoesNotOverwritePrimaryOrRollback() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let current = try makePopulatedState()
+        let primary = directory.file("calendar.json")
+        let rollback = directory.file("rollback.json")
+        let malformedV1 = Data(
+            V1CompleteGraphFixture.json.replacingOccurrences(
+                of: #""end": { "value": 600 }"#,
+                with: #""end": { "value": 480 }"#
+            ).utf8
+        )
+        let source = directory.file("malformed-v1.json")
+        let repository = JSONCalendarRepository(documentURL: primary) { current }
+        try await repository.save(current)
+        try Data("previous rollback bytes".utf8).write(to: rollback)
+        let beforePrimary = try Data(contentsOf: primary)
+        let beforeRollback = try Data(contentsOf: rollback)
+
+        try malformedV1.write(to: source)
+        await #expect(throws: BackupError.invalidDocument) {
+            try await BackupService().restore(
+                from: source,
+                repository: repository,
+                rollbackURL: rollback
+            )
+        }
+
+        #expect(try Data(contentsOf: primary) == beforePrimary)
+        #expect(try Data(contentsOf: rollback) == beforeRollback)
+    }
+
+    @Test func rollbackFailureLeavesOriginalPrimaryAndRollbackBytesUnchanged() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let current = try makePopulatedState()
+        let primary = directory.file("calendar.json")
+        let rollback = directory.file("rollback.json")
+        let source = directory.file("valid-v1.json")
+        let repository = JSONCalendarRepository(documentURL: primary) { current }
+        try await repository.save(current)
+        try Data("previous rollback bytes".utf8).write(to: rollback)
+        let beforePrimary = try Data(contentsOf: primary)
+        let beforeRollback = try Data(contentsOf: rollback)
+        let rollbackWriter = FailingRollbackWriter()
+        rollbackWriter.failNextWrite = true
+
+        try Data(V1CompleteGraphFixture.json.utf8).write(to: source)
+        await #expect(throws: BackupError.rollbackWriteFailed) {
+            try await BackupService(writer: rollbackWriter).restore(
+                from: source,
+                repository: repository,
+                rollbackURL: rollback
+            )
+        }
+
+        #expect(try Data(contentsOf: primary) == beforePrimary)
+        #expect(try Data(contentsOf: rollback) == beforeRollback)
     }
 
     @Test func firstRestoreCreatesMissingRollbackDirectory() async throws {
@@ -338,28 +461,39 @@ struct JSONCalendarRepositoryTests {
         }
     }
 
-    @Test func weeklySeriesDecoderAcceptsOnlyEquivalentMixedRepresentations() throws {
+    @Test func v2DomainDecodersRejectLegacyAndMixedScheduleRepresentations() throws {
         let state = try makePopulatedState()
+        let item = try #require(state.items.values.first)
         let series = try #require(state.recurrence.series.values.first)
-        var equivalent = try encodedJSONDictionary(series)
-        equivalent["startDate"] = equivalent["ruleStartDate"]
-        equivalent["endDate"] = equivalent["recurrenceEndDate"]
+        let override: OccurrenceOverride = try #require(state.recurrence.exceptions.values.compactMap { exception -> OccurrenceOverride? in
+            guard case let .modified(override) = exception else { return nil }
+            return override
+        }.first)
 
-        #expect(
-            try JSONDecoder().decode(WeeklySeries.self, from: jsonData(equivalent)) == series
-        )
+        var legacyItem = try encodedJSONDictionary(item)
+        legacyItem["date"] = ["year": 2026, "month": 8, "day": 3]
+        var mixedSeries = try encodedJSONDictionary(series)
+        mixedSeries["startDate"] = mixedSeries["ruleStartDate"]
+        mixedSeries["endDate"] = mixedSeries["recurrenceEndDate"]
+        var mixedOverride = try encodedJSONDictionary(override)
+        mixedOverride["displayedDate"] = ["year": 2026, "month": 8, "day": 11]
+        mixedOverride["timeRange"] = [
+            "start": ["value": 540],
+            "end": ["value": 600]
+        ]
 
-        var conflictingDuration = equivalent
-        conflictingDuration["durationDays"] = 2
         #expect(throws: DecodingError.self) {
-            try JSONDecoder().decode(
-                WeeklySeries.self,
-                from: try jsonData(conflictingDuration)
-            )
+            try JSONDecoder().decode(CalendarItem.self, from: try jsonData(legacyItem))
+        }
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(WeeklySeries.self, from: try jsonData(mixedSeries))
+        }
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(OccurrenceOverride.self, from: try jsonData(mixedOverride))
         }
     }
 
-    @Test func occurrenceOverrideDecoderRejectsConflictingDualSchedules() throws {
+    @Test func occurrenceOverrideDecoderRejectsLegacyScheduleFields() throws {
         let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000400")!
         let displayedDate = CalendarDate(year: 2026, month: 8, day: 11)!
         let v2TimeRange = try LocalTimeRange(
@@ -563,6 +697,175 @@ private struct InjectedReplaceFailureWriter: AtomicFileWriting {
         try data.write(to: temporary)
         throw InjectedReplaceFailure.beforeReplacement
     }
+}
+
+private final class FailingRollbackWriter: AtomicFileWriting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var shouldFailNextWrite = false
+
+    var failNextWrite: Bool {
+        get { lock.withLock { shouldFailNextWrite } }
+        set { lock.withLock { shouldFailNextWrite = newValue } }
+    }
+
+    func replaceAtomically(data: Data, at destination: URL) throws {
+        let shouldFail = lock.withLock {
+            defer { shouldFailNextWrite = false }
+            return shouldFailNextWrite
+        }
+        if shouldFail {
+            throw InjectedReplaceFailure.beforeReplacement
+        }
+        try FoundationAtomicFileWriter().replaceAtomically(data: data, at: destination)
+    }
+}
+
+private enum V1CompleteGraphFixture {
+    static let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000100")!
+    static let itemID = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
+    static let seriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000102")!
+    static let movedKey = OccurrenceKey(
+        seriesID: seriesID,
+        originalDate: CalendarDate(year: 2026, month: 8, day: 10)!
+    )
+    static let skippedKey = OccurrenceKey(
+        seriesID: seriesID,
+        originalDate: CalendarDate(year: 2026, month: 8, day: 12)!
+    )
+    static let completionKey = OccurrenceKey(
+        seriesID: seriesID,
+        originalDate: CalendarDate(year: 2026, month: 8, day: 17)!
+    )
+    static let itemCompletionDate = Date(timeIntervalSince1970: 1_700_000_100.25)
+    static let occurrenceCompletionDate = Date(timeIntervalSince1970: 1_700_000_300.5)
+    static let categoryCreatedAt = Date(timeIntervalSince1970: 1_700_000_000)
+    static let categoryUpdatedAt = Date(timeIntervalSince1970: 1_700_000_000.1)
+    static let itemCreatedAt = Date(timeIntervalSince1970: 1_700_000_000.2)
+    static let itemUpdatedAt = Date(timeIntervalSince1970: 1_700_000_000.3)
+    static let seriesCreatedAt = Date(timeIntervalSince1970: 1_700_000_000.4)
+    static let seriesUpdatedAt = Date(timeIntervalSince1970: 1_700_000_000.5)
+
+    static let json = #"""
+    {
+      "schemaVersion": 1,
+      "state": {
+        "categories": [
+          "00000000-0000-0000-0000-000000000100",
+          {
+            "id": "00000000-0000-0000-0000-000000000100",
+            "name": "未分类",
+            "colorHex": "#8E8E93",
+            "sortIndex": 0,
+            "createdAt": 1700000000000,
+            "updatedAt": 1700000000100
+          }
+        ],
+        "items": [
+          "00000000-0000-0000-0000-000000000101",
+          {
+            "id": "00000000-0000-0000-0000-000000000101",
+            "kind": "task",
+            "title": "单日事项",
+            "categoryID": "00000000-0000-0000-0000-000000000100",
+            "date": { "year": 2026, "month": 8, "day": 6 },
+            "timeRange": {
+              "start": { "value": 540 },
+              "end": { "value": 600 }
+            },
+            "creationTimeZoneIdentifier": "Asia/Shanghai",
+            "completedAt": 1700000100250,
+            "createdAt": 1700000000200,
+            "updatedAt": 1700000000300
+          }
+        ],
+        "recurrence": {
+          "series": [
+            "00000000-0000-0000-0000-000000000102",
+            {
+              "id": "00000000-0000-0000-0000-000000000102",
+              "kind": "task",
+              "title": "每周回顾",
+              "categoryID": "00000000-0000-0000-0000-000000000100",
+              "startDate": { "year": 2026, "month": 8, "day": 3 },
+              "endDate": { "year": 2026, "month": 8, "day": 31 },
+              "weekdays": [1, 4],
+              "timeRange": {
+                "start": { "value": 570 },
+                "end": { "value": 615 }
+              },
+              "creationTimeZoneIdentifier": "Asia/Shanghai",
+              "createdAt": 1700000000400,
+              "updatedAt": 1700000000500
+            }
+          ],
+          "exceptions": [
+            {
+              "seriesID": "00000000-0000-0000-0000-000000000102",
+              "originalDate": { "year": 2026, "month": 8, "day": 10 }
+            },
+            {
+              "modified": {
+                "_0": {
+                  "displayedDate": { "year": 2026, "month": 8, "day": 13 },
+                  "title": "已移动",
+                  "kind": "task",
+                  "categoryID": "00000000-0000-0000-0000-000000000100",
+                  "timeRange": {
+                    "start": { "value": 660 },
+                    "end": { "value": 720 }
+                  }
+                }
+              }
+            },
+            {
+              "seriesID": "00000000-0000-0000-0000-000000000102",
+              "originalDate": { "year": 2026, "month": 8, "day": 12 }
+            },
+            { "skipped": {} }
+          ],
+          "completions": [
+            {
+              "seriesID": "00000000-0000-0000-0000-000000000102",
+              "originalDate": { "year": 2026, "month": 8, "day": 17 }
+            },
+            {
+              "key": {
+                "seriesID": "00000000-0000-0000-0000-000000000102",
+                "originalDate": { "year": 2026, "month": 8, "day": 17 }
+              },
+              "completedAt": 1700000300500
+            }
+          ]
+        },
+        "uncategorizedID": "00000000-0000-0000-0000-000000000100"
+      }
+    }
+    """#
+}
+
+private func schedule(
+    _ startDate: String,
+    _ endDate: String,
+    _ startHour: Int,
+    _ startMinute: Int,
+    _ endHour: Int,
+    _ endMinute: Int
+) throws -> CalendarSchedule {
+    func date(_ value: String) -> CalendarDate {
+        let parts = value.split(separator: "-").map { Int($0)! }
+        return CalendarDate(year: parts[0], month: parts[1], day: parts[2])!
+    }
+    return try CalendarSchedule(
+        startDate: date(startDate),
+        endDate: date(endDate),
+        startTime: MinuteOfDay(hour: startHour, minute: startMinute),
+        endTime: MinuteOfDay(hour: endHour, minute: endMinute)
+    )
+}
+
+private func schemaVersion(at url: URL) throws -> Int {
+    let document = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+    return try #require(document?["schemaVersion"] as? Int)
 }
 
 private func makePopulatedState() throws -> CalendarState {

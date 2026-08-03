@@ -136,6 +136,13 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         let kind = try container.decode(ItemKind.self, forKey: .kind)
         let title = try container.decode(String.self, forKey: .title)
         let categoryID = try container.decode(UUID.self, forKey: .categoryID)
+        guard ![CodingKeys.date, .timeRange].contains(where: container.contains) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .schedule,
+                in: container,
+                debugDescription: "CalendarItem schema 2 cannot contain schema 1 schedule fields."
+            )
+        }
         let schedule = try container.decode(CalendarSchedule.self, forKey: .schedule)
         let creationTimeZoneIdentifier = try container.decode(String.self, forKey: .creationTimeZoneIdentifier)
         let completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
@@ -182,6 +189,8 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         case title
         case categoryID
         case schedule
+        case date
+        case timeRange
         case creationTimeZoneIdentifier
         case completedAt
         case createdAt
