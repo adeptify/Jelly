@@ -55,6 +55,7 @@ struct CalendarItemRowLayout: Equatable {
     let titleLayoutPriority: Double
     let inlineSpacing: CGFloat
     let categoryFixedWidth: CGFloat?
+    let textFontSize: CGFloat
 
     static let standard = CalendarItemRowLayout(
         categoryMinimumWidth: nil,
@@ -64,7 +65,8 @@ struct CalendarItemRowLayout: Equatable {
         categoryLayoutPriority: 0,
         titleLayoutPriority: 1,
         inlineSpacing: 4,
-        categoryFixedWidth: nil
+        categoryFixedWidth: nil,
+        textFontSize: 12
     )
 
     static let compact = CalendarItemRowLayout(
@@ -75,7 +77,8 @@ struct CalendarItemRowLayout: Equatable {
         categoryLayoutPriority: 3,
         titleLayoutPriority: 1,
         inlineSpacing: 3,
-        categoryFixedWidth: 16
+        categoryFixedWidth: 16,
+        textFontSize: 11
     )
 
 }
@@ -233,6 +236,7 @@ struct CalendarItemRow: View {
                             .layoutPriority(presentation.layout.titleLayoutPriority)
                         Spacer(minLength: 0)
                     }
+                    .font(.system(size: presentation.layout.textFontSize))
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 }
                 .foregroundStyle(isCompletedTask ? CalendarTheme.completedText : .primary)

@@ -129,6 +129,32 @@ struct CalendarItemRowPresentationTests {
         #expect(standard.layout.categoryFixedWidth == nil)
     }
 
+    @Test func compactTimedLayoutUsesReducedTypographyWhileStandardKeepsOriginalSize() throws {
+        let range = try LocalTimeRange(
+            start: .init(hour: 9, minute: 0)!,
+            end: .init(hour: 10, minute: 0)!
+        )
+
+        let compact = CalendarItemRowPresentation.make(
+            availableContentWidth: 140,
+            categoryName: "工作",
+            timeRange: range,
+            title: "产品同步会"
+        )
+        let standard = CalendarItemRowPresentation.make(
+            availableContentWidth: 141,
+            categoryName: "工作",
+            timeRange: range,
+            title: "产品同步会"
+        )
+
+        #expect(compact.layout.textFontSize == 11)
+        #expect(standard.layout.textFontSize == 12)
+        #expect(compact.categoryName == "工")
+        #expect(compact.timeText == "09:00")
+        #expect(compact.title == "产品同步会")
+    }
+
     @Test func rowBodyAccessibilityLabelKeepsFullValuesInCompactAndStandardLayouts() throws {
         let range = try LocalTimeRange(
             start: .init(hour: 9, minute: 0)!,
