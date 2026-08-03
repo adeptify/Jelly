@@ -206,8 +206,9 @@ struct ItemEditorViewModelTests {
         #expect(endTime == MinuteOfDay(hour: 2, minute: 0)!)
     }
 
-    @Test func multiDayRecurringDraftKeepsInstanceSpanSeparateFromRecurrenceEnd() throws {
-        let categoryID = makeEmptyState().uncategorizedID
+    @Test func multiDayRecurringDraftKeepsInstanceSpanSeparateFromRecurrenceEnd() async throws {
+        let original = makeEmptyState()
+        let categoryID = original.uncategorizedID
         let recurrenceEndDate = CalendarDate(year: 2026, month: 8, day: 31)!
         var draft = ItemDraft.newItem(
             from: CalendarDate(year: 2026, month: 8, day: 3)!,
@@ -237,6 +238,31 @@ struct ItemEditorViewModelTests {
         #expect(series.recurrenceEndDate == recurrenceEndDate)
         #expect(series.startTime == draft.startTime)
         #expect(series.endTime == draft.endTime)
+
+        let (store, repository) = try await makeReadyStore(initialState: original)
+        #expect(await repository.saveCount == 0)
+        try await store.send(command, undoLabel: "已创建事项")
+
+        let finalSeries = try #require(store.state.recurrence.series[series.id])
+        #expect(finalSeries.durationDays == 3)
+        #expect(finalSeries.recurrenceEndDate == recurrenceEndDate)
+        #expect(finalSeries.startTime == draft.startTime)
+        #expect(finalSeries.endTime == draft.endTime)
+        let persisted = await repository.persistedState
+        let persistedSeries = try #require(persisted.recurrence.series[series.id])
+        #expect(persistedSeries.durationDays == 3)
+        #expect(persistedSeries.recurrenceEndDate == recurrenceEndDate)
+        #expect(persistedSeries.startTime == draft.startTime)
+        #expect(persistedSeries.endTime == draft.endTime)
+        #expect(persisted == store.state)
+        #expect(await repository.saveCount == 1)
+        #expect(store.canUndo)
+
+        try await store.undo()
+        #expect(store.state == original)
+        #expect(await repository.persistedState == original)
+        #expect(await repository.saveCount == 2)
+        #expect(store.canUndo == false)
     }
 
     @Test func onlyThisRangeAndTimeEditPersistsOneOverrideAndUndoesWholeState() async throws {
