@@ -6,6 +6,81 @@ import Testing
 
 @Suite("WeekRowPresentationTests")
 struct WeekRowPresentationTests {
+    @Test func todayDateBadgeUsesADotAndAnnouncesOnlyToday() {
+        let date = CalendarDate(year: 2026, month: 8, day: 3)!
+        let presentation = CalendarDateBadgePresentation(
+            date: date,
+            isToday: true,
+            isSelected: false
+        )
+
+        #expect(presentation.showsTodayDot)
+        #expect(presentation.showsSelectionRing == false)
+        #expect(presentation.accessibilityLabel == "8月3日，今天，打开当天事项")
+        #expect(presentation.accessibilityValue == "今天")
+    }
+
+    @Test func selectedDateBadgeUsesARingAndAnnouncesOnlySelection() {
+        let date = CalendarDate(year: 2026, month: 8, day: 3)!
+        let presentation = CalendarDateBadgePresentation(
+            date: date,
+            isToday: false,
+            isSelected: true
+        )
+
+        #expect(presentation.showsTodayDot == false)
+        #expect(presentation.showsSelectionRing)
+        #expect(presentation.accessibilityLabel == "8月3日，已选中，打开当天事项")
+        #expect(presentation.accessibilityValue == "已选中")
+    }
+
+    @Test func todayAndSelectedDateBadgeStacksBothMarkersAndBothAnnouncements() {
+        let date = CalendarDate(year: 2026, month: 8, day: 3)!
+        let presentation = CalendarDateBadgePresentation(
+            date: date,
+            isToday: true,
+            isSelected: true
+        )
+
+        #expect(presentation.showsTodayDot)
+        #expect(presentation.showsSelectionRing)
+        #expect(presentation.accessibilityLabel == "8月3日，今天，已选中，打开当天事项")
+        #expect(presentation.accessibilityValue == "今天，已选中")
+    }
+
+    @Test func ordinaryDateBadgeDoesNotMisreportTodayOrSelection() {
+        let date = CalendarDate(year: 2026, month: 8, day: 3)!
+        let presentation = CalendarDateBadgePresentation(
+            date: date,
+            isToday: false,
+            isSelected: false
+        )
+
+        #expect(presentation.showsTodayDot == false)
+        #expect(presentation.showsSelectionRing == false)
+        #expect(presentation.accessibilityLabel == "8月3日，打开当天事项")
+        #expect(presentation.accessibilityValue == "普通日期")
+    }
+
+    @Test func productionWeekRowDateCellConsumesBothMarkerAndAccessibilityStates() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appending(path: "Sources/CalendarApp/Month/WeekRowView.swift"),
+            encoding: .utf8
+        )
+
+        #expect(source.contains("let badge = CalendarDateBadgePresentation("))
+        #expect(source.contains("if badge.showsTodayDot"))
+        #expect(source.contains("if badge.showsSelectionRing"))
+        #expect(source.contains(".accessibilityLabel(badge.accessibilityLabel)"))
+        #expect(source.contains(".accessibilityValue(badge.accessibilityValue)"))
+        #expect(WeekRowMetrics.dateHeaderHeight == 24)
+        #expect(WeekRowMetrics.itemCapacity(height: 252) == 10)
+    }
+
     @Test func crossDaySegmentsKeepContinuousColumnsStableIdentityAndTrueOuterEdges() throws {
         let fixture = try makeCrossMonthFixture()
         let layouts = WeekSegmentLayout.make(

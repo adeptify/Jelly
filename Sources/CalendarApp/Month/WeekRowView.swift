@@ -27,6 +27,34 @@ enum WeekRowDropTarget {
     }
 }
 
+struct CalendarDateBadgePresentation: Equatable {
+    let showsTodayDot: Bool
+    let showsSelectionRing: Bool
+    let accessibilityLabel: String
+    let accessibilityValue: String
+
+    init(date: CalendarDate, isToday: Bool, isSelected: Bool) {
+        showsTodayDot = isToday
+        showsSelectionRing = isSelected
+
+        var labelComponents = ["\(date.month)月\(date.day)日"]
+        var stateComponents: [String] = []
+        if isToday {
+            labelComponents.append("今天")
+            stateComponents.append("今天")
+        }
+        if isSelected {
+            labelComponents.append("已选中")
+            stateComponents.append("已选中")
+        }
+        labelComponents.append("打开当天事项")
+        accessibilityLabel = labelComponents.joined(separator: "，")
+        accessibilityValue = stateComponents.isEmpty
+            ? "普通日期"
+            : stateComponents.joined(separator: "，")
+    }
+}
+
 struct WeekRowSegmentPresentation: Identifiable, Equatable {
     let id: WeekSegmentID
     let source: ProjectedEntryID
@@ -734,6 +762,11 @@ private struct WeekRowDateCell: View {
     }
 
     var body: some View {
+        let badge = CalendarDateBadgePresentation(
+            date: date,
+            isToday: isToday,
+            isSelected: isSelected
+        )
         VStack(spacing: 0) {
             HStack(spacing: 2) {
                 Button {
@@ -748,12 +781,25 @@ private struct WeekRowDateCell: View {
                         .background(dateBadgeFill)
                         .clipShape(Capsule())
                         .overlay {
-                            Capsule()
-                                .stroke(dateBadgeOutline, lineWidth: isToday || isSelected ? 1 : 0)
+                            if badge.showsSelectionRing {
+                                Capsule()
+                                    .stroke(theme.selectionOutline, lineWidth: 1.5)
+                            }
+                        }
+                        .overlay(alignment: .bottom) {
+                            if badge.showsTodayDot {
+                                Circle()
+                                    .fill(theme.todayOutline)
+                                    .frame(width: 4, height: 4)
+                                    .overlay(Circle().stroke(theme.canvas, lineWidth: 0.5))
+                                    .offset(y: 2)
+                                    .accessibilityHidden(true)
+                            }
                         }
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("\(date.month)月\(date.day)日，打开当天事项")
+                .accessibilityLabel(badge.accessibilityLabel)
+                .accessibilityValue(badge.accessibilityValue)
 
                 Spacer(minLength: 0)
 
@@ -837,13 +883,9 @@ private struct WeekRowDateCell: View {
     }
 
     private var dateBadgeFill: Color {
-        if isToday { return theme.todayFill }
         if isSelected { return theme.selectionFill }
+        if isToday { return theme.todayFill }
         return .clear
-    }
-
-    private var dateBadgeOutline: Color {
-        isToday ? theme.todayOutline : theme.selectionOutline
     }
 
     private func sendDayAction(for surface: WeekRowHitSurface) {
