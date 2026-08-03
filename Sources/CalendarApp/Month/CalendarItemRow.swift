@@ -53,6 +53,8 @@ struct CalendarItemRowLayout: Equatable {
     let timeLayoutPriority: Double
     let categoryLayoutPriority: Double
     let titleLayoutPriority: Double
+    let inlineSpacing: CGFloat
+    let categoryFixedWidth: CGFloat?
 
     static let standard = CalendarItemRowLayout(
         categoryMinimumWidth: nil,
@@ -60,27 +62,33 @@ struct CalendarItemRowLayout: Equatable {
         titleMinimumWidth: nil,
         timeLayoutPriority: 2,
         categoryLayoutPriority: 0,
-        titleLayoutPriority: 1
+        titleLayoutPriority: 1,
+        inlineSpacing: 4,
+        categoryFixedWidth: nil
     )
 
     static let compact = CalendarItemRowLayout(
-        categoryMinimumWidth: 24,
-        categoryMaximumWidth: 36,
+        categoryMinimumWidth: 16,
+        categoryMaximumWidth: 16,
         titleMinimumWidth: 20,
         timeLayoutPriority: 4,
         categoryLayoutPriority: 3,
-        titleLayoutPriority: 1
+        titleLayoutPriority: 1,
+        inlineSpacing: 3,
+        categoryFixedWidth: 16
     )
+
 }
 
 struct CalendarItemRowPresentation: Equatable {
     let categoryName: String?
     let timeText: String?
     let title: String
+    let accessibilityLabel: String
     let layout: CalendarItemRowLayout
 
-    private static let compactRowContentWidth = 120.0
-    private static let compactCategoryCharacterLimit = 2
+    private static let compactRowContentWidth = 140.0
+    private static let compactCategoryCharacterLimit = 1
 
     static func make(
         availableContentWidth: Double,
@@ -88,22 +96,40 @@ struct CalendarItemRowPresentation: Equatable {
         timeRange: LocalTimeRange?,
         title: String
     ) -> CalendarItemRowPresentation {
-        let isCompactRow = availableContentWidth < compactRowContentWidth
+        let isCompactRow = availableContentWidth <= compactRowContentWidth
         return CalendarItemRowPresentation(
             categoryName: isCompactRow
                 ? compactCategoryName(from: categoryName)
                 : categoryName,
             timeText: timeRange.map { timeString($0.start) },
             title: title,
+            accessibilityLabel: rowBodyAccessibilityLabel(
+                categoryName: categoryName,
+                timeRange: timeRange,
+                title: title
+            ),
             layout: isCompactRow ? .compact : .standard
         )
+    }
+
+    static func rowBodyAccessibilityLabel(
+        categoryName: String,
+        timeRange: LocalTimeRange?,
+        title: String
+    ) -> String {
+        var components = [categoryName]
+        if let timeRange {
+            components.append(timeString(timeRange.start))
+        }
+        components.append(title)
+        return components.joined(separator: ", ")
     }
 
     private static func compactCategoryName(from categoryName: String) -> String {
         guard categoryName.count > compactCategoryCharacterLimit else {
             return categoryName
         }
-        return "\(categoryName.prefix(compactCategoryCharacterLimit))…"
+        return String(categoryName.prefix(compactCategoryCharacterLimit))
     }
 
     private static func timeString(_ minute: MinuteOfDay) -> String {
@@ -175,21 +201,24 @@ struct CalendarItemRow: View {
                         timeRange: item.timeRange,
                         title: item.title
                     )
-                    HStack(spacing: 4) {
+                    HStack(spacing: presentation.layout.inlineSpacing) {
                         if let categoryName = presentation.categoryName {
-                            Text(categoryName)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                                .frame(
-                                    minWidth: presentation.layout.categoryMinimumWidth,
-                                    maxWidth: presentation.layout.categoryMaximumWidth,
-                                    alignment: .leading
-                                )
-                                .fixedSize(
-                                    horizontal: presentation.layout.categoryMinimumWidth != nil,
-                                    vertical: false
-                                )
-                                .layoutPriority(presentation.layout.categoryLayoutPriority)
+                            if let fixedWidth = presentation.layout.categoryFixedWidth {
+                                Text(categoryName)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .frame(width: fixedWidth, alignment: .leading)
+                                    .layoutPriority(presentation.layout.categoryLayoutPriority)
+                            } else {
+                                Text(categoryName)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                    .frame(
+                                        minWidth: presentation.layout.categoryMinimumWidth,
+                                        maxWidth: presentation.layout.categoryMaximumWidth,
+                                        alignment: .leading
+                                    )
+                                    .layoutPriority(presentation.layout.categoryLayoutPriority)
+                            }
                         }
                         if let timeText = presentation.timeText {
                             Text(timeText)
@@ -208,6 +237,13 @@ struct CalendarItemRow: View {
                 }
                 .foregroundStyle(isCompletedTask ? CalendarTheme.completedText : .primary)
             }
+            .accessibilityLabel(
+                CalendarItemRowPresentation.rowBodyAccessibilityLabel(
+                    categoryName: category?.name ?? "未分类",
+                    timeRange: item.timeRange,
+                    title: item.title
+                )
+            )
             .buttonStyle(.plain)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
