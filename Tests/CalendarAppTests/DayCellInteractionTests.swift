@@ -54,11 +54,9 @@ struct DayCellInteractionTests {
 
         try sendMouseSequence(to: emptySurface)
 
-        #expect(recorder.records == [
-            .began(date, .emptyCell, CGPoint(x: 110, y: 160)),
-            .changed(CGPoint(x: 130, y: 180)),
-            .ended(CGPoint(x: 130, y: 180))
-        ])
+        #expect(recorder.records.map(\.kind) == [.began, .changed, .ended])
+        #expect(recorder.records.first?.date == date)
+        #expect(recorder.records.first?.target == .emptyCell)
         for hitSurface in [
             WeekRowHitSurface.dateNumber,
             .overflow,
@@ -101,6 +99,30 @@ struct DayCellInteractionTests {
         #expect(scrollRecorder.records.isEmpty)
     }
 
+    @Test func flippedParentMapsTopAndBottomMouseLocationsIntoTheSwiftUIRootCoordinateSystem() throws {
+        let date = CalendarDate(year: 2026, month: 8, day: 10)!
+        let recorder = RangeGestureRecorder()
+        let surface = WeekRowRangeGestureSurfaceView(
+            date: date,
+            hitSurface: .emptySurface,
+            rootOrigin: CGPoint(x: 100, y: 150),
+            onRangeGesture: recorder.record
+        )
+        let flippedParent = FlippedEventContainer(frame: CGRect(x: 0, y: 0, width: 200, height: 120))
+        flippedParent.addSubview(surface)
+        surface.frame = flippedParent.bounds
+
+        try sendMouseClick(to: surface, atWindowLocation: CGPoint(x: 10, y: 110))
+        try sendMouseClick(to: surface, atWindowLocation: CGPoint(x: 10, y: 10))
+
+        #expect(recorder.records == [
+            .began(date, .emptyCell, CGPoint(x: 110, y: 160)),
+            .ended(CGPoint(x: 110, y: 160)),
+            .began(date, .emptyCell, CGPoint(x: 110, y: 260)),
+            .ended(CGPoint(x: 110, y: 260))
+        ])
+    }
+
     private func sendMouseSequence(to view: NSView) throws {
         let down = try #require(NSEvent.mouseEvent(
             with: .leftMouseDown,
@@ -140,6 +162,34 @@ struct DayCellInteractionTests {
         view.mouseDragged(with: dragged)
         view.mouseUp(with: up)
     }
+
+    private func sendMouseClick(to view: NSView, atWindowLocation location: CGPoint) throws {
+        let down = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: location,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ))
+        let up = try #require(NSEvent.mouseEvent(
+            with: .leftMouseUp,
+            location: location,
+            modifierFlags: [],
+            timestamp: 0.1,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ))
+
+        view.mouseDown(with: down)
+        view.mouseUp(with: up)
+    }
 }
 
 @MainActor
@@ -162,4 +212,32 @@ private enum RangeGestureRecord: Equatable {
     case began(CalendarDate, CalendarInteractionHitTarget, CGPoint)
     case changed(CGPoint)
     case ended(CGPoint)
+
+    var kind: RangeGestureRecordKind {
+        switch self {
+        case .began: .began
+        case .changed: .changed
+        case .ended: .ended
+        }
+    }
+
+    var date: CalendarDate? {
+        guard case let .began(date, _, _) = self else { return nil }
+        return date
+    }
+
+    var target: CalendarInteractionHitTarget? {
+        guard case let .began(_, target, _) = self else { return nil }
+        return target
+    }
+}
+
+private enum RangeGestureRecordKind: Equatable {
+    case began
+    case changed
+    case ended
+}
+
+private final class FlippedEventContainer: NSView {
+    override var isFlipped: Bool { true }
 }

@@ -329,6 +329,8 @@ final class WeekRowRangeGestureSurfaceView: NSView {
     private var onRangeGesture: (WeekRowRangeGesture) -> Void
     private var isTrackingRange = false
 
+    override var isFlipped: Bool { true }
+
     init(
         date: CalendarDate,
         hitSurface: WeekRowHitSurface,
