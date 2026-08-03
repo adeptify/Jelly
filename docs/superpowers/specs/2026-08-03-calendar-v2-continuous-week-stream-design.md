@@ -29,6 +29,7 @@
 - 上下滚动可无缝跨月、跨年，并提供轻微整周吸附。
 - 顶部月份标题由视口中心周决定；横跨两个月的周以周四所在月份作为显示月份，避免标题在边界来回抖动。
 - 左右箭头以当前焦点日期为基准加减一个自然月，并把目标日期所在周居中。
+- 当目标月份没有同一日号时采用月末夹取，例如 1 月 31 日的“下个月”落到 2 月最后一天。
 - “今天”把今天所在周居中。
 
 ### 2.2 跨日事项
@@ -61,10 +62,10 @@
 
 ```swift
 public struct CalendarSchedule: Codable, Equatable, Sendable {
-    public var startDate: CalendarDate
-    public var endDate: CalendarDate
-    public var startTime: MinuteOfDay?
-    public var endTime: MinuteOfDay?
+    public let startDate: CalendarDate
+    public let endDate: CalendarDate
+    public let startTime: MinuteOfDay?
+    public let endTime: MinuteOfDay?
 }
 ```
 
@@ -76,6 +77,7 @@ public struct CalendarSchedule: Codable, Equatable, Sendable {
 - 跨日定时事项按完整本地日期时间比较，因此允许 `23:00 → 次日 01:00`。
 - 日期跨度按本地日历日计算，不使用固定秒数换算。
 - `durationDays` 是包含首尾的派生值，不单独持久化到普通事项。
+- `CalendarSchedule` 只能通过 throwing initializer 创建；自定义 `init(from:)` 解码后必须调用同一个 initializer，持久化数据不能绕过不变量。
 
 `CalendarItem.date` 与 `CalendarItem.timeRange` 由一个 `schedule` 替代。任务的完成状态仍属于整个 `CalendarItem` 身份。
 
@@ -108,7 +110,8 @@ public struct WeeklySeries: Codable, Equatable, Sendable, Identifiable {
 - 当 `durationDays == 1` 时必须满足 `endTime > startTime`；跨日时以日期跨度保证结束日期时间晚于开始。
 - `recurrenceEndDate` 只表示最后允许开始的日期，不表示某次实例的结束日。
 - `OccurrenceKey.originalDate` 始终表示实例原始开始日。移动、缩放、完成和拆分都不能让稳定身份丢失。
-- `OccurrenceOverride` 可以覆盖显示开始日、`durationDays`、开始时间和结束时间，也可以表达跳过。
+- `OccurrenceExceptionKind` 固定为 `.skipped` 或 `.modified(OccurrenceOverride)`；跳过只由 `.skipped` 表达。
+- `OccurrenceOverride.displayedSchedule` 保存完整的显示起止日期与时间；V2 不再把 `displayedDate` 或单独“显示开始日”作为业务真相。
 - 重复任务的完成状态仍按 `OccurrenceKey` 存储；每个跨日实例只有一个完成状态。
 
 ### 3.3 重复修改合同
@@ -130,11 +133,11 @@ public struct WeeklySeries: Codable, Equatable, Sendable, Identifiable {
 
 V1 → V2 迁移：
 
-- 普通事项 `date` → `schedule.startDate = schedule.endDate = date`。
-- 普通事项 `timeRange` → 同日 `schedule.startTime/endTime`。
-- 系列 `startDate` → `ruleStartDate`。
-- 系列 `endDate` → `recurrenceEndDate`。
-- 所有旧系列与旧例外的 `durationDays = 1`。
+- 使用字段完整的 `V1CalendarItemDTO`、`V1WeeklySeriesDTO`、`V1OccurrenceOverrideDTO`、`V1OccurrenceExceptionKindDTO` 和 V1 graph/state/document DTO，不允许用 V2 `Codable` 默认值猜测旧字段。
+- 普通事项 `date` → `schedule.startDate = schedule.endDate = date`；`timeRange.start/end` → 同日 `schedule.startTime/endTime`。
+- 系列 `startDate` → `ruleStartDate`；`endDate` → `recurrenceEndDate`；`timeRange.start/end` → `startTime/endTime`；`durationDays = 1`。
+- 修改例外的 `displayedDate` → `displayedSchedule.startDate = displayedSchedule.endDate`；`timeRange.start/end` → `displayedSchedule.startTime/endTime`；标题、类型和分类不变。
+- `.skipped` 例外原样保留，不尝试构造修改例外。
 - 分类 ID、事项 ID、系列 ID、`OccurrenceKey`、完成状态、创建时间和更新时间原样保留。
 
 解码行为：
@@ -144,6 +147,7 @@ V1 → V2 迁移：
 - 读取 V1 时只迁移到内存，不立即覆盖源文件；下一次正常保存或恢复成功后写出 V2。
 - V1 备份可以恢复；恢复前的当前主文件继续原样保存为 rollback 快照。
 - 任何迁移、校验或保存失败都不能覆盖最后一份有效主文件。
+- 恢复顺序固定为：读取 schema envelope → 解码对应版本 DTO → 迁移 → V2 全量领域校验 → 把当前主文件原始字节写入 rollback → 原子写入 V2 主文件 → 发布内存状态。
 
 ## 5. 投影与周条带布局
 
@@ -155,7 +159,34 @@ V1 → V2 迁移：
 entry.endDate >= visibleStart && entry.startDate <= visibleEnd
 ```
 
-重复查询必须回看至少 `durationDays - 1` 天，且必须额外纳入被例外修改为更长跨度的实例，确保“从视口前开始但延续进视口”的条带不会消失。
+重复候选必须取以下并集，并按 `OccurrenceKey` 去重：
+
+```text
+基础规则在跨度回看查询范围内生成的自然实例
+UNION
+所有 effective displayedSchedule 与 visibleRange 相交的 modified exception
+```
+
+- modified exception 的 `originalDate` 可以在查询范围之前或之后，不能用它过滤显示范围。
+- 已移动例外压制原始位置；`.skipped` 不投影。
+- 系列拆分后，即使原始星期不再匹配，显式修改例外仍然有效。
+- 基础查询至少回看 `durationDays - 1` 天；加长例外直接按其完整 `displayedSchedule` 做相交判断，确保从视口前延续进来的条带不会消失。
+
+投影稳定身份定义为：
+
+```swift
+enum ProjectedEntryID: Hashable, Sendable {
+    case item(UUID)
+    case occurrence(OccurrenceKey)
+}
+
+struct WeekSegmentID: Hashable, Sendable {
+    let sourceID: ProjectedEntryID
+    let weekStart: CalendarDate
+}
+```
+
+移动、缩放和裁剪不能改变同一来源在同一周的 `WeekSegmentID`。
 
 ### 5.2 周段
 
@@ -186,8 +217,9 @@ struct WeekSegment: Identifiable, Equatable {
 - `WeekRow` 是 7 列背景、日期头、单日事项和跨日条带 overlay 的完整布局单元；不再让七个独立日期格各自绘制跨日事项。
 - 周行使用固定的高密度目标高度，实际值通过真实 8–10 lane 视觉验收确定，初始实现目标为 252pt。
 - 星期栏固定在顶部；周流在其下方纵向滚动。
-- 默认持有当前周前后各 52 周的窗口；接近任一边缘时按 52 周扩展。
-- prepend 前记录顶部可见周 ID 与像素偏移，插入后恢复同一锚点，视觉位置不得跳动。
+- 初始持有当前周前后各 52 周；接近任一边缘时按 52 周扩展，窗口最多保留连续 157 周。
+- 超过 157 周后从远离当前焦点的一端裁掉 52 周；添加或裁剪前记录可见周 ID 与像素偏移，变更后恢复同一锚点，视觉位置不得跳动。
+- `TimelineProjection` 只处理有界周窗口、基础跨度回看和显式例外相交所需的范围，不为所有历史建立常驻投影。
 - 视口中心最近的周是 `focusWeek`，顶部月份标题取该周周四。
 - 轻微吸附只在滚动减速后把最近周边界拉齐，不拦截正常滚轮和触控板滚动。
 - 自动扩展和月份标题变化不修改 Store，也不进入撤销栈。
@@ -233,6 +265,7 @@ editing(draft, anchorDate)
 - 锚点日期因自动滚动暂时离屏时，卡片贴近对应窗口边缘，不关闭、不丢失草稿。
 - 卡片提供开始日期、结束日期、可选开始时间与结束时间；单日事项仍保持紧凑布局。
 - `Enter` 保存，`Esc` 放弃；无效范围就地提示且不清空输入。
+- 保存失败时卡片和完整草稿保持打开，用户可以原地修改或直接重试。
 
 ## 9. 分类颜色与视觉系统
 
@@ -257,7 +290,7 @@ editing(draft, anchorDate)
 | --- | --- |
 | 基础 | `4F7FFF` `735DD0` `D65772` `E58B39` `4EAC73` `2E9EB0` `9A7650` `8C8F96` |
 | 马卡龙 | `8FB8F4` `A9A2E8` `D7A0C5` `F0A59A` `F4C58C` `E4D87D` `9ED8C0` `B9D69B` |
-| 莫兰迪 | `8296A8` `B28F9B` `B6816D` `B6A184` `8F9878` `7F9B8B` `73959A` `8B7867` |
+| 莫兰迪 | `8296A8` `B28F9B` `B6816D` `B6A184` `8F9878` `7F9B8B` `5F889F` `8B7867` |
 | 自然 | `4D83A6` `3E705A` `6F8652` `4D8D89` `C18A3D` `B86549` `81566F` `73716B` |
 | 鲜亮 | `3D63E9` `7548D8` `D43282` `EF5E55` `F28A24` `83B928` `19A86B` `149DB4` |
 
@@ -267,6 +300,7 @@ editing(draft, anchorDate)
 - `CategoryColorResolver` 从基础色生成 `accent / softBackground / outline` 三个浅色与深色角色。
 - 浅色背景以燕麦画布混色，深色背景以暖黑画布混色；accent 必须相对所在表面达到 3:1，正文使用固定暖黑/暖白并达到 4.5:1。
 - 自定义色使用同一解析算法；无法满足对比度时自动调节明度并在预览中展示最终颜色。
+- 每个色系的八个 accent 在 protanopia 与 deuteranopia 模拟下，任意两色的 CIE76 Delta E 不低于 3；40 色表已经为该门禁调整，后续改色必须重新验证。
 - 分类名称、条带文字与无障碍标签始终存在，颜色不是唯一信息来源。
 
 ## 10. 撤销、错误与恢复
@@ -274,7 +308,7 @@ editing(draft, anchorDate)
 - 创建、编辑、移动、缩放、完成、删除和分类变化仍通过 `CalendarStore` 的单一事务入口保存。
 - 一次用户确认只注册一个整状态快照撤销；重复系列拆分、未来例外与完成记录迁移必须原子撤销。
 - preview、滚动、筛选和月份标题变化不进入撤销栈。
-- 保存失败时不保留半完成的领域状态；UI 回滚到原位置并显示可重试提示。
+- 保存失败时不保留半完成的领域状态；移动/缩放 preview 回滚到原位置并显示可重试提示，创建/编辑卡片和草稿保持打开。
 - 分类管理窗口与主窗口继续共享同一个 Store 和撤销命令。
 - 打包、备份、恢复和损坏文件隔离沿用 V1 的事务性门禁，并增加 V1 → V2 迁移覆盖。
 
@@ -301,12 +335,14 @@ editing(draft, anchorDate)
 ### 13.1 领域与迁移
 
 - 单日、跨夜、跨周、跨月、跨年范围校验正确。
-- schema 1 主文件与备份迁移后，ID、分类、完成状态、例外、创建时间均不变。
+- schema 1 主文件与备份迁移后，普通事项、定时系列、移动修改例外、跳过例外、完成记录、ID、分类和时间戳均不变。
+- 迁移、V2 校验、rollback 写入或主文件原子写入任一步失败时，原主文件字节保持不变，内存状态不发布。
 - schema 2 round-trip 无差异；未知 schema 和损坏范围不覆盖当前主文件。
 
 ### 13.2 投影与布局
 
 - 从视口前开始但延续进视口的普通事项、重复事项和加长例外都可见。
+- 原始日期在视口之前或之后、但 `displayedSchedule` 被移动进视口的修改例外可见；原位置被压制，跳过例外不可见。
 - 同周连续条带、跨周/跨月分段、续接样式和真实外端缩放柄正确。
 - 容量不足时条带整段隐藏；每个被覆盖日期的“还有 N 项”准确。
 - 分类筛选后的 lane 与 overflow 重新计算。
@@ -322,14 +358,14 @@ editing(draft, anchorDate)
 ### 13.4 连续滚动
 
 - 手动连续滚动至少覆盖当前周前后各 52 周。
-- 扩展周窗口时可见周与像素位置不跳动。
+- 扩展或裁剪有界周窗口时，可见周与像素位置不跳动，常驻窗口不超过 157 周。
 - 中心周月份标题、整月箭头和“今天”居中行为准确。
 - 常见全屏尺寸下一屏约三周，每格直接显示 8–10 条；较小窗口保持周高而自然减少可见周数。
 
 ### 13.5 视觉、颜色与真实应用
 
 - 浅色、深色、高密度日期格、跨日条带、新建卡片和分类管理均符合 C「安静生活感」。
-- 五组共 40 个预设色及自定义色完成浅深模式可读性检查；颜色不是唯一识别信息。
+- 五组共 40 个预设色及自定义色完成浅深模式可读性检查，并通过常见红绿色觉缺陷模拟下的可区分性复核；颜色不是唯一识别信息。
 - 最终打包 `.app` 真实完成：创建、重启持久化、跨日框选、主体拖动、两端缩放、重复范围选择、撤销和 V1 备份恢复。
 - 单元测试、集成测试或截图绿色不能代替原生鼠标和打包应用验收。
 
