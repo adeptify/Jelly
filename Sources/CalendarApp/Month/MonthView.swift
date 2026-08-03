@@ -87,6 +87,119 @@ enum WeekStreamAutoScrollRouting {
     }
 }
 
+@MainActor
+protocol WeekStreamAutoScrollDeferredCancellation: AnyObject {
+    func cancel()
+}
+
+@MainActor
+protocol WeekStreamAutoScrollDeferrer: AnyObject {
+    func deferToNextLayout(
+        _ action: @escaping () -> Void
+    ) -> any WeekStreamAutoScrollDeferredCancellation
+}
+
+@MainActor
+final class WeekStreamAutoScrollExecutionDriver: ObservableObject {
+    private let deferrer: any WeekStreamAutoScrollDeferrer
+    private var pendingScroll: (any WeekStreamAutoScrollDeferredCancellation)?
+
+    init(deferrer: any WeekStreamAutoScrollDeferrer = MainActorNextLayoutDeferrer()) {
+        self.deferrer = deferrer
+    }
+
+    func execute(
+        plan: WeekStreamAutoScrollPlan,
+        visibleWeek: CalendarDate,
+        direction: CalendarInteractionAutoScrollDirection,
+        loadedWeekStarts: @escaping () -> [CalendarDate],
+        extend: @escaping (CalendarInteractionAutoScrollDirection, CalendarDate) -> Void,
+        scroll: @escaping (CalendarDate, CalendarInteractionAutoScrollDirection) -> Void
+    ) {
+        cancel()
+
+        let targetWeek: CalendarDate
+        switch plan {
+        case let .scroll(week):
+            targetWeek = week
+        case let .extendEarlier(thenScrollTo: week):
+            targetWeek = week
+            extend(.earlier, visibleWeek)
+        case let .extendLater(thenScrollTo: week):
+            targetWeek = week
+            extend(.later, visibleWeek)
+        }
+
+        guard plan.requiresWindowExtension else {
+            scrollIfLoaded(
+                targetWeek,
+                direction: direction,
+                loadedWeekStarts: loadedWeekStarts,
+                scroll: scroll
+            )
+            return
+        }
+
+        pendingScroll = deferrer.deferToNextLayout { [weak self] in
+            guard let self else { return }
+            self.pendingScroll = nil
+            self.scrollIfLoaded(
+                targetWeek,
+                direction: direction,
+                loadedWeekStarts: loadedWeekStarts,
+                scroll: scroll
+            )
+        }
+    }
+
+    func cancel() {
+        pendingScroll?.cancel()
+        pendingScroll = nil
+    }
+
+    private func scrollIfLoaded(
+        _ targetWeek: CalendarDate,
+        direction: CalendarInteractionAutoScrollDirection,
+        loadedWeekStarts: () -> [CalendarDate],
+        scroll: (CalendarDate, CalendarInteractionAutoScrollDirection) -> Void
+    ) {
+        guard loadedWeekStarts().contains(targetWeek) else { return }
+        scroll(targetWeek, direction)
+    }
+}
+
+private extension WeekStreamAutoScrollPlan {
+    var requiresWindowExtension: Bool {
+        switch self {
+        case .scroll: false
+        case .extendEarlier, .extendLater: true
+        }
+    }
+}
+
+@MainActor
+private final class MainActorNextLayoutDeferrer: WeekStreamAutoScrollDeferrer {
+    private final class Cancellation: WeekStreamAutoScrollDeferredCancellation {
+        var isCancelled = false
+
+        func cancel() {
+            isCancelled = true
+        }
+    }
+
+    func deferToNextLayout(
+        _ action: @escaping () -> Void
+    ) -> any WeekStreamAutoScrollDeferredCancellation {
+        let cancellation = Cancellation()
+        Task { @MainActor in
+            await Task.yield()
+            guard !cancellation.isCancelled else { return }
+            action()
+        }
+        return cancellation
+    }
+}
+
 struct MonthView: View {
     let store: CalendarStore
     private let todayRefreshPolicy: MonthViewTodayRefreshPolicy
@@ -97,6 +210,7 @@ struct MonthView: View {
     @StateObject private var dropCoordinator: CalendarDropCoordinator
     @StateObject private var interactionCoordinator: CalendarInteractionCoordinator
     @StateObject private var autoScrollDriver: CalendarInteractionAutoScrollDriver
+    @StateObject private var autoScrollExecutionDriver: WeekStreamAutoScrollExecutionDriver
     @StateObject private var weekStreamScrollCoordinator: WeekStreamScrollCoordinator
     @StateObject private var weekStreamRestoration: WeekStreamRestorationController
     @AppStorage("calendar.hiddenCategoryIDs") private var storedHiddenCategoryIDs = ""
@@ -127,6 +241,7 @@ struct MonthView: View {
         _dropCoordinator = StateObject(wrappedValue: CalendarDropCoordinator(store: store))
         _interactionCoordinator = StateObject(wrappedValue: CalendarInteractionCoordinator())
         _autoScrollDriver = StateObject(wrappedValue: CalendarInteractionAutoScrollDriver())
+        _autoScrollExecutionDriver = StateObject(wrappedValue: WeekStreamAutoScrollExecutionDriver())
         let restoration = WeekStreamRestorationController()
         _weekStreamRestoration = StateObject(wrappedValue: restoration)
         _weekStreamScrollCoordinator = StateObject(wrappedValue: WeekStreamScrollCoordinator {
@@ -533,7 +648,7 @@ struct MonthView: View {
     ) {
         switch gesture {
         case let .began(date, target, point):
-            autoScrollDriver.cancel()
+            cancelRangeAutoScroll()
             interactionCoordinator.pointerDown(on: date, target: target, point: point)
         case let .changed(point):
             let date = dateFrameMap.date(at: point)
@@ -542,9 +657,10 @@ struct MonthView: View {
                 over: date,
                 viewportBounds: viewportBounds
             )
+            autoScrollExecutionDriver.cancel()
             autoScrollDriver.update(direction: interactionCoordinator.autoScrollDirection)
         case let .ended(point):
-            autoScrollDriver.cancel()
+            cancelRangeAutoScroll()
             let releaseDate = dateFrameMap.date(at: point) ?? dateFrameMap.nearestDate(to: point)
             let action = interactionCoordinator.pointerUp(at: point, over: releaseDate)
             presentQuickCreate(for: action)
@@ -579,48 +695,26 @@ struct MonthView: View {
             direction: tick.direction,
             loadedWeekStarts: model.weekStarts
         )
-        switch plan {
-        case let .scroll(targetWeek):
-            scrollProxy.scrollTo(
-                targetWeek,
-                anchor: tick.direction == .earlier ? .top : .bottom
-            )
-        case let .extendEarlier(thenScrollTo: targetWeek):
-            _ = model.extendEarlier(
-                visibleWeek: WeekStreamModel.weekStart(containing: cursorDate),
-                pixelOffset: 0
-            )
-            scrollToAutoScrollTarget(
-                targetWeek,
-                direction: tick.direction,
-                scrollProxy: scrollProxy
-            )
-        case let .extendLater(thenScrollTo: targetWeek):
-            _ = model.extendLater(
-                visibleWeek: WeekStreamModel.weekStart(containing: cursorDate),
-                pixelOffset: 0
-            )
-            scrollToAutoScrollTarget(
-                targetWeek,
-                direction: tick.direction,
-                scrollProxy: scrollProxy
-            )
-        }
-    }
-
-    private func scrollToAutoScrollTarget(
-        _ targetWeek: CalendarDate,
-        direction: CalendarInteractionAutoScrollDirection,
-        scrollProxy: ScrollViewProxy
-    ) {
-        Task { @MainActor in
-            await Task.yield()
-            guard model.weekStarts.contains(targetWeek) else { return }
-            scrollProxy.scrollTo(
-                targetWeek,
-                anchor: direction == .earlier ? .top : .bottom
-            )
-        }
+        autoScrollExecutionDriver.execute(
+            plan: plan,
+            visibleWeek: WeekStreamModel.weekStart(containing: cursorDate),
+            direction: tick.direction,
+            loadedWeekStarts: { model.weekStarts },
+            extend: { direction, visibleWeek in
+                switch direction {
+                case .earlier:
+                    _ = model.extendEarlier(visibleWeek: visibleWeek, pixelOffset: 0)
+                case .later:
+                    _ = model.extendLater(visibleWeek: visibleWeek, pixelOffset: 0)
+                }
+            },
+            scroll: { targetWeek, direction in
+                scrollProxy.scrollTo(
+                    targetWeek,
+                    anchor: direction == .earlier ? .top : .bottom
+                )
+            }
+        )
     }
 
     private func openQuickCreate(on date: CalendarDate) {
@@ -635,7 +729,7 @@ struct MonthView: View {
         else {
             return
         }
-        autoScrollDriver.cancel()
+        cancelRangeAutoScroll()
         quickCreatePresentation = presentation
         lastEditorAnchorFrame = dateFrameMap.frame(for: presentation.anchorDate)
         quickCreateMeasuredContentSize = .zero
@@ -643,11 +737,16 @@ struct MonthView: View {
     }
 
     private func dismissQuickCreate() {
-        autoScrollDriver.cancel()
+        cancelRangeAutoScroll()
         quickCreatePresentation = nil
         lastEditorAnchorFrame = nil
         quickCreateMeasuredContentSize = .zero
         interactionCoordinator.cancel()
+    }
+
+    private func cancelRangeAutoScroll() {
+        autoScrollDriver.cancel()
+        autoScrollExecutionDriver.cancel()
     }
 
     private func resolvedEditorAnchorFrame(for date: CalendarDate, windowBounds: CGRect) -> CGRect {

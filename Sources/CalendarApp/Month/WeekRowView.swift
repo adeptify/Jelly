@@ -1,3 +1,4 @@
+import AppKit
 import CalendarDomain
 import SwiftUI
 
@@ -320,6 +321,100 @@ enum WeekRowHitRouting {
     }
 }
 
+@MainActor
+final class WeekRowRangeGestureSurfaceView: NSView {
+    private var date: CalendarDate
+    private var hitSurface: WeekRowHitSurface
+    private var rootOrigin: CGPoint
+    private var onRangeGesture: (WeekRowRangeGesture) -> Void
+    private var isTrackingRange = false
+
+    init(
+        date: CalendarDate,
+        hitSurface: WeekRowHitSurface,
+        rootOrigin: CGPoint,
+        onRangeGesture: @escaping (WeekRowRangeGesture) -> Void
+    ) {
+        self.date = date
+        self.hitSurface = hitSurface
+        self.rootOrigin = rootOrigin
+        self.onRangeGesture = onRangeGesture
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func update(
+        date: CalendarDate,
+        hitSurface: WeekRowHitSurface,
+        rootOrigin: CGPoint,
+        onRangeGesture: @escaping (WeekRowRangeGesture) -> Void
+    ) {
+        self.date = date
+        self.hitSurface = hitSurface
+        self.rootOrigin = rootOrigin
+        self.onRangeGesture = onRangeGesture
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let target = WeekRowHitRouting.selectionTarget(for: hitSurface) else {
+            isTrackingRange = false
+            return
+        }
+        isTrackingRange = true
+        onRangeGesture(.began(date, target, rootPoint(for: event)))
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isTrackingRange else { return }
+        onRangeGesture(.changed(rootPoint(for: event)))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer { isTrackingRange = false }
+        guard isTrackingRange else { return }
+        onRangeGesture(.ended(rootPoint(for: event)))
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        nextResponder?.scrollWheel(with: event)
+    }
+
+    private func rootPoint(for event: NSEvent) -> CGPoint {
+        let localPoint = convert(event.locationInWindow, from: nil)
+        return CGPoint(
+            x: rootOrigin.x + localPoint.x,
+            y: rootOrigin.y + localPoint.y
+        )
+    }
+}
+
+private struct WeekRowEmptyRangeGestureSurface: NSViewRepresentable {
+    let date: CalendarDate
+    let rootOrigin: CGPoint
+    let onRangeGesture: (WeekRowRangeGesture) -> Void
+
+    func makeNSView(context _: Context) -> WeekRowRangeGestureSurfaceView {
+        WeekRowRangeGestureSurfaceView(
+            date: date,
+            hitSurface: .emptySurface,
+            rootOrigin: rootOrigin,
+            onRangeGesture: onRangeGesture
+        )
+    }
+
+    func updateNSView(_ view: WeekRowRangeGestureSurfaceView, context _: Context) {
+        view.update(
+            date: date,
+            hitSurface: .emptySurface,
+            rootOrigin: rootOrigin,
+            onRangeGesture: onRangeGesture
+        )
+    }
+}
+
 enum WeekRowRangeGesture {
     case began(CalendarDate, CalendarInteractionHitTarget, CGPoint)
     case changed(CGPoint)
@@ -464,7 +559,17 @@ private struct WeekRowDateCell: View {
         .background {
             Rectangle()
                 .fill(isInSelection ? Color.accentColor.opacity(0.14) : Color(nsColor: .windowBackgroundColor))
-                .simultaneousGesture(rangeSelectionGesture)
+                .overlay {
+                    GeometryReader { proxy in
+                        WeekRowEmptyRangeGestureSurface(
+                            date: date,
+                            rootOrigin: proxy.frame(
+                                in: .named(CalendarInteractionCoordinateSpace.root)
+                            ).origin,
+                            onRangeGesture: onRangeGesture
+                        )
+                    }
+                }
         }
         .background {
             GeometryReader { proxy in
@@ -500,18 +605,6 @@ private struct WeekRowDateCell: View {
         } isTargeted: { isTargeted in
             dropCoordinator.setTargeted(isTargeted, date: date)
         }
-    }
-
-    private var rangeSelectionGesture: some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .named(CalendarInteractionCoordinateSpace.root))
-            .onChanged { value in
-                guard let target = WeekRowHitRouting.selectionTarget(for: .emptySurface) else { return }
-                onRangeGesture(.began(date, target, value.startLocation))
-                onRangeGesture(.changed(value.location))
-            }
-            .onEnded { value in
-                onRangeGesture(.ended(value.location))
-            }
     }
 
     private func sendDayAction(for surface: WeekRowHitSurface) {

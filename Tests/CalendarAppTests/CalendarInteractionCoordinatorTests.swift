@@ -137,6 +137,93 @@ struct CalendarInteractionCoordinatorTests {
         #expect(plan == .extendEarlier(thenScrollTo: targetWeek))
     }
 
+    @Test func autoScrollExecutionExtendsTheLoadedWindowBeforeScrollingTheNewlyLoadedWeek() {
+        let cursorDate = date(3)
+        let cursorWeek = WeekStreamModel.weekStart(containing: cursorDate)
+        let targetWeek = cursorWeek.addingDays(-7)
+        let plan = WeekStreamAutoScrollRouting.plan(
+            cursorDate: cursorDate,
+            direction: .earlier,
+            loadedWeekStarts: [cursorWeek]
+        )
+        let deferrer = ManualWeekStreamAutoScrollDeferrer()
+        let driver = WeekStreamAutoScrollExecutionDriver(deferrer: deferrer)
+        let spy = WeekStreamAutoScrollExecutionSpy(
+            loadedWeekStarts: [cursorWeek],
+            targetWeekToLoad: targetWeek,
+            loadsTargetWhenExtended: true
+        )
+
+        driver.execute(
+            plan: plan,
+            visibleWeek: cursorWeek,
+            direction: .earlier,
+            loadedWeekStarts: { spy.loadedWeekStarts },
+            extend: spy.extend,
+            scroll: spy.scroll
+        )
+
+        #expect(spy.operations == [.extendEarlier(cursorWeek)])
+        deferrer.performNext()
+        #expect(spy.operations == [.extendEarlier(cursorWeek), .scroll(targetWeek)])
+    }
+
+    @Test func autoScrollExecutionNeverScrollsAnIdentifierThatTheExtensionDidNotLoad() {
+        let cursorDate = date(3)
+        let cursorWeek = WeekStreamModel.weekStart(containing: cursorDate)
+        let targetWeek = cursorWeek.addingDays(7)
+        let plan = WeekStreamAutoScrollRouting.plan(
+            cursorDate: cursorDate,
+            direction: .later,
+            loadedWeekStarts: [cursorWeek]
+        )
+        let deferrer = ManualWeekStreamAutoScrollDeferrer()
+        let driver = WeekStreamAutoScrollExecutionDriver(deferrer: deferrer)
+        let spy = WeekStreamAutoScrollExecutionSpy(
+            loadedWeekStarts: [cursorWeek],
+            targetWeekToLoad: targetWeek,
+            loadsTargetWhenExtended: false
+        )
+
+        driver.execute(
+            plan: plan,
+            visibleWeek: cursorWeek,
+            direction: .later,
+            loadedWeekStarts: { spy.loadedWeekStarts },
+            extend: spy.extend,
+            scroll: spy.scroll
+        )
+        deferrer.performNext()
+
+        #expect(spy.operations == [.extendLater(cursorWeek)])
+    }
+
+    @Test func cancellingAutoScrollExecutionPreventsItsDeferredScrollCall() {
+        let cursorDate = date(3)
+        let cursorWeek = WeekStreamModel.weekStart(containing: cursorDate)
+        let targetWeek = cursorWeek.addingDays(-7)
+        let deferrer = ManualWeekStreamAutoScrollDeferrer()
+        let driver = WeekStreamAutoScrollExecutionDriver(deferrer: deferrer)
+        let spy = WeekStreamAutoScrollExecutionSpy(
+            loadedWeekStarts: [cursorWeek],
+            targetWeekToLoad: targetWeek,
+            loadsTargetWhenExtended: true
+        )
+
+        driver.execute(
+            plan: .extendEarlier(thenScrollTo: targetWeek),
+            visibleWeek: cursorWeek,
+            direction: .earlier,
+            loadedWeekStarts: { spy.loadedWeekStarts },
+            extend: spy.extend,
+            scroll: spy.scroll
+        )
+        driver.cancel()
+        deferrer.performNext()
+
+        #expect(spy.operations == [.extendEarlier(cursorWeek)])
+    }
+
     @Test func escapeCancelAndSuccessfulSaveClearEditingRange() {
         let coordinator = CalendarInteractionCoordinator()
         let selectedRange = CalendarDateRange(start: date(6), end: date(8))
@@ -217,5 +304,79 @@ private final class ManualAutoScrollScheduler: CalendarInteractionAutoScrollSche
         let due = actions.filter { $0.dueAt <= now }
         actions.removeAll { $0.dueAt <= now }
         due.filter { !$0.token.cancelled }.forEach { $0.action() }
+    }
+}
+
+@MainActor
+private final class ManualWeekStreamAutoScrollDeferrer: WeekStreamAutoScrollDeferrer {
+    private final class Token: WeekStreamAutoScrollDeferredCancellation {
+        var isCancelled = false
+
+        func cancel() {
+            isCancelled = true
+        }
+    }
+
+    private struct DeferredAction {
+        let token: Token
+        let action: () -> Void
+    }
+
+    private var actions: [DeferredAction] = []
+
+    func deferToNextLayout(
+        _ action: @escaping () -> Void
+    ) -> any WeekStreamAutoScrollDeferredCancellation {
+        let token = Token()
+        actions.append(.init(token: token, action: action))
+        return token
+    }
+
+    func performNext() {
+        guard !actions.isEmpty else { return }
+        let next = actions.removeFirst()
+        guard !next.token.isCancelled else { return }
+        next.action()
+    }
+}
+
+@MainActor
+private final class WeekStreamAutoScrollExecutionSpy {
+    enum Operation: Equatable {
+        case extendEarlier(CalendarDate)
+        case extendLater(CalendarDate)
+        case scroll(CalendarDate)
+    }
+
+    var loadedWeekStarts: [CalendarDate]
+    var operations: [Operation] = []
+    private let targetWeekToLoad: CalendarDate
+    private let loadsTargetWhenExtended: Bool
+
+    init(
+        loadedWeekStarts: [CalendarDate],
+        targetWeekToLoad: CalendarDate,
+        loadsTargetWhenExtended: Bool
+    ) {
+        self.loadedWeekStarts = loadedWeekStarts
+        self.targetWeekToLoad = targetWeekToLoad
+        self.loadsTargetWhenExtended = loadsTargetWhenExtended
+    }
+
+    func extend(
+        direction: CalendarInteractionAutoScrollDirection,
+        visibleWeek: CalendarDate
+    ) {
+        switch direction {
+        case .earlier: operations.append(.extendEarlier(visibleWeek))
+        case .later: operations.append(.extendLater(visibleWeek))
+        }
+        if loadsTargetWhenExtended {
+            loadedWeekStarts.append(targetWeekToLoad)
+        }
+    }
+
+    func scroll(to weekStart: CalendarDate, direction _: CalendarInteractionAutoScrollDirection) {
+        operations.append(.scroll(weekStart))
     }
 }

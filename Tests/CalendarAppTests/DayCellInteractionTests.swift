@@ -1,3 +1,4 @@
+import AppKit
 import CalendarDomain
 import Testing
 @testable import CalendarApp
@@ -39,4 +40,126 @@ struct DayCellInteractionTests {
         #expect(WeekRowHitRouting.dayAction(for: .completion, date: date) == nil)
         #expect(WeekRowHitRouting.dayAction(for: .scroll, date: date) == nil)
     }
+
+    @Test func appKitRangeGestureSurfaceEmitsOnlyForTheDedicatedEmptySurface() throws {
+        let date = CalendarDate(year: 2026, month: 8, day: 10)!
+        let recorder = RangeGestureRecorder()
+        let emptySurface = WeekRowRangeGestureSurfaceView(
+            date: date,
+            hitSurface: .emptySurface,
+            rootOrigin: CGPoint(x: 100, y: 150),
+            onRangeGesture: recorder.record
+        )
+        emptySurface.frame = CGRect(x: 0, y: 0, width: 200, height: 120)
+
+        try sendMouseSequence(to: emptySurface)
+
+        #expect(recorder.records == [
+            .began(date, .emptyCell, CGPoint(x: 110, y: 160)),
+            .changed(CGPoint(x: 130, y: 180)),
+            .ended(CGPoint(x: 130, y: 180))
+        ])
+        for hitSurface in [
+            WeekRowHitSurface.dateNumber,
+            .overflow,
+            .item,
+            .completion
+        ] {
+            let blockedRecorder = RangeGestureRecorder()
+            let blocked = WeekRowRangeGestureSurfaceView(
+                date: date,
+                hitSurface: hitSurface,
+                rootOrigin: .zero,
+                onRangeGesture: blockedRecorder.record
+            )
+            blocked.frame = CGRect(x: 0, y: 0, width: 200, height: 120)
+            try sendMouseSequence(to: blocked)
+            #expect(blockedRecorder.records.isEmpty)
+        }
+
+        let scrollRecorder = RangeGestureRecorder()
+        let scrollSurface = WeekRowRangeGestureSurfaceView(
+            date: date,
+            hitSurface: .scroll,
+            rootOrigin: .zero,
+            onRangeGesture: scrollRecorder.record
+        )
+        scrollSurface.frame = CGRect(x: 0, y: 0, width: 200, height: 120)
+        guard let wheelEvent = CGEvent(
+            scrollWheelEvent2Source: CGEventSource(stateID: .hidSystemState),
+            units: .line,
+            wheelCount: 1,
+            wheel1: 1,
+            wheel2: 0,
+            wheel3: 0
+        ).flatMap(NSEvent.init(cgEvent:)) else {
+            Issue.record("Unable to construct the AppKit wheel event.")
+            return
+        }
+        scrollSurface.scrollWheel(with: wheelEvent)
+
+        #expect(scrollRecorder.records.isEmpty)
+    }
+
+    private func sendMouseSequence(to view: NSView) throws {
+        let down = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: CGPoint(x: 10, y: 10),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ))
+        let dragged = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDragged,
+            location: CGPoint(x: 30, y: 30),
+            modifierFlags: [],
+            timestamp: 0.1,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ))
+        let up = try #require(NSEvent.mouseEvent(
+            with: .leftMouseUp,
+            location: CGPoint(x: 30, y: 30),
+            modifierFlags: [],
+            timestamp: 0.2,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ))
+
+        view.mouseDown(with: down)
+        view.mouseDragged(with: dragged)
+        view.mouseUp(with: up)
+    }
+}
+
+@MainActor
+private final class RangeGestureRecorder {
+    var records: [RangeGestureRecord] = []
+
+    func record(_ gesture: WeekRowRangeGesture) {
+        switch gesture {
+        case let .began(date, target, point):
+            records.append(.began(date, target, point))
+        case let .changed(point):
+            records.append(.changed(point))
+        case let .ended(point):
+            records.append(.ended(point))
+        }
+    }
+}
+
+private enum RangeGestureRecord: Equatable {
+    case began(CalendarDate, CalendarInteractionHitTarget, CGPoint)
+    case changed(CGPoint)
+    case ended(CGPoint)
 }
