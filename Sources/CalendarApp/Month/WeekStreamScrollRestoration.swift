@@ -21,9 +21,33 @@ struct WeekStreamWindowRevision: Equatable, Hashable, Sendable {
     }
 }
 
+struct WeekStreamScrollCorrectionToken: Equatable, Hashable, Sendable {
+    private let rawValue: UUID
+
+    init() {
+        rawValue = UUID()
+    }
+}
+
+struct WeekStreamScrollCorrection: Equatable, Sendable {
+    let token: WeekStreamScrollCorrectionToken
+    let windowRevision: WeekStreamWindowRevision
+    let viewportDeltaY: CGFloat
+
+    init(
+        token: WeekStreamScrollCorrectionToken = .init(),
+        windowRevision: WeekStreamWindowRevision,
+        viewportDeltaY: CGFloat
+    ) {
+        self.token = token
+        self.windowRevision = windowRevision
+        self.viewportDeltaY = viewportDeltaY
+    }
+}
+
 enum WeekStreamRestorationAction: Equatable {
     case wait
-    case adjustContentOffset(viewportDeltaY: CGFloat)
+    case adjustContentOffset(WeekStreamScrollCorrection)
     case confirmed
 }
 
@@ -32,7 +56,8 @@ struct WeekStreamRestorationState: Equatable {
         var anchor: WeekStreamAnchor
         let desiredMinY: CGFloat
         var expectedRevision: WeekStreamWindowRevision?
-        var proposedAnchorMinY: CGFloat?
+        var outstandingCorrection: WeekStreamScrollCorrection?
+        var outstandingAnchorMinY: CGFloat?
         var awaitingFrameFromAnchorMinY: CGFloat?
     }
 
@@ -68,6 +93,10 @@ struct WeekStreamRestorationState: Equatable {
             return .wait
         }
 
+        guard pending.outstandingCorrection == nil else {
+            return .wait
+        }
+
         let viewportDeltaY = anchorFrame.minY - pending.desiredMinY
         if abs(viewportDeltaY) <= Self.confirmationTolerance {
             self.pending = nil
@@ -81,30 +110,60 @@ struct WeekStreamRestorationState: Equatable {
             pending.awaitingFrameFromAnchorMinY = nil
         }
 
-        pending.proposedAnchorMinY = anchorFrame.minY
+        let correction = WeekStreamScrollCorrection(
+            windowRevision: expectedRevision,
+            viewportDeltaY: viewportDeltaY
+        )
+        pending.outstandingCorrection = correction
+        pending.outstandingAnchorMinY = anchorFrame.minY
         self.pending = pending
-        return .adjustContentOffset(viewportDeltaY: viewportDeltaY)
+        return .adjustContentOffset(correction)
     }
 
-    mutating func recordAppliedAdjustment(
-        requestedViewportDeltaY: CGFloat,
-        appliedViewportDeltaY: CGFloat
-    ) {
-        guard var pending, let proposedAnchorMinY = pending.proposedAnchorMinY else { return }
-        let proposedViewportDeltaY = proposedAnchorMinY - pending.desiredMinY
-        guard abs(proposedViewportDeltaY - requestedViewportDeltaY) <= Self.confirmationTolerance else {
+    mutating func recordAppliedAdjustment(_ adjustment: WeekStreamScrollAdjustment) {
+        guard var pending,
+              let expectedRevision = pending.expectedRevision,
+              let outstandingCorrection = pending.outstandingCorrection,
+              let outstandingAnchorMinY = pending.outstandingAnchorMinY,
+              adjustment.correction == outstandingCorrection,
+              adjustment.correction.windowRevision == expectedRevision
+        else {
             return
         }
 
-        if abs(appliedViewportDeltaY) <= Self.confirmationTolerance {
+        if abs(adjustment.appliedViewportDeltaY) <= Self.confirmationTolerance {
             // The document boundary made the requested restoration unreachable. Release the
             // extension lock explicitly instead of waiting for a frame change that cannot occur.
             self.pending = nil
             return
         }
-        pending.proposedAnchorMinY = nil
-        pending.awaitingFrameFromAnchorMinY = proposedAnchorMinY
+        pending.outstandingCorrection = nil
+        pending.outstandingAnchorMinY = nil
+        pending.awaitingFrameFromAnchorMinY = outstandingAnchorMinY
         self.pending = pending
+    }
+}
+
+@MainActor
+final class WeekStreamRestorationController: ObservableObject {
+    @Published private var state = WeekStreamRestorationState()
+
+    var isLocked: Bool { state.isLocked }
+
+    func begin(request: WeekStreamExtensionRequest) -> Bool {
+        state.begin(request: request)
+    }
+
+    func expect(anchor: WeekStreamAnchor, windowRevision: WeekStreamWindowRevision) {
+        state.expect(anchor: anchor, windowRevision: windowRevision)
+    }
+
+    func receive(frames: [WeekRowViewportFrame]) -> WeekStreamRestorationAction {
+        state.receive(frames: frames)
+    }
+
+    func recordAppliedAdjustment(_ adjustment: WeekStreamScrollAdjustment) {
+        state.recordAppliedAdjustment(adjustment)
     }
 }
 
@@ -131,14 +190,21 @@ enum WeekStreamScrollOffset {
 }
 
 struct WeekStreamScrollAdjustment: Equatable {
-    let requestedViewportDeltaY: CGFloat
+    let correction: WeekStreamScrollCorrection
     let appliedViewportDeltaY: CGFloat
 }
 
 @MainActor
 final class WeekStreamScrollCoordinator: ObservableObject {
+    private let onAdjustment: @MainActor (WeekStreamScrollAdjustment) -> Void
     private weak var scrollView: NSScrollView?
-    private var queuedViewportDeltaY: CGFloat?
+    private var queuedCorrection: WeekStreamScrollCorrection?
+
+    init(
+        onAdjustment: @escaping @MainActor (WeekStreamScrollAdjustment) -> Void = { _ in }
+    ) {
+        self.onAdjustment = onAdjustment
+    }
 
     func resolve(from markerView: NSView) {
         if let scrollView = Self.findScrollView(from: markerView) {
@@ -155,43 +221,53 @@ final class WeekStreamScrollCoordinator: ObservableObject {
         }
     }
 
-    func adjustViewport(by viewportDeltaY: CGFloat) -> WeekStreamScrollAdjustment? {
+    func adjustViewport(_ correction: WeekStreamScrollCorrection) {
         guard let scrollView, let documentView = scrollView.documentView else {
-            queuedViewportDeltaY = viewportDeltaY
-            return nil
+            if queuedCorrection == nil {
+                queuedCorrection = correction
+            }
+            return
         }
+        apply(correction, to: scrollView, documentView: documentView)
+    }
+
+    private func apply(
+        _ correction: WeekStreamScrollCorrection,
+        to scrollView: NSScrollView,
+        documentView: NSView
+    ) {
         let clipView = scrollView.contentView
         let currentOrigin = clipView.bounds.origin
         let documentHeight = max(documentView.bounds.height, documentView.frame.height)
         let newOriginY = WeekStreamScrollOffset.adjustedOriginY(
             currentOriginY: currentOrigin.y,
-            viewportDeltaY: viewportDeltaY,
+            viewportDeltaY: correction.viewportDeltaY,
             documentHeight: documentHeight,
             viewportHeight: clipView.bounds.height,
             documentIsFlipped: documentView.isFlipped
         )
-        let appliedViewportDeltaY = WeekStreamScrollOffset.appliedViewportDeltaY(
-            fromOriginY: currentOrigin.y,
-            toOriginY: newOriginY,
-            documentIsFlipped: documentView.isFlipped
-        )
 
-        if abs(appliedViewportDeltaY) > 0.01 {
+        if abs(newOriginY - currentOrigin.y) > 0.01 {
             clipView.scroll(to: NSPoint(x: currentOrigin.x, y: newOriginY))
             scrollView.reflectScrolledClipView(clipView)
         }
-        queuedViewportDeltaY = nil
-        return WeekStreamScrollAdjustment(
-            requestedViewportDeltaY: viewportDeltaY,
-            appliedViewportDeltaY: appliedViewportDeltaY
+        let actualOriginY = clipView.bounds.origin.y
+        let adjustment = WeekStreamScrollAdjustment(
+            correction: correction,
+            appliedViewportDeltaY: WeekStreamScrollOffset.appliedViewportDeltaY(
+                fromOriginY: currentOrigin.y,
+                toOriginY: actualOriginY,
+                documentIsFlipped: documentView.isFlipped
+            )
         )
+        onAdjustment(adjustment)
     }
 
     private func attach(_ scrollView: NSScrollView) {
         self.scrollView = scrollView
-        if let queuedViewportDeltaY {
-            _ = adjustViewport(by: queuedViewportDeltaY)
-        }
+        guard let queuedCorrection, let documentView = scrollView.documentView else { return }
+        self.queuedCorrection = nil
+        apply(queuedCorrection, to: scrollView, documentView: documentView)
     }
 
     private static func findScrollView(from markerView: NSView) -> NSScrollView? {

@@ -1,3 +1,4 @@
+import AppKit
 import CalendarDomain
 import Foundation
 import Testing
@@ -184,13 +185,15 @@ struct WeekRowPresentationTests {
             .init(weekStart: anchorWeek, minY: -180, maxY: 72, windowRevision: oldRevision)
         ]) == .wait)
 
-        #expect(restoration.receive(frames: [
+        let correction = try #require(adjustment(from: restoration.receive(frames: [
             .init(weekStart: anchorWeek, minY: 126, maxY: 378, windowRevision: newRevision)
-        ]) == .adjustContentOffset(viewportDeltaY: 306))
-        restoration.recordAppliedAdjustment(
-            requestedViewportDeltaY: 306,
+        ])))
+        #expect(correction.windowRevision == newRevision)
+        #expect(correction.viewportDeltaY == 306)
+        restoration.recordAppliedAdjustment(.init(
+            correction: correction,
             appliedViewportDeltaY: 306
-        )
+        ))
         #expect(restoration.isLocked)
         #expect(restoration.receive(frames: [
             .init(weekStart: anchorWeek, minY: 126, maxY: 378, windowRevision: newRevision)
@@ -203,7 +206,7 @@ struct WeekRowPresentationTests {
         #expect(restoration.isLocked == false)
     }
 
-    @Test func unresolvedScrollViewLeavesTheCorrectionRetryable() {
+    @Test func unresolvedScrollViewLeavesTheCorrectionRetryable() throws {
         let anchorWeek = CalendarDate(year: 2026, month: 8, day: 3)!
         let revision = WeekStreamWindowRevision(first: anchorWeek, last: anchorWeek, count: 1)
         let request = WeekStreamExtensionRequest(
@@ -222,14 +225,15 @@ struct WeekRowPresentationTests {
         let didBegin = restoration.begin(request: request)
         #expect(didBegin)
         restoration.expect(anchor: request.anchor, windowRevision: revision)
-        #expect(restoration.receive(frames: frames) == .adjustContentOffset(viewportDeltaY: 306))
+        let correction = try #require(adjustment(from: restoration.receive(frames: frames)))
+        #expect(correction.viewportDeltaY == 306)
 
-        // An unavailable coordinator reports no applied adjustment, so the same frame can retry.
-        #expect(restoration.receive(frames: frames) == .adjustContentOffset(viewportDeltaY: 306))
+        // One correction remains outstanding until its coordinator completion arrives.
+        #expect(restoration.receive(frames: frames) == .wait)
         #expect(restoration.isLocked)
     }
 
-    @Test func clampedScrollProgressRetriesTheRemainderThenRecoversWithoutPermanentLock() {
+    @Test func clampedScrollProgressRetriesTheRemainderThenRecoversWithoutPermanentLock() throws {
         let anchorWeek = CalendarDate(year: 2026, month: 8, day: 3)!
         let revision = WeekStreamWindowRevision(first: anchorWeek, last: anchorWeek, count: 1)
         let request = WeekStreamExtensionRequest(
@@ -242,38 +246,41 @@ struct WeekRowPresentationTests {
         let didBegin = restoration.begin(request: request)
         #expect(didBegin)
         restoration.expect(anchor: request.anchor, windowRevision: revision)
-        #expect(restoration.receive(frames: [
+        let firstCorrection = try #require(adjustment(from: restoration.receive(frames: [
             .init(weekStart: anchorWeek, minY: 200, maxY: 452, windowRevision: revision)
-        ]) == .adjustContentOffset(viewportDeltaY: 200))
-        restoration.recordAppliedAdjustment(
-            requestedViewportDeltaY: 200,
+        ])))
+        #expect(firstCorrection.viewportDeltaY == 200)
+        restoration.recordAppliedAdjustment(.init(
+            correction: firstCorrection,
             appliedViewportDeltaY: 50
-        )
+        ))
 
         // Do not apply twice while geometry still reports the pre-scroll frame.
         #expect(restoration.receive(frames: [
             .init(weekStart: anchorWeek, minY: 200, maxY: 452, windowRevision: revision)
         ]) == .wait)
-        #expect(restoration.receive(frames: [
+        let remainder = try #require(adjustment(from: restoration.receive(frames: [
             .init(weekStart: anchorWeek, minY: 150, maxY: 402, windowRevision: revision)
-        ]) == .adjustContentOffset(viewportDeltaY: 150))
-        restoration.recordAppliedAdjustment(
-            requestedViewportDeltaY: 150,
+        ])))
+        #expect(remainder.viewportDeltaY == 150)
+        #expect(remainder.token != firstCorrection.token)
+        restoration.recordAppliedAdjustment(.init(
+            correction: remainder,
             appliedViewportDeltaY: 0
-        )
+        ))
         #expect(restoration.isLocked == false)
 
         var fullyClamped = WeekStreamRestorationState()
         let didBeginFullyClamped = fullyClamped.begin(request: request)
         #expect(didBeginFullyClamped)
         fullyClamped.expect(anchor: request.anchor, windowRevision: revision)
-        #expect(fullyClamped.receive(frames: [
+        let clampedCorrection = try #require(adjustment(from: fullyClamped.receive(frames: [
             .init(weekStart: anchorWeek, minY: 200, maxY: 452, windowRevision: revision)
-        ]) == .adjustContentOffset(viewportDeltaY: 200))
-        fullyClamped.recordAppliedAdjustment(
-            requestedViewportDeltaY: 200,
+        ])))
+        fullyClamped.recordAppliedAdjustment(.init(
+            correction: clampedCorrection,
             appliedViewportDeltaY: 0
-        )
+        ))
         #expect(fullyClamped.isLocked == false)
     }
 
@@ -301,7 +308,7 @@ struct WeekRowPresentationTests {
         #expect(restoration.isLocked == false)
     }
 
-    @Test func farSideTrimRestoresSignedAnchorPosition() {
+    @Test func farSideTrimRestoresSignedAnchorPosition() throws {
         let anchorWeek = CalendarDate(year: 2027, month: 8, day: 2)!
         let revision = WeekStreamWindowRevision(
             first: CalendarDate(year: 2026, month: 8, day: 3)!,
@@ -318,12 +325,146 @@ struct WeekRowPresentationTests {
         #expect(didBegin)
         restoration.expect(anchor: request.anchor, windowRevision: revision)
 
-        #expect(restoration.receive(frames: [
+        let correction = try #require(adjustment(from: restoration.receive(frames: [
             .init(weekStart: anchorWeek, minY: -212, maxY: 40, windowRevision: revision)
-        ]) == .adjustContentOffset(viewportDeltaY: -252))
+        ])))
+        #expect(correction.viewportDeltaY == -252)
+        restoration.recordAppliedAdjustment(.init(
+            correction: correction,
+            appliedViewportDeltaY: -252
+        ))
         #expect(restoration.receive(frames: [
             .init(weekStart: anchorWeek, minY: 40, maxY: 292, windowRevision: revision)
         ]) == .confirmed)
+    }
+
+    @Test @MainActor func queuedZeroProgressCompletionFlowsBackAndUnlocksExactlyOnce() throws {
+        let anchorWeek = CalendarDate(year: 2026, month: 8, day: 3)!
+        let revision = WeekStreamWindowRevision(first: anchorWeek, last: anchorWeek, count: 1)
+        let restoration = WeekStreamRestorationController()
+        let recorder = WeekStreamAdjustmentRecorder()
+        let coordinator = WeekStreamScrollCoordinator { [weak restoration] adjustment in
+            recorder.record(adjustment)
+            restoration?.recordAppliedAdjustment(adjustment)
+        }
+        let frames = [WeekRowViewportFrame(
+            weekStart: anchorWeek,
+            minY: 100,
+            maxY: 352,
+            windowRevision: revision
+        )]
+
+        let didBegin = restoration.begin(request: .init(
+            direction: .earlier,
+            anchor: .init(weekStart: anchorWeek, pixelOffset: 0),
+            desiredMinY: 0
+        ))
+        #expect(didBegin)
+        restoration.expect(
+            anchor: .init(weekStart: anchorWeek, pixelOffset: 0),
+            windowRevision: revision
+        )
+        let correction = try #require(adjustment(from: restoration.receive(frames: frames)))
+
+        coordinator.adjustViewport(correction)
+        #expect(recorder.adjustments.isEmpty)
+
+        let harness = makeScrollHarness(documentHeight: 100, viewportHeight: 100, originY: 0)
+        coordinator.resolve(from: harness.marker)
+        coordinator.resolve(from: harness.marker)
+
+        #expect(recorder.adjustments.count == 1)
+        #expect(recorder.adjustments.first?.correction.token == correction.token)
+        #expect(recorder.adjustments.first?.appliedViewportDeltaY == 0)
+        #expect(restoration.isLocked == false)
+    }
+
+    @Test @MainActor func queuedPartialCompletionWaitsForNewFrameThenIssuesOneNewToken() throws {
+        let anchorWeek = CalendarDate(year: 2026, month: 8, day: 3)!
+        let revision = WeekStreamWindowRevision(first: anchorWeek, last: anchorWeek, count: 1)
+        let restoration = WeekStreamRestorationController()
+        let recorder = WeekStreamAdjustmentRecorder()
+        let coordinator = WeekStreamScrollCoordinator { [weak restoration] adjustment in
+            recorder.record(adjustment)
+            restoration?.recordAppliedAdjustment(adjustment)
+        }
+        let oldFrames = [WeekRowViewportFrame(
+            weekStart: anchorWeek,
+            minY: 100,
+            maxY: 352,
+            windowRevision: revision
+        )]
+
+        #expect(restoration.begin(request: .init(
+            direction: .earlier,
+            anchor: .init(weekStart: anchorWeek, pixelOffset: 0),
+            desiredMinY: 0
+        )))
+        restoration.expect(
+            anchor: .init(weekStart: anchorWeek, pixelOffset: 0),
+            windowRevision: revision
+        )
+        let firstCorrection = try #require(adjustment(from: restoration.receive(frames: oldFrames)))
+        coordinator.adjustViewport(firstCorrection)
+
+        let harness = makeScrollHarness(documentHeight: 250, viewportHeight: 100, originY: 100)
+        let originBefore = harness.scrollView.contentView.bounds.origin.y
+        coordinator.resolve(from: harness.marker)
+        coordinator.resolve(from: harness.marker)
+        let originAfter = harness.scrollView.contentView.bounds.origin.y
+
+        #expect(recorder.adjustments.count == 1)
+        #expect(recorder.adjustments.first?.appliedViewportDeltaY == originAfter - originBefore)
+        #expect(recorder.adjustments.first?.appliedViewportDeltaY == 50)
+        #expect(restoration.receive(frames: oldFrames) == .wait)
+
+        let remainder = try #require(adjustment(from: restoration.receive(frames: [
+            .init(weekStart: anchorWeek, minY: 50, maxY: 302, windowRevision: revision)
+        ])))
+        #expect(remainder.viewportDeltaY == 50)
+        #expect(remainder.token != firstCorrection.token)
+        #expect(recorder.adjustments.count == 1)
+    }
+
+    @Test func staleCorrectionCompletionCannotUnlockOrAdvanceRestoration() throws {
+        let anchorWeek = CalendarDate(year: 2026, month: 8, day: 3)!
+        let revision = WeekStreamWindowRevision(first: anchorWeek, last: anchorWeek, count: 1)
+        let frames = [WeekRowViewportFrame(
+            weekStart: anchorWeek,
+            minY: 100,
+            maxY: 352,
+            windowRevision: revision
+        )]
+        var restoration = WeekStreamRestorationState()
+        let didBegin = restoration.begin(request: .init(
+            direction: .earlier,
+            anchor: .init(weekStart: anchorWeek, pixelOffset: 0),
+            desiredMinY: 0
+        ))
+        #expect(didBegin)
+        restoration.expect(
+            anchor: .init(weekStart: anchorWeek, pixelOffset: 0),
+            windowRevision: revision
+        )
+        let correction = try #require(adjustment(from: restoration.receive(frames: frames)))
+        let stale = WeekStreamScrollCorrection(
+            token: .init(),
+            windowRevision: revision,
+            viewportDeltaY: correction.viewportDeltaY
+        )
+
+        restoration.recordAppliedAdjustment(.init(
+            correction: stale,
+            appliedViewportDeltaY: 0
+        ))
+
+        #expect(restoration.isLocked)
+        #expect(restoration.receive(frames: frames) == .wait)
+        restoration.recordAppliedAdjustment(.init(
+            correction: correction,
+            appliedViewportDeltaY: 0
+        ))
+        #expect(restoration.isLocked == false)
     }
 
     @Test func lockedRestorationRejectsRepeatedExtensionBegins() {
@@ -448,4 +589,44 @@ struct WeekRowPresentationTests {
             CalendarDate(year: 2026, month: 8, day: 31)!
         )
     }
+
+    private func adjustment(
+        from action: WeekStreamRestorationAction
+    ) -> WeekStreamScrollCorrection? {
+        guard case let .adjustContentOffset(correction) = action else { return nil }
+        return correction
+    }
+
+    @MainActor
+    private func makeScrollHarness(
+        documentHeight: CGFloat,
+        viewportHeight: CGFloat,
+        originY: CGFloat
+    ) -> (scrollView: NSScrollView, marker: NSView) {
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 100, height: viewportHeight))
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        let documentView = WeekStreamFlippedDocumentView(
+            frame: NSRect(x: 0, y: 0, width: 100, height: documentHeight)
+        )
+        let marker = NSView(frame: .zero)
+        documentView.addSubview(marker)
+        scrollView.documentView = documentView
+        scrollView.layoutSubtreeIfNeeded()
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: originY))
+        return (scrollView, marker)
+    }
+}
+
+@MainActor
+private final class WeekStreamAdjustmentRecorder {
+    private(set) var adjustments: [WeekStreamScrollAdjustment] = []
+
+    func record(_ adjustment: WeekStreamScrollAdjustment) {
+        adjustments.append(adjustment)
+    }
+}
+
+private final class WeekStreamFlippedDocumentView: NSView {
+    override var isFlipped: Bool { true }
 }

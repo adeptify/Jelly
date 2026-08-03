@@ -65,7 +65,8 @@ struct MonthView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model: MonthViewModel
     @StateObject private var dropCoordinator: CalendarDropCoordinator
-    @StateObject private var weekStreamScrollCoordinator = WeekStreamScrollCoordinator()
+    @StateObject private var weekStreamScrollCoordinator: WeekStreamScrollCoordinator
+    @StateObject private var weekStreamRestoration: WeekStreamRestorationController
     @AppStorage("calendar.hiddenCategoryIDs") private var storedHiddenCategoryIDs = ""
     @State private var hiddenCategoryIDs: Set<UUID> = []
     @State private var quickCreateDate: CalendarDate?
@@ -73,7 +74,6 @@ struct MonthView: View {
     @State private var selectedItem: ProjectedItem?
     @State private var recurringDropPresentation = RecurringDropPresentationController()
     @State private var requestedCenterRequest: WeekStreamScrollRequest?
-    @State private var weekStreamRestoration = WeekStreamRestorationState()
 
     init(
         store: CalendarStore,
@@ -90,6 +90,12 @@ struct MonthView: View {
             today: today
         ))
         _dropCoordinator = StateObject(wrappedValue: CalendarDropCoordinator(store: store))
+        let restoration = WeekStreamRestorationController()
+        _weekStreamRestoration = StateObject(wrappedValue: restoration)
+        _weekStreamScrollCoordinator = StateObject(wrappedValue: WeekStreamScrollCoordinator {
+            [weak restoration] adjustment in
+            restoration?.recordAppliedAdjustment(adjustment)
+        })
     }
 
     var body: some View {
@@ -451,13 +457,8 @@ struct MonthView: View {
             switch weekStreamRestoration.receive(frames: frames) {
             case .wait, .confirmed:
                 return
-            case let .adjustContentOffset(viewportDeltaY):
-                if let adjustment = weekStreamScrollCoordinator.adjustViewport(by: viewportDeltaY) {
-                    weekStreamRestoration.recordAppliedAdjustment(
-                        requestedViewportDeltaY: adjustment.requestedViewportDeltaY,
-                        appliedViewportDeltaY: adjustment.appliedViewportDeltaY
-                    )
-                }
+            case let .adjustContentOffset(correction):
+                weekStreamScrollCoordinator.adjustViewport(correction)
                 return
             }
         }
