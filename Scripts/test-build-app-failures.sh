@@ -90,6 +90,7 @@ assert_single_detach_event() {
   local event_path="$1"
   local expected_source="$2"
   local expected_occurrence="$3"
+  local expected_device="$4"
   [[ -f "$event_path" && ! -L "$event_path" ]] || {
     print -u2 "Expected a regular detach fault event file: $event_path"
     exit 1
@@ -97,11 +98,51 @@ assert_single_detach_event() {
   local event_lines actual_event expected_event
   event_lines=$(wc -l < "$event_path" | tr -d '[:space:]')
   actual_event=$(<"$event_path")
-  expected_event="$expected_source"$'\t'"$expected_occurrence"
+  expected_event="$expected_source"$'\t'"$expected_occurrence"$'\t'"$expected_device"
   [[ "$event_lines" == 1 && "$actual_event" == "$expected_event" ]] || {
     print -u2 "Expected detach fault event '$expected_event', got '$actual_event'."
     exit 1
   }
+}
+
+assert_detach_fault_binds_actual_target() {
+  local state_file="$TEMP_ROOT/detach-target-binding.state"
+  local event_file="$TEMP_ROOT/detach-target-binding.event"
+  local marker_file="$TEMP_ROOT/detach-target-binding.marker"
+  local recorded_device="/dev/personal-calendar-recorded-test-device"
+  local wrong_device="/dev/personal-calendar-wrong-test-device"
+  local source="$TEMP_ROOT/formal-test.dmg"
+  print -r -- "$recorded_device"$'\t'"$TEMP_ROOT/mount"$'\t'"$source"$'\t'"2" > "$state_file"
+
+  set +e
+  env "${COMMON_ENV[@]}" \
+    BUILD_APP_FAULT_HDIUTIL_STATE_FILE="$state_file" \
+    BUILD_APP_FAULT_HDIUTIL_DETACH_SOURCE="$source" \
+    BUILD_APP_FAULT_HDIUTIL_DETACH_SOURCE_OCCURRENCE=2 \
+    BUILD_APP_FAULT_HDIUTIL_DETACH_OCCURRENCE_MARKER="$marker_file" \
+    BUILD_APP_FAULT_HDIUTIL_DETACH_EVENT_FILE="$event_file" \
+    hdiutil detach "$wrong_device" >/dev/null 2>&1
+  local wrong_status=$?
+  set -e
+  [[ "$wrong_status" -ne 0 ]]
+  [[ ! -e "$event_file" && ! -e "$marker_file" ]] || {
+    print -u2 "A detach fault fired for a device absent from the attach state."
+    exit 1
+  }
+
+  set +e
+  env "${COMMON_ENV[@]}" \
+    BUILD_APP_FAULT_HDIUTIL_STATE_FILE="$state_file" \
+    BUILD_APP_FAULT_HDIUTIL_DETACH_SOURCE="$source" \
+    BUILD_APP_FAULT_HDIUTIL_DETACH_SOURCE_OCCURRENCE=2 \
+    BUILD_APP_FAULT_HDIUTIL_DETACH_OCCURRENCE_MARKER="$marker_file" \
+    BUILD_APP_FAULT_HDIUTIL_DETACH_EVENT_FILE="$event_file" \
+    hdiutil detach "$recorded_device" >/dev/null 2>&1
+  local recorded_status=$?
+  set -e
+  [[ "$recorded_status" -ne 0 ]]
+  assert_single_fired_marker "$marker_file"
+  assert_single_detach_event "$event_file" "$source" 2 "$recorded_device"
 }
 
 assert_recorded_device_detached() {
@@ -124,6 +165,8 @@ assert_recorded_device_detached() {
   [[ "$leaked" == false ]] || exit 1
 }
 
+assert_detach_fault_binds_actual_target
+
 env "${COMMON_ENV[@]}" zsh "$BUILD_SCRIPT" >/dev/null
 assert_pair_present
 baseline_hashes=$(pair_hashes)
@@ -133,6 +176,69 @@ if env "${COMMON_ENV[@]}" BUILD_APP_FAULT_HDIUTIL_CREATE=true zsh "$BUILD_SCRIPT
   print -u2 "Expected staged DMG creation failure."
   exit 1
 fi
+assert_pair_unchanged "$baseline_hashes"
+
+# Every hidden candidate validation branch must fail before publication while
+# preserving the exact prior pair and removing all temporary candidate files.
+if env "${COMMON_ENV[@]}" \
+  BUILD_APP_FAULT_DITTO_EXTRACT_SOURCE_CONTAINS='.个人月历.app.zip.candidate.' \
+  BUILD_APP_FAULT_ONCE_MARKER="$TEMP_ROOT/candidate-zip-extract-fired" \
+  zsh "$BUILD_SCRIPT" >/dev/null 2>&1; then
+  print -u2 "Expected candidate ZIP extraction verification failure."
+  exit 1
+fi
+assert_single_fired_marker "$TEMP_ROOT/candidate-zip-extract-fired"
+assert_pair_unchanged "$baseline_hashes"
+
+if env "${COMMON_ENV[@]}" \
+  BUILD_APP_FAULT_CODESIGN_TARGET_CONTAINS='zip-verify-candidate/个人月历.app' \
+  BUILD_APP_FAULT_ONCE_MARKER="$TEMP_ROOT/candidate-zip-signature-fired" \
+  zsh "$BUILD_SCRIPT" >/dev/null 2>&1; then
+  print -u2 "Expected candidate ZIP signature verification failure."
+  exit 1
+fi
+assert_single_fired_marker "$TEMP_ROOT/candidate-zip-signature-fired"
+assert_pair_unchanged "$baseline_hashes"
+
+if env "${COMMON_ENV[@]}" \
+  BUILD_APP_FAULT_HDIUTIL_ATTACH_SOURCE_CONTAINS='.个人月历.dmg.candidate.' \
+  BUILD_APP_FAULT_ONCE_MARKER="$TEMP_ROOT/candidate-dmg-attach-fired" \
+  zsh "$BUILD_SCRIPT" >/dev/null 2>&1; then
+  print -u2 "Expected candidate DMG attach verification failure."
+  exit 1
+fi
+assert_single_fired_marker "$TEMP_ROOT/candidate-dmg-attach-fired"
+assert_pair_unchanged "$baseline_hashes"
+
+# The archive regression owns its attachment cleanup. Inject mount metadata
+# loss and a first detach failure into an already-built isolated pair so the
+# test proves cleanup by the recorded device without rebuilding another pair.
+archive_mount_state="$TEMP_ROOT/archive-mount-parse.state"
+if env "${COMMON_ENV[@]}" \
+  BUILD_APP_ARCHIVE_EXISTING_PROJECT="$PROJECT_COPY" \
+  BUILD_APP_FAULT_HDIUTIL_STATE_FILE="$archive_mount_state" \
+  BUILD_APP_FAULT_HDIUTIL_OMIT_MOUNT_POINT_SOURCE="$DMG_PATH" \
+  BUILD_APP_FAULT_ONCE_MARKER="$TEMP_ROOT/archive-mount-parse-fired" \
+  zsh "$PROJECT_COPY/Scripts/test-build-app-archive.sh" >/dev/null 2>&1; then
+  print -u2 "Expected archive verification mount-point metadata failure."
+  exit 1
+fi
+assert_single_fired_marker "$TEMP_ROOT/archive-mount-parse-fired"
+assert_recorded_device_detached "$archive_mount_state"
+assert_pair_unchanged "$baseline_hashes"
+
+archive_detach_state="$TEMP_ROOT/archive-detach-retry.state"
+if env "${COMMON_ENV[@]}" \
+  BUILD_APP_ARCHIVE_EXISTING_PROJECT="$PROJECT_COPY" \
+  BUILD_APP_FAULT_HDIUTIL_STATE_FILE="$archive_detach_state" \
+  BUILD_APP_FAULT_HDIUTIL_DETACH_ONCE_AFTER_SOURCE="$DMG_PATH" \
+  BUILD_APP_FAULT_ONCE_MARKER="$TEMP_ROOT/archive-detach-retry-fired" \
+  zsh "$PROJECT_COPY/Scripts/test-build-app-archive.sh" >/dev/null 2>&1; then
+  print -u2 "Expected archive verification's first detach to fail."
+  exit 1
+fi
+assert_single_fired_marker "$TEMP_ROOT/archive-detach-retry-fired"
+assert_recorded_device_detached "$archive_detach_state"
 assert_pair_unchanged "$baseline_hashes"
 
 # Trigger missing mount metadata only when verifying the published formal DMG.
@@ -177,7 +283,9 @@ fi
 assert_single_fired_marker "$rollback_published_marker"
 assert_single_fired_marker "$rollback_remove_marker"
 assert_single_fired_marker "$rollback_detach_marker"
-assert_single_detach_event "$rollback_detach_event" "$DMG_PATH" 2
+rollback_detach_device=$(awk -F '\t' -v source="$DMG_PATH" '$3 == source && $4 == 2 { print $1; exit }' "$rollback_detach_state")
+[[ -n "$rollback_detach_device" ]]
+assert_single_detach_event "$rollback_detach_event" "$DMG_PATH" 2 "$rollback_detach_device"
 assert_formal_attach_sequence "$rollback_detach_state" "$DMG_PATH"
 assert_recorded_device_detached "$rollback_detach_state"
 assert_pair_unchanged "$baseline_hashes"
@@ -232,6 +340,17 @@ mismatch_app="$mismatch_extract/个人月历.app"
 /usr/bin/ditto --norsrc "$mismatch_app" "$mismatch_source/个人月历.app"
 ln -s /Applications "$mismatch_source/Applications"
 /usr/bin/hdiutil create -volname "个人月历" -srcfolder "$mismatch_source" -ov -format UDZO "$mismatch_dmg" >/dev/null
+
+if env "${COMMON_ENV[@]}" \
+  BUILD_APP_FAULT_HDIUTIL_SUBSTITUTE_MATCH_CONTAINS='.个人月历.dmg.candidate.' \
+  BUILD_APP_FAULT_HDIUTIL_SUBSTITUTE_SOURCE="$mismatch_dmg" \
+  BUILD_APP_FAULT_ONCE_MARKER="$TEMP_ROOT/candidate-dmg-content-fired" \
+  zsh "$BUILD_SCRIPT" >/dev/null 2>&1; then
+  print -u2 "Expected candidate DMG content verification failure."
+  exit 1
+fi
+assert_single_fired_marker "$TEMP_ROOT/candidate-dmg-content-fired"
+assert_pair_unchanged "$baseline_hashes"
 
 if env "${COMMON_ENV[@]}" \
   BUILD_APP_FAULT_HDIUTIL_SUBSTITUTE_MATCH="$DMG_PATH" \

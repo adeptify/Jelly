@@ -66,12 +66,29 @@ set -e
 # A symlinked formal DMG cannot redirect publication outside dist.
 find "$PROJECT_COPY/dist/个人月历.app.zip" -depth -delete
 print -n "legacy zip sentinel" > "$PROJECT_COPY/dist/个人月历.app.zip"
+LEGACY_ZIP_HASH=$(shasum -a 256 "$PROJECT_COPY/dist/个人月历.app.zip" | awk '{print $1}')
 ln -s "$SENTINEL_DMG" "$PROJECT_COPY/dist/个人月历.dmg"
 set +e
 zsh "$PROJECT_COPY/Scripts/build-app.sh" >/dev/null
 STATUS=$?
 set -e
 [[ $STATUS -eq 2 ]]
+[[ "$(shasum -a 256 "$PROJECT_COPY/dist/个人月历.app.zip" | awk '{print $1}')" == "$LEGACY_ZIP_HASH" ]]
 [[ "$(shasum -a 256 "$SENTINEL_DMG" | awk '{print $1}')" == "$DMG_BEFORE_HASH" ]]
+
+# A non-regular formal DMG target is rejected symmetrically and cannot alter
+# its authoritative ZIP peer or any file already inside the directory target.
+/bin/rm "$PROJECT_COPY/dist/个人月历.dmg"
+mkdir -p "$PROJECT_COPY/dist/个人月历.dmg"
+NONREGULAR_DMG_SENTINEL="$PROJECT_COPY/dist/个人月历.dmg/sentinel"
+print -n "nonregular dmg target" > "$NONREGULAR_DMG_SENTINEL"
+NONREGULAR_DMG_HASH=$(shasum -a 256 "$NONREGULAR_DMG_SENTINEL" | awk '{print $1}')
+set +e
+zsh "$PROJECT_COPY/Scripts/build-app.sh" >/dev/null
+STATUS=$?
+set -e
+[[ $STATUS -eq 2 ]]
+[[ "$(shasum -a 256 "$PROJECT_COPY/dist/个人月历.app.zip" | awk '{print $1}')" == "$LEGACY_ZIP_HASH" ]]
+[[ "$(shasum -a 256 "$NONREGULAR_DMG_SENTINEL" | awk '{print $1}')" == "$NONREGULAR_DMG_HASH" ]]
 
 echo "Packaging symlink/non-regular regressions passed; all sentinels stayed unchanged."

@@ -4,21 +4,41 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd -P)
 TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/personal-calendar-archive.XXXXXX")
-PROJECT_COPY="$TEMP_ROOT/calendar-v1"
+PROJECT_COPY="${BUILD_APP_ARCHIVE_EXISTING_PROJECT:-$TEMP_ROOT/calendar-v1}"
 ZIP_VERIFY_ROOT="$TEMP_ROOT/zip-verify"
 DMG_VERIFY_ROOT="$TEMP_ROOT/dmg-verify"
+ACTIVE_DEVICE=""
 ACTIVE_MOUNT_POINT=""
+ACTIVE_IMAGE_PATH=""
 
 cleanup() {
-  if [[ -n "$ACTIVE_MOUNT_POINT" ]]; then
-    hdiutil detach "$ACTIVE_MOUNT_POINT" >/dev/null 2>&1 || true
+  if [[ -n "$ACTIVE_DEVICE" ]]; then
+    if ! hdiutil detach "$ACTIVE_DEVICE" >/dev/null 2>&1; then
+      hdiutil detach -force "$ACTIVE_DEVICE" >/dev/null 2>&1 || true
+    fi
+    if /usr/bin/hdiutil info | grep -Fq -- "$ACTIVE_DEVICE" || \
+      ( [[ -n "$ACTIVE_IMAGE_PATH" ]] && /usr/bin/hdiutil info | grep -Fq -- "$ACTIVE_IMAGE_PATH" ); then
+      echo "Archive verification left its own DMG mounted: device=$ACTIVE_DEVICE image=$ACTIVE_IMAGE_PATH" >&2
+    else
+      ACTIVE_DEVICE=""
+      ACTIVE_MOUNT_POINT=""
+      ACTIVE_IMAGE_PATH=""
+    fi
   fi
   find "$TEMP_ROOT" -depth -delete
 }
 trap cleanup EXIT
 
-rsync -a --exclude '.build' --exclude 'dist' --exclude '.git' "$PROJECT_DIR/" "$PROJECT_COPY/"
-zsh "$PROJECT_COPY/Scripts/build-app.sh"
+if [[ -n "${BUILD_APP_ARCHIVE_EXISTING_PROJECT:-}" ]]; then
+  [[ -d "$PROJECT_COPY" && ! -L "$PROJECT_COPY" ]] || {
+    echo "Expected an existing isolated project directory: $PROJECT_COPY" >&2
+    exit 2
+  }
+  PROJECT_COPY=$(cd "$PROJECT_COPY" && pwd -P)
+else
+  rsync -a --exclude '.build' --exclude 'dist' --exclude '.git' "$PROJECT_DIR/" "$PROJECT_COPY/"
+  zsh "$PROJECT_COPY/Scripts/build-app.sh"
+fi
 
 ARCHIVE="$PROJECT_COPY/dist/个人月历.app.zip"
 DMG="$PROJECT_COPY/dist/个人月历.dmg"
@@ -64,6 +84,17 @@ mkdir -p "$DMG_VERIFY_ROOT"
 ATTACH_PLIST="$DMG_VERIFY_ROOT/attach.plist"
 hdiutil attach -readonly -nobrowse -plist "$DMG" > "$ATTACH_PLIST"
 for index in {0..20}; do
+  if ACTIVE_DEVICE=$(plutil -extract "system-entities.$index.dev-entry" raw -o - "$ATTACH_PLIST" 2>/dev/null); then
+    [[ -n "$ACTIVE_DEVICE" ]] && break
+  fi
+  ACTIVE_DEVICE=""
+done
+[[ -n "$ACTIVE_DEVICE" ]] || {
+  echo "DMG attach did not report a device; refusing ambiguous cleanup." >&2
+  exit 1
+}
+ACTIVE_IMAGE_PATH="$DMG"
+for index in {0..20}; do
   if ACTIVE_MOUNT_POINT=$(plutil -extract "system-entities.$index.mount-point" raw -o - "$ATTACH_PLIST" 2>/dev/null); then
     [[ -n "$ACTIVE_MOUNT_POINT" ]] && break
   fi
@@ -79,7 +110,17 @@ verify_app "$DMG_APP"
 [[ "$(readlink "$ACTIVE_MOUNT_POINT/Applications")" == "/Applications" ]]
 DMG_CDHASH=$(codesign -dv --verbose=4 "$DMG_APP" 2>&1 | awk -F= '/^CDHash=/{print $2}')
 [[ "$DMG_CDHASH" == "$ZIP_CDHASH" ]]
-hdiutil detach "$ACTIVE_MOUNT_POINT" >/dev/null
+if ! hdiutil detach "$ACTIVE_DEVICE" >/dev/null; then
+  echo "Could not detach archive verification DMG: device=$ACTIVE_DEVICE image=$ACTIVE_IMAGE_PATH" >&2
+  exit 1
+fi
+if /usr/bin/hdiutil info | grep -Fq -- "$ACTIVE_DEVICE" || \
+  /usr/bin/hdiutil info | grep -Fq -- "$ACTIVE_IMAGE_PATH"; then
+  echo "Archive verification DMG remained mounted after detach: device=$ACTIVE_DEVICE image=$ACTIVE_IMAGE_PATH" >&2
+  exit 1
+fi
+ACTIVE_DEVICE=""
 ACTIVE_MOUNT_POINT=""
+ACTIVE_IMAGE_PATH=""
 
 print "Packaging pair regression passed; fresh ZIP and readonly DMG contain the same strictly signed app (CDHash=$ZIP_CDHASH)."

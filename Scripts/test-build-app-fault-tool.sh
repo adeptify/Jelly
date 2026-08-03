@@ -9,8 +9,16 @@ case "${0:t}" in
       kill -TERM "$PPID"
       exit 143
     fi
-    if [[ "${BUILD_APP_FAULT_DITTO_EXTRACT_SOURCE:-}" == "${3:-}" ]]; then
-      exit 1
+    if [[ "${BUILD_APP_FAULT_DITTO_EXTRACT_SOURCE:-}" == "${3:-}" || \
+      ( -n "${BUILD_APP_FAULT_DITTO_EXTRACT_SOURCE_CONTAINS:-}" && \
+        "${3:-}" == *"${BUILD_APP_FAULT_DITTO_EXTRACT_SOURCE_CONTAINS}"* ) ]]; then
+      if [[ -z "${BUILD_APP_FAULT_ONCE_MARKER:-}" ]]; then
+        exit 1
+      fi
+      if [[ ! -e "$BUILD_APP_FAULT_ONCE_MARKER" ]]; then
+        print -r -- fired > "$BUILD_APP_FAULT_ONCE_MARKER"
+        exit 1
+      fi
     fi
     if [[ "${BUILD_APP_FAULT_DITTO_DESTINATION:-}" == "$last_arg" ]]; then
       mkdir -p "$last_arg/Contents"
@@ -30,10 +38,13 @@ case "${0:t}" in
       kill -TERM "$PPID"
       exit 143
     fi
-    if [[ "${1:-}" == "attach" && "${BUILD_APP_FAULT_HDIUTIL_ATTACH_SOURCE:-}" == "$last_arg" ]]; then
+    if [[ "${1:-}" == "attach" && \
+      ( "${BUILD_APP_FAULT_HDIUTIL_ATTACH_SOURCE:-}" == "$last_arg" || \
+        ( -n "${BUILD_APP_FAULT_HDIUTIL_ATTACH_SOURCE_CONTAINS:-}" && \
+          "$last_arg" == *"${BUILD_APP_FAULT_HDIUTIL_ATTACH_SOURCE_CONTAINS}"* ) ) ]]; then
       if [[ -n "${BUILD_APP_FAULT_ONCE_MARKER:-}" ]]; then
         if [[ ! -e "$BUILD_APP_FAULT_ONCE_MARKER" ]]; then
-          print -n fired > "$BUILD_APP_FAULT_ONCE_MARKER"
+          print -r -- fired > "$BUILD_APP_FAULT_ONCE_MARKER"
           exit 1
         fi
       else
@@ -74,21 +85,31 @@ case "${0:t}" in
       exit 0
     fi
     if [[ "${1:-}" == "attach" && \
-      "${BUILD_APP_FAULT_HDIUTIL_SUBSTITUTE_MATCH:-}" == "$last_arg" && \
+      ( "${BUILD_APP_FAULT_HDIUTIL_SUBSTITUTE_MATCH:-}" == "$last_arg" || \
+        ( -n "${BUILD_APP_FAULT_HDIUTIL_SUBSTITUTE_MATCH_CONTAINS:-}" && \
+          "$last_arg" == *"${BUILD_APP_FAULT_HDIUTIL_SUBSTITUTE_MATCH_CONTAINS}"* ) ) && \
       -n "${BUILD_APP_FAULT_HDIUTIL_SUBSTITUTE_SOURCE:-}" ]]; then
       if [[ -z "${BUILD_APP_FAULT_ONCE_MARKER:-}" || ! -e "$BUILD_APP_FAULT_ONCE_MARKER" ]]; then
         if [[ -n "${BUILD_APP_FAULT_ONCE_MARKER:-}" ]]; then
-          print -n fired > "$BUILD_APP_FAULT_ONCE_MARKER"
+          print -r -- fired > "$BUILD_APP_FAULT_ONCE_MARKER"
         fi
         replacement="$BUILD_APP_FAULT_HDIUTIL_SUBSTITUTE_SOURCE"
         exec /usr/bin/hdiutil "${@:1:$#-1}" "$replacement"
       fi
     fi
+    recorded_attach_device=""
+    recorded_attach_mount=""
     recorded_attach_source=""
     recorded_attach_source_occurrence=0
-    if [[ -n "${BUILD_APP_FAULT_HDIUTIL_STATE_FILE:-}" && -f "$BUILD_APP_FAULT_HDIUTIL_STATE_FILE" ]]; then
-      recorded_attach_source=$(awk -F '\t' 'END { print $3 }' "$BUILD_APP_FAULT_HDIUTIL_STATE_FILE")
-      recorded_attach_source_occurrence=$(awk -F '\t' 'END { print $4 + 0 }' "$BUILD_APP_FAULT_HDIUTIL_STATE_FILE")
+    if [[ "${1:-}" == "detach" && -n "${BUILD_APP_FAULT_HDIUTIL_STATE_FILE:-}" && \
+      -f "$BUILD_APP_FAULT_HDIUTIL_STATE_FILE" ]]; then
+      recorded_attach_row=$(awk -F '\t' -v target="$last_arg" \
+        '$1 == target || $2 == target { row = $0 } END { print row }' \
+        "$BUILD_APP_FAULT_HDIUTIL_STATE_FILE")
+      if [[ -n "$recorded_attach_row" ]]; then
+        IFS=$'\t' read -r recorded_attach_device recorded_attach_mount \
+          recorded_attach_source recorded_attach_source_occurrence <<< "$recorded_attach_row"
+      fi
     fi
     detach_source_occurrence_fault=false
     if [[ -n "${BUILD_APP_FAULT_HDIUTIL_DETACH_SOURCE:-}" && \
@@ -107,7 +128,7 @@ case "${0:t}" in
           print -u2 "Refusing non-regular detach fault event file: $detach_event_file"
           exit 2
         fi
-        print -r -- "$recorded_attach_source"$'\t'"$recorded_attach_source_occurrence" >> "$detach_event_file"
+        print -r -- "$recorded_attach_source"$'\t'"$recorded_attach_source_occurrence"$'\t'"$recorded_attach_device" >> "$detach_event_file"
       fi
       [[ -z "${BUILD_APP_FAULT_HDIUTIL_DETACH_OCCURRENCE_MARKER:-}" ]] || \
         print -r -- fired >> "$BUILD_APP_FAULT_HDIUTIL_DETACH_OCCURRENCE_MARKER"
@@ -118,7 +139,7 @@ case "${0:t}" in
         ( -n "${BUILD_APP_FAULT_HDIUTIL_DETACH_ONCE_AFTER_SOURCE:-}" && \
           "${BUILD_APP_FAULT_HDIUTIL_DETACH_ONCE_AFTER_SOURCE:-}" == "$recorded_attach_source" ) ) && \
       ( -z "${BUILD_APP_FAULT_ONCE_MARKER:-}" || ! -e "$BUILD_APP_FAULT_ONCE_MARKER" ) ]]; then
-      [[ -z "${BUILD_APP_FAULT_ONCE_MARKER:-}" ]] || print -n fired > "$BUILD_APP_FAULT_ONCE_MARKER"
+      [[ -z "${BUILD_APP_FAULT_ONCE_MARKER:-}" ]] || print -r -- fired > "$BUILD_APP_FAULT_ONCE_MARKER"
       exit 1
     fi
     exec /usr/bin/hdiutil "$@"
@@ -151,8 +172,16 @@ case "${0:t}" in
     exec /usr/bin/xattr "$@"
     ;;
   codesign)
-    if [[ "${BUILD_APP_FAULT_CODESIGN_TARGET:-}" == "$last_arg" ]]; then
-      exit 1
+    if [[ "${BUILD_APP_FAULT_CODESIGN_TARGET:-}" == "$last_arg" || \
+      ( -n "${BUILD_APP_FAULT_CODESIGN_TARGET_CONTAINS:-}" && \
+        "$last_arg" == *"${BUILD_APP_FAULT_CODESIGN_TARGET_CONTAINS}"* ) ]]; then
+      if [[ -z "${BUILD_APP_FAULT_ONCE_MARKER:-}" ]]; then
+        exit 1
+      fi
+      if [[ ! -e "$BUILD_APP_FAULT_ONCE_MARKER" ]]; then
+        print -r -- fired > "$BUILD_APP_FAULT_ONCE_MARKER"
+        exit 1
+      fi
     fi
     exec /usr/bin/codesign "$@"
     ;;
