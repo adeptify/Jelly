@@ -101,6 +101,14 @@ case "${0:t}" in
     fi
     if [[ "${1:-}" == "detach" && \
       "$detach_source_occurrence_fault" == true ]]; then
+      detach_event_file="${BUILD_APP_FAULT_HDIUTIL_DETACH_EVENT_FILE:-}"
+      if [[ -n "$detach_event_file" ]]; then
+        if [[ -L "$detach_event_file" || ( -e "$detach_event_file" && ! -f "$detach_event_file" ) ]]; then
+          print -u2 "Refusing non-regular detach fault event file: $detach_event_file"
+          exit 2
+        fi
+        print -r -- "$recorded_attach_source"$'\t'"$recorded_attach_source_occurrence" >> "$detach_event_file"
+      fi
       [[ -z "${BUILD_APP_FAULT_HDIUTIL_DETACH_OCCURRENCE_MARKER:-}" ]] || \
         print -r -- fired >> "$BUILD_APP_FAULT_HDIUTIL_DETACH_OCCURRENCE_MARKER"
       exit 1

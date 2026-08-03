@@ -86,6 +86,24 @@ assert_formal_attach_sequence() {
   }
 }
 
+assert_single_detach_event() {
+  local event_path="$1"
+  local expected_source="$2"
+  local expected_occurrence="$3"
+  [[ -f "$event_path" && ! -L "$event_path" ]] || {
+    print -u2 "Expected a regular detach fault event file: $event_path"
+    exit 1
+  }
+  local event_lines actual_event expected_event
+  event_lines=$(wc -l < "$event_path" | tr -d '[:space:]')
+  actual_event=$(<"$event_path")
+  expected_event="$expected_source"$'\t'"$expected_occurrence"
+  [[ "$event_lines" == 1 && "$actual_event" == "$expected_event" ]] || {
+    print -u2 "Expected detach fault event '$expected_event', got '$actual_event'."
+    exit 1
+  }
+}
+
 assert_recorded_device_detached() {
   local state_file="$1"
   local device mount_point image_path source_occurrence
@@ -141,6 +159,7 @@ rollback_detach_state="$TEMP_ROOT/rollback-detach-retry.state"
 rollback_published_marker="$TEMP_ROOT/rollback-published-mount-parse-fired"
 rollback_remove_marker="$TEMP_ROOT/rollback-remove-fired"
 rollback_detach_marker="$TEMP_ROOT/rollback-detach-fired"
+rollback_detach_event="$TEMP_ROOT/rollback-detach.event"
 if env "${COMMON_ENV[@]}" \
   BUILD_APP_FAULT_HDIUTIL_STATE_FILE="$rollback_detach_state" \
   BUILD_APP_FAULT_HDIUTIL_OMIT_MOUNT_POINT_SOURCE="$DMG_PATH" \
@@ -150,6 +169,7 @@ if env "${COMMON_ENV[@]}" \
   BUILD_APP_FAULT_HDIUTIL_DETACH_SOURCE="$DMG_PATH" \
   BUILD_APP_FAULT_HDIUTIL_DETACH_SOURCE_OCCURRENCE=2 \
   BUILD_APP_FAULT_HDIUTIL_DETACH_OCCURRENCE_MARKER="$rollback_detach_marker" \
+  BUILD_APP_FAULT_HDIUTIL_DETACH_EVENT_FILE="$rollback_detach_event" \
   zsh "$BUILD_SCRIPT" >/dev/null 2>&1; then
   print -u2 "Expected published verification and rollback DMG detach failure."
   exit 1
@@ -157,6 +177,7 @@ fi
 assert_single_fired_marker "$rollback_published_marker"
 assert_single_fired_marker "$rollback_remove_marker"
 assert_single_fired_marker "$rollback_detach_marker"
+assert_single_detach_event "$rollback_detach_event" "$DMG_PATH" 2
 assert_formal_attach_sequence "$rollback_detach_state" "$DMG_PATH"
 assert_recorded_device_detached "$rollback_detach_state"
 assert_pair_unchanged "$baseline_hashes"
