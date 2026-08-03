@@ -35,7 +35,7 @@ struct MonthViewModelTests {
         }
 
         let model = MonthViewModel(
-            displayedMonth: date,
+            centeredOn: date,
             state: state,
             hiddenCategoryIDs: [],
             today: date
@@ -49,18 +49,21 @@ struct MonthViewModelTests {
         let today = CalendarDate(year: 2026, month: 9, day: 2)!
         let state = makeEmptyState()
         let model = MonthViewModel(
-            displayedMonth: august,
+            centeredOn: august,
             state: state,
             hiddenCategoryIDs: [],
             today: august
         )
 
-        model.goToPreviousMonth()
-        #expect(model.displayedMonth == CalendarDate(year: 2026, month: 7, day: 1)!)
-        model.goToNextMonth()
-        #expect(model.displayedMonth == CalendarDate(year: 2026, month: 8, day: 1)!)
-        model.goToToday(today)
-        #expect(model.displayedMonth == CalendarDate(year: 2026, month: 9, day: 1)!)
+        model.moveWeekStreamFocus(to: .previousLogicalMonth)
+        #expect(model.monthTitleDate.year == 2026)
+        #expect(model.monthTitleDate.month == 7)
+        model.moveWeekStreamFocus(to: .nextLogicalMonth)
+        #expect(model.monthTitleDate.year == 2026)
+        #expect(model.monthTitleDate.month == 8)
+        model.moveWeekStreamFocus(to: .today(today))
+        #expect(model.monthTitleDate.year == 2026)
+        #expect(model.monthTitleDate.month == 9)
         #expect(model.selectedDate == today)
     }
 
@@ -120,7 +123,7 @@ struct MonthViewModelTests {
         )
         state.items[item.id] = item
         let model = MonthViewModel(
-            displayedMonth: date, state: state, hiddenCategoryIDs: [], today: date
+            centeredOn: date, state: state, hiddenCategoryIDs: [], today: date
         )
 
         var changed = state
@@ -149,7 +152,7 @@ struct MonthViewModelTests {
         state.items[visible.id] = visible
         state.items[hidden.id] = hidden
         let model = MonthViewModel(
-            displayedMonth: date, state: state, hiddenCategoryIDs: [hiddenCategory], today: date
+            centeredOn: date, state: state, hiddenCategoryIDs: [hiddenCategory], today: date
         )
         #expect(model.projectedEntries.map(\.title) == ["显示"])
     }
@@ -159,7 +162,7 @@ struct MonthViewModelTests {
         let center = CalendarDate(year: 2026, month: 8, day: 6)!
         let empty = CalendarState.empty(uncategorizedID: categoryID, now: .distantPast)
         let model = MonthViewModel(
-            displayedMonth: center, state: empty, hiddenCategoryIDs: [], today: center
+            centeredOn: center, state: empty, hiddenCategoryIDs: [], today: center
         )
         let range = model.loadedRange
         let enteringItem = try CalendarItem(
@@ -188,12 +191,12 @@ struct MonthViewModelTests {
         #expect(firstLayout.segments.map(\.source) == [.item(enteringItem.id)])
     }
 
-    @Test func weekStreamCanOpenAnItemThatIsVisibleOutsideTheLegacyFortyTwoDayFacade() throws {
+    @Test func weekStreamProjectedLookupOpensAnItemVisibleFarFromTheInitialFocus() throws {
         let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000506")!
         let center = CalendarDate(year: 2026, month: 8, day: 6)!
         var state = CalendarState.empty(uncategorizedID: categoryID, now: .distantPast)
         let model = MonthViewModel(
-            displayedMonth: center, state: state, hiddenCategoryIDs: [], today: center
+            centeredOn: center, state: state, hiddenCategoryIDs: [], today: center
         )
         let farVisibleDate = model.weekStarts[80]
         let item = try CalendarItem(
@@ -215,7 +218,7 @@ struct MonthViewModelTests {
 
         model.update(state: state, hiddenCategoryIDs: [], today: center)
 
-        #expect(model.item(withID: "item:\(item.id.uuidString)")?.title == "远处周内事项")
+        #expect(model.projectedItem(withID: "item:\(item.id.uuidString)")?.title == "远处周内事项")
     }
 
     @Test func changingTheWeekWindowReprojectsTheNewlyLoadedRangeWithoutChangingItemIdentity() throws {
@@ -223,7 +226,7 @@ struct MonthViewModelTests {
         let center = CalendarDate(year: 2026, month: 8, day: 6)!
         let empty = CalendarState.empty(uncategorizedID: categoryID, now: .distantPast)
         let model = MonthViewModel(
-            displayedMonth: center, state: empty, hiddenCategoryIDs: [], today: center
+            centeredOn: center, state: empty, hiddenCategoryIDs: [], today: center
         )
         let itemDate = model.loadedRange.end.addingDays(7)
         let item = try makeItem(categoryID: categoryID, title: "扩展后可见", date: itemDate)
@@ -242,31 +245,31 @@ struct MonthViewModelTests {
         let august = CalendarDate(year: 2026, month: 8, day: 17)!
         let tomorrow = CalendarDate(year: 2026, month: 8, day: 18)!
         let model = MonthViewModel(
-            displayedMonth: august,
+            centeredOn: august,
             state: makeEmptyState(),
             hiddenCategoryIDs: [],
             today: august
         )
-        model.goToPreviousMonth()
-        let focusedMonth = model.displayedMonth
+        model.moveWeekStreamFocus(to: .previousLogicalMonth)
+        let focusedWeek = model.focusWeek
 
         model.update(state: makeEmptyState(), hiddenCategoryIDs: [], today: tomorrow)
 
-        #expect(model.displayedMonth == focusedMonth)
+        #expect(model.focusWeek == focusedWeek)
         #expect(model.today == tomorrow)
     }
 
-    @Test func goToTodayLoadsDistantFutureAndPastWeeksWithoutStalling() {
+    @Test func todayDestinationLoadsDistantFutureAndPastWeeksWithoutStalling() {
         let center = CalendarDate(year: 2026, month: 8, day: 6)!
         let model = MonthViewModel(
-            displayedMonth: center,
+            centeredOn: center,
             state: makeEmptyState(),
             hiddenCategoryIDs: [],
             today: center
         )
 
         let distantFuture = CalendarDate(year: 2031, month: 1, day: 31)!
-        model.goToToday(distantFuture)
+        model.moveWeekStreamFocus(to: .today(distantFuture))
         #expect(model.focusWeek == CalendarDate(year: 2031, month: 1, day: 27)!)
         #expect(model.weekStarts.contains(model.focusWeek))
         #expect(model.weekStarts.count == 157)
@@ -275,7 +278,7 @@ struct MonthViewModelTests {
         }
 
         let distantPast = CalendarDate(year: 2020, month: 1, day: 1)!
-        model.goToToday(distantPast)
+        model.moveWeekStreamFocus(to: .today(distantPast))
         #expect(model.focusWeek == CalendarDate(year: 2019, month: 12, day: 30)!)
         #expect(model.weekStarts.contains(model.focusWeek))
         #expect(model.weekStarts.count == 157)
@@ -287,16 +290,17 @@ struct MonthViewModelTests {
     @Test func monthNavigationLoadsADistantLogicalFocusIntoTheBoundedWindow() {
         let center = CalendarDate(year: 2026, month: 8, day: 6)!
         let model = MonthViewModel(
-            displayedMonth: center,
+            centeredOn: center,
             state: makeEmptyState(),
             hiddenCategoryIDs: [],
             today: center
         )
         model.updateFocus(toWeekStarting: CalendarDate(year: 2031, month: 1, day: 6)!)
 
-        model.goToNextMonth()
+        model.moveWeekStreamFocus(to: .nextLogicalMonth)
 
-        #expect(model.displayedMonth == CalendarDate(year: 2031, month: 2, day: 1)!)
+        #expect(model.monthTitleDate.year == 2031)
+        #expect(model.monthTitleDate.month == 2)
         #expect(model.weekStarts.contains(model.focusWeek))
         #expect(model.weekStarts.count == 157)
         for (earlier, later) in zip(model.weekStarts, model.weekStarts.dropFirst()) {
@@ -329,7 +333,7 @@ struct MonthViewModelTests {
             octoberItems.append(item)
         }
         let model = MonthViewModel(
-            displayedMonth: august,
+            centeredOn: august,
             state: state,
             hiddenCategoryIDs: [],
             today: august
@@ -337,12 +341,13 @@ struct MonthViewModelTests {
         let projectedIDsBeforeFocusChange = model.projectedEntries.map(\.id)
         let lookupID = "item:\(octoberItems[0].id.uuidString)"
 
-        #expect(model.item(withID: lookupID)?.id == lookupID)
+        #expect(model.projectedItem(withID: lookupID)?.id == lookupID)
 
         model.updateFocus(toWeekStarting: october)
 
-        #expect(model.displayedMonth == CalendarDate(year: 2026, month: 10, day: 1)!)
-        #expect(model.item(withID: lookupID)?.id == lookupID)
+        #expect(model.monthTitleDate.year == 2026)
+        #expect(model.monthTitleDate.month == 10)
+        #expect(model.projectedItem(withID: lookupID)?.id == lookupID)
         #expect(model.projectedEntries.map(\.id) == projectedIDsBeforeFocusChange)
     }
 }

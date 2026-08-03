@@ -19,6 +19,7 @@ CANDIDATE_DMG=""
 BACKUP_ZIP=""
 BACKUP_DMG=""
 ACTIVE_MOUNT_POINT=""
+ACTIVE_DEVICE_ENTRY=""
 LAST_VERIFIED_ZIP_CDHASH=""
 LAST_VERIFIED_DMG_CDHASH=""
 PUBLICATION_PENDING=false
@@ -94,6 +95,19 @@ mounted_value() {
   return 1
 }
 
+detach_active_image() {
+  local detach_target="$ACTIVE_DEVICE_ENTRY"
+  [[ -n "$detach_target" ]] || detach_target="$ACTIVE_MOUNT_POINT"
+  [[ -n "$detach_target" ]] || return 0
+  if hdiutil detach "$detach_target" >/dev/null; then
+    ACTIVE_DEVICE_ENTRY=""
+    ACTIVE_MOUNT_POINT=""
+    return 0
+  fi
+  echo "Could not detach active DMG device=$ACTIVE_DEVICE_ENTRY mount=$ACTIVE_MOUNT_POINT" >&2
+  return 1
+}
+
 verify_dmg() {
   local dmg="$1"
   local verify_root="$2"
@@ -104,8 +118,9 @@ verify_dmg() {
   fi
   mkdir -p "$verify_root" || return 1
   hdiutil attach -readonly -nobrowse -plist "$dmg" > "$attach_plist" || return 1
+  ACTIVE_DEVICE_ENTRY=$(mounted_value "$attach_plist" dev-entry) || ACTIVE_DEVICE_ENTRY=""
   ACTIVE_MOUNT_POINT=$(mounted_value "$attach_plist" mount-point) || {
-    echo "DMG attach did not report a mount point: $dmg" >&2
+    echo "DMG attach did not report a mount point: $dmg (device=$ACTIVE_DEVICE_ENTRY)" >&2
     return 1
   }
 
@@ -120,8 +135,7 @@ verify_dmg() {
     echo "DMG is missing the Finder Applications shortcut." >&2
     result=1
   fi
-  hdiutil detach "$ACTIVE_MOUNT_POINT" >/dev/null || result=1
-  ACTIVE_MOUNT_POINT=""
+  detach_active_image || result=1
   return "$result"
 }
 
@@ -177,9 +191,8 @@ rollback_publication() {
 
 cleanup() {
   trap '' HUP INT TERM
-  if [[ -n "$ACTIVE_MOUNT_POINT" ]]; then
-    hdiutil detach "$ACTIVE_MOUNT_POINT" >/dev/null 2>&1 || true
-    ACTIVE_MOUNT_POINT=""
+  if [[ -n "$ACTIVE_DEVICE_ENTRY" || -n "$ACTIVE_MOUNT_POINT" ]]; then
+    detach_active_image >/dev/null 2>&1 || true
   fi
   if [[ "$PUBLICATION_PENDING" == true ]]; then
     rollback_publication || true

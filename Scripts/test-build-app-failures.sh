@@ -58,6 +58,29 @@ assert_pair_unchanged() {
   assert_no_publish_residue
 }
 
+assert_recorded_device_detached() {
+  local state_file="$1"
+  local device mount_point image_path
+  device=$(awk 'NR == 1 { print; exit }' "$state_file")
+  mount_point=$(awk 'NR == 2 { print; exit }' "$state_file")
+  image_path=$(awk 'NR == 3 { print; exit }' "$state_file")
+  [[ -n "$device" ]] || {
+    print -u2 "The attach fault did not record a device entry."
+    exit 1
+  }
+  [[ -n "$image_path" ]] || {
+    print -u2 "The attach fault did not record its temporary image path."
+    exit 1
+  }
+  if /usr/bin/hdiutil info | grep -Fq -- "$device" || \
+    /usr/bin/hdiutil info | grep -Fq -- "$image_path" || \
+    [[ -n "$mount_point" && -d "$mount_point" ]]; then
+    /usr/bin/hdiutil detach -force "$device" >/dev/null 2>&1 || true
+    print -u2 "A failed DMG verification left its image mounted: device=$device image=$image_path"
+    exit 1
+  fi
+}
+
 env "${COMMON_ENV[@]}" zsh "$BUILD_SCRIPT" >/dev/null
 assert_pair_present
 baseline_hashes=$(pair_hashes)
@@ -67,6 +90,34 @@ if env "${COMMON_ENV[@]}" BUILD_APP_FAULT_HDIUTIL_CREATE=true zsh "$BUILD_SCRIPT
   print -u2 "Expected staged DMG creation failure."
   exit 1
 fi
+assert_pair_unchanged "$baseline_hashes"
+
+# A successful attach whose plist cannot yield a mount point must retain its
+# device entry so process cleanup can detach the image before exiting.
+mount_parse_state="$TEMP_ROOT/mount-parse.state"
+if env "${COMMON_ENV[@]}" \
+  BUILD_APP_FAULT_HDIUTIL_STATE_FILE="$mount_parse_state" \
+  BUILD_APP_FAULT_HDIUTIL_OMIT_MOUNT_POINT_ONCE=true \
+  BUILD_APP_FAULT_ONCE_MARKER="$TEMP_ROOT/mount-parse-fired" \
+  zsh "$BUILD_SCRIPT" >/dev/null 2>&1; then
+  print -u2 "Expected missing DMG mount-point metadata to fail verification."
+  exit 1
+fi
+assert_recorded_device_detached "$mount_parse_state"
+assert_pair_unchanged "$baseline_hashes"
+
+# A transient detach failure must preserve the active device/mount identity so
+# cleanup retries and leaves no mounted image behind.
+detach_state="$TEMP_ROOT/detach-retry.state"
+if env "${COMMON_ENV[@]}" \
+  BUILD_APP_FAULT_HDIUTIL_STATE_FILE="$detach_state" \
+  BUILD_APP_FAULT_HDIUTIL_DETACH_ONCE=true \
+  BUILD_APP_FAULT_ONCE_MARKER="$TEMP_ROOT/detach-retry-fired" \
+  zsh "$BUILD_SCRIPT" >/dev/null 2>&1; then
+  print -u2 "Expected the injected first DMG detach to fail verification."
+  exit 1
+fi
+assert_recorded_device_detached "$detach_state"
 assert_pair_unchanged "$baseline_hashes"
 
 # Interrupt after ZIP replacement but before DMG replacement: both old bytes return.

@@ -243,7 +243,7 @@ struct MonthView: View {
         todayRefreshController = MonthViewTodayRefreshController(policy: todayRefreshPolicy)
         let today = todayRefreshPolicy.today
         _model = StateObject(wrappedValue: MonthViewModel(
-            displayedMonth: today,
+            centeredOn: today,
             state: store.state,
             hiddenCategoryIDs: [],
             today: today
@@ -501,7 +501,7 @@ struct MonthView: View {
         case let .quickCreate(date):
             openQuickCreate(on: date)
         case let .openItem(id):
-            selectedItem = model.item(withID: id)
+            selectedItem = model.projectedItem(withID: id)
         }
     }
 
@@ -575,17 +575,17 @@ struct MonthView: View {
     }
 
     private func navigateToPreviousMonth() {
-        model.goToPreviousMonth()
+        model.moveWeekStreamFocus(to: .previousLogicalMonth)
         requestCentering(on: model.focusWeek)
     }
 
     private func navigateToNextMonth() {
-        model.goToNextMonth()
+        model.moveWeekStreamFocus(to: .nextLogicalMonth)
         requestCentering(on: model.focusWeek)
     }
 
     private func navigateToToday() {
-        model.goToToday(todayRefreshPolicy.today)
+        model.moveWeekStreamFocus(to: .today(todayRefreshPolicy.today))
         requestCentering(on: model.focusWeek)
     }
 

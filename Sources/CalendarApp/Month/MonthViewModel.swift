@@ -2,6 +2,12 @@ import CalendarDomain
 import Combine
 import Foundation
 
+enum WeekStreamFocusDestination: Equatable, Sendable {
+    case previousLogicalMonth
+    case nextLogicalMonth
+    case today(CalendarDate)
+}
+
 @MainActor
 final class MonthViewModel: ObservableObject {
     @Published private(set) var state: CalendarState
@@ -23,12 +29,12 @@ final class MonthViewModel: ObservableObject {
     }
 
     init(
-        displayedMonth: CalendarDate,
+        centeredOn date: CalendarDate,
         state: CalendarState,
         hiddenCategoryIDs: Set<UUID>,
         today: CalendarDate
     ) {
-        let stream = WeekStreamModel(centeredOn: displayedMonth)
+        let stream = WeekStreamModel(centeredOn: date)
         weekStream = stream
         loadedRange = Self.range(for: stream.weekStarts)
         self.state = state
@@ -39,10 +45,6 @@ final class MonthViewModel: ObservableObject {
 
     var weekStarts: [CalendarDate] {
         weekStream.weekStarts
-    }
-
-    var displayedMonth: CalendarDate {
-        Self.monthStart(weekStream.monthTitleDate)
     }
 
     var focusWeek: CalendarDate {
@@ -57,7 +59,7 @@ final class MonthViewModel: ObservableObject {
         timelineProjection.entries
     }
 
-    func item(withID id: String) -> ProjectedItem? {
+    func projectedItem(withID id: String) -> ProjectedItem? {
         itemLookup[id]
     }
 
@@ -106,21 +108,20 @@ final class MonthViewModel: ObservableObject {
         return anchor
     }
 
-    func goToPreviousMonth() {
-        moveFocus(to: weekStream.jumpTargetForPreviousMonth(), preservingCivilDayIntent: true)
-    }
-
-    func goToNextMonth() {
-        moveFocus(to: weekStream.jumpTargetForNextMonth(), preservingCivilDayIntent: true)
-    }
-
-    func goToToday(_ today: CalendarDate) {
-        self.today = today
-        selectedDate = today
-        moveFocus(
-            to: weekStream.todayTarget(today),
-            preservingCivilDayIntent: false
-        )
+    func moveWeekStreamFocus(to destination: WeekStreamFocusDestination) {
+        switch destination {
+        case .previousLogicalMonth:
+            moveFocus(to: weekStream.jumpTargetForPreviousMonth(), preservingCivilDayIntent: true)
+        case .nextLogicalMonth:
+            moveFocus(to: weekStream.jumpTargetForNextMonth(), preservingCivilDayIntent: true)
+        case let .today(today):
+            self.today = today
+            selectedDate = today
+            moveFocus(
+                to: weekStream.todayTarget(today),
+                preservingCivilDayIntent: false
+            )
+        }
     }
 
     private func moveFocus(to date: CalendarDate, preservingCivilDayIntent: Bool) {
@@ -175,10 +176,6 @@ final class MonthViewModel: ObservableObject {
             start: weekStarts[0],
             end: weekStarts[weekStarts.count - 1].addingDays(6)
         )
-    }
-
-    private static func monthStart(_ date: CalendarDate) -> CalendarDate {
-        CalendarDate(year: date.year, month: date.month, day: 1)!
     }
 }
 
