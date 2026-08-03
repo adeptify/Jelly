@@ -965,8 +965,14 @@ Use the five rows and exact hex values from `docs/superpowers/specs/2026-08-03-c
 
 @Test func eachFamilyRemainsDistinguishableUnderCommonRedGreenDeficiencySimulation() throws {
     for family in CategoryPalette.families {
-        #expect(try family.minimumPairwiseDeltaE(simulation: .protanopia) >= 3)
-        #expect(try family.minimumPairwiseDeltaE(simulation: .deuteranopia) >= 3)
+        for appearance in [CalendarAppearance.light, .dark] {
+            #expect(try family.minimumRenderedAccentDeltaE(
+                appearance: appearance, simulation: .protanopia
+            ) >= 3)
+            #expect(try family.minimumRenderedAccentDeltaE(
+                appearance: appearance, simulation: .deuteranopia
+            ) >= 3)
+        }
     }
 }
 ```
