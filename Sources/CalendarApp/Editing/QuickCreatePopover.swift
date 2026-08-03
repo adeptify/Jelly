@@ -80,12 +80,16 @@ struct QuickCreatePopover: View {
                 categoryOption = model.draft.categoryID.uuidString
             }
 
-            DatePicker("开始日期", selection: startDateBinding, displayedComponents: .date)
-            DatePicker("结束日期", selection: endDateBinding, displayedComponents: .date)
             Toggle("具体时间", isOn: $model.draft.usesTime)
-            if model.draft.usesTime {
-                HStack {
+            HStack {
+                DatePicker("开始日期", selection: startDateBinding, displayedComponents: .date)
+                if model.draft.usesTime {
                     DatePicker("开始时间", selection: startTimeBinding, displayedComponents: .hourAndMinute)
+                }
+            }
+            HStack {
+                DatePicker("结束日期", selection: endDateBinding, displayedComponents: .date)
+                if model.draft.usesTime {
                     DatePicker("结束时间", selection: endTimeBinding, displayedComponents: .hourAndMinute)
                 }
             }
@@ -93,7 +97,7 @@ struct QuickCreatePopover: View {
             Toggle("每周重复", isOn: $model.draft.repeatsWeekly)
             if model.draft.repeatsWeekly {
                 weekdayPicker
-                Toggle("设置结束日期", isOn: recurrenceEndEnabledBinding)
+                Toggle("设置重复结束日期", isOn: recurrenceEndEnabledBinding)
                 if model.draft.recurrenceEndDate != nil {
                     DatePicker("重复结束日期", selection: recurrenceEndBinding, displayedComponents: .date)
                 }

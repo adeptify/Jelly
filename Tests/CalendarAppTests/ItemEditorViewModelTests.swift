@@ -206,6 +206,186 @@ struct ItemEditorViewModelTests {
         #expect(endTime == MinuteOfDay(hour: 2, minute: 0)!)
     }
 
+    @Test func multiDayRecurringDraftKeepsInstanceSpanSeparateFromRecurrenceEnd() throws {
+        let categoryID = makeEmptyState().uncategorizedID
+        let recurrenceEndDate = CalendarDate(year: 2026, month: 8, day: 31)!
+        var draft = ItemDraft.newItem(
+            from: CalendarDate(year: 2026, month: 8, day: 3)!,
+            through: CalendarDate(year: 2026, month: 8, day: 5)!,
+            categoryID: categoryID
+        )
+        draft.title = "跨日周会"
+        draft.repeatsWeekly = true
+        draft.weekdays = [.monday]
+        draft.recurrenceEndDate = recurrenceEndDate
+        draft.usesTime = true
+        draft.startTime = MinuteOfDay(hour: 23, minute: 0)!
+        draft.endTime = MinuteOfDay(hour: 1, minute: 0)!
+
+        let command = try ItemEditorViewModel(mode: .create, draft: draft).makeCommand(
+            now: .distantPast,
+            newItemID: UUID(),
+            newSeriesID: UUID(),
+            timeZoneIdentifier: "Asia/Shanghai"
+        )
+        guard case let .createSeries(series) = command else {
+            Issue.record("Expected createSeries")
+            return
+        }
+        #expect(series.ruleStartDate == draft.startDate)
+        #expect(series.durationDays == 3)
+        #expect(series.recurrenceEndDate == recurrenceEndDate)
+        #expect(series.startTime == draft.startTime)
+        #expect(series.endTime == draft.endTime)
+    }
+
+    @Test func onlyThisRangeAndTimeEditPersistsOneOverrideAndUndoesWholeState() async throws {
+        var original = makeEmptyState()
+        let series = try WeeklySeries(
+            id: UUID(),
+            kind: .task,
+            title: "跨日周会",
+            categoryID: original.uncategorizedID,
+            ruleStartDate: CalendarDate(year: 2026, month: 8, day: 3)!,
+            recurrenceEndDate: CalendarDate(year: 2026, month: 8, day: 31)!,
+            weekdays: [.monday],
+            durationDays: 2,
+            startTime: MinuteOfDay(hour: 23, minute: 0)!,
+            endTime: MinuteOfDay(hour: 1, minute: 0)!,
+            creationTimeZoneIdentifier: "Asia/Shanghai",
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let key = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: CalendarDate(year: 2026, month: 8, day: 10)!
+        )
+        original.recurrence.series[series.id] = series
+        let occurrence = CalendarOccurrence(
+            key: key,
+            schedule: try CalendarSchedule(
+                startDate: key.originalDate,
+                endDate: key.originalDate.addingDays(1),
+                startTime: series.startTime,
+                endTime: series.endTime
+            ),
+            title: series.title,
+            kind: series.kind,
+            categoryID: series.categoryID,
+            creationTimeZoneIdentifier: series.creationTimeZoneIdentifier,
+            completedAt: nil,
+            createdAt: series.createdAt
+        )
+        let vm = ItemEditorViewModel(
+            mode: .editOccurrence(series: series, key: key, scope: .onlyThis),
+            draft: ItemDraft(occurrence: occurrence, series: series)
+        )
+        vm.draft.startDate = CalendarDate(year: 2026, month: 8, day: 11)!
+        vm.draft.endDate = CalendarDate(year: 2026, month: 8, day: 13)!
+        vm.draft.startTime = MinuteOfDay(hour: 22, minute: 0)!
+        vm.draft.endTime = MinuteOfDay(hour: 2, minute: 0)!
+
+        let command = try vm.makeCommand(
+            now: .now,
+            newItemID: UUID(),
+            newSeriesID: UUID(),
+            timeZoneIdentifier: "Asia/Shanghai"
+        )
+        let (store, repository) = try await makeReadyStore(initialState: original)
+        try await store.send(command, undoLabel: "已更新事项")
+
+        guard case let .modified(override) = store.state.recurrence.exceptions[key] else {
+            Issue.record("Expected one modified occurrence override")
+            return
+        }
+        let expectedSchedule = try CalendarSchedule(
+            startDate: CalendarDate(year: 2026, month: 8, day: 11)!,
+            endDate: CalendarDate(year: 2026, month: 8, day: 13)!,
+            startTime: MinuteOfDay(hour: 22, minute: 0)!,
+            endTime: MinuteOfDay(hour: 2, minute: 0)!
+        )
+        #expect(override.displayedSchedule == expectedSchedule)
+        #expect(store.state.recurrence.series[series.id] == series)
+        #expect(store.state.recurrence.exceptions.count == 1)
+        #expect(await repository.persistedState == store.state)
+        #expect(store.canUndo)
+
+        try await store.undo()
+        #expect(store.state == original)
+        #expect(await repository.persistedState == original)
+        #expect(store.canUndo == false)
+    }
+
+    @Test func movingLastOccurrenceThisAndFutureUsesShiftedDeadlineAndWeekdaysAndUndoes() async throws {
+        var original = makeEmptyState()
+        let originalDeadline = CalendarDate(year: 2026, month: 8, day: 10)!
+        let series = try WeeklySeries(
+            id: UUID(),
+            kind: .event,
+            title: "跨日周会",
+            categoryID: original.uncategorizedID,
+            ruleStartDate: CalendarDate(year: 2026, month: 8, day: 3)!,
+            recurrenceEndDate: originalDeadline,
+            weekdays: [.monday],
+            durationDays: 2,
+            startTime: MinuteOfDay(hour: 23, minute: 0)!,
+            endTime: MinuteOfDay(hour: 1, minute: 0)!,
+            creationTimeZoneIdentifier: "Asia/Shanghai",
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let key = OccurrenceKey(seriesID: series.id, originalDate: originalDeadline)
+        original.recurrence.series[series.id] = series
+        let occurrence = CalendarOccurrence(
+            key: key,
+            schedule: try CalendarSchedule(
+                startDate: key.originalDate,
+                endDate: key.originalDate.addingDays(1),
+                startTime: series.startTime,
+                endTime: series.endTime
+            ),
+            title: series.title,
+            kind: series.kind,
+            categoryID: series.categoryID,
+            creationTimeZoneIdentifier: series.creationTimeZoneIdentifier,
+            completedAt: nil,
+            createdAt: series.createdAt
+        )
+        let newSeriesID = UUID()
+        let vm = ItemEditorViewModel(
+            mode: .editOccurrence(series: series, key: key, scope: .thisAndFuture),
+            draft: ItemDraft(occurrence: occurrence, series: series)
+        )
+        vm.draft.startDate = CalendarDate(year: 2026, month: 8, day: 11)!
+        vm.draft.endDate = CalendarDate(year: 2026, month: 8, day: 13)!
+        vm.draft.startTime = MinuteOfDay(hour: 22, minute: 0)!
+        vm.draft.endTime = MinuteOfDay(hour: 2, minute: 0)!
+
+        let command = try vm.makeCommand(
+            now: .now,
+            newItemID: UUID(),
+            newSeriesID: newSeriesID,
+            timeZoneIdentifier: "Asia/Shanghai"
+        )
+        let (store, repository) = try await makeReadyStore(initialState: original)
+        try await store.send(command, undoLabel: "已更新事项")
+
+        let future = try #require(store.state.recurrence.series[newSeriesID])
+        #expect(future.ruleStartDate == CalendarDate(year: 2026, month: 8, day: 11)!)
+        #expect(future.recurrenceEndDate == CalendarDate(year: 2026, month: 8, day: 11)!)
+        #expect(future.weekdays == [.tuesday])
+        #expect(future.durationDays == 3)
+        #expect(future.startTime == MinuteOfDay(hour: 22, minute: 0)!)
+        #expect(future.endTime == MinuteOfDay(hour: 2, minute: 0)!)
+        #expect(await repository.persistedState == store.state)
+        #expect(store.canUndo)
+
+        try await store.undo()
+        #expect(store.state == original)
+        #expect(await repository.persistedState == original)
+        #expect(store.canUndo == false)
+    }
+
     @Test func editorRejectsReversedTimeWithoutClearingDraft() {
         let draft = ItemDraft(
             kind: .event,

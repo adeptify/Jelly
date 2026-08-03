@@ -49,7 +49,11 @@ final class ItemEditorViewModel: ObservableObject {
             switch mode {
             case .create:
                 if draft.repeatsWeekly {
-                    try validateWeeklyRule(starting: schedule.startDate)
+                    try validateWeeklyRule(
+                        starting: schedule.startDate,
+                        weekdays: draft.weekdays,
+                        recurrenceEndDate: draft.recurrenceEndDate
+                    )
                     return .createSeries(try WeeklySeries(
                         id: newSeriesID,
                         kind: draft.kind,
@@ -94,17 +98,14 @@ final class ItemEditorViewModel: ObservableObject {
                     updatedAt: now
                 ))
 
-            case let .editOccurrence(_, key, scope):
+            case let .editOccurrence(series, key, scope):
                 let patch = try makePatch(
                     normalizedTitle: normalizedTitle,
                     schedule: schedule,
                     scope: scope
                 )
-                if scope == .thisAndFuture,
-                   patch.weekdays != nil ||
-                   !isUnchanged(patch.recurrenceEndDate) ||
-                   patch.displayedStartDate != nil {
-                    try validateWeeklyRule(starting: patch.displayedStartDate ?? key.originalDate)
+                if scope == .thisAndFuture {
+                    try validateFutureRule(series: series, key: key, patch: patch)
                 }
                 return .mutateSeries(
                     key,
@@ -160,11 +161,15 @@ final class ItemEditorViewModel: ObservableObject {
         }
     }
 
-    private func validateWeeklyRule(starting start: CalendarDate) throws {
-        guard !draft.weekdays.isEmpty else {
+    private func validateWeeklyRule(
+        starting start: CalendarDate,
+        weekdays: Set<Weekday>,
+        recurrenceEndDate: CalendarDate?
+    ) throws {
+        guard !weekdays.isEmpty else {
             throw ItemEditorError.emptyWeekdays
         }
-        guard let end = draft.recurrenceEndDate else {
+        guard let end = recurrenceEndDate else {
             return
         }
         guard end >= start else {
@@ -172,12 +177,50 @@ final class ItemEditorViewModel: ObservableObject {
         }
         var candidate = start
         while candidate <= end {
-            if draft.weekdays.contains(candidate.weekday) {
+            if weekdays.contains(candidate.weekday) {
                 return
             }
             candidate = candidate.addingDays(1)
         }
         throw ItemEditorError.noOccurrenceInRange
+    }
+
+    private func validateFutureRule(
+        series: WeeklySeries,
+        key: OccurrenceKey,
+        patch: SeriesPatch
+    ) throws {
+        let dayDelta = patch.displayedStartDate.map {
+            key.originalDate.days(until: $0)
+        } ?? 0
+        let effectiveStart = key.originalDate.addingDays(dayDelta)
+        let effectiveWeekdays: Set<Weekday>
+        if let explicitWeekdays = patch.weekdays {
+            effectiveWeekdays = explicitWeekdays
+        } else if dayDelta != 0 {
+            effectiveWeekdays = Set(series.weekdays.map { shiftedWeekday($0, by: dayDelta) })
+        } else {
+            effectiveWeekdays = series.weekdays
+        }
+
+        let shiftedDeadline = dayDelta == 0
+            ? series.recurrenceEndDate
+            : series.recurrenceEndDate?.addingDays(dayDelta)
+        let effectiveDeadline: CalendarDate?
+        switch patch.recurrenceEndDate {
+        case .unchanged:
+            effectiveDeadline = shiftedDeadline
+        case let .set(end):
+            effectiveDeadline = end
+        case .clear:
+            effectiveDeadline = nil
+        }
+
+        try validateWeeklyRule(
+            starting: effectiveStart,
+            weekdays: effectiveWeekdays,
+            recurrenceEndDate: effectiveDeadline
+        )
     }
 
     private func makePatch(
@@ -249,11 +292,12 @@ final class ItemEditorViewModel: ObservableObject {
         }
     }
 
-    private func isUnchanged<Value>(_ patch: OptionalPatch<Value>) -> Bool where Value: Sendable {
-        if case .unchanged = patch {
-            return true
-        }
-        return false
+    private func shiftedWeekday(_ weekday: Weekday, by dayDelta: Int) -> Weekday {
+        let shiftedZeroBased = (weekday.rawValue - 1 + dayDelta) % Weekday.allCases.count
+        let normalized = shiftedZeroBased >= 0
+            ? shiftedZeroBased
+            : shiftedZeroBased + Weekday.allCases.count
+        return Weekday(rawValue: normalized + 1)!
     }
 }
 
