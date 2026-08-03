@@ -14,6 +14,7 @@ enum ItemEditorMode: Equatable {
 
 enum ItemEditorError: Error, Equatable {
     case emptyTitle
+    case invalidDateRange
     case invalidTimeRange
     case emptyWeekdays
     case invalidRecurrenceEnd
@@ -43,21 +44,23 @@ final class ItemEditorViewModel: ObservableObject {
     ) throws -> CalendarCommand {
         do {
             let normalizedTitle = try validatedTitle()
-            let timeRange = try validatedTimeRange()
+            let schedule = try validatedSchedule()
 
             switch mode {
             case .create:
                 if draft.repeatsWeekly {
-                    try validateWeeklyRule(starting: draft.date)
+                    try validateWeeklyRule(starting: schedule.startDate)
                     return .createSeries(try WeeklySeries(
                         id: newSeriesID,
                         kind: draft.kind,
                         title: normalizedTitle,
                         categoryID: draft.categoryID,
-                        startDate: draft.date,
-                        endDate: draft.recurrenceEndDate,
+                        ruleStartDate: schedule.startDate,
+                        recurrenceEndDate: draft.recurrenceEndDate,
                         weekdays: draft.weekdays,
-                        timeRange: timeRange,
+                        durationDays: schedule.durationDays,
+                        startTime: schedule.startTime,
+                        endTime: schedule.endTime,
                         creationTimeZoneIdentifier: timeZoneIdentifier,
                         createdAt: now,
                         updatedAt: now
@@ -68,8 +71,7 @@ final class ItemEditorViewModel: ObservableObject {
                     kind: draft.kind,
                     title: normalizedTitle,
                     categoryID: draft.categoryID,
-                    date: draft.date,
-                    timeRange: timeRange,
+                    schedule: schedule,
                     creationTimeZoneIdentifier: timeZoneIdentifier,
                     completedAt: nil,
                     createdAt: now,
@@ -85,8 +87,7 @@ final class ItemEditorViewModel: ObservableObject {
                     kind: draft.kind,
                     title: normalizedTitle,
                     categoryID: draft.categoryID,
-                    date: draft.date,
-                    timeRange: timeRange,
+                    schedule: schedule,
                     creationTimeZoneIdentifier: original.creationTimeZoneIdentifier,
                     completedAt: draft.kind == .task ? original.completedAt : nil,
                     createdAt: original.createdAt,
@@ -94,15 +95,21 @@ final class ItemEditorViewModel: ObservableObject {
                 ))
 
             case let .editOccurrence(_, key, scope):
+                let patch = try makePatch(
+                    normalizedTitle: normalizedTitle,
+                    schedule: schedule,
+                    scope: scope
+                )
                 if scope == .thisAndFuture,
-                   draft.weekdays != originalDraft.weekdays ||
-                   draft.recurrenceEndDate != originalDraft.recurrenceEndDate {
-                    try validateWeeklyRule(starting: key.originalDate)
+                   patch.weekdays != nil ||
+                   !isUnchanged(patch.recurrenceEndDate) ||
+                   patch.displayedStartDate != nil {
+                    try validateWeeklyRule(starting: patch.displayedStartDate ?? key.originalDate)
                 }
                 return .mutateSeries(
                     key,
                     scope: scope,
-                    edit: .patch(makePatch(normalizedTitle: normalizedTitle, timeRange: timeRange, scope: scope)),
+                    edit: .patch(patch),
                     newSeriesID: newSeriesID
                 )
             }
@@ -140,14 +147,16 @@ final class ItemEditorViewModel: ObservableObject {
         return title
     }
 
-    private func validatedTimeRange() throws -> LocalTimeRange? {
-        guard draft.usesTime else {
-            return nil
-        }
+    private func validatedSchedule() throws -> CalendarSchedule {
         do {
-            return try LocalTimeRange(start: draft.start, end: draft.end)
-        } catch {
-            throw ItemEditorError.invalidTimeRange
+            return try CalendarSchedule(
+                startDate: draft.startDate,
+                endDate: draft.endDate,
+                startTime: draft.usesTime ? draft.startTime : nil,
+                endTime: draft.usesTime ? draft.endTime : nil
+            )
+        } catch let error as DomainValidationError {
+            throw ItemEditorError(domainError: error)
         }
     }
 
@@ -173,44 +182,78 @@ final class ItemEditorViewModel: ObservableObject {
 
     private func makePatch(
         normalizedTitle: String,
-        timeRange: LocalTimeRange?,
+        schedule: CalendarSchedule,
         scope: SeriesScope
-    ) -> SeriesPatch {
+    ) throws -> SeriesPatch {
         let originalTitle = originalDraft.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let originalRange = originalDraft.usesTime
-            ? try? LocalTimeRange(start: originalDraft.start, end: originalDraft.end)
-            : nil
-        let updatedRange = timeRange
-        let timePatch: OptionalPatch<LocalTimeRange>
-        if originalRange == updatedRange {
-            timePatch = .unchanged
-        } else if let updatedRange {
-            timePatch = .set(updatedRange)
-        } else {
-            timePatch = .clear
+        let originalSchedule = try CalendarSchedule(
+            startDate: originalDraft.startDate,
+            endDate: originalDraft.endDate,
+            startTime: originalDraft.usesTime ? originalDraft.startTime : nil,
+            endTime: originalDraft.usesTime ? originalDraft.endTime : nil
+        )
+        let (startTime, endTime) = pairedTimePatch(
+            schedule: schedule,
+            originalSchedule: originalSchedule
+        )
+
+        var recurrenceEndDate: OptionalPatch<CalendarDate> = .unchanged
+        if scope == .thisAndFuture {
+            switch (originalDraft.recurrenceEndDate, draft.recurrenceEndDate) {
+            case (nil, nil):
+                recurrenceEndDate = .unchanged
+            case let (.some(old), .some(new)) where old == new:
+                recurrenceEndDate = .unchanged
+            case (_, .none):
+                recurrenceEndDate = .clear
+            case let (_, .some(end)):
+                recurrenceEndDate = .set(end)
+            }
         }
 
-        var patch = SeriesPatch(
+        return SeriesPatch(
             title: normalizedTitle == originalTitle ? nil : normalizedTitle,
             kind: draft.kind == originalDraft.kind ? nil : draft.kind,
             categoryID: draft.categoryID == originalDraft.categoryID ? nil : draft.categoryID,
-            timeRange: timePatch,
-            displayedDate: draft.date == originalDraft.date ? nil : draft.date
+            weekdays: scope == .thisAndFuture && draft.weekdays != originalDraft.weekdays
+                ? draft.weekdays
+                : nil,
+            endDate: recurrenceEndDate,
+            displayedStartDate: schedule.startDate == originalSchedule.startDate
+                ? nil
+                : schedule.startDate,
+            durationDays: schedule.durationDays == originalSchedule.durationDays
+                ? nil
+                : schedule.durationDays,
+            startTime: startTime,
+            endTime: endTime
         )
-        if scope == .thisAndFuture {
-            patch.weekdays = draft.weekdays == originalDraft.weekdays ? nil : draft.weekdays
-            switch (originalDraft.recurrenceEndDate, draft.recurrenceEndDate) {
-            case (nil, nil):
-                patch.endDate = .unchanged
-            case let (.some(old), .some(new)) where old == new:
-                patch.endDate = .unchanged
-            case (_, .none):
-                patch.endDate = .clear
-            case let (_, .some(end)):
-                patch.endDate = .set(end)
-            }
+    }
+
+    private func pairedTimePatch(
+        schedule: CalendarSchedule,
+        originalSchedule: CalendarSchedule
+    ) -> (OptionalPatch<MinuteOfDay>, OptionalPatch<MinuteOfDay>) {
+        switch (schedule.startTime, schedule.endTime, originalSchedule.startTime, originalSchedule.endTime) {
+        case let (.some(start), .some(end), .some(originalStart), .some(originalEnd))
+            where start == originalStart && end == originalEnd:
+            return (.unchanged, .unchanged)
+        case let (.some(start), .some(end), _, _):
+            return (.set(start), .set(end))
+        case (nil, nil, nil, nil):
+            return (.unchanged, .unchanged)
+        case (nil, nil, _, _):
+            return (.clear, .clear)
+        default:
+            preconditionFailure("CalendarSchedule always has paired times.")
         }
-        return patch
+    }
+
+    private func isUnchanged<Value>(_ patch: OptionalPatch<Value>) -> Bool where Value: Sendable {
+        if case .unchanged = patch {
+            return true
+        }
+        return false
     }
 }
 
@@ -218,7 +261,8 @@ private extension ItemEditorError {
     init(domainError: DomainValidationError) {
         switch domainError {
         case .emptyTitle: self = .emptyTitle
-        case .invalidDateRange, .invalidTimeRange: self = .invalidTimeRange
+        case .invalidDateRange: self = .invalidDateRange
+        case .invalidTimeRange: self = .invalidTimeRange
         case .emptyWeekdaySet: self = .emptyWeekdays
         case .invalidRecurrenceEnd: self = .invalidRecurrenceEnd
         case .noOccurrenceInRange: self = .noOccurrenceInRange
@@ -229,9 +273,10 @@ private extension ItemEditorError {
     var message: String {
         switch self {
         case .emptyTitle: "请填写标题"
+        case .invalidDateRange: "结束日期不能早于开始日期"
         case .invalidTimeRange: "结束时间必须晚于开始时间"
         case .emptyWeekdays: "请至少选择一个重复日"
-        case .invalidRecurrenceEnd: "结束日期不能早于开始日期"
+        case .invalidRecurrenceEnd: "重复结束日期不能早于开始日期"
         case .noOccurrenceInRange: "重复范围内至少需要包含一次"
         case .invalidEditorMode: "当前事项不能这样编辑"
         }

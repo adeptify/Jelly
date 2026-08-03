@@ -48,8 +48,16 @@ struct ItemDetailPopover: View {
             }
             Text(item.kind == .task ? "待办" : "日程")
                 .foregroundStyle(.secondary)
-            Text(item.timeRange.map { "\(Self.timeString($0.start))–\(Self.timeString($0.end))" } ?? "全天")
+            Text("\(Self.dateString(item.schedule.startDate)) 至 \(Self.dateString(item.schedule.endDate))")
                 .foregroundStyle(.secondary)
+            if let startTime = item.schedule.startTime,
+               let endTime = item.schedule.endTime {
+                Text("\(Self.timeString(startTime))–\(Self.timeString(endTime))")
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("全天")
+                    .foregroundStyle(.secondary)
+            }
             if let message = localError {
                 Text(message).font(.footnote).foregroundStyle(.red)
             }
@@ -153,6 +161,10 @@ struct ItemDetailPopover: View {
     private static func timeString(_ minute: MinuteOfDay) -> String {
         String(format: "%02d:%02d", minute.value / 60, minute.value % 60)
     }
+
+    private static func dateString(_ date: CalendarDate) -> String {
+        String(format: "%04d-%02d-%02d", date.year, date.month, date.day)
+    }
 }
 
 private enum DetailAction {
@@ -236,19 +248,20 @@ private struct ItemEditForm: View {
                     Text(category.name).tag(category.id)
                 }
             }
-            DatePicker("日期", selection: dateBinding, displayedComponents: .date)
+            DatePicker("开始日期", selection: startDateBinding, displayedComponents: .date)
+            DatePicker("结束日期", selection: endDateBinding, displayedComponents: .date)
             Toggle("具体时间", isOn: $model.draft.usesTime)
             if model.draft.usesTime {
                 HStack {
-                    DatePicker("开始", selection: startBinding, displayedComponents: .hourAndMinute)
-                    DatePicker("结束", selection: endBinding, displayedComponents: .hourAndMinute)
+                    DatePicker("开始时间", selection: startTimeBinding, displayedComponents: .hourAndMinute)
+                    DatePicker("结束时间", selection: endTimeBinding, displayedComponents: .hourAndMinute)
                 }
             }
             if configuration.canEditRule {
                 weekdayPicker
                 Toggle("设置结束日期", isOn: recurrenceEndEnabledBinding)
                 if model.draft.recurrenceEndDate != nil {
-                    DatePicker("结束日期", selection: recurrenceEndBinding, displayedComponents: .date)
+                    DatePicker("重复结束日期", selection: recurrenceEndBinding, displayedComponents: .date)
                 }
             }
             if let message = localError ?? model.validationMessage {
@@ -284,27 +297,43 @@ private struct ItemEditForm: View {
         }
     }
 
-    private var dateBinding: Binding<Date> {
-        Binding(get: { model.draft.date.editorDate }, set: { model.draft.date = .editorDate(containing: $0) })
+    private var startDateBinding: Binding<Date> {
+        Binding(
+            get: { model.draft.startDate.editorDate },
+            set: { model.draft.startDate = .editorDate(containing: $0) }
+        )
     }
 
-    private var startBinding: Binding<Date> {
-        Binding(get: { model.draft.start.editorDate }, set: { model.draft.start = .editorMinute(containing: $0) })
+    private var endDateBinding: Binding<Date> {
+        Binding(
+            get: { model.draft.endDate.editorDate },
+            set: { model.draft.endDate = .editorDate(containing: $0) }
+        )
     }
 
-    private var endBinding: Binding<Date> {
-        Binding(get: { model.draft.end.editorDate }, set: { model.draft.end = .editorMinute(containing: $0) })
+    private var startTimeBinding: Binding<Date> {
+        Binding(
+            get: { model.draft.startTime.editorDate },
+            set: { model.draft.startTime = .editorMinute(containing: $0) }
+        )
+    }
+
+    private var endTimeBinding: Binding<Date> {
+        Binding(
+            get: { model.draft.endTime.editorDate },
+            set: { model.draft.endTime = .editorMinute(containing: $0) }
+        )
     }
 
     private var recurrenceEndEnabledBinding: Binding<Bool> {
         Binding(get: { model.draft.recurrenceEndDate != nil }, set: {
-            model.draft.recurrenceEndDate = $0 ? model.draft.date : nil
+            model.draft.recurrenceEndDate = $0 ? model.draft.startDate : nil
         })
     }
 
     private var recurrenceEndBinding: Binding<Date> {
         Binding(
-            get: { (model.draft.recurrenceEndDate ?? model.draft.date).editorDate },
+            get: { (model.draft.recurrenceEndDate ?? model.draft.startDate).editorDate },
             set: { model.draft.recurrenceEndDate = .editorDate(containing: $0) }
         )
     }

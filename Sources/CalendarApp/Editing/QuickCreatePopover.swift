@@ -23,7 +23,7 @@ struct QuickCreatePopover: View {
         self.categories = categories
         self.onClose = onClose
         let categoryID = categories.first?.id ?? store.state.uncategorizedID
-        let draft = ItemDraft.newItem(on: date, categoryID: categoryID)
+        let draft = ItemDraft.newItem(from: date, through: date, categoryID: categoryID)
         _model = StateObject(wrappedValue: ItemEditorViewModel(mode: .create, draft: draft))
         _categoryOption = State(initialValue: categoryID.uuidString)
         _localError = State(initialValue: nil)
@@ -80,12 +80,13 @@ struct QuickCreatePopover: View {
                 categoryOption = model.draft.categoryID.uuidString
             }
 
-            DatePicker("日期", selection: calendarDateBinding, displayedComponents: .date)
+            DatePicker("开始日期", selection: startDateBinding, displayedComponents: .date)
+            DatePicker("结束日期", selection: endDateBinding, displayedComponents: .date)
             Toggle("具体时间", isOn: $model.draft.usesTime)
             if model.draft.usesTime {
                 HStack {
-                    DatePicker("开始", selection: startBinding, displayedComponents: .hourAndMinute)
-                    DatePicker("结束", selection: endBinding, displayedComponents: .hourAndMinute)
+                    DatePicker("开始时间", selection: startTimeBinding, displayedComponents: .hourAndMinute)
+                    DatePicker("结束时间", selection: endTimeBinding, displayedComponents: .hourAndMinute)
                 }
             }
 
@@ -94,7 +95,7 @@ struct QuickCreatePopover: View {
                 weekdayPicker
                 Toggle("设置结束日期", isOn: recurrenceEndEnabledBinding)
                 if model.draft.recurrenceEndDate != nil {
-                    DatePicker("结束日期", selection: recurrenceEndBinding, displayedComponents: .date)
+                    DatePicker("重复结束日期", selection: recurrenceEndBinding, displayedComponents: .date)
                 }
             }
 
@@ -130,33 +131,46 @@ struct QuickCreatePopover: View {
         }
     }
 
-    private var calendarDateBinding: Binding<Date> {
+    private var startDateBinding: Binding<Date> {
         Binding(
-            get: { model.draft.date.editorDate },
-            set: { model.draft.date = CalendarDate.editorDate(containing: $0) }
+            get: { model.draft.startDate.editorDate },
+            set: { model.draft.startDate = CalendarDate.editorDate(containing: $0) }
         )
     }
 
-    private var startBinding: Binding<Date> {
-        Binding(get: { model.draft.start.editorDate }, set: { model.draft.start = .editorMinute(containing: $0) })
+    private var endDateBinding: Binding<Date> {
+        Binding(
+            get: { model.draft.endDate.editorDate },
+            set: { model.draft.endDate = CalendarDate.editorDate(containing: $0) }
+        )
     }
 
-    private var endBinding: Binding<Date> {
-        Binding(get: { model.draft.end.editorDate }, set: { model.draft.end = .editorMinute(containing: $0) })
+    private var startTimeBinding: Binding<Date> {
+        Binding(
+            get: { model.draft.startTime.editorDate },
+            set: { model.draft.startTime = .editorMinute(containing: $0) }
+        )
+    }
+
+    private var endTimeBinding: Binding<Date> {
+        Binding(
+            get: { model.draft.endTime.editorDate },
+            set: { model.draft.endTime = .editorMinute(containing: $0) }
+        )
     }
 
     private var recurrenceEndEnabledBinding: Binding<Bool> {
         Binding(
             get: { model.draft.recurrenceEndDate != nil },
             set: { enabled in
-                model.draft.recurrenceEndDate = enabled ? model.draft.date : nil
+                model.draft.recurrenceEndDate = enabled ? model.draft.startDate : nil
             }
         )
     }
 
     private var recurrenceEndBinding: Binding<Date> {
         Binding(
-            get: { (model.draft.recurrenceEndDate ?? model.draft.date).editorDate },
+            get: { (model.draft.recurrenceEndDate ?? model.draft.startDate).editorDate },
             set: { model.draft.recurrenceEndDate = CalendarDate.editorDate(containing: $0) }
         )
     }

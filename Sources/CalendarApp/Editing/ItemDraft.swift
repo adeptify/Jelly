@@ -5,10 +5,11 @@ struct ItemDraft: Equatable {
     var kind: ItemKind
     var title: String
     var categoryID: UUID
-    var date: CalendarDate
+    var startDate: CalendarDate
+    var endDate: CalendarDate
     var usesTime: Bool
-    var start: MinuteOfDay
-    var end: MinuteOfDay
+    var startTime: MinuteOfDay
+    var endTime: MinuteOfDay
     var repeatsWeekly: Bool
     var weekdays: Set<Weekday>
     var recurrenceEndDate: CalendarDate?
@@ -20,10 +21,11 @@ extension ItemDraft {
             kind: item.kind,
             title: item.title,
             categoryID: item.categoryID,
-            date: item.date,
-            usesTime: item.timeRange != nil,
-            start: item.timeRange?.start ?? MinuteOfDay(hour: 9, minute: 0)!,
-            end: item.timeRange?.end ?? MinuteOfDay(hour: 10, minute: 0)!,
+            startDate: item.schedule.startDate,
+            endDate: item.schedule.endDate,
+            usesTime: item.schedule.startTime != nil,
+            startTime: item.schedule.startTime ?? MinuteOfDay(hour: 9, minute: 0)!,
+            endTime: item.schedule.endTime ?? MinuteOfDay(hour: 10, minute: 0)!,
             repeatsWeekly: false,
             weekdays: [],
             recurrenceEndDate: nil
@@ -35,13 +37,14 @@ extension ItemDraft {
             kind: series.kind,
             title: series.title,
             categoryID: series.categoryID,
-            date: date,
-            usesTime: series.timeRange != nil,
-            start: series.timeRange?.start ?? MinuteOfDay(hour: 9, minute: 0)!,
-            end: series.timeRange?.end ?? MinuteOfDay(hour: 10, minute: 0)!,
+            startDate: date,
+            endDate: date.addingDays(series.durationDays - 1),
+            usesTime: series.startTime != nil,
+            startTime: series.startTime ?? MinuteOfDay(hour: 9, minute: 0)!,
+            endTime: series.endTime ?? MinuteOfDay(hour: 10, minute: 0)!,
             repeatsWeekly: true,
             weekdays: series.weekdays,
-            recurrenceEndDate: series.endDate
+            recurrenceEndDate: series.recurrenceEndDate
         )
     }
 
@@ -50,29 +53,40 @@ extension ItemDraft {
             kind: occurrence.kind,
             title: occurrence.title,
             categoryID: occurrence.categoryID,
-            date: occurrence.displayedDate,
-            usesTime: occurrence.timeRange != nil,
-            start: occurrence.timeRange?.start ?? MinuteOfDay(hour: 9, minute: 0)!,
-            end: occurrence.timeRange?.end ?? MinuteOfDay(hour: 10, minute: 0)!,
+            startDate: occurrence.schedule.startDate,
+            endDate: occurrence.schedule.endDate,
+            usesTime: occurrence.schedule.startTime != nil,
+            startTime: occurrence.schedule.startTime ?? MinuteOfDay(hour: 9, minute: 0)!,
+            endTime: occurrence.schedule.endTime ?? MinuteOfDay(hour: 10, minute: 0)!,
             repeatsWeekly: true,
             weekdays: series.weekdays,
-            recurrenceEndDate: series.endDate
+            recurrenceEndDate: series.recurrenceEndDate
         )
     }
 
-    static func newItem(on date: CalendarDate, categoryID: UUID) -> ItemDraft {
+    static func newItem(
+        from startDate: CalendarDate,
+        through endDate: CalendarDate,
+        categoryID: UUID
+    ) -> ItemDraft {
         ItemDraft(
             kind: .task,
             title: "",
             categoryID: categoryID,
-            date: date,
+            startDate: startDate,
+            endDate: endDate,
             usesTime: false,
-            start: MinuteOfDay(hour: 9, minute: 0)!,
-            end: MinuteOfDay(hour: 10, minute: 0)!,
+            startTime: MinuteOfDay(hour: 9, minute: 0)!,
+            endTime: MinuteOfDay(hour: 10, minute: 0)!,
             repeatsWeekly: false,
-            weekdays: [date.weekday],
+            weekdays: [startDate.weekday],
             recurrenceEndDate: nil
         )
+    }
+
+    @available(*, deprecated, message: "Use newItem(from:through:categoryID:) instead.")
+    static func newItem(on date: CalendarDate, categoryID: UUID) -> ItemDraft {
+        newItem(from: date, through: date, categoryID: categoryID)
     }
 }
 
