@@ -6,9 +6,20 @@ public enum WeekSegmentLayout {
         weekStarts: [CalendarDate],
         laneCapacity: Int
     ) -> [WeekLayout] {
+        let uniqueEntries = deduplicatedEntries(entries)
         let uniqueWeekStarts = Array(Set(weekStarts)).sorted()
         return uniqueWeekStarts.map {
-            makeWeekLayout(entries: entries, weekStart: $0, laneCapacity: max(0, laneCapacity))
+            makeWeekLayout(entries: uniqueEntries, weekStart: $0, laneCapacity: max(0, laneCapacity))
+        }
+    }
+
+    private static func deduplicatedEntries(_ entries: [ProjectedEntry]) -> [ProjectedEntry] {
+        var entriesBySource: [ProjectedEntryID: ProjectedEntry] = [:]
+        for entry in entries where entriesBySource[entry.id] == nil {
+            entriesBySource[entry.id] = entry
+        }
+        return entriesBySource.values.sorted {
+            stableProjectedEntryID($0.id) < stableProjectedEntryID($1.id)
         }
     }
 
@@ -36,19 +47,20 @@ public enum WeekSegmentLayout {
         }
         .sorted(by: candidatePrecedes)
 
-        var laneEndColumns: [Int] = []
+        var occupiedRangesByLane: [[ClosedRange<Int>]] = []
         var visibleSegments: [WeekSegment] = []
         var overflowByDate: [CalendarDate: Int] = [:]
 
         for candidate in candidates {
-            if let lane = laneEndColumns.indices.first(where: {
-                laneEndColumns[$0] < candidate.startColumn
+            let occupiedRange = candidate.startColumn...candidate.endColumn
+            if let lane = occupiedRangesByLane.indices.first(where: {
+                occupiedRangesByLane[$0].allSatisfy { !$0.overlaps(occupiedRange) }
             }) {
-                laneEndColumns[lane] = candidate.endColumn
+                occupiedRangesByLane[lane].append(occupiedRange)
                 visibleSegments.append(candidate.segment(in: lane))
-            } else if laneEndColumns.count < laneCapacity {
-                laneEndColumns.append(candidate.endColumn)
-                visibleSegments.append(candidate.segment(in: laneEndColumns.count - 1))
+            } else if occupiedRangesByLane.count < laneCapacity {
+                occupiedRangesByLane.append([occupiedRange])
+                visibleSegments.append(candidate.segment(in: occupiedRangesByLane.count - 1))
             } else {
                 for column in candidate.startColumn...candidate.endColumn {
                     let date = weekStart.addingDays(column)

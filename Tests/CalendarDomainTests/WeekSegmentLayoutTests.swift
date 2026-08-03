@@ -66,6 +66,38 @@ struct WeekSegmentLayoutTests {
         #expect(layout.overflowByDate[date(2026, 8, 10)] == 1)
     }
 
+    @Test func earlierSingleDayReusesLaneOccupiedByALaterNonOverlappingMultiDay() throws {
+        let earlierSingleDay = entry("2026-08-10", "2026-08-10", id: uuid("542"))
+        let laterMultiDay = entry("2026-08-14", "2026-08-15", id: uuid("543"))
+        let layout = try #require(WeekSegmentLayout.make(
+            entries: [earlierSingleDay, laterMultiDay],
+            weekStarts: [date(2026, 8, 10)],
+            laneCapacity: 1
+        ).first)
+
+        #expect(layout.visibleSegments.map(\.source) == [laterMultiDay.id, earlierSingleDay.id])
+        #expect(layout.visibleSegments.allSatisfy { $0.lane == 0 })
+        #expect(layout.overflowByDate.isEmpty)
+    }
+
+    @Test func duplicateSourceProducesOneSegmentWithoutOverflowAtAnyCapacity() throws {
+        let duplicate = entry("2026-08-11", "2026-08-12", id: uuid("544"))
+
+        for capacity in [1, 2] {
+            let layout = try #require(WeekSegmentLayout.make(
+                entries: [duplicate, duplicate],
+                weekStarts: [date(2026, 8, 10)],
+                laneCapacity: capacity
+            ).first)
+
+            #expect(layout.visibleSegments.count == 1)
+            #expect(layout.visibleSegments.map(\.id) == [
+                WeekSegmentID(sourceID: duplicate.id, weekStart: date(2026, 8, 10))
+            ])
+            #expect(layout.overflowByDate.isEmpty)
+        }
+    }
+
     private func entry(_ start: String, _ end: String, id: UUID) -> ProjectedEntry {
         .item(try! CalendarItem(
             id: id,

@@ -120,12 +120,6 @@ public enum ProjectedItem: Identifiable, Equatable, Sendable {
     }
 }
 
-private extension CalendarDateRange {
-    func contains(_ date: CalendarDate) -> Bool {
-        start <= date && date <= end
-    }
-}
-
 private extension ProjectedEntry {
     var monthProjectedItem: ProjectedItem {
         switch self {
