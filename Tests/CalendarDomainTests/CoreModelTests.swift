@@ -12,11 +12,20 @@ struct CoreModelTests {
         #expect(schedule.durationDays == 2)
     }
 
-    @Test func sameDayScheduleRejectsEqualOrReversedClockTimes() {
+    @Test func sameDayScheduleRejectsEqualClockTimes() {
         #expect(throws: DomainValidationError.invalidTimeRange) {
             try CalendarSchedule(
                 startDate: date(2026, 8, 6), endDate: date(2026, 8, 6),
                 startTime: minute(9, 0), endTime: minute(9, 0)
+            )
+        }
+    }
+
+    @Test func sameDayScheduleRejectsReversedClockTimes() {
+        #expect(throws: DomainValidationError.invalidTimeRange) {
+            try CalendarSchedule(
+                startDate: date(2026, 8, 6), endDate: date(2026, 8, 6),
+                startTime: minute(9, 1), endTime: minute(9, 0)
             )
         }
     }
