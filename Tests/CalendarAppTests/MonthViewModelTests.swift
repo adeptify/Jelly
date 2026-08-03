@@ -151,7 +151,7 @@ struct MonthViewModelTests {
         #expect(model.overflowCount(in: cell, capacity: 1) == 0)
     }
 
-    @Test func compatibilityFacadeUsesTheLoadedWeekRangeForProjectionLayoutAndLookup() throws {
+    @Test func compatibilityFacadeUsesTheLoadedWeekRangeForProjectionAndLayout() throws {
         let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000502")!
         let center = CalendarDate(year: 2026, month: 8, day: 6)!
         let empty = CalendarState.empty(uncategorizedID: categoryID, now: .distantPast)
@@ -181,7 +181,6 @@ struct MonthViewModelTests {
         #expect(model.weekStarts.first == range.start)
         #expect(model.weekStarts.last?.addingDays(6) == range.end)
         #expect(model.projectedEntries.map(\.id) == [.item(enteringItem.id)])
-        #expect(model.item(withID: "item:\(enteringItem.id.uuidString)")?.id == "item:\(enteringItem.id.uuidString)")
         let firstLayout = try #require(model.weekLayouts(laneCapacity: 1).first)
         #expect(firstLayout.segments.map(\.source) == [.item(enteringItem.id)])
     }
@@ -204,7 +203,6 @@ struct MonthViewModelTests {
 
         #expect(anchor == .init(weekStart: model.weekStarts[104], pixelOffset: 23))
         #expect(model.projectedEntries.map(\.id) == [.item(item.id)])
-        #expect(model.item(withID: "item:\(item.id.uuidString)")?.id == "item:\(item.id.uuidString)")
     }
 
     @Test func todayRefreshMovesOnlyTheTodayMarkerWithoutResettingTheFocusedMonth() {
@@ -254,5 +252,100 @@ struct MonthViewModelTests {
         )
 
         #expect(model.cell(for: firstGridDate).items.map(\.id) == ["item:\(enteringItem.id.uuidString)"])
+    }
+
+    @Test func goToTodayLoadsDistantFutureAndPastWeeksWithoutStalling() {
+        let center = CalendarDate(year: 2026, month: 8, day: 6)!
+        let model = MonthViewModel(
+            displayedMonth: center,
+            state: makeEmptyState(),
+            hiddenCategoryIDs: [],
+            today: center
+        )
+
+        let distantFuture = CalendarDate(year: 2031, month: 1, day: 31)!
+        model.goToToday(distantFuture)
+        #expect(model.focusWeek == CalendarDate(year: 2031, month: 1, day: 27)!)
+        #expect(model.weekStarts.contains(model.focusWeek))
+        #expect(model.weekStarts.count == 157)
+        for (earlier, later) in zip(model.weekStarts, model.weekStarts.dropFirst()) {
+            #expect(earlier.addingDays(7) == later)
+        }
+
+        let distantPast = CalendarDate(year: 2020, month: 1, day: 1)!
+        model.goToToday(distantPast)
+        #expect(model.focusWeek == CalendarDate(year: 2019, month: 12, day: 30)!)
+        #expect(model.weekStarts.contains(model.focusWeek))
+        #expect(model.weekStarts.count == 157)
+        for (earlier, later) in zip(model.weekStarts, model.weekStarts.dropFirst()) {
+            #expect(earlier.addingDays(7) == later)
+        }
+    }
+
+    @Test func monthNavigationLoadsADistantLogicalFocusIntoTheBoundedWindow() {
+        let center = CalendarDate(year: 2026, month: 8, day: 6)!
+        let model = MonthViewModel(
+            displayedMonth: center,
+            state: makeEmptyState(),
+            hiddenCategoryIDs: [],
+            today: center
+        )
+        model.updateFocus(toWeekStarting: CalendarDate(year: 2031, month: 1, day: 6)!)
+
+        model.goToNextMonth()
+
+        #expect(model.displayedMonth == CalendarDate(year: 2031, month: 2, day: 1)!)
+        #expect(model.weekStarts.contains(model.focusWeek))
+        #expect(model.weekStarts.count == 157)
+        for (earlier, later) in zip(model.weekStarts, model.weekStarts.dropFirst()) {
+            #expect(earlier.addingDays(7) == later)
+        }
+    }
+
+    @Test func updateFocusRederivesCompatibilityCellsOverflowAndLookupForTheNewMonth() throws {
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000505")!
+        let august = CalendarDate(year: 2026, month: 8, day: 3)!
+        let october = CalendarDate(year: 2026, month: 10, day: 5)!
+        var state = CalendarState.empty(uncategorizedID: categoryID, now: .distantPast)
+        var octoberItems: [CalendarItem] = []
+        for index in 0..<3 {
+            let item = try CalendarItem(
+                id: UUID(), kind: .task, title: "十月事项 \(index)",
+                categoryID: categoryID,
+                schedule: try CalendarSchedule(
+                    startDate: october,
+                    endDate: october,
+                    startTime: nil,
+                    endTime: nil
+                ),
+                creationTimeZoneIdentifier: "Asia/Shanghai",
+                completedAt: nil,
+                createdAt: Date(timeIntervalSince1970: TimeInterval(index)),
+                updatedAt: Date(timeIntervalSince1970: TimeInterval(index))
+            )
+            state.items[item.id] = item
+            octoberItems.append(item)
+        }
+        let model = MonthViewModel(
+            displayedMonth: august,
+            state: state,
+            hiddenCategoryIDs: [],
+            today: august
+        )
+        let projectedIDsBeforeFocusChange = model.projectedEntries.map(\.id)
+        let lookupID = "item:\(octoberItems[0].id.uuidString)"
+
+        #expect(model.cell(for: october).items.isEmpty)
+        #expect(model.item(withID: lookupID) == nil)
+
+        model.updateFocus(toWeekStarting: october)
+
+        let octoberCell = model.cell(for: october)
+        #expect(model.displayedMonth == CalendarDate(year: 2026, month: 10, day: 1)!)
+        #expect(octoberCell.items.map(\.title) == ["十月事项 0", "十月事项 1", "十月事项 2"])
+        #expect(model.visibleItems(in: octoberCell, capacity: 2).count == 1)
+        #expect(model.overflowCount(in: octoberCell, capacity: 2) == 2)
+        #expect(model.item(withID: lookupID)?.id == lookupID)
+        #expect(model.projectedEntries.map(\.id) == projectedIDsBeforeFocusChange)
     }
 }

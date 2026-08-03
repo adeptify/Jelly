@@ -122,6 +122,7 @@ final class MonthViewModel: ObservableObject {
     func updateFocus(toWeekStarting week: CalendarDate) {
         objectWillChange.send()
         weekStream.updateFocus(toWeekStarting: week)
+        rebuildCompatibilityFacade()
     }
 
     func extendEarlier(visibleWeek: CalendarDate, pixelOffset: CGFloat) -> WeekStreamAnchor {
@@ -166,17 +167,27 @@ final class MonthViewModel: ObservableObject {
 
     private func moveFocus(to date: CalendarDate, preservingCivilDayIntent: Bool) {
         objectWillChange.send()
-        ensureWeekIsLoaded(WeekStreamModel.weekStart(containing: date))
         weekStream.moveFocus(to: date, preservingCivilDayIntent: preservingCivilDayIntent)
+        ensureWeekIsLoaded(weekStream.focusWeek)
         rebuildProjection()
     }
 
     private func ensureWeekIsLoaded(_ weekStart: CalendarDate) {
         while weekStart < weekStarts[0] {
-            _ = weekStream.extendEarlier(visibleWeek: weekStarts[0], pixelOffset: 0)
+            let previousFirst = weekStarts[0]
+            _ = weekStream.extendEarlier(visibleWeek: previousFirst, pixelOffset: 0)
+            precondition(
+                weekStarts[0] < previousFirst,
+                "Earlier week-stream extension did not advance toward the target."
+            )
         }
         while weekStart > weekStarts[weekStarts.count - 1] {
-            _ = weekStream.extendLater(visibleWeek: weekStarts[weekStarts.count - 1], pixelOffset: 0)
+            let previousLast = weekStarts[weekStarts.count - 1]
+            _ = weekStream.extendLater(visibleWeek: previousLast, pixelOffset: 0)
+            precondition(
+                weekStarts[weekStarts.count - 1] > previousLast,
+                "Later week-stream extension did not advance toward the target."
+            )
         }
     }
 
@@ -187,24 +198,28 @@ final class MonthViewModel: ObservableObject {
             state: state,
             hiddenCategoryIDs: hiddenCategoryIDs
         )
+        loadedRange = range
+        timelineProjection = projection
+        rebuildCompatibilityFacade()
+    }
+
+    private func rebuildCompatibilityFacade() {
         let legacyGridRange = Self.legacyGridRange(for: displayedMonth)
         var itemsByDate: [CalendarDate: [ProjectedItem]] = [:]
         var itemLookup: [String: ProjectedItem] = [:]
 
-        for entry in projection.entries {
-            let item = ProjectedItem(entry: entry)
-            itemLookup[item.id] = item
+        for entry in timelineProjection.entries {
             guard entry.schedule.startDate <= legacyGridRange.end,
                   legacyGridRange.start <= entry.schedule.endDate
             else {
                 continue
             }
+            let item = ProjectedItem(entry: entry)
             let displayDate = max(entry.schedule.startDate, legacyGridRange.start)
             itemsByDate[displayDate, default: []].append(item)
+            itemLookup[item.id] = item
         }
 
-        loadedRange = range
-        timelineProjection = projection
         compatibilityItemsByDate = itemsByDate
         compatibilityItemLookup = itemLookup
     }
