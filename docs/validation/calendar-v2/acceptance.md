@@ -2,70 +2,80 @@
 
 验收日期：2026-08-04（Asia/Shanghai）
 
-本记录严格区分自动化验证、可交付包验证与原生 GUI 验收。自动化绿色只证明对应合同；未实际启动最终打包应用完成的鼠标、窗口、视觉与辅助功能路径一律保持 `PENDING / NOT RUN`，不得记为通过。
+本记录区分自动化合同、可交付制品、真实原生 GUI 和用户环境保护。最终 GUI 验收使用 ZIP 中新鲜解包的真实可执行文件；为避免与用户正在运行的同 Bundle ID 应用串进程，只复制该可执行文件并为临时验收壳更换 Bundle ID。验收壳可执行文件与最终 ZIP 中可执行文件的 SHA-256 完全一致，业务代码没有改动。更换 `Info.plist` 身份后，临时壳的原始 bundle 签名按设计失效，因此临时壳不作为签名证据；签名、plist、可执行权限、Applications 链接与 CDHash 均在未修改的最终 ZIP／DMG app 上单独严格验证。
 
-## 当前结论
+## 最终结论
 
-- 自动化领域／应用／持久化测试：`PASS`，`302 tests / 24 suites`，非零匹配。
-- 打包 archive、fault-injection、symlink/non-regular 三道门禁：`PASS`。
-- 正式 `Scripts/build-app.sh` 与 `swift build --product PersonalCalendar`：`PASS`。
-- ZIP 新鲜解包与 DMG `-readonly -nobrowse` 挂载后的 plist、真实可执行文件、严格签名、Applications 链接和 CDHash 一致性：`PASS`。
-- 最终打包应用的九项原生 GUI 验收：`PENDING / NOT RUN`，待主 Agent 使用下述最终包执行。
+- 自动化领域／应用／持久化：`PASS`，`311 tests / 24 suites`，零失败。
+- Debug、Release、archive、fault-injection、symlink/non-regular 与正式双制品发布门禁：`PASS`。
+- ZIP／DMG 的 plist、真实可执行文件、严格深度签名、Applications 链接、可执行字节和 CDHash 一致性：`PASS`。
+- 九项最终打包应用原生 GUI 验收：`PASS`。
+- fresh Sol ultra 原生交互修复复审：`PASS`，`0 Critical / 0 Important / 0 Minor`。
+- fresh Sol ultra 打包门禁 finding scoped re-review：`PASS`，`0 Critical / 0 Important / 0 Minor`；先前 `3 Important / 1 Minor` 全部关闭。
+- fresh Sol ultra 最终整体审查：待本记录与证据提交后执行，结果将回填。
 
-## 自动化与集成证据
+## 验收对象与隔离边界
 
-`CalendarStoreTests.v1PrimaryToV2StoreProjectionAndUndoRoundTripKeepsOneCrossDayIdentity` 使用真实临时磁盘上的非空 schema 1 primary。fixture 含固定 ID 与 metadata 的 category/item/series、modified/skipped exception 和 completion；经 `JSONCalendarRepository → CalendarStore → TimelineProjection` 后逐项核对迁移结果，再创建跨月事项。投影保留完整图语义且新事项只有一个来源身份；撤销后内存与磁盘完全相等，primary 为 schema 2。
+| 项目 | 值 |
+| --- | --- |
+| ZIP 新鲜解包 app | `/tmp/personal-calendar-v2-final-gui.TkF6cM/unzip/个人月历.app` |
+| 临时验收壳 | `/tmp/personal-calendar-v2-final-gui.TkF6cM/harness/个人月历最终验收.app` |
+| 最终／验收壳可执行 SHA-256 | `60eeff08157dd56d60f6e852fa50cae939f4eb9209b5e898966531cd8024f384` |
+| 最终 Bundle ID | `com.oreal.personalcalendar` |
+| 临时验收 Bundle ID | `com.oreal.personalcalendar.acceptance.final` |
+| 临时壳签名边界 | `Info.plist` 身份修改使最终包签名不再适用；不用于签名结论 |
+| 隔离 HOME 根目录 | `/tmp/personal-calendar-v2-final-gui.TkF6cM/homes` |
 
-`CalendarStoreTests.v1BackupRestoreMigratesThroughStoreAndCorruptBackupCannotOverwriteIt` 使用同一非空 schema 1 完整图恢复到 V2 Store。有效恢复生成的 rollback 与恢复前 primary 原始 bytes 完全相等；随后损坏备份不改变内存、schema 2 primary 或既有 rollback，也不生成 rejected rollback。V1 迁移 DTO 解码仍保留；临时运行时兼容 initializer/property、`MonthViewModel` 的 fixed-month façade 与固定月格 business-truth 已删除。
+原生 GUI 分别使用 `primary`、`density`、`restore`、`failure`、`recurring` 五套隔离 Application Support。用户真实数据 `/Users/oreal/Library/Application Support/PersonalCalendar/calendar-v1.json` 未作为验收输入；验收结束后其修改时间仍为 `2026-08-04 00:19:05`，SHA-256 为 `6e48cfbc0f41b7ddb3820e5ba0a04ccab49d8d45e09905cc1cb6455e6316df2a`。用户从 DMG 运行的进程 PID `37615` 在整个最终验收后仍存活，用户挂载的 `disk4`／`disk5` 未被卸载。
 
-最终命令结果：
+## 自动化与构建门禁
 
-| 门禁 | 结果 | 证据 |
+`CalendarStoreTests.v1PrimaryToV2StoreProjectionAndUndoRoundTripKeepsOneCrossDayIdentity` 使用真实临时磁盘上的非空 schema 1 primary，覆盖固定身份的 category/item/series、modified/skipped exception、completion、跨月来源唯一性与撤销后内存／磁盘精确还原。
+
+`CalendarStoreTests.v1BackupRestoreMigratesThroughStoreAndCorruptBackupCannotOverwriteIt` 覆盖 schema 1 完整图恢复、rollback 原始字节、损坏备份拒绝和既有 rollback 保持。
+
+| 门禁 | 结果 | 关键证据 |
 | --- | --- | --- |
-| `Scripts/test.sh` | PASS | 302 tests / 24 suites |
-| `Scripts/test-build-app-archive.sh` | PASS | ZIP 新鲜解包与只读 DMG 中 app 均严格签名，且 CDHash 相同 |
-| `Scripts/test-build-app-failures.sh` | PASS | 创建失败、发布中断、验证失败、两个有效签名但 CDHash 不同、首次发布失败及尽力启动副本失败均保持或恢复权威 pair；正式 published DMG 的 mount-point 元数据缺失、首次 detach 失败，以及 rollback verify 自身首次 detach 失败均由完整 attachment 集合保留身份并最终清理。定点用例除三个 one-shot marker 与正式 DMG attach occurrence `1 2` 外，还硬断言实际 detach 故障产生唯一普通 event 文件，唯一一行必须精确绑定正式 `$DMG_PATH` 与 occurrence `2`；旧 pair 精确字节不变，测试结束无临时 image-path/device/mount 残留。临时强制匹配 occurrence `1` 时 mutation gate 按预期精确报告 event `expected …\t2, got …\t1` |
-| `Scripts/test-build-app-symlink.sh` | PASS | symlink dist、非普通 ZIP 目标、symlink DMG 目标均拒绝，sentinel 不变 |
-| `Scripts/build-app.sh` | PASS | 同一事务发布正式 ZIP/DMG pair |
-| `swift build -c release --product PersonalCalendar` | PASS | release 产品构建完成 |
+| `Scripts/test.sh` | PASS | 311 tests / 24 suites |
+| `swift build` Debug／Release | PASS | 两种配置均完成 |
+| `Scripts/test-build-app-archive.sh` | PASS | ZIP 新鲜解包与只读 DMG app 严格签名且 CDHash 相同；attach 后先登记本次 device，mount metadata 缺失与首次 detach 失败都按该 device 清理且无残留 |
+| `Scripts/test-build-app-failures.sh` | PASS | candidate ZIP 解包／签名与 candidate DMG attach／内容四条失败路径、正式发布、签名错配、attach/detach 与 rollback verify 故障均保持或恢复权威 pair；detach event 精确绑定 source、occurrence、device；无临时发布或挂载残留 |
+| `Scripts/test-build-app-symlink.sh` | PASS | symlink dist、symlink／非普通 ZIP／DMG 目标均拒绝，ZIP／DMG 两端 sentinel 对称保持 |
+| `Scripts/build-app.sh` | PASS | ZIP／DMG 在同一事务中发布 |
 
-清理复核命令 `rg 'MonthProjection|MonthGridBuilder|dropDestination|@available.*deprecated|deprecated' Sources Tests` 只剩 `WeekRowView` 的两个真实 `.dropDestination` 消费点；没有 deprecated API 命中。已删除：
-
-- `Sources/CalendarDomain/MonthProjection.swift`
-- `Sources/CalendarApp/Month/MonthGridBuilder.swift`
-- `Sources/CalendarApp/Month/DayCellView.swift`
-- `Tests/CalendarAppTests/MonthGridBuilderTests.swift`
-
-`CalendarTransferPayload: Transferable` 因 `WeekRowView` 的真实拖放消费者继续保留。
-
-`MonthViewModel` 生产与测试调用现使用 `centeredOn`、`moveWeekStreamFocus(to:)` 和 `projectedItem(withID:)`。旧 `displayedMonth`、`goToPreviousMonth`、`goToNextMonth`、`goToToday` 与 `item(withID:)` façade 在 Sources/Tests 中零引用并已物理移除。
+生产交互修复引入 `WeekStreamCenteringCoordinator`，把启动居中、Today 重复点击、延迟 frame/viewport 确认与滚动解锁统一为同一状态机；mutation gate 已证明连续 Today 集成测试会杀死绕过真实编排的实现。fresh Sol ultra scoped re-review 独立重跑 32/32 定点测试、311/24 全量测试、Debug/Release 与 diff-check，结果为零 finding。
 
 ## 最终交付物
 
 | 制品 | 绝对路径 | SHA-256 |
 | --- | --- | --- |
-| 权威 ZIP | `/Users/oreal/Documents/个人管理工具/.worktrees/calendar-v1/dist/个人月历.app.zip` | `68c1ba637dd6d13553e0a39b8264ba5a63491043a98ac1cc336bf0509e4e3540` |
-| Finder 友好 DMG | `/Users/oreal/Documents/个人管理工具/.worktrees/calendar-v1/dist/个人月历.dmg` | `9a8f6908bd3e95503035029984b20f2dc90649f97a863b48ecf69105abf29e04` |
+| 权威 ZIP | `/Users/oreal/Documents/个人管理工具/.worktrees/calendar-v1/dist/个人月历.app.zip` | `67d863122043e08add5154834af108b0949e036a893b7d3409660adaf16366e5` |
+| Finder 友好 DMG | `/Users/oreal/Documents/个人管理工具/.worktrees/calendar-v1/dist/个人月历.dmg` | `84c59ab6765affe820363b1c73d33ec1611af052872e104d206bc97fd6ce8574` |
 
-- ZIP 新鲜解包 app CDHash：`7f2d81c00ab594e1d8931c74af8256df6f9db0a6`
-- DMG 只读挂载 app CDHash：`7f2d81c00ab594e1d8931c74af8256df6f9db0a6`
-- DMG 包含 `Applications -> /Applications`；ZIP 与 DMG 中 app 均通过 `plutil -lint`、真实 `CFBundleExecutable` 普通文件／可执行检查及 `codesign --verify --deep --strict`。
-- `dist/个人月历.app` 是尽力发布的本机启动副本；正式交付身份由 ZIP/DMG pair 共同承担。
+- ZIP 新鲜解包 app CDHash：`6d136d04f19bfa4244e048fa74000d522b48f56f`
+- DMG 只读挂载 app CDHash：`6d136d04f19bfa4244e048fa74000d522b48f56f`
+- DMG 包含 `Applications -> /Applications`；ZIP 与 DMG app 均通过 `plutil -lint`、真实 `CFBundleExecutable` 普通文件／可执行检查和 `codesign --verify --deep --strict`。
+- 最终冻结验证挂载使用临时 `disk6`，已按 attach 返回的 device 精确卸载；验收后只剩用户原有 `disk4`／`disk5`。
 
 ## 原生打包应用验收
 
-以下九项均未在本任务中启动最终包执行，状态统一为 `PENDING / NOT RUN`：
+| # | 场景 | 结果与证据 | 状态 |
+| --- | --- | --- | --- |
+| 1 | 四角日期创建卡跟随与翻边 | [左上](evidence/final-quick-create-top-left.jpeg)、[右上](evidence/final-quick-create-top-right.jpeg)、[左下](evidence/final-quick-create-bottom-left.jpeg)、[右下](evidence/final-quick-create-bottom-right.jpeg)；卡片就近锚定且标题自动聚焦 | PASS |
+| 2 | 正／反向跨月拖选 | [正向](evidence/final-range-forward-cross-month.jpeg)、[反向](evidence/final-range-reverse-cross-month.jpeg) 都归一化为 `2026-07-31 → 2026-08-04`，松手卡片跟随释放端 | PASS |
+| 3 | 跨月连续滚动与 Today 状态机 | 向未来超过 52 周到 [2027 年 9 月](evidence/final-scroll-future-52-weeks.jpeg)，向过去超过 52 周到 [2023 年 8 月](evidence/final-scroll-past-52-weeks.jpeg)；[重复 Today 后仍可手动滚动](evidence/final-repeated-today-scroll-unlocked.jpeg) | PASS |
+| 4 | 单日高密度 | [10 条直接显示并出现“还有1项”](evidence/final-density-10-plus-overflow.jpeg)；[抽屉列出 11 个唯一来源](evidence/final-density-drawer-11-items.jpeg)，跨日来源只出现一次 | PASS |
+| 5 | 普通跨日移动、两端缩放、完成与撤销 | [主体移动](evidence/final-multi-day-body-moved.jpeg) 保持 5 天跨度；[尾端缩放](evidence/final-multi-day-trailing-resized.jpeg) 只改结束；[首端缩放](evidence/final-multi-day-leading-resized.jpeg) 只改开始；每次 Command-Z 恢复；[跨周整体完成](evidence/final-multi-day-completed.jpeg) 两段同步 | PASS |
+| 6 | 重复跨日范围与保存恢复 | [范围提示](evidence/final-recurring-scope-prompt.jpeg) 含“仅本次／本次及以后／取消”；取消前后哈希同为 `bfc214…6320`；[仅本次](evidence/final-recurring-only-this.jpeg) 只把首例改为 8/4–8/6；[本次及以后](evidence/final-recurring-this-and-future.jpeg) 从下一例起改为周二 3 天；[失败提示](evidence/final-save-failure-alert.jpeg) 时 primary 哈希保持 `edad5b…b05`，[修复权限重试](evidence/final-save-retry-success.jpeg) 后仅有一条事项 | PASS |
+| 7 | 彻底退出与重启持久化 | [重启后](evidence/final-restart-persisted-completed.jpeg) `7/31–8/4` 范围及跨周完成状态保持，启动仍居中今天 | PASS |
+| 8 | V1 恢复与无效备份拒绝 | [V1 完整图迁移](evidence/final-v1-restore-migrated.jpeg) 保留 item、series、2 exceptions、completion；[语义无效备份被拒绝](evidence/final-invalid-restore-rejected.jpeg)，恢复前后哈希同为 `28c1983080936e78205f15d1165954fc2e75fa5c40b298b88afee6744abd1c5f` | PASS |
+| 9 | 主题、色板、自定义色、减少动态、VoiceOver/AX | 深色 [五组色系入口](evidence/final-category-palettes-dark.jpeg)，[马卡龙 8 色](evidence/final-category-palette-macaron.jpeg)，自定义 [黑](evidence/final-custom-color-black.jpeg)／[白](evidence/final-custom-color-white.jpeg) 都显示浅深对比度；[暖色浅色主题](evidence/final-theme-light.jpeg)；系统实际[开启减少动态](evidence/final-reduce-motion-enabled.jpeg) 后[远距回到今天](evidence/final-reduce-motion-today-centered.jpeg)；系统实际[开启 VoiceOver](evidence/final-voiceover-enabled.jpeg)，跨周条带 AX 完整读出范围及[前后周延续语义](evidence/final-voiceover-cross-week-ax.jpeg) | PASS |
 
-| # | 待验场景 | 状态 |
-| --- | --- | --- |
-| 1 | 单击窗口四个边缘附近日期，创建卡片跟随日期就近出现并在必要时自动翻边 | PENDING / NOT RUN |
-| 2 | 正向与反向拖选跨月范围，持续高亮并把归一化起止日期正确预填到创建卡 | PENDING / NOT RUN |
-| 3 | 全屏向前、向后连续滚动至少各 52 周；扩展不跳位，标题跟随中心周跨月更新 | PENDING / NOT RUN |
-| 4 | 单日 10 条直接可见，第 11 条产生正确 overflow，且条带身份不重复 | PENDING / NOT RUN |
-| 5 | 普通跨日条带主体移动、左右真实外端缩放与 Command-Z 原子撤销 | PENDING / NOT RUN |
-| 6 | 重复跨日条带的“仅本次／本次及以后／取消”，并覆盖保存失败后的可重试恢复 | PENDING / NOT RUN |
-| 7 | 关闭并重启最终打包应用后，范围、完成状态、分类和重复实例保持 | PENDING / NOT RUN |
-| 8 | schema 1 备份恢复成功；无效或损坏备份不覆盖当前数据 | PENDING / NOT RUN |
-| 9 | 浅色／深色、五组色板、自定义极端颜色、VoiceOver 元素顺序与减少动态效果 | PENDING / NOT RUN |
+## 失败证据与修复闭环
 
-逐项操作与记录栏见 [V2 原生视觉与交互清单](visual-checklist.md)。收到原生操作证据前，本记录不宣称 V2 已完成真实 GUI 验收。
+- 修复前打包应用重启落在错误位置，保留证据 [restart-wrong-initial-position.jpeg](evidence/restart-wrong-initial-position.jpeg)；修复后 [final-startup-centered.jpeg](evidence/final-startup-centered.jpeg) 与重复 Today 用例均通过。
+- 修复前空白跨日拖选未进入范围创建；该 finding 促成范围手势命中区域与事项手势优先级修复，最终正／反向跨月证据均通过。
+- 保存失败用例不是只测错误弹窗：只读目录下失败时旧 primary 字节不变；权限恢复后原卡片、标题与保存动作仍在，重试后落盘仅一条同名事项。
+- 首次最终整体审查曾给出打包门禁 `0 Critical / 3 Important / 1 Minor`，没有被覆盖为成功；修复提交 `eb67d06` 通过了错误 device、candidate contains 匹配与 DMG 拒绝前破坏 ZIP 的定向 mutation，并经 scoped Sol 复审降为 `0 / 0 / 0`。
+
+详细逐项操作边界见 [V2 原生视觉与交互清单](visual-checklist.md)。
