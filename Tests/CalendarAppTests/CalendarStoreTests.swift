@@ -239,6 +239,35 @@ struct CalendarStoreTests {
         #expect(await repository.saveCount == 0)
     }
 
+    @Test func failedV1RestorePrimarySaveDoesNotPublishState() async throws {
+        let stored = try makeStateWithOneItem()
+        let (store, repository) = try await makeReadyStore(initialState: stored)
+        let beforeState = store.state
+        let beforePublicationGeneration = store.statePublicationGeneration
+        let beforePrimary = await repository.rawDocumentData()
+        let sourceDirectory = try makeTemporaryCalendarAppDirectory()
+        defer { try? FileManager.default.removeItem(at: sourceDirectory) }
+        let source = sourceDirectory.appendingPathComponent("schema-one-primary-failure.json")
+        let rollback = sourceDirectory.appendingPathComponent("rollback.json")
+        try Data(schemaOneEmptyCalendarJSON.utf8).write(to: source)
+        await repository.failNextSave()
+
+        await #expect(throws: StoreError.restoreFailed) {
+            try await store.restore(
+                from: source,
+                using: BackupService(),
+                rollbackURL: rollback
+            )
+        }
+
+        #expect(store.state == beforeState)
+        #expect(store.statePublicationGeneration == beforePublicationGeneration)
+        #expect(store.phase == .ready)
+        #expect(await repository.rawDocumentData() == beforePrimary)
+        #expect(await repository.saveCount == 0)
+        #expect(try Data(contentsOf: rollback) == beforePrimary)
+    }
+
     @Test func successfulRestorePublishesOnceAndClearsUndo() async throws {
         let original = makeEmptyState()
         let restored = try makeCompleteRecurrenceGraphState()

@@ -238,6 +238,67 @@ struct JSONCalendarRepositoryTests {
         #expect(try Data(contentsOf: rollback) == beforeRollback)
     }
 
+    @Test func v1RestorePrimaryAtomicFailureKeepsPrimaryAfterRollbackWasWritten() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let current = try makePopulatedState()
+        let primary = directory.file("calendar.json")
+        let rollback = directory.file("rollback.json")
+        let source = directory.file("valid-v1-primary-failure.json")
+        let preparingRepository = JSONCalendarRepository(documentURL: primary) { current }
+        try await preparingRepository.save(current)
+        let beforePrimary = try Data(contentsOf: primary)
+        try Data(V1CompleteGraphFixture.json.utf8).write(to: source)
+        let failingRepository = JSONCalendarRepository(
+            documentURL: primary,
+            seed: { current },
+            writer: InjectedReplaceFailureWriter()
+        )
+
+        await #expect(throws: BackupError.atomicWriteFailed) {
+            try await BackupService().restore(
+                from: source,
+                repository: failingRepository,
+                rollbackURL: rollback
+            )
+        }
+
+        #expect(try Data(contentsOf: primary) == beforePrimary)
+        #expect(try Data(contentsOf: rollback) == beforePrimary)
+    }
+
+    @Test func semanticallyInvalidV1MigrationDoesNotOverwritePrimaryOrRollback() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let current = try makePopulatedState()
+        let primary = directory.file("calendar.json")
+        let rollback = directory.file("rollback.json")
+        let source = directory.file("dangling-category-v1.json")
+        let repository = JSONCalendarRepository(documentURL: primary) { current }
+        try await repository.save(current)
+        try Data("previous rollback bytes".utf8).write(to: rollback)
+        let beforePrimary = try Data(contentsOf: primary)
+        let beforeRollback = try Data(contentsOf: rollback)
+        let danglingCategoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000199")!
+        let semanticallyInvalidV1 = try mutatedV1DocumentData { document in
+            try mutateItem(&document, id: V1CompleteGraphFixture.itemID) { item in
+                item["categoryID"] = danglingCategoryID.uuidString
+            }
+        }
+        try semanticallyInvalidV1.write(to: source)
+
+        await #expect(throws: BackupError.invalidDocument) {
+            try await BackupService().restore(
+                from: source,
+                repository: repository,
+                rollbackURL: rollback
+            )
+        }
+
+        #expect(try Data(contentsOf: primary) == beforePrimary)
+        #expect(try Data(contentsOf: rollback) == beforeRollback)
+    }
+
     @Test func firstRestoreCreatesMissingRollbackDirectory() async throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
@@ -961,6 +1022,16 @@ private func mutatedDocumentData(
 ) throws -> Data {
     let source = try encodedDocumentData(state)
     var document = try JSONSerialization.jsonObject(with: source) as! [String: Any]
+    try mutation(&document)
+    return try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys])
+}
+
+private func mutatedV1DocumentData(
+    mutation: (inout [String: Any]) throws -> Void
+) throws -> Data {
+    var document = try JSONSerialization.jsonObject(
+        with: Data(V1CompleteGraphFixture.json.utf8)
+    ) as! [String: Any]
     try mutation(&document)
     return try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys])
 }
