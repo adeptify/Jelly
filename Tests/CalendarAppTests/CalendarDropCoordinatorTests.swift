@@ -249,6 +249,81 @@ struct CalendarDropCoordinatorTests {
         #expect(coordinator.pendingRecurringDrop == nil)
     }
 
+    @Test func dismissedConfirmationCancelsPendingDropAndAllowsTheNextRecurringDrop() async throws {
+        let harness = try makeMondayWednesdayDropHarness()
+        let repository = InMemoryCalendarRepository(initialState: harness.originalState)
+        let store = CalendarStore(initialState: harness.originalState, repository: repository)
+        await store.load()
+        let coordinator = CalendarDropCoordinator(store: store)
+        var presentation = RecurringDropPresentationController()
+
+        try await coordinator.accept(.occurrence(harness.boundaryMonday), on: harness.destinationTuesday)
+        presentation.pendingDropDidChange(hasPendingDrop: coordinator.pendingRecurringDrop != nil)
+        #expect(presentation.isConfirmationPresented)
+
+        let dismissalRequested = presentation.requestConfirmationDismissal()
+        #expect(dismissalRequested)
+        let dismissalSettled = presentation.settleConfirmationDismissal()
+        #expect(dismissalSettled)
+        coordinator.cancel()
+        presentation.pendingDropDidChange(hasPendingDrop: coordinator.pendingRecurringDrop != nil)
+
+        #expect(coordinator.pendingRecurringDrop == nil)
+        #expect(presentation.state == .hidden)
+        #expect(store.state == harness.originalState)
+        #expect(await repository.saveCount == 0)
+
+        let nextDestination = harness.destinationTuesday.addingDays(1)
+        try await coordinator.accept(.occurrence(harness.boundaryMonday), on: nextDestination)
+
+        #expect(coordinator.pendingRecurringDrop?.destination == nextDestination)
+    }
+
+    @Test func failedRecurringDropClosesConfirmationBeforeErrorAndReopensForRetry() async throws {
+        let harness = try makeMondayWednesdayDropHarness()
+        let repository = InMemoryCalendarRepository(initialState: harness.originalState)
+        let store = CalendarStore(initialState: harness.originalState, repository: repository)
+        await store.load()
+        let coordinator = CalendarDropCoordinator(store: store)
+        var presentation = RecurringDropPresentationController()
+        try await coordinator.accept(.occurrence(harness.boundaryMonday), on: harness.destinationTuesday)
+        presentation.pendingDropDidChange(hasPendingDrop: coordinator.pendingRecurringDrop != nil)
+
+        let firstScopeSelectionStarted = presentation.beginScopeSelection()
+        #expect(firstScopeSelectionStarted)
+        let firstResolution = try #require(coordinator.beginResolution(scope: .thisAndFuture))
+        await repository.failNextSave()
+        do {
+            try await coordinator.submit(firstResolution)
+            Issue.record("A failed save must reject the recurring move.")
+        } catch let error as StoreError {
+            #expect(error == .persistenceFailed)
+        }
+        presentation.resolutionFailed()
+
+        #expect(!presentation.isConfirmationPresented)
+        #expect(presentation.isErrorPresented)
+        #expect(coordinator.pendingRecurringDrop?.key == harness.boundaryMonday)
+        store.dismissErrors()
+        let errorAcknowledged = presentation.acknowledgeError(
+            hasPendingDrop: coordinator.pendingRecurringDrop != nil
+        )
+        #expect(errorAcknowledged)
+        #expect(presentation.isConfirmationPresented)
+        #expect(!presentation.isErrorPresented)
+
+        let retryScopeSelectionStarted = presentation.beginScopeSelection()
+        #expect(retryScopeSelectionStarted)
+        let retryResolution = try #require(coordinator.beginResolution(scope: .thisAndFuture))
+        try await coordinator.submit(retryResolution)
+        presentation.resolutionSucceeded()
+        presentation.pendingDropDidChange(hasPendingDrop: coordinator.pendingRecurringDrop != nil)
+
+        #expect(coordinator.pendingRecurringDrop == nil)
+        #expect(presentation.state == .hidden)
+        #expect(await repository.saveCount == 1)
+    }
+
     @Test func sharedUndoCommandUsesStoreAvailabilityAndSnapshot() async throws {
         let original = makeEmptyState()
         let repository = InMemoryCalendarRepository(initialState: original)

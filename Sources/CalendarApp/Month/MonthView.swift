@@ -65,7 +65,7 @@ struct MonthView: View {
     @State private var quickCreateDate: CalendarDate?
     @State private var selectedDayDrawerDate: CalendarDate?
     @State private var selectedItem: ProjectedItem?
-    @State private var isRecurringDropConfirmationPresented = false
+    @State private var recurringDropPresentation = RecurringDropPresentationController()
 
     init(
         store: CalendarStore,
@@ -119,7 +119,7 @@ struct MonthView: View {
             hiddenCategoryIDs = CategoryFilterView.decode(encoded)
         }
         .onChange(of: dropCoordinator.pendingRecurringDrop) { _, pendingDrop in
-            isRecurringDropConfirmationPresented = pendingDrop != nil
+            recurringDropPresentation.pendingDropDidChange(hasPendingDrop: pendingDrop != nil)
         }
         .popover(isPresented: quickCreatePresented) {
             if let date = quickCreateDate {
@@ -141,14 +141,13 @@ struct MonthView: View {
         }
         .confirmationDialog(
             "移动重复事项",
-            isPresented: $isRecurringDropConfirmationPresented,
+            isPresented: recurringDropConfirmationPresented,
             titleVisibility: .visible
         ) {
             Button("仅本次") { resolveRecurringDrop(scope: .onlyThis) }
             Button("本次及以后") { resolveRecurringDrop(scope: .thisAndFuture) }
             Button("取消", role: .cancel) {
-                isRecurringDropConfirmationPresented = false
-                dropCoordinator.cancel()
+                cancelRecurringDropConfirmation()
             }
         } message: {
             Text("请选择移动范围")
@@ -246,8 +245,31 @@ struct MonthView: View {
 
     private var alertPresented: Binding<Bool> {
         Binding(
-            get: { store.loadError != nil || store.mutationError != nil },
-            set: { if !$0 { store.dismissErrors() } }
+            get: {
+                recurringDropPresentation.isErrorPresented
+                    || store.loadError != nil
+                    || (
+                        store.mutationError != nil
+                            && recurringDropPresentation.state != .resolving
+                    )
+            },
+            set: { isPresented in
+                guard !isPresented else { return }
+                store.dismissErrors()
+                _ = recurringDropPresentation.acknowledgeError(
+                    hasPendingDrop: dropCoordinator.pendingRecurringDrop != nil
+                )
+            }
+        )
+    }
+
+    private var recurringDropConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { recurringDropPresentation.isConfirmationPresented },
+            set: { isPresented in
+                guard !isPresented else { return }
+                requestRecurringDropConfirmationDismissal()
+            }
         )
     }
 
@@ -299,15 +321,35 @@ struct MonthView: View {
     }
 
     private func resolveRecurringDrop(scope: SeriesScope) {
-        guard let resolution = dropCoordinator.beginResolution(scope: scope) else { return }
-        isRecurringDropConfirmationPresented = false
+        guard recurringDropPresentation.beginScopeSelection() else { return }
+        guard let resolution = dropCoordinator.beginResolution(scope: scope) else {
+            recurringDropPresentation.pendingDropDidChange(
+                hasPendingDrop: dropCoordinator.pendingRecurringDrop != nil
+            )
+            return
+        }
         Task {
             do {
                 try await dropCoordinator.submit(resolution)
+                recurringDropPresentation.resolutionSucceeded()
             } catch {
-                isRecurringDropConfirmationPresented = true
+                recurringDropPresentation.resolutionFailed()
             }
         }
+    }
+
+    private func requestRecurringDropConfirmationDismissal() {
+        guard recurringDropPresentation.requestConfirmationDismissal() else { return }
+        Task { @MainActor in
+            await Task.yield()
+            guard recurringDropPresentation.settleConfirmationDismissal() else { return }
+            dropCoordinator.cancel()
+        }
+    }
+
+    private func cancelRecurringDropConfirmation() {
+        guard recurringDropPresentation.cancelConfirmation() else { return }
+        dropCoordinator.cancel()
     }
 
     private func undo() {
