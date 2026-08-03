@@ -14,29 +14,19 @@ public struct MonthProjection: Equatable, Sendable {
         let range = CalendarDateRange(start: firstCell, end: cellDates[cellDates.count - 1])
         var entriesByDate = Dictionary(uniqueKeysWithValues: cellDates.map { ($0, [ProjectedItem]()) })
 
-        for item in state.items.values where range.contains(item.date) {
-            guard !hiddenCategoryIDs.contains(item.categoryID) else {
-                continue
-            }
-            entriesByDate[item.date, default: []].append(.item(item))
-        }
-
-        for series in state.recurrence.series.values {
-            let occurrences = RecurrenceEngine.occurrences(
-                of: series,
-                in: range,
-                exceptions: state.recurrence.exceptions,
-                completions: state.recurrence.completions
-            )
-            for occurrence in occurrences where !hiddenCategoryIDs.contains(occurrence.categoryID) {
-                entriesByDate[occurrence.displayedDate, default: []].append(.occurrence(occurrence))
-            }
+        for entry in TimelineProjection.make(
+            in: range,
+            state: state,
+            hiddenCategoryIDs: hiddenCategoryIDs
+        ).entries {
+            let displayDate = max(entry.schedule.startDate, range.start)
+            entriesByDate[displayDate, default: []].append(entry.monthProjectedItem)
         }
 
         return MonthProjection(days: cellDates.map { cellDate in
             ProjectedDay(
                 date: cellDate,
-                items: entriesByDate[cellDate, default: []].sorted(by: projectedItemPrecedes)
+                items: entriesByDate[cellDate, default: []]
             )
         })
     }
@@ -65,15 +55,12 @@ public enum ProjectedItem: Identifiable, Equatable, Sendable {
         case let .item(item):
             return "item:\(item.id.uuidString)"
         case let .occurrence(occurrence):
-            return "occurrence:\(occurrence.key.seriesID.uuidString):\(stableDate(occurrence.key.originalDate))"
+            return "occurrence:\(occurrence.key.seriesID.uuidString):\(monthStableDate(occurrence.key.originalDate))"
         }
     }
 
     public var displayedDate: CalendarDate {
-        switch self {
-        case let .item(item): item.date
-        case let .occurrence(occurrence): occurrence.displayedDate
-        }
+        schedule.startDate
     }
 
     public var title: String {
@@ -98,10 +85,10 @@ public enum ProjectedItem: Identifiable, Equatable, Sendable {
     }
 
     public var timeRange: LocalTimeRange? {
-        switch self {
-        case let .item(item): item.timeRange
-        case let .occurrence(occurrence): occurrence.timeRange
+        guard let startTime = schedule.startTime, let endTime = schedule.endTime else {
+            return nil
         }
+        return try? LocalTimeRange(start: startTime, end: endTime)
     }
 
     public var creationTimeZoneIdentifier: String {
@@ -124,6 +111,13 @@ public enum ProjectedItem: Identifiable, Equatable, Sendable {
         case let .occurrence(occurrence): occurrence.createdAt
         }
     }
+
+    public var schedule: CalendarSchedule {
+        switch self {
+        case let .item(item): item.schedule
+        case let .occurrence(occurrence): occurrence.schedule
+        }
+    }
 }
 
 private extension CalendarDateRange {
@@ -132,22 +126,15 @@ private extension CalendarDateRange {
     }
 }
 
-private func projectedItemPrecedes(_ lhs: ProjectedItem, _ rhs: ProjectedItem) -> Bool {
-    switch (lhs.timeRange, rhs.timeRange) {
-    case (nil, .some):
-        return true
-    case (.some, nil):
-        return false
-    case let (.some(left), .some(right)) where left.start != right.start:
-        return left.start < right.start
-    default:
-        if lhs.createdAt != rhs.createdAt {
-            return lhs.createdAt < rhs.createdAt
+private extension ProjectedEntry {
+    var monthProjectedItem: ProjectedItem {
+        switch self {
+        case let .item(item): .item(item)
+        case let .occurrence(occurrence): .occurrence(occurrence)
         }
-        return lhs.id < rhs.id
     }
 }
 
-private func stableDate(_ date: CalendarDate) -> String {
+private func monthStableDate(_ date: CalendarDate) -> String {
     String(format: "%04d-%02d-%02d", date.year, date.month, date.day)
 }
