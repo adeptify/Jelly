@@ -42,12 +42,14 @@ struct CalendarThemeTests {
         let reduced = CalendarMotionPolicy(reduceMotion: true)
         #expect(reduced.snapAnimation == nil)
         #expect(reduced.overlayAnimation == nil)
+        #expect(reduced.centeringSettleDelay == nil)
         #expect(reduced.shouldAlignToWeek)
         #expect(reduced.shouldPresentOverlays)
 
         let standard = CalendarMotionPolicy(reduceMotion: false)
         #expect(standard.snapAnimation != nil)
         #expect(standard.overlayAnimation != nil)
+        #expect(standard.centeringSettleDelay == .milliseconds(180))
         #expect(standard.shouldAlignToWeek)
         #expect(standard.shouldPresentOverlays)
     }

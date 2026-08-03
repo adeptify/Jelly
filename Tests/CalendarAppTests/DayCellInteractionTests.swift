@@ -131,25 +131,56 @@ struct DayCellInteractionTests {
         #expect(scrollRecorder.records.isEmpty)
     }
 
+    @Test func bodyRangeSurfaceUsesLocalOriginAndExcludesOnlyOccupiedLanes() {
+        let date = CalendarDate(year: 2026, month: 8, day: 10)!
+        let emptySurface = WeekRowRangeGestureSurfaceView(
+            date: date,
+            hitSurface: .emptySurface,
+            rootOrigin: .zero,
+            onRangeGesture: { _ in }
+        )
+        emptySurface.frame = CGRect(x: 0, y: 0, width: 100, height: 228)
+        #expect(emptySurface.hitTest(CGPoint(x: 50, y: 1)) === emptySurface)
+
+        let surface = WeekRowRangeGestureSurfaceView(
+            date: date,
+            hitSurface: .emptySurface,
+            rootOrigin: .zero,
+            blockedLaneIndexes: [0, 1, 2],
+            onRangeGesture: { _ in }
+        )
+        surface.frame = CGRect(x: 0, y: 0, width: 100, height: 228)
+
+        #expect(surface.hitTest(CGPoint(x: 50, y: 1)) == nil)
+        #expect(surface.hitTest(CGPoint(x: 50, y: 22)) === surface)
+        #expect(surface.hitTest(CGPoint(x: 50, y: 24)) == nil)
+        #expect(surface.hitTest(CGPoint(x: 50, y: 47)) == nil)
+        #expect(surface.hitTest(CGPoint(x: 50, y: 70)) === surface)
+    }
+
     @Test func hostedWeekRowRoutesEmptyBodyToRangeSurfaceWithoutCoveringHeaderOrItem() throws {
         let weekStart = CalendarDate(year: 2026, month: 8, day: 3)!
         var state = makeEmptyState()
-        let item = try CalendarItem(
-            id: UUID(),
-            kind: .task,
-            title: "前景事项",
-            categoryID: state.uncategorizedID,
-            schedule: try CalendarSchedule(
-                startDate: weekStart.addingDays(1),
-                endDate: weekStart.addingDays(2),
-                startTime: nil,
-                endTime: nil
-            ),
-            completedAt: nil,
-            createdAt: .distantPast,
-            updatedAt: .distantPast
-        )
-        state.items[item.id] = item
+        let items = try (0..<3).map { lane in
+            try CalendarItem(
+                id: UUID(),
+                kind: .task,
+                title: "前景事项 (lane)",
+                categoryID: state.uncategorizedID,
+                schedule: try CalendarSchedule(
+                    startDate: weekStart.addingDays(1),
+                    endDate: weekStart.addingDays(2),
+                    startTime: nil,
+                    endTime: nil
+                ),
+                completedAt: nil,
+                createdAt: .distantPast,
+                updatedAt: .distantPast
+            )
+        }
+        for item in items {
+            state.items[item.id] = item
+        }
 
         let store = CalendarStore(
             initialState: state,
@@ -158,7 +189,7 @@ struct DayCellInteractionTests {
         let rangeRecorder = RangeGestureRecorder()
         let itemRecorder = ItemGestureRecorder()
         let layout = try #require(WeekSegmentLayout.make(
-            entries: [.item(item)],
+            entries: items.map(ProjectedEntry.item),
             weekStarts: [weekStart],
             laneCapacity: 10
         ).first)
@@ -191,11 +222,19 @@ struct DayCellInteractionTests {
         host.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
 
-        let emptySurface = try #require(
-            descendants(of: host, as: WeekRowRangeGestureSurfaceView.self).first
-        )
+        let rangeSurfaces = descendants(of: host, as: WeekRowRangeGestureSurfaceView.self)
+            .sorted {
+                $0.convert(CGPoint(x: $0.bounds.midX, y: 1), to: host).x
+                    < $1.convert(CGPoint(x: $1.bounds.midX, y: 1), to: host).x
+            }
+        let emptySurface = try #require(rangeSurfaces.first)
+        let itemCellSurface = try #require(rangeSurfaces.dropFirst().first)
         let itemSurface = try #require(
             descendants(of: host, as: WeekRowItemGestureSurfaceView.self).first
+        )
+        let topEmptyBodyPoint = emptySurface.convert(
+            CGPoint(x: emptySurface.bounds.midX, y: 1),
+            to: host
         )
         let emptyBodyPoint = emptySurface.convert(
             CGPoint(x: emptySurface.bounds.midX, y: emptySurface.bounds.midY),
@@ -221,13 +260,26 @@ struct DayCellInteractionTests {
             CGPoint(x: itemSurface.bounds.maxX - 2, y: itemSurface.bounds.midY),
             to: host
         )
+        let blockedLanePoints = (0..<3).map { lane in
+            itemCellSurface.convert(
+                CGPoint(
+                    x: itemCellSurface.bounds.midX,
+                    y: CGFloat(lane) * (WeekRowMetrics.laneHeight + WeekRowMetrics.laneSpacing) + 1
+                ),
+                to: host
+            )
+        }
 
+        #expect(host.hitTest(topEmptyBodyPoint) === emptySurface)
         #expect(host.hitTest(emptyBodyPoint) === emptySurface)
         #expect(host.hitTest(headerPoint) !== emptySurface)
         #expect(!(host.hitTest(itemPoint) is WeekRowRangeGestureSurfaceView))
         #expect(!(host.hitTest(completionPoint) is WeekRowRangeGestureSurfaceView))
         #expect(!(host.hitTest(leadingHandlePoint) is WeekRowRangeGestureSurfaceView))
         #expect(!(host.hitTest(trailingHandlePoint) is WeekRowRangeGestureSurfaceView))
+        for blockedLanePoint in blockedLanePoints {
+            #expect(!(host.hitTest(blockedLanePoint) is WeekRowRangeGestureSurfaceView))
+        }
 
         try sendMouseClick(
             to: try #require(host.hitTest(emptyBodyPoint) as? WeekRowRangeGestureSurfaceView),

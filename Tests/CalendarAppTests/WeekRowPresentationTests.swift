@@ -297,15 +297,83 @@ struct WeekRowPresentationTests {
             last: target.addingDays(364),
             count: 105
         )
+        let centeredFrames = [WeekRowViewportFrame(
+            weekStart: target,
+            minY: 258,
+            maxY: 510,
+            windowRevision: revision
+        )]
         var state = WeekStreamCenteringState()
         let first = state.begin(weekStart: target, windowRevision: revision)
-        let second = state.begin(weekStart: target, windowRevision: revision)
+        let firstIssueAccepted = state.markScrollIssued(for: first)
+        #expect(firstIssueAccepted)
+        // A centered Today target can leave preference frames unchanged because scrollTo is a
+        // no-op. The cached frame must still release the request.
+        #expect(state.receive(frames: centeredFrames, viewportHeight: 768) == .ready)
+        #expect(state.blocksViewportUpdates == false)
 
+        let second = state.begin(weekStart: target, windowRevision: revision)
         #expect(first != second)
         let staleIssueAccepted = state.markScrollIssued(for: first)
-        let latestIssueAccepted = state.markScrollIssued(for: second)
+        let secondIssueAccepted = state.markScrollIssued(for: second)
         #expect(staleIssueAccepted == false)
-        #expect(latestIssueAccepted)
+        #expect(secondIssueAccepted)
+        #expect(state.receive(frames: centeredFrames, viewportHeight: 768) == .ready)
+        #expect(state.blocksViewportUpdates == false)
+
+        let nextWeek = target.addingDays(7)
+        #expect(WeekStreamViewport.focusWeek(
+            in: [
+                .init(weekStart: target, minY: -128, maxY: 124, windowRevision: revision),
+                .init(weekStart: nextWeek, minY: 124, maxY: 376, windowRevision: revision)
+            ],
+            viewportHeight: 500
+        ) == nextWeek)
+    }
+
+    @Test func animatedCenteringWaitsForStableFramesWhileReducedMotionSettlesDirectly() {
+        let target = CalendarDate(year: 2026, month: 8, day: 3)!
+        let revision = WeekStreamWindowRevision(
+            first: target.addingDays(-364),
+            last: target.addingDays(364),
+            count: 105
+        )
+        let intermediateFrames = [WeekRowViewportFrame(
+            weekStart: target,
+            minY: 0,
+            maxY: 252,
+            windowRevision: revision
+        )]
+
+        var standardMotion = WeekStreamCenteringState()
+        let standardRequest = standardMotion.begin(weekStart: target, windowRevision: revision)
+        let animatedIssueAccepted = standardMotion.markScrollIssued(
+            for: standardRequest,
+            animated: true
+        )
+        #expect(animatedIssueAccepted)
+        #expect(standardMotion.receive(frames: intermediateFrames, viewportHeight: 768) == .wait)
+        #expect(standardMotion.blocksViewportUpdates)
+        let animationSettled = standardMotion.markAnimationSettled(for: standardRequest)
+        #expect(animationSettled)
+        #expect(standardMotion.receive(frames: intermediateFrames, viewportHeight: 768)
+            == .retry(standardRequest))
+        let retryIssueAccepted = standardMotion.markScrollIssued(
+            for: standardRequest,
+            animated: false
+        )
+        #expect(retryIssueAccepted)
+        #expect(standardMotion.receive(frames: intermediateFrames, viewportHeight: 768) == .wait)
+
+        var reducedMotion = WeekStreamCenteringState()
+        let reducedRequest = reducedMotion.begin(weekStart: target, windowRevision: revision)
+        let reducedIssueAccepted = reducedMotion.markScrollIssued(
+            for: reducedRequest,
+            animated: false
+        )
+        #expect(reducedIssueAccepted)
+        #expect(reducedMotion.receive(frames: intermediateFrames, viewportHeight: 768)
+            == .retry(reducedRequest))
     }
 
     @Test func nearLeadingWindowEdgeRequestsExtensionAndPreservesTheVisibleWeekAnchor() {
@@ -673,6 +741,61 @@ struct WeekRowPresentationTests {
         #expect(firstBegin)
         #expect(repeatedBegin == false)
         #expect(restoration.isLocked)
+    }
+
+    @Test @MainActor func farProgrammaticCenteringCancelsOldRestorationAndQueuedCorrection() throws {
+        let extensionAnchor = CalendarDate(year: 2026, month: 8, day: 3)!
+        let oldRevision = WeekStreamWindowRevision(
+            first: extensionAnchor,
+            last: extensionAnchor.addingDays(364),
+            count: 53
+        )
+        let farToday = CalendarDate(year: 2027, month: 8, day: 2)!
+        let recenteredRevision = WeekStreamWindowRevision(
+            first: farToday.addingDays(-364),
+            last: farToday.addingDays(364),
+            count: 105
+        )
+        let restoration = WeekStreamRestorationController()
+        let recorder = WeekStreamAdjustmentRecorder()
+        let coordinator = WeekStreamScrollCoordinator(onAdjustment: recorder.record)
+        let extensionRequest = WeekStreamExtensionRequest(
+            direction: .earlier,
+            anchor: .init(weekStart: extensionAnchor, pixelOffset: 0),
+            desiredMinY: 0
+        )
+
+        #expect(restoration.begin(request: extensionRequest))
+        restoration.expect(anchor: extensionRequest.anchor, windowRevision: oldRevision)
+        let correction = try #require(adjustment(from: restoration.receive(frames: [
+            .init(weekStart: extensionAnchor, minY: 200, maxY: 452, windowRevision: oldRevision)
+        ])))
+        coordinator.adjustViewport(correction)
+        #expect(restoration.isLocked)
+        #expect(recorder.adjustments.isEmpty)
+
+        // A far Today action supersedes the extension before its deferred correction can attach.
+        restoration.cancel()
+        coordinator.invalidateQueuedCorrection()
+        #expect(restoration.isLocked == false)
+        #expect(restoration.receive(frames: [
+            .init(weekStart: extensionAnchor, minY: 200, maxY: 452, windowRevision: oldRevision)
+        ]) == .wait)
+        let harness = makeScrollHarness(documentHeight: 1_000, viewportHeight: 100, originY: 200)
+        coordinator.resolve(from: harness.marker)
+        #expect(recorder.adjustments.isEmpty)
+
+        var centering = WeekStreamCenteringState()
+        let todayRequest = centering.begin(
+            weekStart: farToday,
+            windowRevision: recenteredRevision
+        )
+        let todayIssueAccepted = centering.markScrollIssued(for: todayRequest)
+        #expect(todayIssueAccepted)
+        #expect(centering.receive(frames: [
+            .init(weekStart: farToday, minY: 258, maxY: 510, windowRevision: recenteredRevision)
+        ], viewportHeight: 768) == .ready)
+        #expect(centering.blocksViewportUpdates == false)
     }
 
     @Test func scrollOffsetMathUsesDocumentOrientationAndClamps() {

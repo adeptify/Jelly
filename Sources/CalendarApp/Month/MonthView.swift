@@ -59,6 +59,23 @@ private struct WeekStreamScrollRequest: Equatable {
     let animated: Bool
 }
 
+struct MonthViewInitialWeekStream: Equatable {
+    let today: CalendarDate
+    let weekStarts: [CalendarDate]
+    let focusWeek: CalendarDate
+    let monthTitleDate: CalendarDate
+    let windowRevision: WeekStreamWindowRevision
+
+    init(today: CalendarDate) {
+        let stream = WeekStreamModel(centeredOn: today)
+        self.today = today
+        weekStarts = stream.weekStarts
+        focusWeek = stream.focusWeek
+        monthTitleDate = stream.monthTitleDate
+        windowRevision = WeekStreamWindowRevision(weekStarts: stream.weekStarts)
+    }
+}
+
 enum MonthQuickCreateRouting {
     static func presentation(for action: CalendarInteractionAction?) -> QuickCreatePresentation? {
         guard let action else { return nil }
@@ -228,6 +245,8 @@ struct MonthView: View {
     @State private var recurringDropPresentation = RecurringDropPresentationController()
     @State private var requestedCenterRequest: WeekStreamScrollRequest?
     @State private var weekStreamCentering: WeekStreamCenteringState
+    @State private var latestWeekStreamFrames: [WeekRowViewportFrame] = []
+    @State private var latestWeekStreamViewportHeight: CGFloat?
 
     private var theme: CalendarSemanticAppearance {
         CalendarTheme.appearance(for: colorScheme)
@@ -244,12 +263,12 @@ struct MonthView: View {
         self.store = store
         self.todayRefreshPolicy = todayRefreshPolicy
         todayRefreshController = MonthViewTodayRefreshController(policy: todayRefreshPolicy)
-        let today = todayRefreshPolicy.today
+        let initialWeekStream = MonthViewInitialWeekStream(today: todayRefreshPolicy.today)
         _model = StateObject(wrappedValue: MonthViewModel(
-            centeredOn: today,
+            centeredOn: initialWeekStream.today,
             state: store.state,
             hiddenCategoryIDs: [],
-            today: today
+            today: initialWeekStream.today
         ))
         _dropCoordinator = StateObject(wrappedValue: CalendarDropCoordinator(store: store))
         _interactionCoordinator = StateObject(wrappedValue: CalendarInteractionCoordinator())
@@ -261,11 +280,10 @@ struct MonthView: View {
             [weak restoration] adjustment in
             restoration?.recordAppliedAdjustment(adjustment)
         })
-        let initialStream = WeekStreamModel(centeredOn: today)
         var initialCentering = WeekStreamCenteringState()
         _ = initialCentering.begin(
-            weekStart: initialStream.focusWeek,
-            windowRevision: WeekStreamWindowRevision(weekStarts: initialStream.weekStarts)
+            weekStart: initialWeekStream.focusWeek,
+            windowRevision: initialWeekStream.windowRevision
         )
         _weekStreamCentering = State(initialValue: initialCentering)
     }
@@ -600,6 +618,8 @@ struct MonthView: View {
     }
 
     private func requestCentering(on weekStart: CalendarDate) {
+        weekStreamRestoration.cancel()
+        weekStreamScrollCoordinator.invalidateQueuedCorrection()
         requestedCenterRequest = .init(
             weekStart: weekStart,
             windowRevision: WeekStreamWindowRevision(weekStarts: model.weekStarts),
@@ -684,6 +704,8 @@ struct MonthView: View {
                 )
             }
             .onPreferenceChange(WeekRowFramePreferenceKey.self) { frames in
+                latestWeekStreamFrames = frames
+                latestWeekStreamViewportHeight = viewportHeight
                 handleWeekStreamViewport(
                     frames: frames,
                     viewportHeight: viewportHeight,
@@ -867,8 +889,45 @@ struct MonthView: View {
     ) {
         Task { @MainActor in
             await Task.yield()
-            guard weekStreamCentering.markScrollIssued(for: request) else { return }
-            align(proxy, to: request.weekStart, anchor: .center, animated: animated)
+            let usesAnimatedScroll = animated && motionPolicy.snapAnimation != nil
+            guard weekStreamCentering.markScrollIssued(
+                for: request,
+                animated: usesAnimatedScroll
+            ) else {
+                return
+            }
+            align(
+                proxy,
+                to: request.weekStart,
+                anchor: .center,
+                animated: usesAnimatedScroll
+            )
+            if usesAnimatedScroll, let delay = motionPolicy.centeringSettleDelay {
+                try? await Task.sleep(for: delay)
+                guard weekStreamCentering.markAnimationSettled(for: request) else { return }
+            }
+            await Task.yield()
+            confirmDeferredCentering(for: request, using: proxy)
+        }
+    }
+
+    private func confirmDeferredCentering(
+        for request: WeekStreamCenteringRequest,
+        using proxy: ScrollViewProxy
+    ) {
+        guard weekStreamCentering.pendingRequest == request,
+              let viewportHeight = latestWeekStreamViewportHeight
+        else {
+            return
+        }
+        switch weekStreamCentering.receive(
+            frames: latestWeekStreamFrames,
+            viewportHeight: viewportHeight
+        ) {
+        case .wait, .ready:
+            return
+        case let .retry(request):
+            issueCenteringScroll(request, using: proxy, animated: false)
         }
     }
 

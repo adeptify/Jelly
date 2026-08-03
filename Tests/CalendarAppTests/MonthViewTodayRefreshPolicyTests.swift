@@ -64,7 +64,29 @@ struct MonthViewTodayRefreshPolicyTests {
             year: 2026, month: 8, day: 4, hour: 9
         ))!
         let policy = MonthViewTodayRefreshPolicy(now: { now }, calendar: calendar)
+        let injectedToday = policy.today
+        let initialWeekStream = MonthViewInitialWeekStream(today: injectedToday)
+        let targetWeek = CalendarDate(year: 2026, month: 8, day: 3)!
+
+        #expect(initialWeekStream.today == injectedToday)
+        #expect(initialWeekStream.focusWeek == targetWeek)
+        #expect(initialWeekStream.monthTitleDate == CalendarDate(year: 2026, month: 8, day: 6)!)
+        #expect(initialWeekStream.weekStarts.count == 105)
+        #expect(initialWeekStream.weekStarts[52] == targetWeek)
+        #expect(initialWeekStream.windowRevision == .init(weekStarts: initialWeekStream.weekStarts))
+
         let state = makeEmptyState()
+        let initialModel = MonthViewModel(
+            centeredOn: initialWeekStream.today,
+            state: state,
+            hiddenCategoryIDs: [],
+            today: initialWeekStream.today
+        )
+        #expect(initialModel.focusWeek == initialWeekStream.focusWeek)
+        #expect(initialModel.monthTitleDate == initialWeekStream.monthTitleDate)
+        #expect(initialModel.weekStarts[52] == initialWeekStream.focusWeek)
+        #expect(WeekStreamWindowRevision(weekStarts: initialModel.weekStarts)
+            == initialWeekStream.windowRevision)
         let store = CalendarStore(
             initialState: state,
             repository: InMemoryCalendarRepository(initialState: state)
@@ -92,9 +114,14 @@ struct MonthViewTodayRefreshPolicyTests {
         let stream = try #require(descendants(of: host, as: NSScrollView.self).first)
         let maxOriginY = max(0, stream.documentView!.bounds.height - stream.contentView.bounds.height)
         let originalOriginY = stream.contentView.bounds.origin.y
+        let targetDocumentCenterY = CGFloat(
+            try #require(initialWeekStream.weekStarts.firstIndex(of: targetWeek))
+        ) * WeekRowMetrics.defaultHeight + WeekRowMetrics.defaultHeight / 2
+        let targetViewportCenterY = targetDocumentCenterY - originalOriginY
 
         #expect(originalOriginY > 252)
         #expect(originalOriginY < maxOriginY - 252)
+        #expect(abs(targetViewportCenterY - stream.contentView.bounds.height / 2) <= 1)
 
         stream.contentView.scroll(to: NSPoint(x: 0, y: originalOriginY - 252))
         let earlierOriginY = stream.contentView.bounds.origin.y

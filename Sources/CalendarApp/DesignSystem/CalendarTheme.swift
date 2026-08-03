@@ -68,6 +68,12 @@ struct CalendarSemanticAppearance: Equatable, Sendable {
 struct CalendarMotionPolicy {
     let reduceMotion: Bool
 
+    // Keep viewport observation paused until the standard centering animation has
+    // produced a stable frame. Reduced Motion skips the interpolation entirely.
+    var centeringSettleDelay: Duration? {
+        reduceMotion ? nil : .milliseconds(180)
+    }
+
     var snapAnimation: Animation? {
         reduceMotion ? nil : .easeOut(duration: 0.16)
     }

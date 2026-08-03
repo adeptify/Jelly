@@ -421,8 +421,9 @@ final class WeekRowRangeGestureSurfaceView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard point.y >= WeekRowMetrics.dateHeaderHeight,
-              !blockedLaneIndexes.contains(where: { blockedLaneContains($0, point: point) })
+        let bodyPoint = localBodyPoint(for: point)
+        guard bodyPoint.y >= 0,
+              !blockedLaneIndexes.contains(where: { blockedLaneContains($0, point: bodyPoint) })
         else {
             return nil
         }
@@ -462,8 +463,16 @@ final class WeekRowRangeGestureSurfaceView: NSView {
     }
 
     private func blockedLaneContains(_ lane: Int, point: NSPoint) -> Bool {
-        let top = WeekRowMetrics.laneOffset(lane)
+        let top = WeekRowMetrics.laneOffset(lane) - WeekRowMetrics.dateHeaderHeight
         return point.y >= top && point.y < top + WeekRowMetrics.laneHeight
+    }
+
+    private func localBodyPoint(for point: NSPoint) -> NSPoint {
+        // SwiftUI keeps this bridge's AppKit hit coordinates in the date-cell space even
+        // though the representable is laid out below the header. Normalize once so lane 0
+        // starts at local body y = 0, and direct unit hosting remains locally testable.
+        guard window != nil else { return point }
+        return NSPoint(x: point.x, y: point.y - WeekRowMetrics.dateHeaderHeight)
     }
 }
 

@@ -70,6 +70,7 @@ enum WeekStreamCenteringAction: Equatable {
 struct WeekStreamCenteringState: Equatable {
     private enum Phase: Equatable {
         case pending
+        case animating
         case centering
     }
 
@@ -77,6 +78,7 @@ struct WeekStreamCenteringState: Equatable {
     private var request: WeekStreamCenteringRequest?
     private var phase: Phase?
     private var retryScheduled = false
+    private var retriesRemaining = 1
 
     var blocksViewportUpdates: Bool { request != nil }
     var pendingRequest: WeekStreamCenteringRequest? { request }
@@ -93,14 +95,25 @@ struct WeekStreamCenteringState: Equatable {
         self.request = request
         phase = .pending
         retryScheduled = false
+        retriesRemaining = 1
         return request
     }
 
     @discardableResult
-    mutating func markScrollIssued(for request: WeekStreamCenteringRequest) -> Bool {
+    mutating func markScrollIssued(
+        for request: WeekStreamCenteringRequest,
+        animated: Bool = false
+    ) -> Bool {
         guard self.request == request else { return false }
-        phase = .centering
+        phase = animated ? .animating : .centering
         retryScheduled = false
+        return true
+    }
+
+    @discardableResult
+    mutating func markAnimationSettled(for request: WeekStreamCenteringRequest) -> Bool {
+        guard self.request == request, phase == .animating else { return false }
+        phase = .centering
         return true
     }
 
@@ -128,8 +141,9 @@ struct WeekStreamCenteringState: Equatable {
     }
 
     private mutating func scheduleRetry(for request: WeekStreamCenteringRequest) -> WeekStreamCenteringAction {
-        guard !retryScheduled else { return .wait }
+        guard !retryScheduled, retriesRemaining > 0 else { return .wait }
         retryScheduled = true
+        retriesRemaining -= 1
         return .retry(request)
     }
 }
@@ -154,6 +168,10 @@ struct WeekStreamRestorationState: Equatable {
     private var pending: Pending?
 
     var isLocked: Bool { pending != nil }
+
+    mutating func cancel() {
+        pending = nil
+    }
 
     mutating func begin(request: WeekStreamExtensionRequest) -> Bool {
         guard pending == nil else { return false }
@@ -247,6 +265,10 @@ final class WeekStreamRestorationController: ObservableObject {
         state.expect(anchor: anchor, windowRevision: windowRevision)
     }
 
+    func cancel() {
+        state.cancel()
+    }
+
     func receive(frames: [WeekRowViewportFrame]) -> WeekStreamRestorationAction {
         state.receive(frames: frames)
     }
@@ -318,6 +340,10 @@ final class WeekStreamScrollCoordinator: ObservableObject {
             return
         }
         apply(correction, to: scrollView, documentView: documentView)
+    }
+
+    func invalidateQueuedCorrection() {
+        queuedCorrection = nil
     }
 
     private func apply(
