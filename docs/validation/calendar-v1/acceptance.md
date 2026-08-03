@@ -7,13 +7,14 @@
 
 ## 最终交付指纹
 
-- 构建来源提交：`e4b9fb7`（后续只追加验收文档和截图，不再重新打包）
-- 证据批次：`20260803-e4b9fb7-final`
-- `dist/个人月历.app.zip` SHA-256：`bb1e9a38b2bdde5f0b79684f545299b60e518def176f8d32e090702d5190e7b5`
-- 从该 ZIP 解出的 `个人月历.app` CDHash：`0f7845f1983f5b276824e2309ae20b81b1fdeb53`
+- 构建来源提交：`c573369`（拖拽自定义类型声明修复）
+- 交付物证据批次：`20260803-c573369-drag-uti`
+- `dist/个人月历.app.zip` SHA-256：`f4084fc79383ff7ad3fb35c071e5001cc77905d2fe1234b14da6acc72df61837`
+- 从该 ZIP 解出的 `个人月历.app` CDHash：`787e7fd7d736945e8dee18d68286bb9162f99caf`
 - `dark-980x680.png` SHA-256：`b4ae004a49d137206fd0bbb4a6e37f31e8f8b63788cc1ea26b45a2c32552b9a5`
 - `light-980x680.png` SHA-256：`03584c6bc18579a877aba0f7cd8e5a64af4f9f135c5c0c6fd704a5d8f91392a0`
-- 严格校验：ZIP 新鲜解包后 `plutil -lint`、`codesign --verify --deep --strict` 通过，且无 `com.apple.FinderInfo` / `com.apple.fileprovider` 扩展属性。
+- 严格校验：ZIP 新鲜解包后 `plutil -lint`、`codesign --verify --deep --strict` 通过，且无 `com.apple.FinderInfo` / `com.apple.fileprovider` 扩展属性；产物内 `UTExportedTypeDeclarations` 精确声明 `com.oreal.personalcalendar.item`，描述为“个人月历事项”，并符合 `public.json`。
+- 视觉截图沿用 `e4b9fb7` 的最终视觉批次；本次提交只修改 bundle 类型声明和打包回归脚本，没有修改 SwiftUI、主题、布局或业务状态。截图继续作为未受影响的视觉基线，不作为本次拖拽手势通过证据。
 
 | # | 场景 | Expected | Automated evidence | Manual evidence | Result |
 | --- | --- | --- | --- | --- | --- |
@@ -24,9 +25,9 @@
 | 5 | 重复任务独立完成 | 完成本周实例不影响下一次实例；重复日程没有完成状态 | `RecurrenceEngineTests.completingOneTaskOccurrenceDoesNotCompleteNext`、`RecurrenceEngineTests.eventDoesNotExposeCompletion` | 真实完成 8/12 重复实例；8/19 及以后实例仍未完成 | 通过 |
 | 6 | 仅本次编辑/移动 | 仅本次生成稳定身份例外，移动后原日期不重复生成，其他周期不变 | `SeriesMutationEngineTests.onlyThisMoveCreatesOneModifiedException`、`RecurrenceEngineTests.movedExceptionSuppressesOriginalAndKeepsStableKey` | 8/19“每周复盘”选择仅本次，改名并移动至 8/20“单次复盘验收”；8/19 消失，8/20 出现，8/12、8/26、9/2 保持 | 通过 |
 | 7 | 本次及以后编辑与例外迁移 | 历史实例、例外与完成保持；未来采用新规则，未来单次例外按合同迁移 | `SeriesMutationEngineTests.splittingPreservesPastAndMigratesFutureExceptions`、`RecurrenceEngineTests.explicitExceptionSurvivesNonMatchingWeekdayAfterSplit` | 从 8/12 选本次及以后改为“未来复盘验收”；8/12 完成态保留，8/20 单次例外保留，8/26、9/2 用新标题 | 通过 |
-| 8 | 周一/周三拖至周二后的整段平移与撤销 | 选择“本次及以后”后未来从周一/周三变周二/周四；撤销原子恢复系列、例外和完成记录 | `SeriesMutationEngineTests.thisAndFutureMoveShiftsMondayWednesdayToTuesdayThursday`、`futureMoveShiftsExplicitStateAndEmbeddedCompletionKey`、`CalendarDropCoordinatorTests.recurringDropWaitsForScopeAndShiftsFuturePattern` | 原生范围 dialog 的三个选项真实出现且有图；`sky.drag` 对月格 row 未触发，未能实测周一/周三→周二/周四与撤销 | 部分通过：自动化与范围 UI 通过；真实拖拽未确认 |
+| 8 | 周一/周三拖至周二后的整段平移与撤销 | 选择“本次及以后”后未来从周一/周三变周二/周四；撤销原子恢复系列、例外和完成记录 | `SeriesMutationEngineTests.thisAndFutureMoveShiftsMondayWednesdayToTuesdayThursday`、`futureMoveShiftsExplicitStateAndEmbeddedCompletionKey`、`CalendarDropCoordinatorTests.recurringDropWaitsForScopeAndShiftsFuturePattern`；archive 回归从最终 ZIP 解包的 plist 校验拖拽 UTI 声明 | 原生范围 dialog 的三个选项真实出现且有图。受控诊断确认修复前源 payload 已生成但日期格不进入 targeted；只补 bundle UTI 声明后，日期格立即高亮并显示“移到 8月4日”。最终包的 CUA 坐标注入本轮报 `noWindowsAvailable`，未能替代真实鼠标完成松手、范围选择、整段平移与撤销 | 部分通过：目标识别根因已修；完整真实拖拽仍待用户鼠标确认 |
 | 9 | 重复事项删除范围与撤销 | 单次删除只跳过该实例；本次及以后删除保留过去历史；两者均可撤销 | `SeriesMutationEngineTests.onlyThisDeleteCreatesOneSkippedException`、`thisAndFutureDeleteEndsOldSeriesAndRemovesFutureState`、`ItemEditorViewModelTests.deletingOccurrenceUsesChosenScope` | 对“边界重复验收”真实仅本次删除：8/10 消失、8/17 保留，Command-Z 恢复；本次及以后删除：8/10、8/17 均消失，Command-Z 恢复 | 通过 |
-| 10 | 普通事项拖动和撤销 | 普通事项改期，定时时间/时长保持，Command-Z 恢复原日期 | `CalendarReducerTests.movingTimedItemPreservesTimeRange`、`CalendarDropCoordinatorTests.oneOffDropPreservesTimeAndRegistersOneUndo` | 对“产品同步会”真实 `sky.drag` 未触发，未能完成手势路径 | 部分通过：自动化通过；真实拖拽手势未确认 |
+| 10 | 普通事项拖动和撤销 | 普通事项改期，定时时间/时长保持，Command-Z 恢复原日期 | `CalendarReducerTests.movingTimedItemPreservesTimeRange`、`CalendarDropCoordinatorTests.oneOffDropPreservesTimeAndRegistersOneUndo`；archive 回归校验实际产物 UTI | 修复前“产品同步会”拖拽源已启动，但日期格因 bundle 未注册自定义类型而拒绝；加入声明后同一共享 drop target 已能进入 targeted 并显示目的日期。最终完成移动与 Command-Z 仍需真实鼠标确认 | 部分通过：阻断拖拽的类型注册缺失已修；完整手势与撤销待用户确认 |
 | 11 | 日期格三热区 | 日期数字/溢出打开当天抽屉；空白区打开快速创建；已有事项打开详情，入口不冲突 | `ItemEditorViewModelTests.overflowAndDateNumberOpenDayWhileBlankCreates`、`DayCellInteractionTests.emptyCellSurfaceUsesQuickCreateWithoutStealingControls` | 日期数字打开 8/3 抽屉、事项打开详情；空白 8/7、8/8 打开快速创建且标题立即聚焦。图展示浮层、文本和焦点环/插入位置 | 通过 |
 | 12 | 溢出、筛选重计与当天抽屉 | 内容超容量显示“还有 N 项”；隐藏分类后 N 重新计算；抽屉显示完整列表 | `MonthViewModelTests.monthViewModelOrdersUntimedBeforeTimedAndComputesOverflow`、`hiddenCategoriesAreExcludedFromFreshProjectionAndOverflow`、`CalendarReducerTests.hiddenCategoriesDoNotCountTowardOverflow` | 980 窗口 8/3 显示“还有 3 项”；隐藏工作后剩健康/生活两条且溢出消失，恢复后“还有 3 项”返回；抽屉显示 4 项 | 通过 |
 | 13 | 在用分类删除迁移与撤销 | 删除在用分类要求明确迁移或未分类；无悬空引用；撤销原子恢复分类和全部引用 | `CalendarReducerTests.deletingCategoryMigratesEveryReferenceAtomically`、`CategoryManagerViewModelTests.deleteRequiresExplicitMigrationChoice`、`deleteToUncategorizedAtomicallyMigratesAllReferencesAndUndoRestoresEverything` | 真实删除在用“生活”并迁移至未分类，分类消失；分类窗口 Command-Z 后“生活”及主月历两条引用恢复，无悬空 | 通过 |
@@ -49,4 +50,4 @@
 | `category-manager-previews.png` | 独立分类管理窗口，同时显示浅/深色预览和对比值 | 已采集并目检：实际像素 900×552；浅/深预览同时显示，对比值为 14.38:1 与 13.12:1 |
 | `recurring-scope-dialog.png` | 月格上方的“仅本次 / 本次及以后 / 取消”确认 | 已采集并目检：实际像素 3024×1964；三个范围选项清晰可见 |
 
-最终结论：18 条场景中，16 条已完成自动化与真实手动路径并通过；#8 重复事项整段拖拽、#10 普通事项拖拽仍为“部分通过/真实手势未确认”，不把它们写成全绿。#18 已由指纹对应的权威 ZIP 解出的 App 在浅/深 980 最小窗口下重采并通过；新图实际为 980×768，并同时包含完整时间、短标题和“还有 2 项”。#1 的排序需求已由真实可访问备用入口与 Command-Z 完成。
+最终结论：18 条场景中，16 条已完成自动化与真实手动路径并通过。用户报告的“完全拖不动”已定位为 bundle 未声明自定义拖拽 UTI；修复后受控诊断已确认日期格能够识别 payload 并进入 targeted，最终 ZIP 也包含并自动回归该声明。#8、#10 仍只记为“部分通过”，因为本轮 CUA 坐标注入失败，未替代用户真实鼠标完成松手后的移动、范围选择与撤销；收到用户确认前不写成 18/18。#18 的视觉基线未受本次纯 metadata/回归脚本修复影响。#1 的排序需求已由真实可访问备用入口与 Command-Z 完成。
