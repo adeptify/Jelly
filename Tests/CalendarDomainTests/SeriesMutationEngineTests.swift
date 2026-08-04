@@ -140,6 +140,97 @@ struct SeriesMutationEngineTests {
         #expect(result.completions[futureKey] == nil)
     }
 
+    @Test func eventSeriesFutureLeadingResizeKeepsModifiedTaskCompletionAndDropsNaturalEventCompletion() throws {
+        let series = try WeeklySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000280")!,
+            kind: .event,
+            title: "周会",
+            categoryID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            ruleStartDate: .init(year: 2026, month: 8, day: 3)!,
+            recurrenceEndDate: .init(year: 2026, month: 8, day: 31)!,
+            weekdays: [.monday],
+            durationDays: 2,
+            startTime: nil,
+            endTime: nil,
+            createdAt: Date(timeIntervalSince1970: 0),
+            updatedAt: Date(timeIntervalSince1970: 0)
+        )
+        let boundary = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: .init(year: 2026, month: 8, day: 10)!
+        )
+        let modifiedTaskKey = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: .init(year: 2026, month: 8, day: 17)!
+        )
+        let naturalEventKey = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: .init(year: 2026, month: 8, day: 24)!
+        )
+        let taskOverride = OccurrenceOverride(
+            displayedSchedule: try CalendarSchedule(
+                startDate: .init(year: 2026, month: 8, day: 18)!,
+                endDate: .init(year: 2026, month: 8, day: 18)!,
+                startTime: nil,
+                endTime: nil
+            ),
+            title: "会后待办",
+            kind: .task,
+            categoryID: series.categoryID
+        )
+        let taskCompletedAt = Date(timeIntervalSince1970: 280)
+        let naturalEventCompletedAt = Date(timeIntervalSince1970: 281)
+        let graph = RecurrenceGraph(
+            series: [series.id: series],
+            exceptions: [modifiedTaskKey: .modified(taskOverride)],
+            completions: [
+                modifiedTaskKey: .init(key: modifiedTaskKey, completedAt: taskCompletedAt),
+                naturalEventKey: .init(key: naturalEventKey, completedAt: naturalEventCompletedAt)
+            ]
+        )
+        let futureSeriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000281")!
+
+        let result = try SeriesMutationEngine.apply(
+            edit: .patch(.init(
+                displayedStartDate: .init(year: 2026, month: 8, day: 9)!,
+                durationDays: 3
+            )),
+            to: boundary,
+            scope: .thisAndFuture,
+            in: graph,
+            newSeriesID: futureSeriesID,
+            now: Date(timeIntervalSince1970: 282)
+        )
+
+        let migratedTaskKey = OccurrenceKey(
+            seriesID: futureSeriesID,
+            originalDate: .init(year: 2026, month: 8, day: 16)!
+        )
+        let migratedNaturalEventKey = OccurrenceKey(
+            seriesID: futureSeriesID,
+            originalDate: .init(year: 2026, month: 8, day: 23)!
+        )
+        #expect(result.series[futureSeriesID]?.kind == .event)
+        #expect(result.exceptions[migratedTaskKey] == .modified(.init(
+            displayedSchedule: try CalendarSchedule(
+                startDate: .init(year: 2026, month: 8, day: 17)!,
+                endDate: .init(year: 2026, month: 8, day: 17)!,
+                startTime: nil,
+                endTime: nil
+            ),
+            title: taskOverride.title,
+            kind: .task,
+            categoryID: taskOverride.categoryID
+        )))
+        #expect(result.completions[migratedTaskKey] == .init(
+            key: migratedTaskKey,
+            completedAt: taskCompletedAt
+        ))
+        #expect(result.completions[modifiedTaskKey] == nil)
+        #expect(result.completions[migratedNaturalEventKey] == nil)
+        #expect(result.completions[naturalEventKey] == nil)
+    }
+
     @Test func futureTrailingResizeChangesDurationWithoutMovingDeadline() throws {
         let originalDeadline = CalendarDate(year: 2026, month: 9, day: 30)!
         let series = try makeV2Series(

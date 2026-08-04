@@ -340,10 +340,6 @@ public enum SeriesMutationEngine {
         graph: RecurrenceGraph,
         result: inout RecurrenceGraph
     ) {
-        guard future.kind == .task else {
-            return
-        }
-
         for (oldKey, completion) in graph.completions where isFutureKey(
             oldKey,
             seriesID: oldSeriesID,
@@ -431,7 +427,7 @@ public enum SeriesMutationEngine {
         case let .modified(override):
             return override.kind == .task
         case nil:
-            return isNaturallyGenerated(key.originalDate, by: series)
+            return series.kind == .task && isNaturallyGenerated(key.originalDate, by: series)
         }
     }
 
