@@ -170,6 +170,9 @@ struct QuickCreatePopover: View {
                 Text("日程").tag(ItemKind.event)
             }
             .pickerStyle(.segmented)
+            .onChange(of: model.draft.kind) { previous, _ in
+                model.kindDidChange(from: previous)
+            }
 
             Picker("分类", selection: $categoryOption) {
                 ForEach(categories) { category in
@@ -198,18 +201,40 @@ struct QuickCreatePopover: View {
                 categoryOption = model.draft.categoryID.uuidString
             }
 
-            Toggle("具体时间", isOn: $model.draft.usesTime)
+            Toggle("具体时间（精确到分钟，含 00:00）", isOn: $model.draft.usesTime)
+                .onChange(of: model.draft.usesTime) { _, _ in
+                    model.usesTimeDidChange()
+                }
             HStack {
                 DatePicker("开始日期", selection: startDateBinding, displayedComponents: .date)
                 if model.draft.usesTime {
-                    DatePicker("开始时间", selection: startTimeBinding, displayedComponents: .hourAndMinute)
+                    DatePicker(
+                        "开始时间",
+                        selection: startTimeBinding,
+                        displayedComponents: .hourAndMinute
+                    )
+                    .labelsHidden()
+                    .frame(width: 96)
+                    .help("开始时间，可设为 00:00")
                 }
             }
             HStack {
                 DatePicker("结束日期", selection: endDateBinding, displayedComponents: .date)
                 if model.draft.usesTime {
-                    DatePicker("结束时间", selection: endTimeBinding, displayedComponents: .hourAndMinute)
+                    DatePicker(
+                        "结束时间",
+                        selection: endTimeBinding,
+                        displayedComponents: .hourAndMinute
+                    )
+                    .labelsHidden()
+                    .frame(width: 96)
+                    .help("结束时间，须晚于开始；跨日可到次日 00:00")
                 }
+            }
+            if model.draft.usesTime {
+                Text("保存后会在月历/周视图卡片上显示时间")
+                    .font(.caption2)
+                    .foregroundStyle(theme.secondaryText)
             }
 
             Toggle("每周重复", isOn: $model.draft.repeatsWeekly)

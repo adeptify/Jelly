@@ -256,22 +256,32 @@ private struct ItemEditForm: View {
                 Text("日程").tag(ItemKind.event)
             }
             .pickerStyle(.segmented)
+            .onChange(of: model.draft.kind) { previous, _ in
+                model.kindDidChange(from: previous)
+            }
             Picker("分类", selection: $model.draft.categoryID) {
                 ForEach(categories) { category in
                     Text(category.name).tag(category.id)
                 }
             }
-            Toggle("具体时间", isOn: $model.draft.usesTime)
+            Toggle("具体时间（精确到分钟，含 00:00）", isOn: $model.draft.usesTime)
+                .onChange(of: model.draft.usesTime) { _, _ in
+                    model.usesTimeDidChange()
+                }
             HStack {
                 DatePicker("开始日期", selection: startDateBinding, displayedComponents: .date)
                 if model.draft.usesTime {
                     DatePicker("开始时间", selection: startTimeBinding, displayedComponents: .hourAndMinute)
+                        .labelsHidden()
+                        .frame(width: 96)
                 }
             }
             HStack {
                 DatePicker("结束日期", selection: endDateBinding, displayedComponents: .date)
                 if model.draft.usesTime {
                     DatePicker("结束时间", selection: endTimeBinding, displayedComponents: .hourAndMinute)
+                        .labelsHidden()
+                        .frame(width: 96)
                 }
             }
             if configuration.canEditRule {

@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>个人月历 · 事项卡片视觉方案</title>
+<style>
+  :root {
+    --canvas: #F7F1E7;
+    --surface: #FFF9F0;
+    --text: #2A2420;
+    --muted: #6D625B;
+    --border: #D8CEC1;
+    --work: #5B7FD6;
+    --health: #5FA37A;
+    --life: #C48A4A;
+    --shadow: rgba(58, 48, 40, 0.12);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: #1a1816;
+    color: #f4efe7;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+    line-height: 1.4;
+  }
+  .page { max-width: 1280px; margin: 0 auto; padding: 36px 28px 80px; }
+  .eyebrow {
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-size: 11px;
+    color: #a89a8c;
+    margin-bottom: 8px;
+  }
+  h1 {
+    font-size: 28px;
+    font-weight: 620;
+    margin: 0 0 10px;
+    letter-spacing: -0.02em;
+  }
+  .lead {
+    color: #cbbfb2;
+    max-width: 720px;
+    font-size: 15px;
+    margin-bottom: 28px;
+  }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 10px 18px;
+    font-size: 13px; color: #b7a99b; margin-bottom: 28px;
+  }
+  .legend strong { color: #efe6da; font-weight: 560; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+  }
+  @media (max-width: 900px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+  .card {
+    background: #25211e;
+    border: 1px solid #3a332d;
+    border-radius: 16px;
+    overflow: hidden;
+    transition: border-color .15s, transform .15s, box-shadow .15s;
+    cursor: pointer;
+  }
+  .card:hover { border-color: #6a5d52; }
+  .card.selected {
+    border-color: #d4a27a;
+    box-shadow: 0 0 0 1px #d4a27a, 0 10px 30px rgba(0,0,0,.28);
+  }
+  .card-head {
+    padding: 16px 18px 12px;
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .card-head h2 {
+    margin: 0 0 4px;
+    font-size: 16px;
+    font-weight: 600;
+    color: #f7f0e6;
+  }
+  .tag {
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: #3a322c;
+    color: #d8c9b8;
+    white-space: nowrap;
+  }
+  .tag.current { background: #4a3b30; color: #f0c9a4; }
+  .desc {
+    margin: 0;
+    font-size: 12.5px;
+    color: #a89a8c;
+  }
+  .preview-wrap {
+    background: var(--canvas);
+    padding: 18px 16px 20px;
+    border-top: 1px solid #3a332d;
+  }
+  .day-label {
+    font-size: 11px;
+    color: #8a7d72;
+    margin-bottom: 10px;
+    font-weight: 560;
+  }
+  .stack { display: flex; flex-direction: column; gap: 4px; width: 100%; max-width: 280px; }
+  .meta {
+    margin-top: 12px;
+    font-size: 11.5px;
+    color: #8f8175;
+  }
+  .footer {
+    position: sticky;
+    bottom: 0;
+    margin-top: 28px;
+    padding: 14px 16px;
+    background: rgba(28, 24, 21, 0.92);
+    backdrop-filter: blur(10px);
+    border: 1px solid #3d352f;
+    border-radius: 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .footer strong { color: #f3e8db; }
+  .footer span { color: #b5a697; font-size: 13px; }
+  button.copy {
+    border: 0;
+    background: #d4a27a;
+    color: #2a1e16;
+    font-weight: 620;
+    border-radius: 10px;
+    padding: 9px 14px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  button.copy:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* Shared row base */
+  .row {
+    display: flex;
+    align-items: center;
+    min-height: 22px;
+    width: 100%;
+    font-size: 12px;
+    color: var(--text);
+    user-select: none;
+  }
+  .check {
+    width: 12px; height: 12px;
+    border-radius: 3px;
+    border: 1.4px solid currentColor;
+    opacity: .55;
+    flex: 0 0 auto;
+    margin-right: 6px;
+    position: relative;
+  }
+  .check.done::after {
+    content: "";
+    position: absolute;
+    left: 2.5px; top: 0.5px;
+    width: 5px; height: 8px;
+    border: solid currentColor;
+    border-width: 0 1.5px 1.5px 0;
+    transform: rotate(45deg);
+    opacity: .85;
+  }
+  .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .cat { opacity: .72; margin-right: 4px; flex: 0 0 auto; }
+  .time { opacity: .55; margin-left: auto; padding-left: 6px; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+
+  /* A Current */
+  .a .row {
+    background: color-mix(in srgb, var(--c) 14%, transparent);
+    border-radius: 5px;
+    padding: 2px 6px 2px 0;
+    height: 21px;
+    position: relative;
+  }
+  .a .bar {
+    width: 3px; align-self: stretch; border-radius: 5px 0 0 5px;
+    background: var(--c); margin-right: 6px; flex: 0 0 auto;
+  }
+  .a .bar-end {
+    width: 3px; align-self: stretch; border-radius: 0 5px 5px 0;
+    background: var(--c); margin-left: 6px; flex: 0 0 auto;
+  }
+
+  /* B Soft Chip */
+  .b .row {
+    background: color-mix(in srgb, var(--c) 11%, #fffaf3);
+    border-radius: 999px;
+    padding: 3px 10px 3px 8px;
+    height: 24px;
+    gap: 6px;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 18%, transparent);
+  }
+  .b .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--c); flex: 0 0 auto;
+  }
+  .b .check { border-radius: 50%; width: 13px; height: 13px; margin-right: 0; }
+
+  /* C Paper Tag */
+  .c .row {
+    background: #fffdf9;
+    border-radius: 6px;
+    padding: 3px 8px 3px 4px;
+    height: 24px;
+    box-shadow: 0 1px 0 rgba(58,48,40,.06);
+    border: 1px solid color-mix(in srgb, var(--border) 80%, var(--c));
+    gap: 6px;
+  }
+  .c .badge {
+    font-size: 10px;
+    font-weight: 620;
+    color: #fff;
+    background: var(--c);
+    border-radius: 4px;
+    padding: 1px 5px;
+    flex: 0 0 auto;
+    letter-spacing: 0.02em;
+  }
+  .c .check { margin-right: 0; border-color: #9a8f86; color: #9a8f86; }
+  .c .title { font-weight: 500; }
+  .c .row.done .title { text-decoration: line-through; opacity: .55; }
+
+  /* D Quiet Line */
+  .d .row {
+    background: transparent;
+    border-radius: 4px;
+    padding: 3px 4px 3px 0;
+    height: 22px;
+    border-left: 2px solid var(--c);
+    padding-left: 8px;
+  }
+  .d .row:hover { background: rgba(42,36,32,.04); }
+  .d .check { border-radius: 2px; margin-right: 7px; border-color: color-mix(in srgb, var(--c) 55%, #8a7d72); }
+  .d .cat { color: var(--c); font-weight: 560; opacity: .9; font-size: 11px; }
+  .d .title { font-weight: 450; }
+
+  /* E Solid Wash */
+  .e .row {
+    background: color-mix(in srgb, var(--c) 22%, #fff8ef);
+    border-radius: 8px;
+    padding: 4px 9px;
+    height: 26px;
+    gap: 7px;
+    border: 1px solid color-mix(in srgb, var(--c) 28%, transparent);
+  }
+  .e .check {
+    width: 14px; height: 14px; border-radius: 4px;
+    border-color: color-mix(in srgb, var(--c) 70%, #2a2420);
+    color: color-mix(in srgb, var(--c) 70%, #2a2420);
+    margin-right: 0;
+  }
+  .e .cat { display: none; }
+  .e .title { font-weight: 560; letter-spacing: -0.01em; }
+  .e .time {
+    background: color-mix(in srgb, var(--c) 16%, #fff);
+    border-radius: 999px;
+    padding: 1px 6px;
+    opacity: .8;
+    font-size: 10.5px;
+  }
+
+  /* F Notebook Mark */
+  .f .row {
+    background: linear-gradient(180deg, #fffdf8 0%, #fbf5eb 100%);
+    border-radius: 3px;
+    padding: 3px 8px 3px 7px;
+    height: 24px;
+    border: 1px solid #e7dccd;
+    border-left: 3.5px solid var(--c);
+    box-shadow: 0 1px 0 rgba(90,70,40,.04);
+    gap: 6px;
+  }
+  .f .check {
+    border: 0;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--c) 16%, #fff);
+    box-shadow: inset 0 0 0 1.3px color-mix(in srgb, var(--c) 55%, #b0a296);
+    margin-right: 0;
+  }
+  .f .check.done {
+    background: var(--c);
+    box-shadow: none;
+  }
+  .f .check.done::after {
+    border-color: #fff;
+    left: 4px; top: 1.5px; width: 4px; height: 7px;
+  }
+  .f .cat {
+    font-size: 10px;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--c);
+    opacity: 1;
+    min-width: 2em;
+  }
+  .f .title { font-weight: 500; }
+
+  .row.done .title { opacity: .55; text-decoration: line-through; }
+  .row.event .check { visibility: hidden; width: 0; margin: 0; }
+
+  .mini-note {
+    margin-top: 10px;
+    font-size: 11px;
+    color: #9c8e81;
+  }
+</style>
+</head>
+<body>
+  <div class="page">
+    <div class="eyebrow">Design exploration · Item cards</div>
+    <h1>事项小卡片 · 6 个差异方向</h1>
+    <p class="lead">
+      同一组真实数据（你截图里的 4 条 + 一条定时日程 + 一条完成态），只改卡片视觉语言。
+      保持「安静生活感」画布，不动交互结构。点选你更想每天看的方向；也可以说喜欢 A 的某某 + B 的某某。
+    </p>
+    <div class="legend">
+      <span><strong>约束：</strong>每天约 8–10 条，必须扫读快</span>
+      <span><strong>分类色：</strong>工作蓝 / 健康绿 / 生活陶土</span>
+      <span><strong>当前痛点：</strong>两端色条 + 分类名塞进标题，显得挤、糊、像色块列表</span>
+    </div>
+
+    <div class="grid" id="grid"></div>
+
+    <div class="footer">
+      <div>
+        <strong id="choice">尚未选择</strong>
+        <div><span id="choiceHint">点任一方案卡片；选定后可把名字发回对话</span></div>
+      </div>
+      <button class="copy" id="copyBtn" disabled>复制我的选择</button>
+    </div>
+  </div>
+
+<script>
+const items = [
+  { cat: '工作', title: '完成月历验收', c: 'var(--work)', kind: 'task', done: false },
+  { cat: '工作', title: '整理验收证据', c: 'var(--work)', kind: 'task', done: false },
+  { cat: '健康', title: '晚间散步', c: 'var(--health)', kind: 'task', done: false },
+  { cat: '生活', title: '购买咖啡豆', c: 'var(--life)', kind: 'task', done: false },
+  { cat: '工作', title: '产品同步会', c: 'var(--work)', kind: 'event', done: false, time: '09:00' },
+  { cat: '健康', title: '拉伸 10 分钟', c: 'var(--health)', kind: 'task', done: true },
+];
+
+const variants = [
+  {
+    id: 'A',
+    name: '当前基线 · 双端色条',
+    tag: '现状',
+    current: true,
+    blurb: '浅色底 + 左右两端色条 + 分类名拼进标题。信息密，但两端色条抢视线，容易像一排色块。',
+    cls: 'a',
+    note: '适合：你已习惯。风险：高密度时视觉噪声最大。',
+  },
+  {
+    id: 'B',
+    name: '软胶囊 · Soft Chip',
+    tag: '圆润轻松',
+    blurb: '整行做成圆角胶囊，左侧小圆点标分类色，checkbox 也圆形。更轻松，偏待办 App。',
+    cls: 'b',
+    note: '适合：日常待办感、亲和。风险：跨日条带会变「香肠」，可能不够利落。',
+  },
+  {
+    id: 'C',
+    name: '纸片标签 · Paper Tag',
+    tag: '信息分层',
+    blurb: '白卡片 + 分类做成实心小徽章，标题独立。分类和标题终于分开，扫读时先色后文。',
+    cls: 'c',
+    note: '适合：分类很多时。风险：徽章占宽，窄格里标题更短。',
+  },
+  {
+    id: 'D',
+    name: '静默细线 · Quiet Line',
+    tag: '极简',
+    blurb: '几乎无底色，只留左侧 2px 色线 + 分类名用分类色。安静、透气，最贴「安静生活感」。',
+    cls: 'd',
+    note: '适合：高密度、长时间盯着不累。风险：色彩识别弱一点，完成态不够醒目。',
+  },
+  {
+    id: 'E',
+    name: '色块实体 · Solid Wash',
+    tag: '大胆',
+    blurb: '更饱和的色底 + 更大圆角，隐藏分类文字，只靠颜色辨认；时间做成小 pill。更像现代日历事件。',
+    cls: 'e',
+    note: '适合：分类色记熟的人。风险：同类色挤在一起时靠颜色不够，标题权重变高。',
+  },
+  {
+    id: 'F',
+    name: '手账标记 · Notebook Mark',
+    tag: '生活感',
+    blurb: '左侧粗色签 + 纸质浅底 + 圆形完成钮 + 分类用小号大写色字。偏手账/工作室，有一点温度。',
+    cls: 'f',
+    note: '适合：想要个性但不花哨。风险：略占高度，三周全屏时要控行高。',
+  },
+];
+
+function renderRow(v, item) {
+  const style = `--c:${item.c}`;
+  const done = item.done ? 'done' : '';
+  const event = item.kind === 'event' ? 'event' : '';
+  const check = item.kind === 'task'
+    ? `<span class="check ${done}"></span>`
+    : `<span class="check" style="visibility:hidden;width:0;margin:0"></span>`;
+
+  if (v.cls === 'a') {
+    return `<div class="row ${done} ${event}" style="${style}">
+      <span class="bar"></span>${check}
+      <span class="cat">${item.cat}</span>
+      <span class="title">${item.title}</span>
+      ${item.time ? `<span class="time">${item.time}</span>` : ''}
+      <span class="bar-end"></span>
+    </div>`;
+  }
+  if (v.cls === 'b') {
+    return `<div class="row ${done} ${event}" style="${style}">
+      <span class="dot"></span>${check}
+      <span class="cat">${item.cat}</span>
+      <span class="title">${item.title}</span>
+      ${item.time ? `<span class="time">${item.time}</span>` : ''}
+    </div>`;
+  }
+  if (v.cls === 'c') {
+    return `<div class="row ${done} ${event}" style="${style}">
+      ${check}
+      <span class="badge">${item.cat}</span>
+      <span class="title">${item.title}</span>
+      ${item.time ? `<span class="time">${item.time}</span>` : ''}
+    </div>`;
+  }
+  if (v.cls === 'd') {
+    return `<div class="row ${done} ${event}" style="${style}">
+      ${check}
+      <span class="cat">${item.cat}</span>
+      <span class="title">${item.title}</span>
+      ${item.time ? `<span class="time">${item.time}</span>` : ''}
+    </div>`;
+  }
+  if (v.cls === 'e') {
+    return `<div class="row ${done} ${event}" style="${style}">
+      ${check}
+      <span class="title">${item.title}</span>
+      ${item.time ? `<span class="time">${item.time}</span>` : ''}
+    </div>`;
+  }
+  // f
+  return `<div class="row ${done} ${event}" style="${style}">
+    ${check}
+    <span class="cat">${item.cat.slice(0,1)}</span>
+    <span class="title">${item.title}</span>
+    ${item.time ? `<span class="time">${item.time}</span>` : ''}
+  </div>`;
+}
+
+const grid = document.getElementById('grid');
+variants.forEach(v => {
+  const el = document.createElement('article');
+  el.className = 'card';
+  el.dataset.id = v.id;
+  el.innerHTML = `
+    <div class="card-head">
+      <div>
+        <h2>${v.id}. ${v.name}</h2>
+        <p class="desc">${v.blurb}</p>
+      </div>
+      <span class="tag ${v.current ? 'current' : ''}">${v.tag}</span>
+    </div>
+    <div class="preview-wrap ${v.cls}">
+      <div class="day-label">3 日 · 高密度预览</div>
+      <div class="stack">
+        ${items.map(i => renderRow(v, i)).join('')}
+      </div>
+      <div class="mini-note">${v.note}</div>
+    </div>
+  `;
+  el.addEventListener('click', () => select(v.id));
+  grid.appendChild(el);
+});
+
+let selected = null;
+function select(id) {
+  selected = id;
+  document.querySelectorAll('.card').forEach(c => {
+    c.classList.toggle('selected', c.dataset.id === id);
+  });
+  const v = variants.find(x => x.id === id);
+  document.getElementById('choice').textContent = `已选：${v.id}. ${v.name}`;
+  document.getElementById('choiceHint').textContent = '把方案字母发回对话即可，例如：「我更喜欢 D，想吸收 C 的分类徽章」';
+  document.getElementById('copyBtn').disabled = false;
+}
+
+document.getElementById('copyBtn').addEventListener('click', async () => {
+  if (!selected) return;
+  const v = variants.find(x => x.id === selected);
+  const text = `事项卡片方案选择：${v.id} ${v.name}`;
+  try {
+    await navigator.clipboard.writeText(text);
+    document.getElementById('copyBtn').textContent = '已复制';
+    setTimeout(() => document.getElementById('copyBtn').textContent = '复制我的选择', 1200);
+  } catch {
+    prompt('复制下面内容：', text);
+  }
+});
+</script>
+</body>
+</html>

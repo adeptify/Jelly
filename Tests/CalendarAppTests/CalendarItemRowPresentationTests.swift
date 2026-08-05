@@ -19,7 +19,7 @@ struct CalendarItemRowPresentationTests {
             title: "产品同步会"
         )
         #expect(compact.categoryName == nil)
-        #expect(compact.timeText == "09:00")
+        #expect(compact.timeText == "09:00–10:00")
         #expect(compact.title == "产品同步会")
         #expect(compact.layout.titleMinimumWidth == 20)
         #expect(compact.layout.timeLayoutPriority > compact.layout.titleLayoutPriority)
@@ -32,7 +32,7 @@ struct CalendarItemRowPresentationTests {
             title: "产品同步会"
         )
         #expect(regular.categoryName == nil)
-        #expect(regular.timeText == "09:00")
+        #expect(regular.timeText == "09:00–10:00")
         #expect(regular.layout.textFontSize == 12)
     }
 
@@ -50,7 +50,7 @@ struct CalendarItemRowPresentationTests {
         )
 
         #expect(compact.categoryName == nil)
-        #expect(compact.timeText == "09:00")
+        #expect(compact.timeText == "09:00–10:00")
         #expect(compact.title == "需要被合理省略的长标题")
     }
 
@@ -68,7 +68,7 @@ struct CalendarItemRowPresentationTests {
         )
 
         #expect(boundary.categoryName == nil)
-        #expect(boundary.timeText == "09:00")
+        #expect(boundary.timeText == "09:00–10:00")
         #expect(boundary.title == "产品同步会")
         #expect(boundary.layout.titleMinimumWidth == 20)
         #expect(boundary.layout.timeLayoutPriority > boundary.layout.titleLayoutPriority)
@@ -141,7 +141,7 @@ struct CalendarItemRowPresentationTests {
         #expect(compact.layout.textFontSize == 11)
         #expect(standard.layout.textFontSize == 12)
         #expect(compact.categoryName == nil)
-        #expect(compact.timeText == "09:00")
+        #expect(compact.timeText == "09:00–10:00")
         #expect(compact.title == "产品同步会")
     }
 
@@ -167,6 +167,7 @@ struct CalendarItemRowPresentationTests {
         #expect(compact.categoryName == nil)
         #expect(compact.accessibilityLabel == "工作, 09:00, 产品同步会")
         #expect(standard.accessibilityLabel == "工作, 09:00, 产品同步会")
+        #expect(compact.timeText == "09:00–10:00")
     }
 
     @Test func rowBodyAccessibilityLabelOmitsTimeForUntimedItems() {

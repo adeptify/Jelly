@@ -153,15 +153,21 @@ struct CalendarItemRowPresentation: Equatable {
         timeRange: LocalTimeRange?,
         title: String
     ) -> CalendarItemRowPresentation {
-        make(
-            availableContentWidth: availableContentWidth,
-            startTime: timeRange?.start,
+        let timeText = timeRange.map { range in
+            range.start == range.end
+                ? timeString(range.start)
+                : "\(timeString(range.start))–\(timeString(range.end))"
+        }
+        return CalendarItemRowPresentation(
+            categoryName: nil,
+            timeText: timeText,
             title: title,
             accessibilityLabel: rowBodyAccessibilityLabel(
                 categoryName: categoryName,
                 timeRange: timeRange,
                 title: title
-            )
+            ),
+            layout: availableContentWidth <= compactRowContentWidth ? .compact : .standard
         )
     }
 
@@ -173,7 +179,7 @@ struct CalendarItemRowPresentation: Equatable {
     ) -> CalendarItemRowPresentation {
         make(
             availableContentWidth: availableContentWidth,
-            startTime: schedule.startTime,
+            schedule: schedule,
             title: title,
             accessibilityLabel: rowBodyAccessibilityLabel(
                 categoryName: categoryName,
@@ -185,18 +191,28 @@ struct CalendarItemRowPresentation: Equatable {
 
     private static func make(
         availableContentWidth: Double,
-        startTime: MinuteOfDay?,
+        schedule: CalendarSchedule,
         title: String,
         accessibilityLabel: String
     ) -> CalendarItemRowPresentation {
         let isCompactRow = availableContentWidth <= compactRowContentWidth
         return CalendarItemRowPresentation(
             categoryName: nil,
-            timeText: startTime.map(timeString),
+            timeText: displayTimeText(for: schedule),
             title: title,
             accessibilityLabel: accessibilityLabel,
             layout: isCompactRow ? .compact : .standard
         )
+    }
+
+    /// Visible chip time: start only, or same-day `HH:mm–HH:mm` when end differs.
+    static func displayTimeText(for schedule: CalendarSchedule) -> String? {
+        guard let start = schedule.startTime else { return nil }
+        guard let end = schedule.endTime else { return timeString(start) }
+        if schedule.startDate == schedule.endDate, end != start {
+            return "\(timeString(start))–\(timeString(end))"
+        }
+        return timeString(start)
     }
 
     static func rowBodyAccessibilityLabel(
@@ -218,14 +234,14 @@ struct CalendarItemRowPresentation: Equatable {
         title: String
     ) -> String {
         var components = [categoryName]
-        if let startTime = schedule.startTime {
-            components.append(timeString(startTime))
+        if let time = displayTimeText(for: schedule) {
+            components.append(time)
         }
         components.append(title)
         return components.joined(separator: ", ")
     }
 
-    private static func timeString(_ minute: MinuteOfDay) -> String {
+    static func timeString(_ minute: MinuteOfDay) -> String {
         String(format: "%02d:%02d", minute.value / 60, minute.value % 60)
     }
 }

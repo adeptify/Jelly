@@ -237,7 +237,10 @@ struct MonthView: View {
     @AppStorage("calendar.hiddenCategoryIDs") private var storedHiddenCategoryIDs = ""
     @AppStorage(CalendarAppearancePreference.storageKey)
     private var appearancePreferenceRaw = CalendarAppearancePreference.system.rawValue
+    @AppStorage(CalendarPrimaryViewMode.storageKey)
+    private var primaryViewModeRaw = CalendarPrimaryViewMode.month.rawValue
     @State private var hiddenCategoryIDs: Set<UUID> = []
+    @StateObject private var weekModel: WeekViewModel
     @State private var quickCreatePresentation: QuickCreatePresentation?
     @State private var dateFrameMap = CalendarDateFrameMap(frames: [])
     @State private var lastEditorAnchorFrame: CGRect?
@@ -286,14 +289,36 @@ struct MonthView: View {
             windowRevision: initialWeekStream.windowRevision
         )
         _weekStreamCentering = State(initialValue: initialCentering)
+        _weekModel = StateObject(wrappedValue: WeekViewModel(
+            weekStart: initialWeekStream.focusWeek,
+            today: todayRefreshPolicy.today,
+            state: store.state,
+            hiddenCategoryIDs: []
+        ))
+    }
+
+    private var primaryViewMode: CalendarPrimaryViewMode {
+        CalendarPrimaryViewMode(rawValue: primaryViewModeRaw) ?? .month
     }
 
     var body: some View {
         VStack(spacing: 0) {
             toolbar
-            weekdayHeader
-            GeometryReader { proxy in
-                weekStream(viewportBounds: proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root)))
+            if primaryViewMode == .month {
+                weekdayHeader
+                GeometryReader { proxy in
+                    weekStream(viewportBounds: proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root)))
+                }
+            } else {
+                weekDayHeader
+                WeekView(
+                    store: store,
+                    model: weekModel,
+                    categories: orderedCategories,
+                    hiddenCategoryIDs: $hiddenCategoryIDs,
+                    onOpenDetail: { selectedItem = $0 },
+                    onCreate: { openQuickCreate(on: $0) }
+                )
             }
         }
         .background(theme.canvas)
@@ -317,8 +342,31 @@ struct MonthView: View {
         .onChange(of: scenePhase) { _, newPhase in
             refreshToday(for: .scenePhaseChanged(newPhase))
         }
-        .onChange(of: store.state) { _, _ in refreshProjection() }
-        .onChange(of: hiddenCategoryIDs) { _, _ in refreshProjection() }
+        .onChange(of: store.state) { _, _ in
+            refreshProjection()
+            weekModel.update(
+                state: store.state,
+                hiddenCategoryIDs: hiddenCategoryIDs,
+                today: model.today
+            )
+        }
+        .onChange(of: hiddenCategoryIDs) { _, _ in
+            refreshProjection()
+            weekModel.update(
+                state: store.state,
+                hiddenCategoryIDs: hiddenCategoryIDs,
+                today: model.today
+            )
+        }
+        .onChange(of: primaryViewModeRaw) { _, raw in
+            if raw == CalendarPrimaryViewMode.week.rawValue {
+                weekModel.update(
+                    state: store.state,
+                    hiddenCategoryIDs: hiddenCategoryIDs,
+                    today: model.today
+                )
+            }
+        }
         .onChange(of: storedHiddenCategoryIDs) { _, encoded in
             hiddenCategoryIDs = CategoryFilterView.decode(encoded)
         }
@@ -431,25 +479,57 @@ struct MonthView: View {
     private var toolbar: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(monthTitle)
+                Text(primaryViewMode == .month ? monthTitle : weekModel.title)
                     .font(CalendarTheme.monthTitleFont)
-                if MonthEmptyStateHintPolicy.shouldShow(phase: store.phase, state: store.state) {
+                if primaryViewMode == .month,
+                   MonthEmptyStateHintPolicy.shouldShow(phase: store.phase, state: store.state) {
                     Text("点击日期开始创建")
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.secondaryText)
+                } else if primaryViewMode == .week {
+                    Text("按小时查看本周日程 · 点击空白处新建")
                         .font(.system(size: 11))
                         .foregroundStyle(theme.secondaryText)
                 }
             }
             Spacer()
             HStack(spacing: 10) {
-                Button { navigateToPreviousMonth() } label: {
+                Picker("视图", selection: $primaryViewModeRaw) {
+                    ForEach(CalendarPrimaryViewMode.allCases) { mode in
+                        Text(mode.title).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 88)
+                .help("月视图 / 周视图")
+
+                Button {
+                    if primaryViewMode == .month {
+                        navigateToPreviousMonth()
+                    } else {
+                        weekModel.goToPreviousWeek()
+                    }
+                } label: {
                     Image(systemName: "chevron.left")
                 }
-                .help("上个月")
-                Button("今天") { navigateToToday() }
-                Button { navigateToNextMonth() } label: {
+                .help(primaryViewMode == .month ? "上个月" : "上一周")
+                Button("今天") {
+                    if primaryViewMode == .month {
+                        navigateToToday()
+                    } else {
+                        weekModel.goToToday()
+                    }
+                }
+                Button {
+                    if primaryViewMode == .month {
+                        navigateToNextMonth()
+                    } else {
+                        weekModel.goToNextWeek()
+                    }
+                } label: {
                     Image(systemName: "chevron.right")
                 }
-                .help("下个月")
+                .help(primaryViewMode == .month ? "下个月" : "下一周")
                 Menu("分类") {
                     CategoryFilterView(
                         categories: orderedCategories,
@@ -465,6 +545,45 @@ struct MonthView: View {
         }
         .padding(.horizontal, 16)
         .frame(height: CalendarTheme.toolbarHeight)
+    }
+
+    private var weekDayHeader: some View {
+        HStack(spacing: 0) {
+            Color.clear.frame(width: WeekTimeGridMetrics.gutterWidth)
+            ForEach(Array(weekModel.dayStarts.enumerated()), id: \.offset) { _, day in
+                VStack(spacing: 2) {
+                    Text(weekdayLabel(for: day))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(theme.secondaryText)
+                    Text("\(day.day)")
+                        .font(.system(size: 14, weight: day == weekModel.today ? .bold : .semibold))
+                        .foregroundStyle(day == weekModel.today ? theme.controlAccent : theme.primaryText)
+                        .frame(width: 28, height: 28)
+                        .background {
+                            if day == weekModel.today {
+                                Circle().fill(theme.todayFill)
+                            }
+                        }
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: WeekTimeGridMetrics.dayHeaderHeight)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(theme.separator).frame(height: 0.5)
+        }
+    }
+
+    private func weekdayLabel(for day: CalendarDate) -> String {
+        switch day.weekday {
+        case .monday: "一"
+        case .tuesday: "二"
+        case .wednesday: "三"
+        case .thursday: "四"
+        case .friday: "五"
+        case .saturday: "六"
+        case .sunday: "日"
+        }
     }
 
     private var appearancePreference: CalendarAppearancePreference {

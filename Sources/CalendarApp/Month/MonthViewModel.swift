@@ -181,13 +181,3 @@ final class MonthViewModel: ObservableObject {
     }
 }
 
-private extension ProjectedItem {
-    init(entry: ProjectedEntry) {
-        switch entry {
-        case let .item(item):
-            self = .item(item)
-        case let .occurrence(occurrence):
-            self = .occurrence(occurrence)
-        }
-    }
-}

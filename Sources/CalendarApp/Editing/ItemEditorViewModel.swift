@@ -36,6 +36,34 @@ final class ItemEditorViewModel: ObservableObject {
         validationMessage = nil
     }
 
+    /// Selecting 日程 turns on minute-level times; 待办 keeps the user's time toggle.
+    func kindDidChange(from previous: ItemKind) {
+        guard draft.kind != previous else { return }
+        if draft.kind == .event {
+            draft.usesTime = true
+            normalizeTimedDraftIfNeeded()
+        }
+    }
+
+    /// Keep a valid same-day pair when enabling times (supports 00:00 start).
+    func usesTimeDidChange() {
+        guard draft.usesTime else { return }
+        normalizeTimedDraftIfNeeded()
+    }
+
+    private func normalizeTimedDraftIfNeeded() {
+        if draft.startDate == draft.endDate, draft.endTime <= draft.startTime {
+            // Default 1-hour block; wrap past midnight onto the next day.
+            let next = draft.startTime.value + 60
+            if next < 24 * 60 {
+                draft.endTime = MinuteOfDay(hour: next / 60, minute: next % 60)!
+            } else {
+                draft.endDate = draft.endDate.addingDays(1)
+                draft.endTime = MinuteOfDay(hour: 0, minute: 0)!
+            }
+        }
+    }
+
     func makeCommand(
         now: Date,
         newItemID: UUID,
