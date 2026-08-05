@@ -527,10 +527,10 @@ struct ItemEditorViewModelTests {
         #expect(item.schedule.endTime != nil)
     }
 
-    @Test func editingCompletedTaskIntoEventClearsCompletion() throws {
+    @Test func editingCompletedItemKeepsCompletionUnderUnifiedTODO() throws {
         let original = try CalendarItem(
             id: UUID(), kind: .task, title: "已完成", categoryID: UUID(),
-            schedule: CalendarSchedule(
+            schedule: try CalendarSchedule(
                 startDate: CalendarDate(year: 2026, month: 8, day: 3)!,
                 endDate: CalendarDate(year: 2026, month: 8, day: 3)!,
                 startTime: nil,
@@ -540,7 +540,7 @@ struct ItemEditorViewModelTests {
             createdAt: .distantPast, updatedAt: .distantPast
         )
         var draft = ItemDraft(item: original)
-        draft.kind = .event
+        draft.usesTime = true
         let command = try ItemEditorViewModel(mode: .editItem(original), draft: draft).makeCommand(
             now: .now, newItemID: UUID(), newSeriesID: UUID(), timeZoneIdentifier: "UTC"
         )
@@ -549,9 +549,10 @@ struct ItemEditorViewModelTests {
             return
         }
         #expect(item.id == original.id)
+        #expect(item.kind == .unifiedTODO)
         #expect(item.createdAt == original.createdAt)
         #expect(item.creationTimeZoneIdentifier == original.creationTimeZoneIdentifier)
-        #expect(item.completedAt == nil)
+        #expect(item.completedAt == original.completedAt)
     }
 
     @Test func editingOccurrenceCarriesStableKeyAndChosenScope() throws {
@@ -773,7 +774,15 @@ struct ItemEditorViewModelTests {
         #expect(completedKey == occurrenceKey)
         var event = item
         event.kind = .event
-        #expect(ItemCompletionRouter.command(for: .item(event), now: now) == nil)
+        // Legacy event kind is still completable under the unified TODO model.
+        guard case let .setTaskCompleted(eventID, completedAt)? =
+            ItemCompletionRouter.command(for: .item(event), now: now)
+        else {
+            Issue.record("Expected completion command for legacy event")
+            return
+        }
+        #expect(eventID == event.id)
+        #expect(completedAt == now)
     }
 
     @Test func completingAndUncompletingRecurringTaskAreEachUndoable() async throws {

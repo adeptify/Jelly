@@ -3,9 +3,7 @@ import SwiftUI
 
 enum ItemCompletionRouter {
     static func command(for item: ProjectedItem, now: Date) -> CalendarCommand? {
-        guard item.kind == .task else {
-            return nil
-        }
+        // Unified TODO: every item can be completed, timed or not.
         switch item {
         case let .item(item):
             return .setTaskCompleted(item.id, item.completedAt == nil ? now : nil)
@@ -28,11 +26,8 @@ struct CalendarItemAccessibility: Equatable {
     let value: String
 
     static func make(item: ProjectedItem, categoryName: String) -> CalendarItemAccessibility {
-        let kind = item.kind == .task ? "待办" : "日程"
-        var components = [kind, categoryName, item.title, dateTimeRangeText(for: item.schedule)]
-        if item.kind == .task {
-            components.append(item.completedAt == nil ? "未完成" : "已完成")
-        }
+        var components = ["事项", categoryName, item.title, dateTimeRangeText(for: item.schedule)]
+        components.append(item.completedAt == nil ? "未完成" : "已完成")
         return CalendarItemAccessibility(
             label: components.joined(separator: "，"),
             value: sourceValue(for: item)
@@ -300,7 +295,7 @@ struct CalendarItemRow: View {
     }
 
     private var isCompletedTask: Bool {
-        item.kind == .task && item.completedAt != nil
+        item.completedAt != nil
     }
 
     var body: some View {
@@ -315,25 +310,23 @@ struct CalendarItemRow: View {
                 )
             }
 
-            if item.kind == .task {
-                Button {
-                    let interaction = CalendarItemRowInteractionRouter.route(
-                        target: .completion,
-                        item: item,
-                        now: Date()
-                    )
-                    if let command = interaction.completionCommand {
-                        onCompletion?(command)
-                    }
-                } label: {
-                    Image(systemName: isCompletedTask ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(categoryColor.opacity(isCompletedTask ? 0.85 : 0.75))
+            Button {
+                let interaction = CalendarItemRowInteractionRouter.route(
+                    target: .completion,
+                    item: item,
+                    now: Date()
+                )
+                if let command = interaction.completionCommand {
+                    onCompletion?(command)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(CalendarItemAccessibility.completionLabel(isCompleted: isCompletedTask))
-                .accessibilityValue(isCompletedTask ? "已完成" : "未完成")
+            } label: {
+                Image(systemName: isCompletedTask ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(categoryColor.opacity(isCompletedTask ? 0.85 : 0.75))
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel(CalendarItemAccessibility.completionLabel(isCompleted: isCompletedTask))
+            .accessibilityValue(isCompletedTask ? "已完成" : "未完成")
 
             Button {
                 let interaction = CalendarItemRowInteractionRouter.route(

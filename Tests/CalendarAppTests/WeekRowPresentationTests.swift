@@ -130,9 +130,9 @@ struct WeekRowPresentationTests {
             categories: [fixture.category.id: fixture.category]
         )
 
-        #expect(presentation.accessibilityLabel == "待办，工作，产品发布，8月29日至9月2日，延续到下一周，未完成")
+        #expect(presentation.accessibilityLabel == "事项，工作，产品发布，8月29日至9月2日，延续到下一周，未完成")
         #expect(presentation.segment(.item(fixture.item.id))?.accessibilityLabel
-            == "待办，工作，产品发布，8月29日至9月2日，延续到下一周，未完成")
+            == "事项，工作，产品发布，8月29日至9月2日，延续到下一周，未完成")
     }
 
     @Test func continuationAccessibilityNamesFullRangeBothDirectionsAndStableSourceIdentity() throws {
@@ -236,7 +236,7 @@ struct WeekRowPresentationTests {
             categories: [category.id: category]
         ).accessibilityLabel
 
-        #expect(label == "日程，发布，跨年值守，2026年12月31日 23:00至2027年1月2日 01:00")
+        #expect(label == "事项，发布，跨年值守，2026年12月31日 23:00至2027年1月2日 01:00，未完成")
     }
 
     @Test func focusResolverChoosesTheWeekNearestToViewportCenter() {

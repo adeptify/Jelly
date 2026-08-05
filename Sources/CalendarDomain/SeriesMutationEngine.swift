@@ -126,9 +126,7 @@ public enum SeriesMutationEngine {
             var override = effectiveOverride(for: key, in: series, exceptions: graph.exceptions)
             try applyOccurrencePatch(patch, to: &override)
             result.exceptions[key] = .modified(override)
-            if override.kind == .event {
-                result.completions.removeValue(forKey: key)
-            }
+            // Unified TODO: keep completion when editing an instance (including legacy event kind).
             return result
         }
     }
@@ -424,10 +422,11 @@ public enum SeriesMutationEngine {
         switch exceptions[key] {
         case .skipped:
             return false
-        case let .modified(override):
-            return override.kind == .task
+        case .modified:
+            // Unified TODO: any concrete modified instance can carry completion.
+            return true
         case nil:
-            return series.kind == .task && isNaturallyGenerated(key.originalDate, by: series)
+            return isNaturallyGenerated(key.originalDate, by: series)
         }
     }
 

@@ -54,7 +54,7 @@ struct ItemDetailPopover: View {
                 Button(action: onClose) { Image(systemName: "xmark") }
                     .buttonStyle(.plain)
             }
-            Text(item.kind == .task ? "待办" : "日程")
+            Text(item.schedule.startTime == nil ? "全天事项" : "定时事项")
                 .foregroundStyle(theme.secondaryText)
             Text("\(Self.dateString(item.schedule.startDate)) 至 \(Self.dateString(item.schedule.endDate))")
                 .foregroundStyle(theme.secondaryText)
@@ -251,14 +251,6 @@ private struct ItemEditForm: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("编辑事项").font(.headline)
             TextField("标题", text: $model.draft.title).focused($titleFocused)
-            Picker("类型", selection: $model.draft.kind) {
-                Text("待办").tag(ItemKind.task)
-                Text("日程").tag(ItemKind.event)
-            }
-            .pickerStyle(.segmented)
-            .onChange(of: model.draft.kind) { previous, _ in
-                model.kindDidChange(from: previous)
-            }
             Picker("分类", selection: $model.draft.categoryID) {
                 ForEach(categories) { category in
                     Text(category.name).tag(category.id)

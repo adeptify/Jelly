@@ -36,17 +36,9 @@ final class ItemEditorViewModel: ObservableObject {
         validationMessage = nil
     }
 
-    /// Selecting 日程 turns on minute-level times; 待办 keeps the user's time toggle.
-    func kindDidChange(from previous: ItemKind) {
-        guard draft.kind != previous else { return }
-        if draft.kind == .event {
-            draft.usesTime = true
-            normalizeTimedDraftIfNeeded()
-        }
-    }
-
     /// Keep a valid same-day pair when enabling times (supports 00:00 start).
     func usesTimeDidChange() {
+        draft.kind = .unifiedTODO
         guard draft.usesTime else { return }
         normalizeTimedDraftIfNeeded()
     }
@@ -73,6 +65,8 @@ final class ItemEditorViewModel: ObservableObject {
         do {
             let normalizedTitle = try validatedTitle()
             let schedule = try validatedSchedule()
+            // Product model: one completable TODO kind; timed vs untimed is the only split.
+            let kind = ItemKind.unifiedTODO
 
             switch mode {
             case .create:
@@ -84,7 +78,7 @@ final class ItemEditorViewModel: ObservableObject {
                     )
                     return .createSeries(try WeeklySeries(
                         id: newSeriesID,
-                        kind: draft.kind,
+                        kind: kind,
                         title: normalizedTitle,
                         categoryID: draft.categoryID,
                         ruleStartDate: schedule.startDate,
@@ -100,7 +94,7 @@ final class ItemEditorViewModel: ObservableObject {
                 }
                 return .createItem(try CalendarItem(
                     id: newItemID,
-                    kind: draft.kind,
+                    kind: kind,
                     title: normalizedTitle,
                     categoryID: draft.categoryID,
                     schedule: schedule,
@@ -116,12 +110,12 @@ final class ItemEditorViewModel: ObservableObject {
                 }
                 return .updateItem(try CalendarItem(
                     id: original.id,
-                    kind: draft.kind,
+                    kind: kind,
                     title: normalizedTitle,
                     categoryID: draft.categoryID,
                     schedule: schedule,
                     creationTimeZoneIdentifier: original.creationTimeZoneIdentifier,
-                    completedAt: draft.kind == .task ? original.completedAt : nil,
+                    completedAt: original.completedAt,
                     createdAt: original.createdAt,
                     updatedAt: now
                 ))

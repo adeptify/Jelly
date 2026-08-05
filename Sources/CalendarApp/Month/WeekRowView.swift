@@ -121,7 +121,7 @@ struct WeekRowSegmentPresentation: Identifiable, Equatable {
         continuesAfter: Bool
     ) -> String {
         var components = [
-            entry.kind == .task ? "待办" : "日程",
+            "事项",
             categoryName,
             entry.title,
             CalendarItemAccessibility.dateTimeRangeText(for: entry.schedule)
@@ -132,9 +132,7 @@ struct WeekRowSegmentPresentation: Identifiable, Equatable {
         if continuesAfter {
             components.append("延续到下一周")
         }
-        if entry.kind == .task {
-            components.append(entry.completedAt == nil ? "未完成" : "已完成")
-        }
+        components.append(entry.completedAt == nil ? "未完成" : "已完成")
         return components.joined(separator: "，")
     }
 
@@ -363,7 +361,7 @@ enum WeekRowItemHitRouting {
         showsTrailingHandle: Bool
     ) -> CalendarInteractionHitTarget {
         let clampedX = min(max(x, 0), max(0, width))
-        if kind == .task, completionHitRange.contains(clampedX) {
+        if completionHitRange.contains(clampedX) {
             return .completionButton
         }
         if showsLeadingHandle, clampedX <= handleHitWidth {

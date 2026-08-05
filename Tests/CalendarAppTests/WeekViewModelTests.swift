@@ -89,20 +89,6 @@ struct WeekViewModelTests {
 @Suite("ItemEditorTimePolicyTests")
 @MainActor
 struct ItemEditorTimePolicyTests {
-    @Test func selectingEventEnablesMinutePrecisionTime() {
-        let draft = ItemDraft.newItem(
-            from: CalendarDate(year: 2026, month: 8, day: 4)!,
-            through: CalendarDate(year: 2026, month: 8, day: 4)!,
-            categoryID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
-        )
-        #expect(draft.usesTime == false)
-        let model = ItemEditorViewModel(mode: .create, draft: draft)
-        model.draft.kind = .event
-        model.kindDidChange(from: .task)
-        #expect(model.draft.usesTime == true)
-        #expect(model.draft.startTime == MinuteOfDay(hour: 9, minute: 0)!)
-    }
-
     @Test func enablingTimeNormalizesInvertedSameDayRange() {
         var draft = ItemDraft.newItem(
             from: CalendarDate(year: 2026, month: 8, day: 4)!,

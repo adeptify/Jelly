@@ -226,9 +226,7 @@ final class CalendarDropCoordinator: ObservableObject {
             kind: kind,
             categoryID: override?.categoryID ?? series.categoryID,
             creationTimeZoneIdentifier: series.creationTimeZoneIdentifier,
-            completedAt: kind == .task
-                ? store.state.recurrence.completions[key]?.completedAt
-                : nil,
+            completedAt: store.state.recurrence.completions[key]?.completedAt,
             createdAt: series.createdAt
         )
     }

@@ -54,25 +54,26 @@ struct CoreModelTests {
         }
     }
 
-    @Test func eventCannotCarryCompletion() throws {
+    @Test func legacyEventCanCarryCompletion() throws {
         let category = UUID()
-        #expect(throws: DomainValidationError.eventCannotComplete) {
-            try CalendarItem(
-                id: UUID(),
-                kind: .event,
-                title: "评审",
-                categoryID: category,
-                schedule: CalendarSchedule(
-                    startDate: CalendarDate(year: 2026, month: 8, day: 3)!,
-                    endDate: CalendarDate(year: 2026, month: 8, day: 3)!,
-                    startTime: nil,
-                    endTime: nil
-                ),
-                completedAt: .now,
-                createdAt: .now,
-                updatedAt: .now
-            )
-        }
+        let completedAt = Date(timeIntervalSince1970: 42)
+        let item = try CalendarItem(
+            id: UUID(),
+            kind: .event,
+            title: "评审",
+            categoryID: category,
+            schedule: try CalendarSchedule(
+                startDate: CalendarDate(year: 2026, month: 8, day: 3)!,
+                endDate: CalendarDate(year: 2026, month: 8, day: 3)!,
+                startTime: nil,
+                endTime: nil
+            ),
+            completedAt: completedAt,
+            createdAt: .now,
+            updatedAt: .now
+        )
+        #expect(item.completedAt == completedAt)
+        #expect(item.kind == .event)
     }
 
     @Test func calendarDateUsesLocalCalendarDays() {

@@ -165,14 +165,6 @@ struct QuickCreatePopover: View {
                 .font(.headline)
             TextField("标题", text: $model.draft.title)
                 .focused($titleFocused)
-            Picker("类型", selection: $model.draft.kind) {
-                Text("待办").tag(ItemKind.task)
-                Text("日程").tag(ItemKind.event)
-            }
-            .pickerStyle(.segmented)
-            .onChange(of: model.draft.kind) { previous, _ in
-                model.kindDidChange(from: previous)
-            }
 
             Picker("分类", selection: $categoryOption) {
                 ForEach(categories) { category in

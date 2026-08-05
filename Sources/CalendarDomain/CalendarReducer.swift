@@ -25,9 +25,7 @@ public enum CalendarReducer {
             var updated = item
             updated.createdAt = stored.createdAt
             updated.updatedAt = now
-            if updated.kind == .event {
-                updated.completedAt = nil
-            }
+            // Unified TODO: keep completion regardless of legacy kind.
             result.items[updated.id] = updated
 
         case let .deleteItem(id):
@@ -48,18 +46,13 @@ public enum CalendarReducer {
             guard var item = result.items[id] else {
                 throw ReducerError.missingItem
             }
-            guard item.kind == .task else {
-                throw ReducerError.eventCannotComplete
-            }
             item.completedAt = completedAt
             item.updatedAt = now
             result.items[id] = item
 
         case let .setOccurrenceCompleted(key, completedAt):
-            let kind = try completableKind(for: key, in: result.recurrence)
-            guard kind == .task else {
-                throw ReducerError.eventCannotComplete
-            }
+            // Ensure the occurrence exists (natural or modified); any non-skipped instance is completable.
+            _ = try completableKind(for: key, in: result.recurrence)
             if let completedAt {
                 result.recurrence.completions[key] = .init(key: key, completedAt: completedAt)
             } else {
@@ -256,8 +249,7 @@ public enum CalendarStateValidator {
                   state.categories[item.categoryID] != nil,
                   isTrimmedNonEmpty(item.title),
                   TimeZone(identifier: item.creationTimeZoneIdentifier) != nil,
-                  isValidSchedule(item.schedule),
-                  item.kind != .event || item.completedAt == nil
+                  isValidSchedule(item.schedule)
             else {
                 throw ReducerError.invalidState
             }
@@ -322,16 +314,17 @@ public enum CalendarStateValidator {
     }
 
     private static func isTaskOccurrence(_ key: OccurrenceKey, in graph: RecurrenceGraph) -> Bool {
+        // Name is historical: any non-skipped concrete occurrence may carry completion.
         guard let series = graph.series[key.seriesID] else {
             return false
         }
         switch graph.exceptions[key] {
         case .skipped:
             return false
-        case let .modified(override):
-            return override.kind == .task
+        case .modified:
+            return true
         case nil:
-            return series.kind == .task && series.weekdays.contains(key.originalDate.weekday)
+            return series.weekdays.contains(key.originalDate.weekday)
         }
     }
 }

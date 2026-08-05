@@ -140,7 +140,7 @@ struct SeriesMutationEngineTests {
         #expect(result.completions[futureKey] == nil)
     }
 
-    @Test func eventSeriesFutureLeadingResizeKeepsModifiedTaskCompletionAndDropsNaturalEventCompletion() throws {
+    @Test func eventSeriesFutureLeadingResizeMigratesAllCompletableCompletions() throws {
         let series = try WeeklySeries(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000280")!,
             kind: .event,
@@ -227,7 +227,10 @@ struct SeriesMutationEngineTests {
             completedAt: taskCompletedAt
         ))
         #expect(result.completions[modifiedTaskKey] == nil)
-        #expect(result.completions[migratedNaturalEventKey] == nil)
+        #expect(result.completions[migratedNaturalEventKey] == .init(
+            key: migratedNaturalEventKey,
+            completedAt: naturalEventCompletedAt
+        ))
         #expect(result.completions[naturalEventKey] == nil)
     }
 
@@ -371,7 +374,7 @@ struct SeriesMutationEngineTests {
         )))
     }
 
-    @Test func onlyThisTaskToEventClearsSelectedCompletion() throws {
+    @Test func onlyThisTaskToEventKeepsSelectedCompletion() throws {
         let series = try makeMondayWednesdaySeries(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000204")!
         )
@@ -379,10 +382,11 @@ struct SeriesMutationEngineTests {
             seriesID: series.id,
             originalDate: .init(year: 2026, month: 8, day: 3)!
         )
+        let completedAt = Date(timeIntervalSince1970: 100)
         let before = RecurrenceGraph(
             series: [series.id: series],
             exceptions: [:],
-            completions: [key: .init(key: key, completedAt: Date(timeIntervalSince1970: 100))]
+            completions: [key: .init(key: key, completedAt: completedAt)]
         )
 
         let after = try SeriesMutationEngine.apply(
@@ -394,7 +398,7 @@ struct SeriesMutationEngineTests {
             now: .now
         )
 
-        #expect(after.completions[key] == nil)
+        #expect(after.completions[key] == .init(key: key, completedAt: completedAt))
         #expect(after.exceptions[key] == .modified(.init(
             displayedSchedule: schedule(
                 on: key.originalDate,
@@ -592,7 +596,7 @@ struct SeriesMutationEngineTests {
         #expect(after.completions.keys.allSatisfy { $0.originalDate < boundary.originalDate })
     }
 
-    @Test func changingTaskSeriesToEventRemovesFutureCompletions() throws {
+    @Test func changingTaskSeriesToEventKeepsMigratedFutureCompletions() throws {
         let series = try makeMondayWednesdaySeries(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000209")!
         )
@@ -614,19 +618,24 @@ struct SeriesMutationEngineTests {
                 futureKey: .init(key: futureKey, completedAt: Date(timeIntervalSince1970: 300))
             ]
         )
+        let futureSeriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000219")!
 
         let after = try SeriesMutationEngine.apply(
             edit: .patch(.init(kind: .event)),
             to: boundary,
             scope: .thisAndFuture,
             in: before,
-            newSeriesID: UUID(uuidString: "00000000-0000-0000-0000-000000000219")!,
+            newSeriesID: futureSeriesID,
             now: .now
         )
 
-        let future = try #require(after.series.values.first { $0.id != series.id })
+        let future = try #require(after.series[futureSeriesID])
         #expect(future.kind == .event)
-        #expect(after.completions == [pastKey: before.completions[pastKey]!])
+        let migratedBoundary = OccurrenceKey(seriesID: futureSeriesID, originalDate: boundary.originalDate)
+        let migratedFuture = OccurrenceKey(seriesID: futureSeriesID, originalDate: futureKey.originalDate)
+        #expect(after.completions[pastKey] == before.completions[pastKey])
+        #expect(after.completions[migratedBoundary]?.completedAt == Date(timeIntervalSince1970: 200))
+        #expect(after.completions[migratedFuture]?.completedAt == Date(timeIntervalSince1970: 300))
     }
 
     @Test func futureMoveShiftsExplicitStateAndEmbeddedCompletionKey() throws {

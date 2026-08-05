@@ -479,7 +479,13 @@ struct JSONCalendarRepositoryTests {
                 }
             },
             mutatedDocumentData(from: current) { document in
-                try mutateSeries(&document, id: seriesID) { $0["kind"] = ItemKind.event.rawValue }
+                // Completion on a skipped occurrence remains invalid (unified TODO still forbids it).
+                try mutateOccurrencePair(in: &document, collection: "completions") { key, value in
+                    key["originalDate"] = ["year": 2026, "month": 8, "day": 12]
+                    var embedded = try dictionary(at: "key", in: value)
+                    embedded["originalDate"] = ["year": 2026, "month": 8, "day": 12]
+                    value["key"] = embedded
+                }
             }
         ]
 
@@ -673,9 +679,10 @@ struct JSONCalendarRepositoryTests {
                 )
             },
             mutatedDocumentData(from: current) { document in
+                // Move completion onto a skipped occurrence (invalid under unified TODO).
                 try mutateFirstOccurrenceValue(in: &document, collection: "completions") { completion in
                     var key = try dictionary(at: "key", in: completion)
-                    key["originalDate"] = ["year": 2026, "month": 8, "day": 24]
+                    key["originalDate"] = ["year": 2026, "month": 8, "day": 12]
                     completion["key"] = key
                 }
             }

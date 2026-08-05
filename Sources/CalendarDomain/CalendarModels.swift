@@ -1,8 +1,13 @@
 import Foundation
 
+/// Stored kind is retained for schema compatibility.
+/// Product model is unified: every item is a completable TODO; timed vs untimed is the only split.
 public enum ItemKind: String, Codable, Equatable, Hashable, Sendable {
     case task
     case event
+
+    /// New writes always use `.task`; `.event` is accepted on read for older data.
+    public static let unifiedTODO = ItemKind.task
 }
 
 public enum DomainValidationError: Error, Equatable, Sendable {
@@ -69,9 +74,6 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         }
         guard TimeZone(identifier: creationTimeZoneIdentifier) != nil else {
             throw DomainValidationError.invalidTimeZoneIdentifier
-        }
-        guard kind != .event || completedAt == nil else {
-            throw DomainValidationError.eventCannotComplete
         }
 
         self.id = id

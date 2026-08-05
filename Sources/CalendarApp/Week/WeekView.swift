@@ -185,7 +185,7 @@ struct WeekView: View {
         let hex = category?.colorHex ?? "#8C8F96"
         let roles = CalendarTheme.categoryItemRoles(
             hex,
-            isCompleted: item.kind == .task && item.completedAt != nil,
+            isCompleted: item.completedAt != nil,
             appearance: appearance
         )
         let background = roles.map { CalendarTheme.categoryColor($0.background) }
@@ -197,11 +197,9 @@ struct WeekView: View {
             onOpenDetail(item)
         } label: {
             HStack(alignment: .top, spacing: 4) {
-                if item.kind == .task {
-                    Image(systemName: item.completedAt == nil ? "circle" : "checkmark.circle.fill")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(accent.opacity(0.8))
-                }
+                Image(systemName: item.completedAt == nil ? "circle" : "checkmark.circle.fill")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(accent.opacity(0.8))
                 VStack(alignment: .leading, spacing: 1) {
                     if let compactTime {
                         Text(compactTime)

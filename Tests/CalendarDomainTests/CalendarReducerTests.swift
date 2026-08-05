@@ -149,7 +149,7 @@ struct CalendarReducerTests {
         #expect(projection.entries.count == 3)
     }
 
-    @Test func completingEventThrows() throws {
+    @Test func completingLegacyEventSucceeds() throws {
         let fixture = try makeCategoryReferenceFixture()
         let event = try makeItem(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000310")!,
@@ -158,16 +158,15 @@ struct CalendarReducerTests {
         )
         var state = fixture.state
         state.items[event.id] = event
-        let before = state
+        let completedAt = Date(timeIntervalSince1970: 1)
 
-        #expect(throws: ReducerError.eventCannotComplete) {
-            try CalendarReducer.reduce(
-                state,
-                command: .setTaskCompleted(event.id, Date(timeIntervalSince1970: 1)),
-                now: .now
-            )
-        }
-        #expect(state == before)
+        let result = try CalendarReducer.reduce(
+            state,
+            command: .setTaskCompleted(event.id, completedAt),
+            now: .now
+        )
+        #expect(result.items[event.id]?.completedAt == completedAt)
+        try CalendarStateValidator.validate(result)
     }
 
     @Test func deletingUncategorizedThrows() throws {
@@ -288,29 +287,29 @@ struct CalendarReducerTests {
         #expect(next.completedAt == nil)
     }
 
-    @Test func completingRecurringEventThrows() throws {
+    @Test func completingRecurringLegacyEventSucceeds() throws {
         let fixture = try makeCategoryReferenceFixture()
         let state = fixture.state
         let key = OccurrenceKey(
             seriesID: try #require(state.recurrence.series.keys.first),
             originalDate: CalendarDate(year: 2026, month: 8, day: 3)!
         )
-        let before = state
-        #expect(throws: ReducerError.eventCannotComplete) {
-            try CalendarReducer.reduce(
-                state,
-                command: .setOccurrenceCompleted(key, Date(timeIntervalSince1970: 1)),
-                now: .now
-            )
-        }
-        #expect(state == before)
+        let completedAt = Date(timeIntervalSince1970: 1)
+        let result = try CalendarReducer.reduce(
+            state,
+            command: .setOccurrenceCompleted(key, completedAt),
+            now: .now
+        )
+        #expect(result.recurrence.completions[key]?.completedAt == completedAt)
+        try CalendarStateValidator.validate(result)
     }
 
-    @Test func updatingCompletedTaskToEventClearsCompletion() throws {
+    @Test func updatingCompletedTaskToEventKeepsCompletion() throws {
         let fixture = try makeCategoryReferenceFixture()
         let item = try #require(fixture.state.items.values.first)
         var state = fixture.state
-        state.items[item.id]?.completedAt = Date(timeIntervalSince1970: 20)
+        let completedAt = Date(timeIntervalSince1970: 20)
+        state.items[item.id]?.completedAt = completedAt
         var event = try #require(state.items[item.id])
         event.kind = .event
         let result = try CalendarReducer.reduce(
@@ -320,7 +319,7 @@ struct CalendarReducerTests {
         )
         let updated = try #require(result.items[item.id])
         #expect(updated.kind == .event)
-        #expect(updated.completedAt == nil)
+        #expect(updated.completedAt == completedAt)
         #expect(updated.id == item.id)
         #expect(updated.createdAt == item.createdAt)
         try CalendarStateValidator.validate(result)
@@ -469,8 +468,11 @@ struct CalendarReducerTests {
             originalDate: CalendarDate(year: 2026, month: 8, day: 24)!
         )
         var skipped = valid
-        skipped.recurrence.exceptions[skippedKey] = .skipped
-        skipped.recurrence.completions[skippedKey] = .init(key: skippedKey, completedAt: .now)
+        skipped.recurrence.exceptions[skippedKey] = OccurrenceExceptionKind.skipped
+        skipped.recurrence.completions[skippedKey] = OccurrenceCompletion(
+            key: skippedKey,
+            completedAt: Date(timeIntervalSince1970: 1)
+        )
         #expect(throws: ReducerError.invalidState) {
             try CalendarStateValidator.validate(skipped)
         }
@@ -486,27 +488,6 @@ struct CalendarReducerTests {
         )
         #expect(throws: ReducerError.invalidState) {
             try CalendarStateValidator.validate(nonexistent)
-        }
-
-        let eventKey = OccurrenceKey(
-            seriesID: newID,
-            originalDate: CalendarDate(year: 2026, month: 8, day: 19)!
-        )
-        var event = valid
-        event.recurrence.exceptions[eventKey] = .modified(.init(
-            displayedSchedule: try CalendarSchedule(
-                startDate: eventKey.originalDate,
-                endDate: eventKey.originalDate,
-                startTime: nil,
-                endTime: nil
-            ),
-            title: "例会",
-            kind: .event,
-            categoryID: old.categoryID
-        ))
-        event.recurrence.completions[eventKey] = .init(key: eventKey, completedAt: .now)
-        #expect(throws: ReducerError.invalidState) {
-            try CalendarStateValidator.validate(event)
         }
     }
 

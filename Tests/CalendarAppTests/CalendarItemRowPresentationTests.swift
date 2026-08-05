@@ -239,7 +239,7 @@ struct CalendarItemRowPresentationTests {
             categoryName: "工作"
         )
 
-        #expect(accessibility.label.contains("待办"))
+        #expect(accessibility.label.contains("事项"))
         #expect(accessibility.label.contains("工作"))
         #expect(accessibility.label.contains("跨夜发布"))
         #expect(accessibility.label.contains("8月29日 23:00至8月30日 01:00"))
