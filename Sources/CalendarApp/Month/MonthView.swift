@@ -377,14 +377,6 @@ struct MonthView: View {
             guard size.width > 0, size.height > 0 else { return }
             quickCreateMeasuredContentSize = size
         }
-        .popover(item: $selectedItem) { item in
-            ItemDetailPopover(
-                item: item,
-                store: store,
-                categories: orderedCategories,
-                onClose: { selectedItem = nil }
-            )
-        }
         .confirmationDialog(
             "修改重复事项",
             isPresented: recurringDropConfirmationPresented,
@@ -417,6 +409,27 @@ struct MonthView: View {
             }
         }
         .overlay {
+            // Item detail / edit: click blank area to dismiss (same as Cancel / Escape).
+            if let item = selectedItem {
+                ZStack {
+                    dismissScrim(action: { selectedItem = nil })
+                    ItemDetailPopover(
+                        item: item,
+                        store: store,
+                        categories: orderedCategories,
+                        onClose: { selectedItem = nil }
+                    )
+                    .background(theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(theme.subtleBorder, lineWidth: 1)
+                    }
+                    .shadow(color: theme.subtleShadow.opacity(0.22), radius: 16, y: 6)
+                    .accessibilityIdentifier("item-detail-overlay-card")
+                }
+            }
+        }
+        .overlay {
             GeometryReader { proxy in
                 if let presentation = quickCreatePresentation {
                     let windowBounds = proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root))
@@ -429,26 +442,31 @@ struct MonthView: View {
                         ),
                         windowBounds: windowBounds
                     )
-                    QuickCreatePopover(
-                        presentation: presentation,
-                        categories: orderedCategories,
-                        store: store,
-                        availableWidth: overlayPresentation.placement.frame.width,
-                        maximumContentHeight: overlayPresentation.contentLayout.maximumHeight,
-                        onClose: dismissQuickCreate
-                    )
-                    .frame(width: overlayPresentation.placement.frame.width)
-                    .background(theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 12))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(theme.subtleBorder, lineWidth: 1)
+                    ZStack {
+                        // Create: click blank area to dismiss without saving.
+                        dismissScrim(action: dismissQuickCreate)
+                            .frame(width: proxy.size.width, height: proxy.size.height)
+                        QuickCreatePopover(
+                            presentation: presentation,
+                            categories: orderedCategories,
+                            store: store,
+                            availableWidth: overlayPresentation.placement.frame.width,
+                            maximumContentHeight: overlayPresentation.contentLayout.maximumHeight,
+                            onClose: dismissQuickCreate
+                        )
+                        .frame(width: overlayPresentation.placement.frame.width)
+                        .background(theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 12))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(theme.subtleBorder, lineWidth: 1)
+                        }
+                        .shadow(color: theme.subtleShadow.opacity(0.20), radius: 14, y: 5)
+                        .position(
+                            x: overlayPresentation.placement.frame.midX,
+                            y: overlayPresentation.placement.frame.midY
+                        )
+                        .accessibilityIdentifier("quick-create-overlay-card")
                     }
-                    .shadow(color: theme.subtleShadow.opacity(0.20), radius: 14, y: 5)
-                    .position(
-                        x: overlayPresentation.placement.frame.midX,
-                        y: overlayPresentation.placement.frame.midY
-                    )
-                    .accessibilityIdentifier("quick-create-overlay-card")
                 }
             }
         }
@@ -1029,6 +1047,22 @@ struct MonthView: View {
         lastEditorAnchorFrame = nil
         quickCreateMeasuredContentSize = .zero
         interactionCoordinator.cancel()
+    }
+
+    /// Full-window tap catcher behind editor cards. The card sits above and absorbs its own hits.
+    @ViewBuilder
+    private func dismissScrim(action: @escaping () -> Void) -> some View {
+        Color.black.opacity(colorScheme == .dark ? 0.28 : 0.14)
+            .ignoresSafeArea()
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(motionPolicy.overlayAnimation) {
+                    action()
+                }
+            }
+            .accessibilityLabel("关闭编辑")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityIdentifier("editor-dismiss-scrim")
     }
 
     private func issueCenteringScroll(
