@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import SwiftUI
 import Testing
 @testable import CalendarApp
 
@@ -90,5 +92,23 @@ struct CalendarThemeTests {
         #expect(monthView.contains("withAnimation(animation)"))
         #expect(monthView.contains("withAnimation(motionPolicy.overlayAnimation)"))
         #expect(monthView.contains("transaction.disablesAnimations = true"))
+        #expect(monthView.contains("appearance-preference-toggle"))
+        #expect(monthView.contains("CalendarAppearancePreference.storageKey"))
+    }
+
+    @Test func appearancePreferenceMapsToColorSchemeAndApplicationAppearance() {
+        #expect(CalendarAppearancePreference.system.preferredColorScheme == nil)
+        #expect(CalendarAppearancePreference.light.preferredColorScheme == .light)
+        #expect(CalendarAppearancePreference.dark.preferredColorScheme == .dark)
+
+        #expect(CalendarAppearancePreference.system.nsAppearance == nil)
+        #expect(CalendarAppearancePreference.light.nsAppearance?.name == .aqua)
+        #expect(CalendarAppearancePreference.dark.nsAppearance?.name == .darkAqua)
+
+        #expect(CalendarAppearancePreference.system.title == "跟随系统")
+        #expect(CalendarAppearancePreference.light.title == "浅色")
+        #expect(CalendarAppearancePreference.dark.title == "深色")
+        #expect(CalendarAppearancePreference.storageKey == "calendar.appearancePreference")
+        #expect(CalendarAppearancePreference.allCases.map(\.rawValue) == ["system", "light", "dark"])
     }
 }

@@ -235,6 +235,8 @@ struct MonthView: View {
     @StateObject private var weekStreamScrollCoordinator: WeekStreamScrollCoordinator
     @StateObject private var weekStreamRestoration: WeekStreamRestorationController
     @AppStorage("calendar.hiddenCategoryIDs") private var storedHiddenCategoryIDs = ""
+    @AppStorage(CalendarAppearancePreference.storageKey)
+    private var appearancePreferenceRaw = CalendarAppearancePreference.system.rawValue
     @State private var hiddenCategoryIDs: Set<UUID> = []
     @State private var quickCreatePresentation: QuickCreatePresentation?
     @State private var dateFrameMap = CalendarDateFrameMap(frames: [])
@@ -438,28 +440,60 @@ struct MonthView: View {
                 }
             }
             Spacer()
-            Button { navigateToPreviousMonth() } label: {
-                Image(systemName: "chevron.left")
+            HStack(spacing: 10) {
+                Button { navigateToPreviousMonth() } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .help("上个月")
+                Button("今天") { navigateToToday() }
+                Button { navigateToNextMonth() } label: {
+                    Image(systemName: "chevron.right")
+                }
+                .help("下个月")
+                Menu("分类") {
+                    CategoryFilterView(
+                        categories: orderedCategories,
+                        hiddenCategoryIDs: $hiddenCategoryIDs
+                    )
+                }
+                Button("管理分类") {
+                    openWindow(id: "category-manager")
+                }
             }
-            .help("上个月")
-            Button("今天") { navigateToToday() }
-            Button { navigateToNextMonth() } label: {
-                Image(systemName: "chevron.right")
-            }
-            .help("下个月")
-            Menu("分类") {
-                CategoryFilterView(
-                    categories: orderedCategories,
-                    hiddenCategoryIDs: $hiddenCategoryIDs
-                )
-            }
-            Button("管理分类") {
-                openWindow(id: "category-manager")
-            }
+            .disabled(store.phase != .ready)
+            appearanceToggle
         }
         .padding(.horizontal, 16)
         .frame(height: CalendarTheme.toolbarHeight)
-        .disabled(store.phase != .ready)
+    }
+
+    private var appearancePreference: CalendarAppearancePreference {
+        CalendarAppearancePreference(rawValue: appearancePreferenceRaw) ?? .system
+    }
+
+    private var appearanceToggle: some View {
+        Menu {
+            ForEach(CalendarAppearancePreference.allCases) { preference in
+                Button {
+                    appearancePreferenceRaw = preference.rawValue
+                    CalendarAppearancePreference.applyToApplication(preference)
+                } label: {
+                    if preference == appearancePreference {
+                        Label(preference.title, systemImage: "checkmark")
+                    } else {
+                        Text(preference.title)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: appearancePreference.symbolName)
+                .frame(minWidth: 18)
+        }
+        .menuStyle(.borderlessButton)
+        .help("切换主题（\(appearancePreference.title)）")
+        .accessibilityLabel("切换主题")
+        .accessibilityValue(appearancePreference.title)
+        .accessibilityIdentifier("appearance-preference-toggle")
     }
 
     private var weekdayHeader: some View {
