@@ -225,6 +225,8 @@ final class CalendarDropCoordinator: ObservableObject {
             title: override?.title ?? series.title,
             kind: kind,
             categoryID: override?.categoryID ?? series.categoryID,
+            priority: override?.priority ?? series.priority,
+            isPinned: override?.isPinned ?? series.isPinned,
             creationTimeZoneIdentifier: series.creationTimeZoneIdentifier,
             completedAt: store.state.recurrence.completions[key]?.completedAt,
             createdAt: series.createdAt

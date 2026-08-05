@@ -246,7 +246,10 @@ struct MonthView: View {
     @State private var lastEditorAnchorFrame: CGRect?
     @State private var quickCreateMeasuredContentSize = CGSize.zero
     @State private var selectedDayDrawerDate: CalendarDate?
-    @State private var selectedItem: ProjectedItem?
+    @State private var editorSession: ItemEditorConfiguration?
+    @State private var recurringEditItem: ProjectedItem?
+    @State private var deleteConfirmItem: ProjectedItem?
+    @State private var actionError: String?
     @State private var recurringDropPresentation = RecurringDropPresentationController()
     @State private var requestedCenterRequest: WeekStreamScrollRequest?
     @State private var weekStreamCentering: WeekStreamCenteringCoordinator
@@ -302,6 +305,117 @@ struct MonthView: View {
     }
 
     var body: some View {
+        dialogsAndOverlays
+            .alert("日历提示", isPresented: alertPresented) {
+                Button("知道了", role: .cancel) {
+                    store.dismissErrors()
+                    actionError = nil
+                }
+            } message: {
+                Text(store.loadError ?? store.mutationError ?? actionError ?? "")
+            }
+    }
+
+    private var dialogsAndOverlays: some View {
+        lifecycleBound
+            .confirmationDialog(
+                "修改重复事项",
+                isPresented: recurringDropConfirmationPresented,
+                titleVisibility: .visible
+            ) {
+                Button("仅本次") { resolveRecurringDrop(scope: .onlyThis) }
+                Button("本次及以后") { resolveRecurringDrop(scope: .thisAndFuture) }
+                Button("取消", role: .cancel) { cancelRecurringDropConfirmation() }
+            } message: {
+                Text("请选择这次修改影响的范围")
+            }
+            .confirmationDialog(
+                "编辑重复事项",
+                isPresented: recurringEditPresented,
+                titleVisibility: .visible
+            ) {
+                Button("仅本次") { confirmRecurringEdit(scope: .onlyThis) }
+                Button("本次及以后") { confirmRecurringEdit(scope: .thisAndFuture) }
+                Button("取消", role: .cancel) { recurringEditItem = nil }
+            } message: {
+                Text("请选择这次编辑影响的范围")
+            }
+            .confirmationDialog(
+                "删除此事项？",
+                isPresented: deleteConfirmPresented,
+                titleVisibility: .visible
+            ) {
+                Button("删除", role: .destructive) { confirmDeleteItem() }
+                Button("取消", role: .cancel) { deleteConfirmItem = nil }
+            }
+            .overlay(alignment: .trailing) { dayDrawerOverlay }
+            .overlay { editorOverlay }
+            .overlay { quickCreateOverlay }
+            .overlay(alignment: .bottom) { undoBannerOverlay }
+    }
+
+    private var lifecycleBound: some View {
+        calendarChrome
+            .background(theme.canvas)
+            .foregroundStyle(theme.primaryText)
+            .tint(theme.controlAccent)
+            .transaction { transaction in
+                if accessibilityReduceMotion {
+                    transaction.disablesAnimations = true
+                }
+            }
+            .coordinateSpace(name: CalendarInteractionCoordinateSpace.root)
+            .onAppear {
+                hiddenCategoryIDs = CategoryFilterView.decode(storedHiddenCategoryIDs)
+                refreshProjection()
+            }
+            .onReceive(NotificationCenter.default.publisher(
+                for: MonthViewTodayRefreshPolicy.calendarDayChangedNotification
+            )) { _ in
+                refreshToday(for: .calendarDayChanged)
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                refreshToday(for: .scenePhaseChanged(newPhase))
+            }
+            .onChange(of: store.state) { _, _ in
+                refreshProjection()
+                weekModel.update(
+                    state: store.state,
+                    hiddenCategoryIDs: hiddenCategoryIDs,
+                    today: model.today
+                )
+            }
+            .onChange(of: hiddenCategoryIDs) { _, _ in
+                refreshProjection()
+                weekModel.update(
+                    state: store.state,
+                    hiddenCategoryIDs: hiddenCategoryIDs,
+                    today: model.today
+                )
+            }
+            .onChange(of: primaryViewModeRaw) { _, raw in
+                if raw == CalendarPrimaryViewMode.week.rawValue {
+                    weekModel.update(
+                        state: store.state,
+                        hiddenCategoryIDs: hiddenCategoryIDs,
+                        today: model.today
+                    )
+                }
+            }
+            .onChange(of: storedHiddenCategoryIDs) { _, encoded in
+                hiddenCategoryIDs = CategoryFilterView.decode(encoded)
+            }
+            .onChange(of: dropCoordinator.pendingRecurringDrop) { _, pendingDrop in
+                recurringDropPresentation.pendingDropDidChange(hasPendingDrop: pendingDrop != nil)
+            }
+            .onPreferenceChange(QuickCreateCardSizePreferenceKey.self) { size in
+                guard size.width > 0, size.height > 0 else { return }
+                quickCreateMeasuredContentSize = size
+            }
+    }
+
+    @ViewBuilder
+    private var calendarChrome: some View {
         VStack(spacing: 0) {
             toolbar
             if primaryViewMode == .month {
@@ -316,181 +430,114 @@ struct MonthView: View {
                     model: weekModel,
                     categories: orderedCategories,
                     hiddenCategoryIDs: $hiddenCategoryIDs,
-                    onOpenDetail: { selectedItem = $0 },
+                    onOpenDetail: { openEditor(for: $0) },
                     onCreate: { openQuickCreate(on: $0) }
                 )
             }
         }
-        .background(theme.canvas)
-        .foregroundStyle(theme.primaryText)
-        .tint(theme.controlAccent)
-        .transaction { transaction in
-            if accessibilityReduceMotion {
-                transaction.disablesAnimations = true
-            }
-        }
-        .coordinateSpace(name: CalendarInteractionCoordinateSpace.root)
-        .onAppear {
-            hiddenCategoryIDs = CategoryFilterView.decode(storedHiddenCategoryIDs)
-            refreshProjection()
-        }
-        .onReceive(NotificationCenter.default.publisher(
-            for: MonthViewTodayRefreshPolicy.calendarDayChangedNotification
-        )) { _ in
-            refreshToday(for: .calendarDayChanged)
-        }
-        .onChange(of: scenePhase) { _, newPhase in
-            refreshToday(for: .scenePhaseChanged(newPhase))
-        }
-        .onChange(of: store.state) { _, _ in
-            refreshProjection()
-            weekModel.update(
-                state: store.state,
+    }
+
+    @ViewBuilder
+    private var dayDrawerOverlay: some View {
+        if let date = selectedDayDrawerDate {
+            DayDrawerView(
+                date: date,
+                store: store,
+                categories: store.state.categories,
                 hiddenCategoryIDs: hiddenCategoryIDs,
-                today: model.today
+                onClose: {
+                    withAnimation(motionPolicy.overlayAnimation) {
+                        selectedDayDrawerDate = nil
+                    }
+                },
+                onQuickCreate: { openQuickCreate(on: $0) },
+                onOpenDetail: { openEditor(for: $0) }
             )
+            .transition(.move(edge: .trailing))
         }
-        .onChange(of: hiddenCategoryIDs) { _, _ in
-            refreshProjection()
-            weekModel.update(
-                state: store.state,
-                hiddenCategoryIDs: hiddenCategoryIDs,
-                today: model.today
-            )
-        }
-        .onChange(of: primaryViewModeRaw) { _, raw in
-            if raw == CalendarPrimaryViewMode.week.rawValue {
-                weekModel.update(
-                    state: store.state,
-                    hiddenCategoryIDs: hiddenCategoryIDs,
-                    today: model.today
-                )
-            }
-        }
-        .onChange(of: storedHiddenCategoryIDs) { _, encoded in
-            hiddenCategoryIDs = CategoryFilterView.decode(encoded)
-        }
-        .onChange(of: dropCoordinator.pendingRecurringDrop) { _, pendingDrop in
-            recurringDropPresentation.pendingDropDidChange(hasPendingDrop: pendingDrop != nil)
-        }
-        .onPreferenceChange(QuickCreateCardSizePreferenceKey.self) { size in
-            guard size.width > 0, size.height > 0 else { return }
-            quickCreateMeasuredContentSize = size
-        }
-        .confirmationDialog(
-            "修改重复事项",
-            isPresented: recurringDropConfirmationPresented,
-            titleVisibility: .visible
-        ) {
-            Button("仅本次") { resolveRecurringDrop(scope: .onlyThis) }
-            Button("本次及以后") { resolveRecurringDrop(scope: .thisAndFuture) }
-            Button("取消", role: .cancel) {
-                cancelRecurringDropConfirmation()
-            }
-        } message: {
-            Text("请选择这次修改影响的范围")
-        }
-        .overlay(alignment: .trailing) {
-            if let date = selectedDayDrawerDate {
-                DayDrawerView(
-                    date: date,
+    }
+
+    @ViewBuilder
+    private var editorOverlay: some View {
+        if let session = editorSession {
+            ZStack {
+                dismissScrim(action: { editorSession = nil })
+                ItemEditForm(
+                    configuration: session,
                     store: store,
-                    categories: store.state.categories,
-                    hiddenCategoryIDs: hiddenCategoryIDs,
-                    onClose: {
-                        withAnimation(motionPolicy.overlayAnimation) {
-                            selectedDayDrawerDate = nil
-                        }
-                    },
-                    onQuickCreate: { openQuickCreate(on: $0) },
-                    onOpenDetail: { selectedItem = $0 }
+                    categories: orderedCategories,
+                    onCancel: { editorSession = nil },
+                    onSaved: { editorSession = nil }
                 )
-                .transition(.move(edge: .trailing))
+                .background(theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(theme.subtleBorder, lineWidth: 1)
+                }
+                .shadow(color: theme.subtleShadow.opacity(0.22), radius: 16, y: 6)
+                .accessibilityIdentifier("item-edit-overlay-card")
             }
         }
-        .overlay {
-            // Item detail / edit: click blank area to dismiss (same as Cancel / Escape).
-            if let item = selectedItem {
+    }
+
+    @ViewBuilder
+    private var quickCreateOverlay: some View {
+        GeometryReader { proxy in
+            if let presentation = quickCreatePresentation {
+                let windowBounds = proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root))
+                let overlayPresentation = QuickCreateOverlayPresentation(
+                    presentation: presentation,
+                    measuredContentSize: quickCreateMeasuredContentSize,
+                    anchorFrame: resolvedEditorAnchorFrame(
+                        for: presentation.anchorDate,
+                        windowBounds: windowBounds
+                    ),
+                    windowBounds: windowBounds
+                )
                 ZStack {
-                    dismissScrim(action: { selectedItem = nil })
-                    ItemDetailPopover(
-                        item: item,
-                        store: store,
+                    dismissScrim(action: dismissQuickCreate)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                    QuickCreatePopover(
+                        presentation: presentation,
                         categories: orderedCategories,
-                        onClose: { selectedItem = nil }
+                        store: store,
+                        availableWidth: overlayPresentation.placement.frame.width,
+                        maximumContentHeight: overlayPresentation.contentLayout.maximumHeight,
+                        onClose: dismissQuickCreate
                     )
-                    .background(theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .frame(width: overlayPresentation.placement.frame.width)
+                    .background(theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 12))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        RoundedRectangle(cornerRadius: 12)
                             .stroke(theme.subtleBorder, lineWidth: 1)
                     }
-                    .shadow(color: theme.subtleShadow.opacity(0.22), radius: 16, y: 6)
-                    .accessibilityIdentifier("item-detail-overlay-card")
-                }
-            }
-        }
-        .overlay {
-            GeometryReader { proxy in
-                if let presentation = quickCreatePresentation {
-                    let windowBounds = proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root))
-                    let overlayPresentation = QuickCreateOverlayPresentation(
-                        presentation: presentation,
-                        measuredContentSize: quickCreateMeasuredContentSize,
-                        anchorFrame: resolvedEditorAnchorFrame(
-                            for: presentation.anchorDate,
-                            windowBounds: windowBounds
-                        ),
-                        windowBounds: windowBounds
+                    .shadow(color: theme.subtleShadow.opacity(0.20), radius: 14, y: 5)
+                    .position(
+                        x: overlayPresentation.placement.frame.midX,
+                        y: overlayPresentation.placement.frame.midY
                     )
-                    ZStack {
-                        // Create: click blank area to dismiss without saving.
-                        dismissScrim(action: dismissQuickCreate)
-                            .frame(width: proxy.size.width, height: proxy.size.height)
-                        QuickCreatePopover(
-                            presentation: presentation,
-                            categories: orderedCategories,
-                            store: store,
-                            availableWidth: overlayPresentation.placement.frame.width,
-                            maximumContentHeight: overlayPresentation.contentLayout.maximumHeight,
-                            onClose: dismissQuickCreate
-                        )
-                        .frame(width: overlayPresentation.placement.frame.width)
-                        .background(theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 12))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(theme.subtleBorder, lineWidth: 1)
-                        }
-                        .shadow(color: theme.subtleShadow.opacity(0.20), radius: 14, y: 5)
-                        .position(
-                            x: overlayPresentation.placement.frame.midX,
-                            y: overlayPresentation.placement.frame.midY
-                        )
-                        .accessibilityIdentifier("quick-create-overlay-card")
-                    }
+                    .accessibilityIdentifier("quick-create-overlay-card")
                 }
             }
         }
-        .overlay(alignment: .bottom) {
-            if let undoNotice = store.undoNotice {
-                HStack(spacing: 10) {
-                    Text(undoNotice)
-                    Button("撤销") { undo() }
-                        .disabled(!store.canUndo || store.isMutating)
-                }
-                .font(.system(size: 12, weight: .medium))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .foregroundStyle(theme.primaryText)
-                .background(theme.elevatedSurface, in: Capsule())
-                .overlay(Capsule().stroke(theme.subtleBorder, lineWidth: 0.5))
-                .padding(.bottom, 16)
-                .transition(.opacity)
+    }
+
+    @ViewBuilder
+    private var undoBannerOverlay: some View {
+        if let undoNotice = store.undoNotice {
+            HStack(spacing: 10) {
+                Text(undoNotice)
+                Button("撤销") { undo() }
+                    .disabled(!store.canUndo || store.isMutating)
             }
-        }
-        .alert("日历提示", isPresented: alertPresented) {
-            Button("知道了", role: .cancel) { store.dismissErrors() }
-        } message: {
-            Text(store.loadError ?? store.mutationError ?? "")
+            .font(.system(size: 12, weight: .medium))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .foregroundStyle(theme.primaryText)
+            .background(theme.elevatedSurface, in: Capsule())
+            .overlay(Capsule().stroke(theme.subtleBorder, lineWidth: 0.5))
+            .padding(.bottom, 16)
+            .transition(.opacity)
         }
     }
 
@@ -682,6 +729,20 @@ struct MonthView: View {
         )
     }
 
+    private var recurringEditPresented: Binding<Bool> {
+        Binding(
+            get: { recurringEditItem != nil },
+            set: { if !$0 { recurringEditItem = nil } }
+        )
+    }
+
+    private var deleteConfirmPresented: Binding<Bool> {
+        Binding(
+            get: { deleteConfirmItem != nil },
+            set: { if !$0 { deleteConfirmItem = nil } }
+        )
+    }
+
     private var orderedCategories: [CalendarCategory] {
         store.state.categories.values.sorted {
             $0.sortIndex == $1.sortIndex ? $0.name < $1.name : $0.sortIndex < $1.sortIndex
@@ -698,7 +759,70 @@ struct MonthView: View {
         case let .quickCreate(date):
             openQuickCreate(on: date)
         case let .openItem(id):
-            selectedItem = model.projectedItem(withID: id)
+            if let item = model.projectedItem(withID: id) {
+                openEditor(for: item)
+            }
+        }
+    }
+
+    private func openEditor(for item: ProjectedItem) {
+        switch item {
+        case .item:
+            if let config = ItemActions.editorConfiguration(
+                for: item,
+                seriesLookup: { store.state.recurrence.series[$0] },
+                scope: .onlyThis
+            ) {
+                withAnimation(motionPolicy.overlayAnimation) {
+                    editorSession = config
+                }
+            }
+        case .occurrence:
+            recurringEditItem = item
+        }
+    }
+
+    private func confirmRecurringEdit(scope: SeriesScope) {
+        guard let item = recurringEditItem else { return }
+        recurringEditItem = nil
+        if let config = ItemActions.editorConfiguration(
+            for: item,
+            seriesLookup: { store.state.recurrence.series[$0] },
+            scope: scope
+        ) {
+            withAnimation(motionPolicy.overlayAnimation) {
+                editorSession = config
+            }
+        }
+    }
+
+    private func applyPriority(_ priority: ItemPriority, to item: ProjectedItem) {
+        sendItemAction(ItemActions.setPriority(priority, on: item), undoLabel: "已更新优先级")
+    }
+
+    private func togglePin(for item: ProjectedItem) {
+        let command = ItemActions.setPinned(!item.isPinned, on: item)
+        sendItemAction(command, undoLabel: item.isPinned ? "已取消置顶" : "已置顶")
+    }
+
+    private func requestDelete(_ item: ProjectedItem) {
+        deleteConfirmItem = item
+    }
+
+    private func confirmDeleteItem() {
+        guard let item = deleteConfirmItem else { return }
+        deleteConfirmItem = nil
+        sendItemAction(ItemActions.deleteCommand(for: item), undoLabel: "已删除事项")
+    }
+
+    private func sendItemAction(_ command: CalendarCommand, undoLabel: String) {
+        guard store.phase == .ready else { return }
+        Task {
+            do {
+                try await store.send(command, undoLabel: undoLabel)
+            } catch {
+                actionError = store.mutationError ?? "操作失败，请重试"
+            }
         }
     }
 
@@ -816,6 +940,9 @@ struct MonthView: View {
                                 dropCoordinator: dropCoordinator,
                                 onAction: handle,
                                 onCompletion: sendCompletion,
+                                onPriority: { item, priority in applyPriority(priority, to: item) },
+                                onPin: { togglePin(for: $0) },
+                                onDelete: { requestDelete($0) },
                                 selectionRange: interactionCoordinator.previewRange,
                                 onRangeGesture: { gesture in
                                     handleRangeGesture(

@@ -59,6 +59,28 @@ public enum CalendarReducer {
                 result.recurrence.completions.removeValue(forKey: key)
             }
 
+        case let .setItemPriority(id, priority):
+            guard var item = result.items[id] else {
+                throw ReducerError.missingItem
+            }
+            item.priority = priority
+            if priority != .p0 {
+                // Clearing/changing away from pin rank does not auto-unpin unless unpinned explicitly.
+            }
+            item.updatedAt = now
+            result.items[id] = item
+
+        case let .setItemPinned(id, isPinned):
+            guard var item = result.items[id] else {
+                throw ReducerError.missingItem
+            }
+            item.isPinned = isPinned
+            if isPinned {
+                item.priority = .p0
+            }
+            item.updatedAt = now
+            result.items[id] = item
+
         case let .createSeries(series):
             guard result.recurrence.series[series.id] == nil else {
                 throw ReducerError.invalidState

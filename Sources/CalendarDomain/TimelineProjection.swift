@@ -98,6 +98,20 @@ public enum ProjectedEntry: Identifiable, Equatable, Sendable {
         case let .occurrence(occurrence): occurrence.createdAt
         }
     }
+
+    public var priority: ItemPriority {
+        switch self {
+        case let .item(item): item.priority
+        case let .occurrence(occurrence): occurrence.priority
+        }
+    }
+
+    public var isPinned: Bool {
+        switch self {
+        case let .item(item): item.isPinned
+        case let .occurrence(occurrence): occurrence.isPinned
+        }
+    }
 }
 
 private extension CalendarDateRange {
@@ -107,6 +121,14 @@ private extension CalendarDateRange {
 }
 
 private func projectedEntryPrecedes(_ lhs: ProjectedEntry, _ rhs: ProjectedEntry) -> Bool {
+    // Pin first, then priority (P0 → none), then schedule time, else creation time.
+    if lhs.isPinned != rhs.isPinned {
+        return lhs.isPinned && !rhs.isPinned
+    }
+    if lhs.priority != rhs.priority {
+        return lhs.priority < rhs.priority
+    }
+
     let leftIsMultiDay = lhs.schedule.durationDays > 1
     let rightIsMultiDay = rhs.schedule.durationDays > 1
     if leftIsMultiDay != rightIsMultiDay {
@@ -115,6 +137,7 @@ private func projectedEntryPrecedes(_ lhs: ProjectedEntry, _ rhs: ProjectedEntry
 
     switch (lhs.schedule.startTime, rhs.schedule.startTime) {
     case (nil, .some):
+        // All-day / untimed stay above timed blocks (month density reading).
         return true
     case (.some, nil):
         return false

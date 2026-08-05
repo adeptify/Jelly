@@ -7,7 +7,7 @@ struct ItemDetailPopover: View {
     let categories: [CalendarCategory]
     let onClose: () -> Void
     @State private var pendingAction: DetailAction?
-    @State private var editorConfiguration: EditorConfiguration?
+    @State private var editorConfiguration: ItemEditorConfiguration?
     @State private var deleteConfirmationShown = false
     @State private var localError: String?
     @Environment(\.colorScheme) private var colorScheme
@@ -180,7 +180,7 @@ private enum DetailAction {
     case delete
 }
 
-private enum EditorConfiguration: Identifiable {
+enum ItemEditorConfiguration: Identifiable {
     case oneOff(item: CalendarItem)
     case occurrence(series: WeeklySeries, occurrence: CalendarOccurrence, scope: SeriesScope)
 
@@ -214,8 +214,8 @@ private enum EditorConfiguration: Identifiable {
     }
 }
 
-private struct ItemEditForm: View {
-    let configuration: EditorConfiguration
+struct ItemEditForm: View {
+    let configuration: ItemEditorConfiguration
     let store: CalendarStore
     let categories: [CalendarCategory]
     let onCancel: () -> Void
@@ -230,7 +230,7 @@ private struct ItemEditForm: View {
     }
 
     init(
-        configuration: EditorConfiguration,
+        configuration: ItemEditorConfiguration,
         store: CalendarStore,
         categories: [CalendarCategory],
         onCancel: @escaping () -> Void,

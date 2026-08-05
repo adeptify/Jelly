@@ -246,6 +246,9 @@ struct CalendarItemRow: View {
     let category: CalendarCategory?
     var onCompletion: ((CalendarCommand) -> Void)?
     var onOpenDetail: ((ProjectedItem) -> Void)?
+    var onPriority: ((ItemPriority) -> Void)?
+    var onPin: (() -> Void)?
+    var onDelete: (() -> Void)?
     var accessibilityLabelOverride: String?
     var accessibilityValueOverride: String?
     var continuesBefore = false
@@ -299,6 +302,18 @@ struct CalendarItemRow: View {
     }
 
     var body: some View {
+        ItemRowActionChrome(
+            item: item,
+            onEdit: { onOpenDetail?(item) },
+            onPriority: { onPriority?($0) },
+            onPin: { onPin?() },
+            onDelete: { onDelete?() }
+        ) {
+            rowBody
+        }
+    }
+
+    private var rowBody: some View {
         HStack(spacing: 4) {
             if continuesBefore {
                 continuationMarker(systemName: "arrow.left")
@@ -345,8 +360,8 @@ struct CalendarItemRow: View {
                         schedule: item.schedule,
                         title: item.title
                     )
-                    // TickTick layout: title first, optional time trailing. Category is color-only.
                     HStack(spacing: presentation.layout.inlineSpacing) {
+                        ItemPriorityBadge(priority: item.priority, isPinned: item.isPinned)
                         Text(presentation.title)
                             .lineLimit(1)
                             .truncationMode(.tail)

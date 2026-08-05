@@ -103,6 +103,8 @@ public enum RecurrenceEngine {
         let title = override?.title ?? series.title
         let kind = override?.kind ?? series.kind
         let categoryID = override?.categoryID ?? series.categoryID
+        let priority = override?.priority ?? series.priority
+        let isPinned = override?.isPinned ?? series.isPinned
         let schedule: CalendarSchedule
         if let override {
             schedule = override.displayedSchedule
@@ -114,7 +116,7 @@ public enum RecurrenceEngine {
                 endTime: series.endTime
             )
         }
-        let completedAt = kind == .task ? completions[key]?.completedAt : nil
+        let completedAt = completions[key]?.completedAt
 
         return CalendarOccurrence(
             key: key,
@@ -122,6 +124,8 @@ public enum RecurrenceEngine {
             title: title,
             kind: kind,
             categoryID: categoryID,
+            priority: priority,
+            isPinned: isPinned,
             creationTimeZoneIdentifier: series.creationTimeZoneIdentifier,
             completedAt: completedAt,
             createdAt: series.createdAt
@@ -132,6 +136,12 @@ public enum RecurrenceEngine {
         _ lhs: CalendarOccurrence,
         _ rhs: CalendarOccurrence
     ) -> Bool {
+        if lhs.isPinned != rhs.isPinned {
+            return lhs.isPinned && !rhs.isPinned
+        }
+        if lhs.priority != rhs.priority {
+            return lhs.priority < rhs.priority
+        }
         if lhs.schedule.startDate != rhs.schedule.startDate {
             return lhs.schedule.startDate < rhs.schedule.startDate
         }
@@ -144,6 +154,9 @@ public enum RecurrenceEngine {
         case let (.some(lhsStartTime), .some(rhsStartTime)) where lhsStartTime != rhsStartTime:
             return lhsStartTime < rhsStartTime
         default:
+            if lhs.createdAt != rhs.createdAt {
+                return lhs.createdAt < rhs.createdAt
+            }
             return lhs.key.originalDate < rhs.key.originalDate
         }
     }

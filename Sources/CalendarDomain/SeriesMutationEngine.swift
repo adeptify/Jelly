@@ -37,6 +37,8 @@ public struct SeriesPatch: Sendable {
     public var durationDays: Int?
     public var startTime: OptionalPatch<MinuteOfDay>
     public var endTime: OptionalPatch<MinuteOfDay>
+    public var priority: ItemPriority?
+    public var isPinned: Bool?
 
     public init(
         title: String? = nil,
@@ -47,7 +49,9 @@ public struct SeriesPatch: Sendable {
         displayedStartDate: CalendarDate? = nil,
         durationDays: Int? = nil,
         startTime: OptionalPatch<MinuteOfDay> = .unchanged,
-        endTime: OptionalPatch<MinuteOfDay> = .unchanged
+        endTime: OptionalPatch<MinuteOfDay> = .unchanged,
+        priority: ItemPriority? = nil,
+        isPinned: Bool? = nil
     ) {
         self.title = title
         self.kind = kind
@@ -58,6 +62,8 @@ public struct SeriesPatch: Sendable {
         self.durationDays = durationDays
         self.startTime = startTime
         self.endTime = endTime
+        self.priority = priority
+        self.isPinned = isPinned
     }
 }
 
@@ -254,6 +260,11 @@ public enum SeriesMutationEngine {
             recurrenceEndDate = nil
         }
 
+        var priority = patch.priority ?? series.priority
+        let isPinned = patch.isPinned ?? series.isPinned
+        if isPinned, priority == .none {
+            priority = .p0
+        }
         return try WeeklySeries(
             id: id,
             kind: patch.kind ?? series.kind,
@@ -265,6 +276,8 @@ public enum SeriesMutationEngine {
             durationDays: patch.durationDays ?? series.durationDays,
             startTime: applying(patch.startTime, to: series.startTime),
             endTime: applying(patch.endTime, to: series.endTime),
+            priority: priority,
+            isPinned: isPinned,
             creationTimeZoneIdentifier: series.creationTimeZoneIdentifier,
             createdAt: now,
             updatedAt: now
@@ -471,7 +484,9 @@ public enum SeriesMutationEngine {
             ),
             title: series.title,
             kind: series.kind,
-            categoryID: series.categoryID
+            categoryID: series.categoryID,
+            priority: series.priority,
+            isPinned: series.isPinned
         )
     }
 
@@ -492,6 +507,15 @@ public enum SeriesMutationEngine {
         }
         if let categoryID = patch.categoryID {
             override.categoryID = categoryID
+        }
+        if let priority = patch.priority {
+            override.priority = priority
+        }
+        if let isPinned = patch.isPinned {
+            override.isPinned = isPinned
+            if isPinned, override.priority == .none {
+                override.priority = .p0
+            }
         }
     }
 

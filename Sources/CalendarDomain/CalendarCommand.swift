@@ -8,6 +8,8 @@ public enum CalendarCommand: Sendable {
     case moveItem(UUID, to: CalendarDate)
     case setTaskCompleted(UUID, Date?)
     case setOccurrenceCompleted(OccurrenceKey, Date?)
+    case setItemPriority(UUID, ItemPriority)
+    case setItemPinned(UUID, Bool)
     case createSeries(WeeklySeries)
     case mutateSeries(
         OccurrenceKey,

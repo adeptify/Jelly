@@ -127,7 +127,7 @@ struct RecurrenceEngineTests {
         ])
     }
 
-    @Test func eventDoesNotExposeCompletion() throws {
+    @Test func eventOccurrenceCanExposeCompletion() throws {
         let series = try makeSeries(kind: .event, weekdays: [.monday])
         let key = OccurrenceKey(
             seriesID: series.id,
@@ -144,7 +144,7 @@ struct RecurrenceEngineTests {
         )
 
         #expect(result.count == 1)
-        #expect(result[0].completedAt == nil)
+        #expect(result[0].completedAt == Date(timeIntervalSince1970: 60))
     }
 
     @Test func completingOneTaskOccurrenceDoesNotCompleteNext() throws {

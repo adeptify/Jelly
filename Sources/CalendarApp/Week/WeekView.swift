@@ -201,10 +201,13 @@ struct WeekView: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(accent.opacity(0.8))
                 VStack(alignment: .leading, spacing: 1) {
-                    if let compactTime {
-                        Text(compactTime)
-                            .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                            .opacity(0.8)
+                    HStack(spacing: 3) {
+                        ItemPriorityBadge(priority: item.priority, isPinned: item.isPinned)
+                        if let compactTime {
+                            Text(compactTime)
+                                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                                .opacity(0.8)
+                        }
                     }
                     Text(entry.title)
                         .font(.system(size: 11, weight: .medium))
@@ -222,6 +225,11 @@ struct WeekView: View {
         }
         .buttonStyle(.plain)
         .help(entry.title)
+        .contextMenu {
+            Button("编辑") { onOpenDetail(item) }
+            Divider()
+            // Priority/pin/delete for week grid use the same edit entry; full actions live on month chips.
+        }
     }
 }
 

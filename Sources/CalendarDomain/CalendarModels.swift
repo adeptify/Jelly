@@ -10,6 +10,37 @@ public enum ItemKind: String, Codable, Equatable, Hashable, Sendable {
     public static let unifiedTODO = ItemKind.task
 }
 
+/// Explicit priority for ordering and triage. Pinning forces `.p0`.
+public enum ItemPriority: String, Codable, Equatable, Hashable, Comparable, Sendable, CaseIterable {
+    case p0
+    case p1
+    case p2
+    case none
+
+    public var title: String {
+        switch self {
+        case .p0: "P0"
+        case .p1: "P1"
+        case .p2: "P2"
+        case .none: "无"
+        }
+    }
+
+    /// Lower sorts earlier (P0 first).
+    public var sortRank: Int {
+        switch self {
+        case .p0: 0
+        case .p1: 1
+        case .p2: 2
+        case .none: 3
+        }
+    }
+
+    public static func < (lhs: ItemPriority, rhs: ItemPriority) -> Bool {
+        lhs.sortRank < rhs.sortRank
+    }
+}
+
 public enum DomainValidationError: Error, Equatable, Sendable {
     case invalidDateRange
     case invalidTimeRange
@@ -53,6 +84,8 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
     public var categoryID: UUID
     public var schedule: CalendarSchedule
     public var creationTimeZoneIdentifier: String
+    public var priority: ItemPriority
+    public var isPinned: Bool
     public var completedAt: Date?
     public var createdAt: Date
     public var updatedAt: Date
@@ -64,6 +97,8 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         categoryID: UUID,
         schedule: CalendarSchedule,
         creationTimeZoneIdentifier: String = TimeZone.current.identifier,
+        priority: ItemPriority = .none,
+        isPinned: Bool = false,
         completedAt: Date?,
         createdAt: Date,
         updatedAt: Date
@@ -82,6 +117,8 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         self.categoryID = categoryID
         self.schedule = schedule
         self.creationTimeZoneIdentifier = creationTimeZoneIdentifier
+        self.priority = isPinned && priority == .none ? .p0 : priority
+        self.isPinned = isPinned
         self.completedAt = completedAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -102,6 +139,8 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         }
         let schedule = try container.decode(CalendarSchedule.self, forKey: .schedule)
         let creationTimeZoneIdentifier = try container.decode(String.self, forKey: .creationTimeZoneIdentifier)
+        let priority = try container.decodeIfPresent(ItemPriority.self, forKey: .priority) ?? .none
+        let isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         let completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
         let createdAt = try container.decode(Date.self, forKey: .createdAt)
         let updatedAt = try container.decode(Date.self, forKey: .updatedAt)
@@ -114,6 +153,8 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
                 categoryID: categoryID,
                 schedule: schedule,
                 creationTimeZoneIdentifier: creationTimeZoneIdentifier,
+                priority: priority,
+                isPinned: isPinned,
                 completedAt: completedAt,
                 createdAt: createdAt,
                 updatedAt: updatedAt
@@ -135,6 +176,8 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         try container.encode(categoryID, forKey: .categoryID)
         try container.encode(schedule, forKey: .schedule)
         try container.encode(creationTimeZoneIdentifier, forKey: .creationTimeZoneIdentifier)
+        try container.encode(priority, forKey: .priority)
+        try container.encode(isPinned, forKey: .isPinned)
         try container.encodeIfPresent(completedAt, forKey: .completedAt)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
@@ -149,6 +192,8 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         case date
         case timeRange
         case creationTimeZoneIdentifier
+        case priority
+        case isPinned
         case completedAt
         case createdAt
         case updatedAt

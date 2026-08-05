@@ -701,6 +701,9 @@ struct WeekRowView: View {
     @ObservedObject var dropCoordinator: CalendarDropCoordinator
     let onAction: (DayCellAction) -> Void
     let onCompletion: (CalendarCommand) -> Void
+    var onPriority: ((ProjectedItem, ItemPriority) -> Void)?
+    var onPin: ((ProjectedItem) -> Void)?
+    var onDelete: ((ProjectedItem) -> Void)?
     let selectionRange: CalendarDateRange?
     let onRangeGesture: (WeekRowRangeGesture) -> Void
     let onItemGesture: (WeekRowItemGesture) -> Void
@@ -744,7 +747,10 @@ struct WeekRowView: View {
                         onCompletion: onCompletion,
                         onOpenDetail: { item in
                             onAction(.openItem(item.id))
-                        }
+                        },
+                        onPriority: onPriority,
+                        onPin: onPin,
+                        onDelete: onDelete
                     )
                     .frame(
                         width: columnWidth * CGFloat(segment.endColumn - segment.startColumn + 1),
@@ -933,6 +939,9 @@ private struct WeekRowSegmentBar: View {
     let onItemGesture: (WeekRowItemGesture) -> Void
     let onCompletion: (CalendarCommand) -> Void
     let onOpenDetail: (ProjectedItem) -> Void
+    var onPriority: ((ProjectedItem, ItemPriority) -> Void)?
+    var onPin: ((ProjectedItem) -> Void)?
+    var onDelete: ((ProjectedItem) -> Void)?
 
     var body: some View {
         CalendarItemRow(
@@ -940,6 +949,9 @@ private struct WeekRowSegmentBar: View {
             category: category,
             onCompletion: onCompletion,
             onOpenDetail: onOpenDetail,
+            onPriority: { onPriority?(projectedItem, $0) },
+            onPin: { onPin?(projectedItem) },
+            onDelete: { onDelete?(projectedItem) },
             accessibilityLabelOverride: segment.accessibilityLabel,
             accessibilityValueOverride: segment.accessibilityValue,
             continuesBefore: segment.continuesBefore,
