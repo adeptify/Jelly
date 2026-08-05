@@ -6,7 +6,7 @@ import Testing
 @Suite("CalendarItemRowPresentationTests")
 @MainActor
 struct CalendarItemRowPresentationTests {
-    @Test func compactTimedRowKeepsFullStartTimeReadableCategoryAndTitle() throws {
+    @Test func compactTimedRowKeepsFullStartTimeAndTitleWithoutCategoryLabel() throws {
         let range = try LocalTimeRange(
             start: .init(hour: 9, minute: 0)!,
             end: .init(hour: 10, minute: 0)!
@@ -18,16 +18,12 @@ struct CalendarItemRowPresentationTests {
             timeRange: range,
             title: "产品同步会"
         )
-        #expect(compact.categoryName == "工")
+        #expect(compact.categoryName == nil)
         #expect(compact.timeText == "09:00")
         #expect(compact.title == "产品同步会")
-        #expect(compact.layout.categoryMinimumWidth == 16)
-        #expect(compact.layout.categoryMaximumWidth == 16)
-        #expect(compact.layout.categoryMinimumWidth == compact.layout.categoryMaximumWidth)
-        #expect(compact.layout.categoryFixedWidth == 16)
         #expect(compact.layout.titleMinimumWidth == 20)
-        #expect(compact.layout.timeLayoutPriority > compact.layout.categoryLayoutPriority)
-        #expect(compact.layout.categoryLayoutPriority > compact.layout.titleLayoutPriority)
+        #expect(compact.layout.timeLayoutPriority > compact.layout.titleLayoutPriority)
+        #expect(compact.layout.textFontSize == 11)
 
         let regular = CalendarItemRowPresentation.make(
             availableContentWidth: 142,
@@ -35,11 +31,12 @@ struct CalendarItemRowPresentationTests {
             timeRange: range,
             title: "产品同步会"
         )
-        #expect(regular.categoryName == "工作")
+        #expect(regular.categoryName == nil)
         #expect(regular.timeText == "09:00")
+        #expect(regular.layout.textFontSize == 12)
     }
 
-    @Test func compactTimedRowUsesReadableCategoryPrefixInsteadOfMeaninglessEllipsis() throws {
+    @Test func categoryNameIsNeverShownEvenForLongCategoryLabels() throws {
         let range = try LocalTimeRange(
             start: .init(hour: 9, minute: 0)!,
             end: .init(hour: 10, minute: 0)!
@@ -52,14 +49,12 @@ struct CalendarItemRowPresentationTests {
             title: "需要被合理省略的长标题"
         )
 
-        #expect(compact.categoryName == "重")
-        #expect(compact.categoryName != "…")
-        #expect(compact.categoryName?.contains("…") == false)
+        #expect(compact.categoryName == nil)
         #expect(compact.timeText == "09:00")
         #expect(compact.title == "需要被合理省略的长标题")
     }
 
-    @Test func minimumWindowContentBoundaryKeepsCategoryTimeAndTitle() throws {
+    @Test func minimumWindowContentBoundaryKeepsTimeAndTitle() throws {
         let range = try LocalTimeRange(
             start: .init(hour: 9, minute: 0)!,
             end: .init(hour: 10, minute: 0)!
@@ -72,16 +67,11 @@ struct CalendarItemRowPresentationTests {
             title: "产品同步会"
         )
 
-        #expect(boundary.categoryName == "工")
+        #expect(boundary.categoryName == nil)
         #expect(boundary.timeText == "09:00")
         #expect(boundary.title == "产品同步会")
-        #expect(boundary.layout.categoryMinimumWidth == 16)
-        #expect(boundary.layout.categoryMaximumWidth == 16)
-        #expect(boundary.layout.categoryMinimumWidth == boundary.layout.categoryMaximumWidth)
-        #expect(boundary.layout.categoryFixedWidth == 16)
         #expect(boundary.layout.titleMinimumWidth == 20)
-        #expect(boundary.layout.timeLayoutPriority > boundary.layout.categoryLayoutPriority)
-        #expect(boundary.layout.categoryLayoutPriority > boundary.layout.titleLayoutPriority)
+        #expect(boundary.layout.timeLayoutPriority > boundary.layout.titleLayoutPriority)
     }
 
     @Test func minimumWindowGeometryWidthUsesCompactLayoutThrough140Points() throws {
@@ -103,13 +93,13 @@ struct CalendarItemRowPresentationTests {
             title: "产品同步会"
         )
 
-        #expect(compact.categoryName == "重")
-        #expect(compact.layout.categoryFixedWidth == 16)
-        #expect(standard.categoryName == "重点客户项目")
-        #expect(standard.layout.categoryFixedWidth == nil)
+        #expect(compact.categoryName == nil)
+        #expect(compact.layout.textFontSize == 11)
+        #expect(standard.categoryName == nil)
+        #expect(standard.layout.textFontSize == 12)
     }
 
-    @Test func compactCategoryUsesOneCharacterTokenWhileStandardKeepsFullName() {
+    @Test func visualPresentationNeverSurfacesCategoryTokens() {
         let compact = CalendarItemRowPresentation.make(
             availableContentWidth: 140,
             categoryName: "工作",
@@ -123,11 +113,10 @@ struct CalendarItemRowPresentationTests {
             title: "事项"
         )
 
-        #expect(compact.categoryName == "工")
-        #expect(compact.categoryName?.contains("…") == false)
-        #expect(compact.layout.categoryFixedWidth == 16)
-        #expect(standard.categoryName == "工作")
-        #expect(standard.layout.categoryFixedWidth == nil)
+        #expect(compact.categoryName == nil)
+        #expect(standard.categoryName == nil)
+        #expect(compact.timeText == nil)
+        #expect(standard.timeText == nil)
     }
 
     @Test func compactTimedLayoutUsesReducedTypographyWhileStandardKeepsOriginalSize() throws {
@@ -151,12 +140,12 @@ struct CalendarItemRowPresentationTests {
 
         #expect(compact.layout.textFontSize == 11)
         #expect(standard.layout.textFontSize == 12)
-        #expect(compact.categoryName == "工")
+        #expect(compact.categoryName == nil)
         #expect(compact.timeText == "09:00")
         #expect(compact.title == "产品同步会")
     }
 
-    @Test func rowBodyAccessibilityLabelKeepsFullValuesInCompactAndStandardLayouts() throws {
+    @Test func rowBodyAccessibilityLabelKeepsFullCategoryInCompactAndStandardLayouts() throws {
         let range = try LocalTimeRange(
             start: .init(hour: 9, minute: 0)!,
             end: .init(hour: 10, minute: 0)!
@@ -175,7 +164,7 @@ struct CalendarItemRowPresentationTests {
             title: "产品同步会"
         )
 
-        #expect(compact.categoryName == "工")
+        #expect(compact.categoryName == nil)
         #expect(compact.accessibilityLabel == "工作, 09:00, 产品同步会")
         #expect(standard.accessibilityLabel == "工作, 09:00, 产品同步会")
     }
@@ -188,6 +177,7 @@ struct CalendarItemRowPresentationTests {
             title: "收集灵感"
         )
 
+        #expect(presentation.categoryName == nil)
         #expect(presentation.accessibilityLabel == "未分类, 收集灵感")
     }
 
@@ -206,11 +196,12 @@ struct CalendarItemRowPresentationTests {
             title: "夜间发布"
         )
 
+        #expect(presentation.categoryName == nil)
         #expect(presentation.timeText == "23:00")
         #expect(presentation.accessibilityLabel == "工作, 23:00, 夜间发布")
     }
 
-    @Test func narrowUntimedRowAlsoKeepsReadableCategoryPrefixAndTitle() {
+    @Test func narrowUntimedRowKeepsTitleWithoutCategoryLabel() {
         let compact = CalendarItemRowPresentation.make(
             availableContentWidth: 112,
             categoryName: "重点客户项目",
@@ -218,16 +209,9 @@ struct CalendarItemRowPresentationTests {
             title: "需要被合理省略的长标题"
         )
 
-        #expect(compact.categoryName == "重")
-        #expect(compact.categoryName != "…")
-        #expect(compact.categoryName?.contains("…") == false)
-        #expect(compact.categoryName != nil)
+        #expect(compact.categoryName == nil)
         #expect(compact.timeText == nil)
         #expect(compact.title == "需要被合理省略的长标题")
-        #expect(compact.layout.categoryMinimumWidth == 16)
-        #expect(compact.layout.categoryMaximumWidth == 16)
-        #expect(compact.layout.categoryMinimumWidth == compact.layout.categoryMaximumWidth)
-        #expect(compact.layout.categoryLayoutPriority > compact.layout.titleLayoutPriority)
         #expect(compact.layout.titleMinimumWidth == 20)
     }
 

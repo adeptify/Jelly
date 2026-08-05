@@ -133,16 +133,22 @@ enum CalendarTheme {
     static let previewLightTextHex = light.primaryTextHex
     static let previewDarkCanvasHex = dark.canvasHex
     static let previewDarkTextHex = dark.primaryTextHex
-    static let categoryItemBackgroundOpacity = 0.14
+    /// Soft pastel wash for TickTick-style item chips on the warm canvas.
+    static let categoryItemBackgroundOpacity = 0.24
+    /// Completed chips keep structure but sit lighter on the canvas.
+    static let categoryItemCompletedBackgroundOpacity = 0.11
     static let categoryTextMinimumContrast = 4.5
     static let categoryAccentMinimumContrast = 3.0
 
     static let toolbarHeight: CGFloat = 52
     static let weekdayHeaderHeight: CGFloat = 28
     static let cellPadding: CGFloat = 6
+    /// Keep 21 so a 252pt week row still exposes 10 lanes before overflow.
     static let itemRowHeight: CGFloat = 21
     static let itemSpacing: CGFloat = 3
-    static let cornerRadius: CGFloat = 5
+    static let cornerRadius: CGFloat = 6
+    /// Whole-row fade for completed tasks (no strikethrough).
+    static let completedItemOpacity = 0.62
     static let monthTitleFont = Font.system(size: 17, weight: .semibold)
     static let dateFont = Font.system(size: 12)
     static let itemFont = Font.system(size: 12)

@@ -174,6 +174,22 @@ enum CategoryColorResolver {
             surface: softBackground,
             appearance: appearance
         )
+        let completedBackground = base.composited(
+            over: canvas,
+            alpha: CalendarTheme.categoryItemCompletedBackgroundOpacity
+        )
+        let completedAccent = accentMeetingMinimumContrast(
+            from: accent.mixed(toward: canvas, fraction: 0.28),
+            surface: completedBackground,
+            appearance: appearance
+        )
+        let completedOutline = accentMeetingMinimumContrast(
+            from: outline.mixed(toward: canvas, fraction: 0.28),
+            surface: completedBackground,
+            appearance: appearance
+        )
+        // Completion is a softer wash + checkbox; never rely on strikethrough.
+        let completedText = text.mixed(toward: canvas, fraction: 0.18)
         return CategoryColorRoles(
             accent: accent,
             softBackground: softBackground,
@@ -181,12 +197,12 @@ enum CategoryColorResolver {
             text: text,
             canvas: canvas,
             completed: CategoryRenderedColorRoles(
-                // Completion is expressed by the checkbox glyph and strikethrough in the row.
-                // It deliberately keeps the contrast-safe colors instead of fading them.
-                accent: accent,
-                background: softBackground,
-                outline: outline,
-                text: text
+                accent: completedAccent,
+                background: completedBackground,
+                outline: completedOutline,
+                text: completedText.contrastRatio(with: completedBackground) >= CalendarTheme.categoryTextMinimumContrast
+                    ? completedText
+                    : text
             )
         )
     }

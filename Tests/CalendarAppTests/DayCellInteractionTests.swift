@@ -151,6 +151,7 @@ struct DayCellInteractionTests {
         )
         surface.frame = CGRect(x: 0, y: 0, width: 100, height: 228)
 
+        // Lanes use itemRowHeight 21 + spacing 2 → [0,21), [23,44), [46,67).
         #expect(surface.hitTest(CGPoint(x: 50, y: 1)) == nil)
         #expect(surface.hitTest(CGPoint(x: 50, y: 22)) === surface)
         #expect(surface.hitTest(CGPoint(x: 50, y: 24)) == nil)
