@@ -160,7 +160,7 @@ enum CategoryColorResolver {
             : CalendarTheme.previewDarkTextHex)
         let softBackground = base.composited(
             over: canvas,
-            alpha: CalendarTheme.categoryItemBackgroundOpacity
+            alpha: CalendarTheme.categoryItemBackgroundOpacity(for: appearance)
         )
         let accent = paletteAccents[appearance]?[normalized]
             ?? accentMeetingMinimumContrast(
@@ -174,35 +174,47 @@ enum CategoryColorResolver {
             surface: softBackground,
             appearance: appearance
         )
+        // Dark chips are denser; push text toward white/black pole until WCAG 4.5 holds.
+        let resolvedText = textMeetingMinimumContrast(
+            from: text,
+            surface: softBackground,
+            appearance: appearance
+        )
         let completedBackground = base.composited(
             over: canvas,
-            alpha: CalendarTheme.categoryItemCompletedBackgroundOpacity
+            alpha: CalendarTheme.categoryItemCompletedBackgroundOpacity(for: appearance)
         )
+        // Dark completed chips fade toward the canvas a bit more so they stay quiet.
+        let completedMix = appearance == .light ? 0.28 : 0.36
         let completedAccent = accentMeetingMinimumContrast(
-            from: accent.mixed(toward: canvas, fraction: 0.28),
+            from: accent.mixed(toward: canvas, fraction: completedMix),
             surface: completedBackground,
             appearance: appearance
         )
         let completedOutline = accentMeetingMinimumContrast(
-            from: outline.mixed(toward: canvas, fraction: 0.28),
+            from: outline.mixed(toward: canvas, fraction: completedMix),
             surface: completedBackground,
             appearance: appearance
         )
         // Completion is a softer wash + checkbox; never rely on strikethrough.
-        let completedText = text.mixed(toward: canvas, fraction: 0.18)
+        let completedTextMix = appearance == .light ? 0.18 : 0.28
+        let completedTextSeed = resolvedText.mixed(toward: canvas, fraction: completedTextMix)
+        let completedText = textMeetingMinimumContrast(
+            from: completedTextSeed,
+            surface: completedBackground,
+            appearance: appearance
+        )
         return CategoryColorRoles(
             accent: accent,
             softBackground: softBackground,
             outline: outline,
-            text: text,
+            text: resolvedText,
             canvas: canvas,
             completed: CategoryRenderedColorRoles(
                 accent: completedAccent,
                 background: completedBackground,
                 outline: completedOutline,
-                text: completedText.contrastRatio(with: completedBackground) >= CalendarTheme.categoryTextMinimumContrast
-                    ? completedText
-                    : text
+                text: completedText
             )
         )
     }
@@ -226,7 +238,7 @@ enum CategoryColorResolver {
             : CalendarTheme.previewDarkCanvasHex)
         let surface = base.composited(
             over: canvas,
-            alpha: CalendarTheme.categoryItemBackgroundOpacity
+            alpha: CalendarTheme.categoryItemBackgroundOpacity(for: appearance)
         )
         return accentMeetingMinimumContrast(
             from: base,
@@ -242,11 +254,40 @@ enum CategoryColorResolver {
     ) -> SRGBColor {
         // Keep a small margin so platform color conversion and rasterization cannot turn a
         // mathematically exact 3.00:1 result into a rendered near miss.
-        let renderedMinimumContrast = CalendarTheme.categoryAccentMinimumContrast + 0.05
+        colorMeetingMinimumContrast(
+            from: color,
+            surface: surface,
+            appearance: appearance,
+            minimum: CalendarTheme.categoryAccentMinimumContrast + 0.05
+        )
+    }
+
+    private static func textMeetingMinimumContrast(
+        from color: SRGBColor,
+        surface: SRGBColor,
+        appearance: CalendarAppearance
+    ) -> SRGBColor {
+        colorMeetingMinimumContrast(
+            from: color,
+            surface: surface,
+            appearance: appearance,
+            minimum: CalendarTheme.categoryTextMinimumContrast + 0.05
+        )
+    }
+
+    private static func colorMeetingMinimumContrast(
+        from color: SRGBColor,
+        surface: SRGBColor,
+        appearance: CalendarAppearance,
+        minimum: Double
+    ) -> SRGBColor {
         let pole = appearance == .light ? SRGBColor.black : SRGBColor.white
+        if color.contrastRatio(with: surface) >= minimum {
+            return color
+        }
         for step in 0...200 {
             let candidate = color.mixed(toward: pole, fraction: Double(step) / 200)
-            if candidate.contrastRatio(with: surface) >= renderedMinimumContrast {
+            if candidate.contrastRatio(with: surface) >= minimum {
                 return candidate
             }
         }
@@ -271,7 +312,7 @@ enum CategoryColorResolver {
                     guard let base = try? SRGBColor(hex: hex) else { continue }
                     let surface = base.composited(
                         over: canvas,
-                        alpha: CalendarTheme.categoryItemBackgroundOpacity
+                        alpha: CalendarTheme.categoryItemBackgroundOpacity(for: appearance)
                     )
                     let raw = accentMeetingMinimumContrast(
                         from: base,

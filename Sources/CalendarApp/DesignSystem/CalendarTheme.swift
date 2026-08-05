@@ -133,10 +133,13 @@ enum CalendarTheme {
     static let previewLightTextHex = light.primaryTextHex
     static let previewDarkCanvasHex = dark.canvasHex
     static let previewDarkTextHex = dark.primaryTextHex
-    /// Soft pastel wash for TickTick-style item chips on the warm canvas.
-    static let categoryItemBackgroundOpacity = 0.24
-    /// Completed chips keep structure but sit lighter on the canvas.
-    static let categoryItemCompletedBackgroundOpacity = 0.11
+    /// Soft pastel wash on light canvas (TickTick light).
+    static let categoryItemBackgroundOpacityLight = 0.24
+    /// More present muted wash on warm-black canvas (TickTick dark).
+    static let categoryItemBackgroundOpacityDark = 0.36
+    /// Completed chips: lighter wash, structure kept.
+    static let categoryItemCompletedBackgroundOpacityLight = 0.11
+    static let categoryItemCompletedBackgroundOpacityDark = 0.17
     static let categoryTextMinimumContrast = 4.5
     static let categoryAccentMinimumContrast = 3.0
 
@@ -148,17 +151,41 @@ enum CalendarTheme {
     static let itemSpacing: CGFloat = 3
     static let cornerRadius: CGFloat = 6
     /// Whole-row fade for completed tasks (no strikethrough).
-    static let completedItemOpacity = 0.62
+    static let completedItemOpacityLight = 0.62
+    static let completedItemOpacityDark = 0.55
     static let monthTitleFont = Font.system(size: 17, weight: .semibold)
     static let dateFont = Font.system(size: 12)
     static let itemFont = Font.system(size: 12)
+
+    /// Default / light-only callers (preview palette production baseline).
+    static var categoryItemBackgroundOpacity: Double { categoryItemBackgroundOpacityLight }
+    static var categoryItemCompletedBackgroundOpacity: Double {
+        categoryItemCompletedBackgroundOpacityLight
+    }
+    static var completedItemOpacity: Double { completedItemOpacityLight }
+
+    static func categoryItemBackgroundOpacity(for appearance: CalendarAppearance) -> Double {
+        appearance == .light
+            ? categoryItemBackgroundOpacityLight
+            : categoryItemBackgroundOpacityDark
+    }
+
+    static func categoryItemCompletedBackgroundOpacity(for appearance: CalendarAppearance) -> Double {
+        appearance == .light
+            ? categoryItemCompletedBackgroundOpacityLight
+            : categoryItemCompletedBackgroundOpacityDark
+    }
+
+    static func completedItemOpacity(for appearance: CalendarAppearance) -> Double {
+        appearance == .light ? completedItemOpacityLight : completedItemOpacityDark
+    }
 
     static func appearance(for colorScheme: ColorScheme) -> CalendarSemanticAppearance {
         colorScheme == .dark ? dark : light
     }
 
-    static func itemBackground(_ category: Color) -> Color {
-        category.opacity(categoryItemBackgroundOpacity)
+    static func itemBackground(_ category: Color, appearance: CalendarAppearance = .light) -> Color {
+        category.opacity(categoryItemBackgroundOpacity(for: appearance))
     }
 
     static func categoryColor(_ hex: String) -> Color {

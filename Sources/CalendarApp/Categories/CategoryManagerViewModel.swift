@@ -34,15 +34,21 @@ struct CategoryPreviewPalette: Sendable {
     let lightTextHex: String
     let darkCanvasHex: String
     let darkTextHex: String
-    let categoryBackgroundOpacity: Double
+    let lightCategoryBackgroundOpacity: Double
+    let darkCategoryBackgroundOpacity: Double
 
     static let production = CategoryPreviewPalette(
         lightCanvasHex: CalendarTheme.previewLightCanvasHex,
         lightTextHex: CalendarTheme.previewLightTextHex,
         darkCanvasHex: CalendarTheme.previewDarkCanvasHex,
         darkTextHex: CalendarTheme.previewDarkTextHex,
-        categoryBackgroundOpacity: CalendarTheme.categoryItemBackgroundOpacity
+        lightCategoryBackgroundOpacity: CalendarTheme.categoryItemBackgroundOpacityLight,
+        darkCategoryBackgroundOpacity: CalendarTheme.categoryItemBackgroundOpacityDark
     )
+
+    func categoryBackgroundOpacity(for appearance: CalendarAppearance) -> Double {
+        appearance == .light ? lightCategoryBackgroundOpacity : darkCategoryBackgroundOpacity
+    }
 }
 
 enum CategoryManagerError: Error, Equatable {
@@ -82,7 +88,10 @@ enum CategoryColorValidator {
         let category = try SRGBColor(hex: colorHex)
         let canvas = try SRGBColor(hex: canvasHex(for: appearance, palette: palette))
         let text = try SRGBColor(hex: textHex(for: appearance, palette: palette))
-        let composite = category.composited(over: canvas, alpha: palette.categoryBackgroundOpacity)
+        let composite = category.composited(
+            over: canvas,
+            alpha: palette.categoryBackgroundOpacity(for: appearance)
+        )
         return composite.contrastRatio(with: text)
     }
 

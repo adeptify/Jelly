@@ -41,9 +41,14 @@ struct CategoryManagerViewModelTests {
 
         #expect(light >= 4.5)
         #expect(dark >= 4.5)
-        #expect(CalendarTheme.categoryItemBackgroundOpacity == 0.24)
-        #expect(CalendarTheme.categoryItemCompletedBackgroundOpacity == 0.11)
-        #expect(CalendarTheme.completedItemOpacity == 0.62)
+        #expect(CalendarTheme.categoryItemBackgroundOpacityLight == 0.24)
+        #expect(CalendarTheme.categoryItemBackgroundOpacityDark == 0.36)
+        #expect(CalendarTheme.categoryItemCompletedBackgroundOpacityLight == 0.11)
+        #expect(CalendarTheme.categoryItemCompletedBackgroundOpacityDark == 0.17)
+        #expect(CalendarTheme.completedItemOpacityLight == 0.62)
+        #expect(CalendarTheme.completedItemOpacityDark == 0.55)
+        #expect(CalendarTheme.categoryItemBackgroundOpacity(for: .light) == 0.24)
+        #expect(CalendarTheme.categoryItemBackgroundOpacity(for: .dark) == 0.36)
         #expect(CalendarTheme.previewLightCanvasHex == "#F7F1E7")
         #expect(CalendarTheme.previewLightTextHex == "#2A2420")
         #expect(CalendarTheme.previewDarkCanvasHex == "#211E1B")
@@ -224,7 +229,8 @@ struct CategoryManagerViewModelTests {
             lightTextHex: "#FFFFFF",
             darkCanvasHex: "#1C1C1E",
             darkTextHex: "#1C1C1E",
-            categoryBackgroundOpacity: 0.14
+            lightCategoryBackgroundOpacity: 0.14,
+            darkCategoryBackgroundOpacity: 0.14
         )
         #expect(throws: CategoryManagerError.insufficientContrast) {
             try CategoryColorValidator.validateReadableInBothAppearances(

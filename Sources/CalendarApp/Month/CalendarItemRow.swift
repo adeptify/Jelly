@@ -272,7 +272,10 @@ struct CalendarItemRow: View {
 
     private var categoryBackground: Color {
         itemColorRoles.map { CalendarTheme.categoryColor($0.background) }
-            ?? CalendarTheme.itemBackground(CalendarTheme.categoryColor(categoryHex))
+            ?? CalendarTheme.itemBackground(
+                CalendarTheme.categoryColor(categoryHex),
+                appearance: appearance
+            )
     }
 
     private var categoryText: Color {
@@ -388,7 +391,7 @@ struct CalendarItemRow: View {
             categoryBackground,
             in: RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius, style: .continuous)
         )
-        .opacity(isCompletedTask ? CalendarTheme.completedItemOpacity : 1)
+        .opacity(isCompletedTask ? CalendarTheme.completedItemOpacity(for: appearance) : 1)
         .draggable(transferPayload)
     }
 
