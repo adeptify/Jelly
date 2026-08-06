@@ -4,10 +4,20 @@ import SwiftUI
 struct QuickCreatePresentation: Equatable {
     let range: CalendarDateRange
     let anchorDate: CalendarDate
+    /// When set (e.g. week-grid hour tap), create form opens with 具体时间 enabled.
+    let startTime: MinuteOfDay?
+    let endTime: MinuteOfDay?
 
-    init(range: CalendarDateRange, anchorDate: CalendarDate) {
+    init(
+        range: CalendarDateRange,
+        anchorDate: CalendarDate,
+        startTime: MinuteOfDay? = nil,
+        endTime: MinuteOfDay? = nil
+    ) {
         self.range = range
         self.anchorDate = anchorDate
+        self.startTime = startTime
+        self.endTime = endTime
     }
 
     init?(action: CalendarInteractionAction) {
@@ -15,8 +25,44 @@ struct QuickCreatePresentation: Equatable {
         self.init(range: range, anchorDate: anchor)
     }
 
+    /// Seed a single-day create; optional hour slot fills 具体时间 (default 1h block).
+    static func forDay(
+        _ date: CalendarDate,
+        startTime: MinuteOfDay? = nil
+    ) -> QuickCreatePresentation {
+        guard let start = startTime else {
+            return QuickCreatePresentation(
+                range: CalendarDateRange(start: date, end: date),
+                anchorDate: date
+            )
+        }
+        let next = start.value + 60
+        let endDate: CalendarDate
+        let end: MinuteOfDay
+        if next < 24 * 60 {
+            endDate = date
+            end = MinuteOfDay(hour: next / 60, minute: next % 60)!
+        } else {
+            // 23:00 → overnight to next day 00:00
+            endDate = date.addingDays(1)
+            end = MinuteOfDay(hour: 0, minute: 0)!
+        }
+        return QuickCreatePresentation(
+            range: CalendarDateRange(start: date, end: endDate),
+            anchorDate: date,
+            startTime: start,
+            endTime: end
+        )
+    }
+
     func initialDraft(categoryID: UUID) -> ItemDraft {
-        .newItem(from: range.start, through: range.end, categoryID: categoryID)
+        .newItem(
+            from: range.start,
+            through: range.end,
+            categoryID: categoryID,
+            startTime: startTime,
+            endTime: endTime
+        )
     }
 }
 
@@ -44,6 +90,10 @@ enum QuickCreateContentLayout: Equatable {
 }
 
 struct QuickCreateOverlayPresentation: Equatable {
+    /// Used before preference measures real content — avoids height-0 midY placement
+    /// that jumps the card to the window top once the form expands.
+    nonisolated static let estimatedCardHeight: CGFloat = 420
+
     let presentation: QuickCreatePresentation
     let placement: AnchoredEditorPlacement
 
@@ -54,12 +104,13 @@ struct QuickCreateOverlayPresentation: Equatable {
         windowBounds: CGRect
     ) {
         self.presentation = presentation
-        let preferredSize = CGSize(
-            width: measuredContentSize.width > 0
-                ? measuredContentSize.width
-                : QuickCreatePopover.preferredWidth,
-            height: max(0, measuredContentSize.height)
-        )
+        let width = measuredContentSize.width > 1
+            ? measuredContentSize.width
+            : QuickCreatePopover.preferredWidth
+        let height = measuredContentSize.height > 1
+            ? measuredContentSize.height
+            : Self.estimatedCardHeight
+        let preferredSize = CGSize(width: width, height: height)
         placement = AnchoredEditorLayout.place(
             cardSize: preferredSize,
             anchorFrame: anchorFrame,
@@ -86,7 +137,7 @@ struct QuickCreatePopover: View {
     let onClose: () -> Void
     private let availableWidth: CGFloat
     private let maximumContentHeight: CGFloat?
-    @Environment(\.openWindow) private var openWindow
+    @Environment(\.openCategoryManager) private var openCategoryManager
     @Environment(\.colorScheme) private var colorScheme
     @FocusState private var titleFocused: Bool
     @StateObject private var model: ItemEditorViewModel
@@ -96,8 +147,6 @@ struct QuickCreatePopover: View {
     private var theme: CalendarSemanticAppearance {
         CalendarTheme.appearance(for: colorScheme)
     }
-
-    private static let categoryManagerOption = "__category_manager__"
 
     init(
         presentation: QuickCreatePresentation,
@@ -160,98 +209,216 @@ struct QuickCreatePopover: View {
     }
 
     private var editorContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: EditorFormStyle.contentSpacing) {
             Text("新建事项")
-                .font(.headline)
+                .font(EditorFormStyle.title)
+
             TextField("标题", text: $model.draft.title)
+                .textFieldStyle(.roundedBorder)
+                .font(EditorFormStyle.body)
                 .focused($titleFocused)
 
-            Picker("分类", selection: $categoryOption) {
-                ForEach(categories) { category in
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(CalendarTheme.categoryAccent(
-                                category.colorHex,
-                                appearance: colorScheme == .dark ? .dark : .light
-                            ))
-                            .frame(width: 8, height: 8)
-                        Text(category.name)
-                    }
-                    .tag(category.id.uuidString)
-                }
-                Divider()
-                Text("管理分类…").tag(Self.categoryManagerOption)
-            }
-            .onChange(of: categoryOption) { _, option in
-                guard option == Self.categoryManagerOption else {
-                    if let id = UUID(uuidString: option) {
-                        model.draft.categoryID = id
-                    }
-                    return
-                }
-                openWindow(id: "category-manager")
-                categoryOption = model.draft.categoryID.uuidString
-            }
-
-            Toggle("具体时间（精确到分钟，含 00:00）", isOn: $model.draft.usesTime)
-                .onChange(of: model.draft.usesTime) { _, _ in
-                    model.usesTimeDidChange()
-                }
-            HStack {
-                DatePicker("开始日期", selection: startDateBinding, displayedComponents: .date)
-                if model.draft.usesTime {
-                    DatePicker(
-                        "开始时间",
-                        selection: startTimeBinding,
-                        displayedComponents: .hourAndMinute
-                    )
-                    .labelsHidden()
-                    .frame(width: 96)
-                    .help("开始时间，可设为 00:00")
-                }
-            }
-            HStack {
-                DatePicker("结束日期", selection: endDateBinding, displayedComponents: .date)
-                if model.draft.usesTime {
-                    DatePicker(
-                        "结束时间",
-                        selection: endTimeBinding,
-                        displayedComponents: .hourAndMinute
-                    )
-                    .labelsHidden()
-                    .frame(width: 96)
-                    .help("结束时间，须晚于开始；跨日可到次日 00:00")
-                }
-            }
-            if model.draft.usesTime {
-                Text("保存后会在月历/周视图卡片上显示时间")
-                    .font(.caption2)
+            // Category
+            HStack(spacing: 8) {
+                Text("分类")
+                    .font(EditorFormStyle.label)
                     .foregroundStyle(theme.secondaryText)
+                    .frame(width: EditorFormStyle.labelWidth, alignment: .leading)
+                categoryMenu
+                Spacer(minLength: 0)
             }
 
-            Toggle("每周重复", isOn: $model.draft.repeatsWeekly)
+            HStack(spacing: 8) {
+                Text("优先级")
+                    .font(EditorFormStyle.label)
+                    .foregroundStyle(theme.secondaryText)
+                    .frame(width: EditorFormStyle.labelWidth, alignment: .leading)
+                EditorPriorityPicker(priority: $model.draft.priority)
+                Spacer(minLength: 0)
+            }
+            .frame(minHeight: EditorFormStyle.fieldMinHeight)
+
+            scheduleBlock
+
+            Toggle(isOn: $model.draft.repeatsWeekly) {
+                Text("每周重复")
+                    .font(EditorFormStyle.control)
+            }
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+
             if model.draft.repeatsWeekly {
                 weekdayPicker
-                Toggle("设置重复结束日期", isOn: recurrenceEndEnabledBinding)
+                Toggle(isOn: recurrenceEndEnabledBinding) {
+                    Text("设置结束日期")
+                        .font(EditorFormStyle.control)
+                }
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
                 if model.draft.recurrenceEndDate != nil {
-                    DatePicker("重复结束日期", selection: recurrenceEndBinding, displayedComponents: .date)
+                    scheduleFieldRow("直到") {
+                        EditorDateChip(date: recurrenceEndBinding)
+                        Spacer(minLength: 0)
+                    }
                 }
             }
 
             if let message = localError ?? model.validationMessage {
                 Text(message)
-                    .font(.footnote)
+                    .font(EditorFormStyle.caption)
                     .foregroundStyle(theme.error)
             }
+
             HStack {
                 Spacer()
                 Button("取消", action: onClose)
+                    .controlSize(.small)
                     .keyboardShortcut(.escape, modifiers: [])
                 Button("保存", action: save)
+                    .controlSize(.small)
+                    .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.return, modifiers: [])
                     .disabled(store.phase != .ready)
             }
         }
+    }
+
+    // MARK: - Schedule (compact)
+
+    private var scheduleBlock: some View {
+        VStack(alignment: .leading, spacing: EditorFormStyle.blockSpacing) {
+            // 全天 / 定时 — short segmented control instead of a long checkbox label
+            HStack(spacing: 0) {
+                timeModeChip(title: "全天", selected: !model.draft.usesTime) {
+                    if model.draft.usesTime {
+                        model.draft.usesTime = false
+                    }
+                }
+                timeModeChip(title: "定时", selected: model.draft.usesTime) {
+                    if !model.draft.usesTime {
+                        model.draft.usesTime = true
+                        model.usesTimeDidChange()
+                    }
+                }
+            }
+            .padding(2)
+            .background(
+                theme.subtleBorder.opacity(0.22),
+                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            )
+
+            scheduleFieldRow("开始") {
+                EditorDateChip(date: startDateBinding)
+                if model.draft.usesTime {
+                    EditorTimeChip(date: startTimeBinding)
+                        .help("开始时间")
+                }
+                Spacer(minLength: 0)
+            }
+
+            scheduleFieldRow("结束") {
+                EditorDateChip(date: endDateBinding)
+                if model.draft.usesTime {
+                    EditorTimeChip(date: endTimeBinding)
+                        .help("结束时间；跨日可到次日 00:00")
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(EditorFormStyle.blockPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(theme.subtleBorder.opacity(0.16))
+        )
+    }
+
+    private func timeModeChip(
+        title: String,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(EditorFormStyle.segment(selected: selected))
+                .foregroundStyle(selected ? theme.primaryText : theme.secondaryText)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 5)
+                .background {
+                    if selected {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(theme.elevatedSurface)
+                            .shadow(color: .black.opacity(0.12), radius: 1, y: 0.5)
+                    }
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func scheduleFieldRow<Content: View>(
+        _ label: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(alignment: .center, spacing: 8) {
+            Text(label)
+                .font(EditorFormStyle.label)
+                .foregroundStyle(theme.secondaryText)
+                .frame(width: EditorFormStyle.labelWidth, alignment: .leading)
+            content()
+        }
+        .frame(minHeight: EditorFormStyle.fieldMinHeight)
+    }
+
+    private var categoryMenu: some View {
+        let appearance: CalendarAppearance = colorScheme == .dark ? .dark : .light
+        let selected = categories.first { $0.id.uuidString == categoryOption }
+            ?? categories.first { $0.id == model.draft.categoryID }
+        let selectedHex = selected?.colorHex ?? "#8C8F96"
+        return Menu {
+            ForEach(categories) { category in
+                Button {
+                    categoryOption = category.id.uuidString
+                    model.draft.categoryID = category.id
+                } label: {
+                    Text(category.name)
+                    CalendarTheme.categoryTagDotImage(category.colorHex, appearance: appearance)
+                    if category.id.uuidString == categoryOption {
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
+            Divider()
+            Button("管理分类…") {
+                openCategoryManager.callAsFunction()
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Text(selected?.name ?? "未分类")
+                    .font(EditorFormStyle.control)
+                    .foregroundStyle(theme.primaryText)
+                    .lineLimit(1)
+                Circle()
+                    .fill(CalendarTheme.categoryTagColor(selectedHex, appearance: appearance))
+                    .frame(width: 8, height: 8)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(EditorFormStyle.chevron)
+                    .foregroundStyle(theme.secondaryText)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                theme.subtleBorder.opacity(0.28),
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(theme.subtleBorder.opacity(0.55), lineWidth: 0.5)
+            }
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var weekdayPicker: some View {
@@ -332,7 +499,7 @@ struct QuickCreatePopover: View {
             localError = model.validationMessage ?? "无法保存事项"
             return
         }
-        Task {
+        Task { @MainActor in
             do {
                 try await store.send(command, undoLabel: "已创建事项")
                 onClose()

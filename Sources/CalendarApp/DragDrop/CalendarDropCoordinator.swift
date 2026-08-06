@@ -113,10 +113,16 @@ final class CalendarDropCoordinator: ObservableObject {
             let command: CalendarCommand
             switch mutation.operation {
             case .move:
-                command = .moveItem(item.id, to: mutation.previewSchedule.startDate)
+                // Prefer full schedule write so week-view timed moves (day + clock) stick;
+                // day-only shifts also work because previewSchedule already has shifted dates.
+                var updated = item
+                updated.schedule = mutation.previewSchedule
+                updated.updatedAt = Date()
+                command = .updateItem(updated)
             case .resizeLeading, .resizeTrailing:
                 var updated = item
                 updated.schedule = mutation.previewSchedule
+                updated.updatedAt = Date()
                 command = .updateItem(updated)
             }
             do {
@@ -250,16 +256,29 @@ private extension PendingCalendarMutation {
     }
 
     var seriesPatch: SeriesPatch {
+        let startTime: OptionalPatch<MinuteOfDay> = previewSchedule.startTime.map { .set($0) } ?? .unchanged
+        let endTime: OptionalPatch<MinuteOfDay> = previewSchedule.endTime.map { .set($0) } ?? .unchanged
         switch operation {
         case .move:
-            SeriesPatch(displayedStartDate: previewSchedule.startDate)
-        case .resizeLeading:
-            SeriesPatch(
+            return SeriesPatch(
                 displayedStartDate: previewSchedule.startDate,
-                durationDays: previewSchedule.durationDays
+                durationDays: previewSchedule.durationDays,
+                startTime: startTime,
+                endTime: endTime
+            )
+        case .resizeLeading:
+            return SeriesPatch(
+                displayedStartDate: previewSchedule.startDate,
+                durationDays: previewSchedule.durationDays,
+                startTime: startTime,
+                endTime: endTime
             )
         case .resizeTrailing:
-            SeriesPatch(durationDays: previewSchedule.durationDays)
+            return SeriesPatch(
+                durationDays: previewSchedule.durationDays,
+                startTime: startTime,
+                endTime: endTime
+            )
         }
     }
 }

@@ -2,15 +2,23 @@ import AppKit
 import CalendarDomain
 import SwiftUI
 
+/// Category manager — same visual language as the item editor (compact, warm, non-system).
 struct CategoryManagerView: View {
     let store: CalendarStore
     @StateObject private var model: CategoryManagerViewModel
     @State private var editingCategoryID: UUID?
     @State private var localError: String?
+    @State private var attemptedSave = false
+    @FocusState private var nameFocused: Bool
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dismiss) private var dismiss
 
     private var theme: CalendarSemanticAppearance {
         CalendarTheme.appearance(for: colorScheme)
+    }
+
+    private var appearance: CalendarAppearance {
+        colorScheme == .dark ? .dark : .light
     }
 
     init(store: CalendarStore) {
@@ -21,15 +29,18 @@ struct CategoryManagerView: View {
     var body: some View {
         HStack(spacing: 0) {
             categoryList
-                .frame(minWidth: 176, idealWidth: 190, maxWidth: 230)
-            Divider()
+                .frame(width: 200)
+            Rectangle()
+                .fill(theme.separator.opacity(0.45))
+                .frame(width: 1)
             editor
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .background(theme.canvas)
+        // Single elevated surface like the item editor — avoids muddy nested grays.
+        .background(theme.elevatedSurface)
         .foregroundStyle(theme.primaryText)
         .tint(theme.controlAccent)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .confirmationDialog(
             "删除分类并迁移事项",
             isPresented: deleteDialogPresented,
@@ -56,184 +67,247 @@ struct CategoryManagerView: View {
                 }
             }
         }
+        .onAppear {
+            if editingCategoryID == nil, model.draftName.isEmpty {
+                startCreating()
+            }
+            DispatchQueue.main.async { nameFocused = true }
+        }
     }
+
+    // MARK: - Sidebar
 
     private var categoryList: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 8) {
                 Text("分类")
-                    .font(.headline)
-                Spacer()
-                Button {
-                    moveSelectedCategory(.up)
-                } label: {
-                    Image(systemName: "chevron.up")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer(minLength: 0)
+                toolbarIconButton(
+                    systemName: "plus",
+                    help: "新建分类",
+                    emphasized: editingCategoryID == nil
+                ) {
+                    startCreating()
                 }
-                .help("上移当前分类")
-                .accessibilityLabel("上移当前分类")
-                .disabled(reorderedIDs(for: .up) == nil || store.phase != .ready)
-                Button {
-                    moveSelectedCategory(.down)
-                } label: {
-                    Image(systemName: "chevron.down")
-                }
-                .help("下移当前分类")
-                .accessibilityLabel("下移当前分类")
-                .disabled(reorderedIDs(for: .down) == nil || store.phase != .ready)
-                Button(action: startCreating) {
-                    Image(systemName: "plus")
-                }
-                .help("新建分类")
             }
-            .padding(12)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
 
-            List {
-                ForEach(orderedCategories) { category in
-                    Button {
-                        select(category)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "line.3.horizontal")
-                                .foregroundStyle(theme.secondaryText.opacity(0.72))
-                            Circle()
-                                .fill(CalendarTheme.categoryAccent(
-                                    category.colorHex,
-                                    appearance: colorScheme == .dark ? .dark : .light
-                                ))
-                                .frame(width: 10, height: 10)
-                            Text(category.name)
-                                .lineLimit(1)
-                            Spacer(minLength: 0)
-                        }
-                        .contentShape(Rectangle())
+            thinRule
+
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    if editingCategoryID == nil {
+                        creatingRow
                     }
-                    .buttonStyle(.plain)
-                    .padding(.vertical, 3)
-                    .listRowBackground(
-                        category.id == editingCategoryID
-                            ? theme.selectionFill
-                            : Color.clear
-                    )
+                    ForEach(orderedCategories) { category in
+                        categoryRow(category)
+                    }
                 }
-                .onMove(perform: moveCategories)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 12)
             }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
         }
-        .background(theme.elevatedSurface)
+        // Slightly quieter than the editor column.
+        .background(theme.canvas.opacity(colorScheme == .dark ? 0.55 : 0.35))
     }
+
+    private var creatingRow: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(CalendarTheme.categoryTagColor(model.draftColorHex, appearance: appearance))
+                .frame(width: 10, height: 10)
+            Text(model.draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "新分类…"
+                : model.draftName)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(theme.primaryText)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Text("编辑中")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(theme.controlAccent)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(theme.controlAccent.opacity(0.16), in: Capsule())
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            theme.selectionFill,
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(theme.controlAccent.opacity(0.35), lineWidth: 1)
+        }
+    }
+
+    private func categoryRow(_ category: CalendarCategory) -> some View {
+        let selected = category.id == editingCategoryID
+        return Button {
+            select(category)
+        } label: {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(CalendarTheme.categoryTagColor(category.colorHex, appearance: appearance))
+                    .frame(width: 10, height: 10)
+                Text(category.name)
+                    .font(.system(size: 13, weight: selected ? .semibold : .regular))
+                    .lineLimit(1)
+                    .foregroundStyle(theme.primaryText)
+                Spacer(minLength: 0)
+                if category.id == store.state.uncategorizedID {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(theme.secondaryText.opacity(0.55))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 11)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                selected ? theme.selectionFill : Color.clear,
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func toolbarIconButton(
+        systemName: String,
+        help: String,
+        disabled: Bool = false,
+        emphasized: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(
+                    disabled
+                        ? theme.secondaryText.opacity(0.3)
+                        : (emphasized ? theme.controlAccent : theme.secondaryText)
+                )
+                .frame(width: 28, height: 28)
+                .background(
+                    (emphasized ? theme.controlAccent.opacity(0.18) : theme.subtleBorder.opacity(disabled ? 0.08 : 0.22)),
+                    in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .help(help)
+    }
+
+    // MARK: - Editor
 
     private var editor: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text(editingCategory == nil ? "新建分类" : "编辑分类")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                if editingCategory != nil {
-                    Button("删除", role: .destructive, action: beginDelete)
-                        .disabled(isProtectedCategory)
+        VStack(alignment: .leading, spacing: 0) {
+            editorHeader
+            thinRule
+            VStack(alignment: .leading, spacing: 16) {
+                if isProtectedCategory {
+                    protectedBanner
+                }
+
+                livePreviewHero
+                nameBlock
+                colorBlock
+
+                if let message = userFacingMessage {
+                    Text(message.text)
+                        .font(.system(size: 12))
+                        .foregroundStyle(message.isError ? theme.error : theme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
                 }
             }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 18)
 
-            if isProtectedCategory {
-                Label("“未分类”是系统分类，名称、颜色和删除受到保护；你仍可在左侧拖动它调整顺序。", systemImage: "lock.fill")
-                    .font(.footnote)
+            thinRule
+            editorFooter
+        }
+    }
+
+    private var editorHeader: some View {
+        HStack(spacing: 8) {
+            Text(editingCategory == nil ? "新建分类" : "编辑分类")
+                .font(.system(size: 13, weight: .semibold))
+            Spacer(minLength: 0)
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(theme.secondaryText)
+                    .frame(width: 22, height: 22)
+                    .background(theme.subtleBorder.opacity(0.3), in: Circle())
+                    .contentShape(Circle())
             }
-
-            TextField("分类名称", text: $model.draftName)
-                .textFieldStyle(.roundedBorder)
-                .disabled(isProtectedCategory)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("颜色")
-                    .font(.subheadline.weight(.medium))
-                Picker("色系", selection: familySelection) {
-                    ForEach(CategoryPalette.families) { family in
-                        Text(family.name).tag(family.id)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .disabled(isProtectedCategory)
-                .accessibilityLabel("分类色系")
-
-                LazyVGrid(
-                    columns: Array(repeating: GridItem(.fixed(28), spacing: 8), count: 8),
-                    spacing: 8
-                ) {
-                    ForEach(selectedFamily.presets) { preset in
-                        Button {
-                            model.selectPreset(preset.hex)
-                        } label: {
-                            ZStack {
-                                Circle()
-                                    .fill(CalendarTheme.categoryColor(preset.hex))
-                                if model.draftColorHex.uppercased() == preset.hex {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundStyle(swatchCheckColor(for: preset.hex))
-                                }
-                            }
-                                .frame(width: 26, height: 26)
-                                .overlay {
-                                    Circle().stroke(
-                                        model.draftColorHex.uppercased() == preset.hex
-                                            ? theme.selectionOutline
-                                            : theme.subtleBorder,
-                                        lineWidth: model.draftColorHex.uppercased() == preset.hex ? 2 : 1
-                                    )
-                                }
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(isProtectedCategory)
-                        .accessibilityLabel("选择\(selectedFamily.name)色系的\(preset.accessibilityName)")
-                        .accessibilityValue(
-                            model.draftColorHex.uppercased() == preset.hex ? "已选中" : "未选中"
-                        )
-                    }
-                }
-                ColorPicker("自定义颜色", selection: colorBinding, supportsOpacity: false)
-                    .disabled(isProtectedCategory)
-                TextField("#RRGGBB", text: $model.draftColorHex)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(isProtectedCategory)
-            }
-
-            contrastPreviews
-
-            if let validationMessage {
-                Text(validationMessage)
-                    .font(.footnote)
-                    .foregroundStyle(validationError == nil ? theme.secondaryText : theme.error)
-            }
-            if let localError {
-                Text(localError)
-                    .font(.footnote)
-                    .foregroundStyle(theme.error)
-            }
-
-            HStack {
-                Spacer()
-                Button(editingCategory == nil ? "创建" : "保存", action: save)
-                    .keyboardShortcut(.return, modifiers: [])
-                    .disabled(isSaveDisabled)
-            }
+            .buttonStyle(.plain)
+            .help("关闭")
         }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
     }
 
-    private var contrastPreviews: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("可读性预览")
-                .font(.subheadline.weight(.medium))
-            HStack(spacing: 10) {
-                preview(appearance: .light, title: "浅色")
-                preview(appearance: .dark, title: "深色")
+    /// Matches item editor: destructive left, primary actions right.
+    private var editorFooter: some View {
+        HStack(spacing: 8) {
+            if editingCategory != nil {
+                Button("删除", role: .destructive, action: beginDelete)
+                    .controlSize(.small)
+                    .disabled(isProtectedCategory || store.phase != .ready)
             }
+            Spacer(minLength: 0)
+            Button("取消") { dismiss() }
+                .controlSize(.small)
+                .keyboardShortcut(.escape, modifiers: [])
+            Button(editingCategory == nil ? "创建" : "保存", action: save)
+                .controlSize(.small)
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: [])
+                .disabled(isSaveDisabled)
         }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
     }
 
-    private func preview(appearance: CalendarAppearance, title: String) -> some View {
+    private var protectedBanner: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "lock.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(theme.secondaryText)
+            Text("「未分类」是系统分类，名称与颜色受保护。")
+                .font(.system(size: 12))
+                .foregroundStyle(theme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(fieldBlockBackground)
+    }
+
+    /// Primary feedback: how the category will look on the calendar.
+    private var livePreviewHero: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionLabel("月历预览")
+            HStack(spacing: 12) {
+                previewChip(appearance: .light, caption: "浅色")
+                previewChip(appearance: .dark, caption: "深色")
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(fieldBlockBackground)
+    }
+
+    private func previewChip(appearance: CalendarAppearance, caption: String) -> some View {
         let previewTheme = appearance == .light ? CalendarTheme.light : CalendarTheme.dark
         let roles = try? CategoryColorResolver.roles(for: model.draftColorHex, appearance: appearance)
         let canvasHex = roles?.canvas.hex ?? (appearance == .light
@@ -246,35 +320,199 @@ struct CategoryManagerView: View {
             ?? CalendarTheme.categoryColor(model.draftColorHex)
         let backgroundColor = roles.map { CalendarTheme.categoryColor($0.softBackground) }
             ?? CalendarTheme.categoryColor(canvasHex)
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(title)
-                Spacer()
-                Text(contrastText(for: appearance))
-                    .monospacedDigit()
-            }
-            .font(.caption)
+        let label = model.draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(caption)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(previewTheme.secondaryText)
             HStack(spacing: 6) {
                 RoundedRectangle(cornerRadius: 1)
                     .fill(accentColor)
-                    .frame(width: 3, height: 22)
-                Text(model.draftName.isEmpty ? "分类事项" : model.draftName)
+                    .frame(width: 3, height: 15)
+                Text(label.isEmpty ? "分类事项" : label)
                     .lineLimit(1)
                     .foregroundStyle(CalendarTheme.categoryColor(textHex))
                 Spacer(minLength: 0)
             }
             .font(CalendarTheme.itemFont)
-            .padding(.horizontal, 6)
-            .frame(height: CalendarTheme.itemRowHeight)
+            .padding(.horizontal, 8)
+            .frame(height: 24)
             .background(
                 backgroundColor,
-                in: RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius)
+                in: RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius, style: .continuous)
             )
         }
-        .padding(8)
-        .background(CalendarTheme.categoryColor(canvasHex), in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(previewTheme.subtleBorder))
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            CalendarTheme.categoryColor(canvasHex),
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(previewTheme.subtleBorder.opacity(0.55), lineWidth: 1)
+        }
     }
+
+    private var nameBlock: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionLabel("名称")
+            TextField("例如：学习、运动、副业", text: $model.draftName)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 13))
+                .focused($nameFocused)
+                .disabled(isProtectedCategory)
+                .onChange(of: model.draftName) { _, _ in
+                    if attemptedSave { attemptedSave = false }
+                    localError = nil
+                }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(fieldBlockBackground)
+    }
+
+    private var colorBlock: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionLabel("颜色")
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(CategoryPalette.families) { family in
+                        let selected = model.selectedFamilyID == family.id
+                        Button {
+                            model.selectFamily(family.id)
+                        } label: {
+                            Text(family.name)
+                                .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                                .foregroundStyle(selected ? theme.primaryText : theme.secondaryText)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .background(
+                                    selected
+                                        ? theme.controlAccent.opacity(0.24)
+                                        : theme.subtleBorder.opacity(0.14),
+                                    in: Capsule()
+                                )
+                                .overlay {
+                                    Capsule()
+                                        .stroke(
+                                            selected ? theme.controlAccent.opacity(0.45) : Color.clear,
+                                            lineWidth: 1
+                                        )
+                                }
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isProtectedCategory)
+                    }
+                }
+            }
+
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(minimum: 30), spacing: 10), count: 8),
+                spacing: 10
+            ) {
+                ForEach(selectedFamily.presets) { preset in
+                    let selected = model.draftColorHex.uppercased() == preset.hex
+                    Button {
+                        model.selectPreset(preset.hex)
+                    } label: {
+                        ZStack {
+                            Circle()
+                                .fill(CalendarTheme.categoryColor(preset.hex))
+                            if selected {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(swatchCheckColor(for: preset.hex))
+                            }
+                        }
+                        .frame(width: 30, height: 30)
+                        .overlay {
+                            Circle().stroke(
+                                selected ? theme.primaryText.opacity(0.9) : theme.subtleBorder.opacity(0.4),
+                                lineWidth: selected ? 2 : 1
+                            )
+                        }
+                        .shadow(
+                            color: selected ? CalendarTheme.categoryColor(preset.hex).opacity(0.4) : .clear,
+                            radius: 5,
+                            y: 1
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isProtectedCategory)
+                    .accessibilityLabel("选择\(selectedFamily.name)色系的\(preset.accessibilityName)")
+                    .accessibilityValue(selected ? "已选中" : "未选中")
+                }
+            }
+
+            HStack(spacing: 10) {
+                Text("色值")
+                    .font(.system(size: 12))
+                    .foregroundStyle(theme.secondaryText)
+                    .frame(width: 32, alignment: .leading)
+                TextField("#RRGGBB", text: $model.draftColorHex)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .disabled(isProtectedCategory)
+                ColorPicker("", selection: colorBinding, supportsOpacity: false)
+                    .labelsHidden()
+                    .disabled(isProtectedCategory)
+                    .frame(width: 28, height: 22)
+                    .help("打开取色器")
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(fieldBlockBackground)
+    }
+
+    // MARK: - Shared chrome
+
+    private var thinRule: some View {
+        Rectangle()
+            .fill(theme.separator.opacity(0.45))
+            .frame(height: 1)
+    }
+
+    /// Soft fill only — matches item editor blocks (no heavy double borders).
+    private var fieldBlockBackground: some View {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(theme.subtleBorder.opacity(colorScheme == .dark ? 0.16 : 0.14))
+    }
+
+    private func sectionLabel(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(theme.secondaryText)
+    }
+
+    // MARK: - Validation display
+
+    /// Only show hard errors after the user tries to save (or real save failures).
+    private var userFacingMessage: (text: String, isError: Bool)? {
+        if let localError {
+            return (localError, true)
+        }
+        if isProtectedCategory {
+            return ("系统分类受保护，仅可调整顺序。", false)
+        }
+        guard attemptedSave, let validationError else { return nil }
+        switch validationError {
+        case .emptyName:
+            return ("请填写分类名称。", true)
+        case .duplicateName:
+            return ("已有同名分类，请换一个名称。", true)
+        case .invalidColor:
+            return ("颜色必须是 #RRGGBB 格式。", true)
+        case .insufficientContrast:
+            return ("这个颜色在浅色或深色下不够清晰，请换一个。", true)
+        default:
+            return ("当前分类不能保存。", true)
+        }
+    }
+
+    // MARK: - Model helpers
 
     private var colorBinding: Binding<Color> {
         Binding(
@@ -284,13 +522,6 @@ struct CategoryManagerView: View {
                     model.draftColorHex = hex
                 }
             }
-        )
-    }
-
-    private var familySelection: Binding<CategoryColorFamilyID> {
-        Binding(
-            get: { model.selectedFamilyID },
-            set: { model.selectFamily($0) }
         )
     }
 
@@ -345,28 +576,8 @@ struct CategoryManagerView: View {
         }
     }
 
-    private var validationMessage: String? {
-        if isProtectedCategory {
-            return "系统分类受到保护。"
-        }
-        switch validationError {
-        case nil:
-            return "浅色 \(contrastText(for: .light))，深色 \(contrastText(for: .dark))；两种外观均满足文字 4.5:1、强调 3:1。"
-        case .emptyName:
-            return "请填写分类名称。"
-        case .duplicateName:
-            return "已有同名分类，请换一个名称。"
-        case .invalidColor:
-            return "颜色必须是 #RRGGBB 格式。"
-        case .insufficientContrast:
-            return "这个颜色在浅色或深色下文字不够清晰，请换一个颜色。"
-        default:
-            return "当前分类不能保存。"
-        }
-    }
-
     private var isSaveDisabled: Bool {
-        isProtectedCategory || validationError != nil || store.phase != .ready
+        isProtectedCategory || store.phase != .ready
     }
 
     private var deleteDialogPresented: Binding<Bool> {
@@ -385,16 +596,22 @@ struct CategoryManagerView: View {
         editingCategoryID = category.id
         model.beginEditing(category)
         localError = nil
+        attemptedSave = false
+        nameFocused = true
     }
 
     private func startCreating() {
         editingCategoryID = nil
         model.beginCreating()
         localError = nil
+        attemptedSave = false
+        nameFocused = true
     }
 
     private func save() {
+        attemptedSave = true
         localError = nil
+        if validationError != nil { return }
         Task {
             do {
                 if let category = editingCategory {
@@ -402,6 +619,7 @@ struct CategoryManagerView: View {
                 } else {
                     try await model.create()
                 }
+                attemptedSave = false
             } catch {
                 localError = message(for: error)
             }
@@ -428,52 +646,12 @@ struct CategoryManagerView: View {
         }
     }
 
-    private func moveCategories(from source: IndexSet, to destination: Int) {
-        var categories = orderedCategories
-        categories.move(fromOffsets: source, toOffset: destination)
-        submitReorder(categories.map(\.id))
-    }
-
-    private func moveSelectedCategory(_ direction: CategoryReorderMove.Direction) {
-        guard let ids = reorderedIDs(for: direction) else { return }
-        submitReorder(ids)
-    }
-
-    private func reorderedIDs(for direction: CategoryReorderMove.Direction) -> [UUID]? {
-        CategoryReorderMove.reorderedIDs(
-            orderedCategories.map(\.id),
-            selected: editingCategoryID,
-            direction: direction
-        )
-    }
-
-    private func submitReorder(_ ids: [UUID]) {
-        localError = nil
-        Task {
-            do {
-                try await model.reorder(ids)
-            } catch {
-                localError = message(for: error)
-            }
-        }
-    }
-
     private func migrationTargets(for category: CalendarCategory) -> [CalendarCategory] {
         orderedCategories.filter { $0.id != category.id }
     }
 
     private func migrationLabel(for target: CalendarCategory) -> String {
         target.id == store.state.uncategorizedID ? "转入未分类" : "转入“\(target.name)”"
-    }
-
-    private func contrastText(for appearance: CalendarAppearance) -> String {
-        guard let roles = try? CategoryColorResolver.roles(
-            for: model.draftColorHex,
-            appearance: appearance
-        ) else {
-            return "—"
-        }
-        return String(format: "文字 %.2f:1 · 强调 %.2f:1", roles.textContrast, roles.accentContrast)
     }
 
     private func message(for error: Error) -> String {

@@ -146,8 +146,8 @@ enum CalendarTheme {
     static let toolbarHeight: CGFloat = 52
     static let weekdayHeaderHeight: CGFloat = 28
     static let cellPadding: CGFloat = 6
-    /// Keep 21 so a 252pt week row still exposes 10 lanes before overflow.
-    static let itemRowHeight: CGFloat = 21
+    /// Item chip height (independent of week-row height — prefer readable chips).
+    static let itemRowHeight: CGFloat = 20
     static let itemSpacing: CGFloat = 3
     static let cornerRadius: CGFloat = 6
     /// Whole-row fade for completed tasks (no strikethrough).
@@ -221,6 +221,32 @@ enum CalendarTheme {
             return categoryColor(hex)
         }
         return categoryColor(role)
+    }
+
+    /// Tag swatch matching month chips / category manager (incomplete-item accent).
+    static func categoryTagColor(_ hex: String, appearance: CalendarAppearance) -> Color {
+        if let accent = categoryItemRoles(hex, isCompleted: false, appearance: appearance)?.accent {
+            return categoryColor(accent)
+        }
+        return categoryAccent(hex, appearance: appearance)
+    }
+
+    /// Baked non-template image so macOS menus keep true category colors.
+    static func categoryTagDotImage(
+        _ hex: String,
+        appearance: CalendarAppearance,
+        diameter: CGFloat = 9
+    ) -> Image {
+        let color = NSColor(categoryTagColor(hex, appearance: appearance))
+        let size = NSSize(width: diameter + 2, height: diameter + 2)
+        let image = NSImage(size: size, flipped: false) { rect in
+            color.setFill()
+            let inset = (rect.width - diameter) / 2
+            NSBezierPath(ovalIn: rect.insetBy(dx: inset, dy: inset)).fill()
+            return true
+        }
+        image.isTemplate = false
+        return Image(nsImage: image)
     }
 
     static func categorySoftBackground(_ hex: String, appearance: CalendarAppearance) -> Color {

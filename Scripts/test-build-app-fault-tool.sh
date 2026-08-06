@@ -147,7 +147,7 @@ case "${0:t}" in
   rm)
     if [[
       "${BUILD_APP_FAULT_RM_TERM_BACKUP:-}" == true &&
-      "$last_arg" == *.个人月历.app.zip.backup.*
+      "$last_arg" == *.Jelly.app.zip.backup.*
     ]]; then
       /bin/rm "$@"
       kill -TERM "$PPID"
@@ -189,7 +189,7 @@ case "${0:t}" in
     source_arg="${2:-}"
     if [[
       "${BUILD_APP_FAULT_MV_TERM_CANDIDATE_DESTINATION:-}" == "$last_arg" &&
-      "$source_arg" == *.个人月历.*.candidate.*
+      "$source_arg" == *.Jelly.*.candidate.*
     ]]; then
       /bin/mv "$@"
       kill -TERM "$PPID"
@@ -197,7 +197,7 @@ case "${0:t}" in
     fi
     if [[
       "${BUILD_APP_FAULT_MV_ROLLBACK_DESTINATION:-}" == "$last_arg" &&
-      "$source_arg" == *.个人月历.app.zip.backup.*
+      "$source_arg" == *.Jelly.app.zip.backup.*
     ]]; then
       exit 1
     fi

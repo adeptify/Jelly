@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// User-selectable appearance for the whole app (independent of system setting).
+/// Explicit light/dark for the app. `.system` is retained only to decode older AppStorage values.
 enum CalendarAppearancePreference: String, CaseIterable, Identifiable, Sendable {
     case system
     case light
@@ -19,15 +19,17 @@ enum CalendarAppearancePreference: String, CaseIterable, Identifiable, Sendable 
         }
     }
 
-    var symbolName: String {
+    /// Icon invites the *next* action: moon → go dark, sun → go light.
+    var toggleSymbolName: String {
         switch self {
-        case .system: "circle.lefthalf.filled"
-        case .light: "sun.max"
-        case .dark: "moon"
+        case .dark: "sun.max"
+        case .light, .system: "moon"
         }
     }
 
-    /// `nil` means follow the system color scheme.
+    var symbolName: String { toggleSymbolName }
+
+    /// `nil` means follow the system color scheme (legacy only).
     var preferredColorScheme: ColorScheme? {
         switch self {
         case .system: nil
@@ -41,6 +43,15 @@ enum CalendarAppearancePreference: String, CaseIterable, Identifiable, Sendable 
         case .system: nil
         case .light: NSAppearance(named: .aqua)
         case .dark: NSAppearance(named: .darkAqua)
+        }
+    }
+
+    /// One-click light ↔ dark. Legacy `.system` resolves from the currently rendered scheme.
+    func toggled(renderedAs colorScheme: ColorScheme) -> CalendarAppearancePreference {
+        switch self {
+        case .light: .dark
+        case .dark: .light
+        case .system: colorScheme == .dark ? .light : .dark
         }
     }
 

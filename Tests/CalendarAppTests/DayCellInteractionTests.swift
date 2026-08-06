@@ -131,32 +131,23 @@ struct DayCellInteractionTests {
         #expect(scrollRecorder.records.isEmpty)
     }
 
-    @Test func bodyRangeSurfaceUsesLocalOriginAndExcludesOnlyOccupiedLanes() {
+    @Test func bodyRangeSurfaceAcceptsEntireBodyIncludingOccupiedLaneBands() {
+        // Chips sit above this surface in the ZStack; the empty surface must stay hittable
+        // for margins beside chips and any free body area (full-cell create).
         let date = CalendarDate(year: 2026, month: 8, day: 10)!
-        let emptySurface = WeekRowRangeGestureSurfaceView(
-            date: date,
-            hitSurface: .emptySurface,
-            rootOrigin: .zero,
-            onRangeGesture: { _ in }
-        )
-        emptySurface.frame = CGRect(x: 0, y: 0, width: 100, height: 228)
-        #expect(emptySurface.hitTest(CGPoint(x: 50, y: 1)) === emptySurface)
-
         let surface = WeekRowRangeGestureSurfaceView(
             date: date,
             hitSurface: .emptySurface,
             rootOrigin: .zero,
-            blockedLaneIndexes: [0, 1, 2],
             onRangeGesture: { _ in }
         )
         surface.frame = CGRect(x: 0, y: 0, width: 100, height: 228)
 
-        // Lanes use itemRowHeight 21 + spacing 2 → [0,21), [23,44), [46,67).
-        #expect(surface.hitTest(CGPoint(x: 50, y: 1)) == nil)
-        #expect(surface.hitTest(CGPoint(x: 50, y: 22)) === surface)
-        #expect(surface.hitTest(CGPoint(x: 50, y: 24)) == nil)
-        #expect(surface.hitTest(CGPoint(x: 50, y: 47)) == nil)
-        #expect(surface.hitTest(CGPoint(x: 50, y: 70)) === surface)
+        #expect(surface.hitTest(CGPoint(x: 50, y: 1)) === surface)
+        #expect(surface.hitTest(CGPoint(x: 2, y: 1)) === surface) // left margin
+        #expect(surface.hitTest(CGPoint(x: 50, y: 24)) === surface) // mid body
+        #expect(surface.hitTest(CGPoint(x: 50, y: 220)) === surface) // bottom
+        #expect(surface.hitTest(CGPoint(x: 50, y: 230)) == nil) // outside bounds
     }
 
     @Test func hostedWeekRowRoutesEmptyBodyToRangeSurfaceWithoutCoveringHeaderOrItem() throws {
@@ -261,15 +252,18 @@ struct DayCellInteractionTests {
             CGPoint(x: itemSurface.bounds.maxX - 2, y: itemSurface.bounds.midY),
             to: host
         )
-        let blockedLanePoints = (0..<3).map { lane in
-            itemCellSurface.convert(
-                CGPoint(
-                    x: itemCellSurface.bounds.midX,
-                    y: CGFloat(lane) * (WeekRowMetrics.laneHeight + WeekRowMetrics.laneSpacing) + 1
-                ),
-                to: host
-            )
-        }
+        // Margins of an occupied lane (beside the chip) should still reach the empty surface.
+        let occupiedLaneLeftMargin = itemCellSurface.convert(
+            CGPoint(x: 1, y: 1),
+            to: host
+        )
+        let occupiedLaneBottomFree = itemCellSurface.convert(
+            CGPoint(
+                x: itemCellSurface.bounds.midX,
+                y: itemCellSurface.bounds.maxY - 4
+            ),
+            to: host
+        )
 
         #expect(host.hitTest(topEmptyBodyPoint) === emptySurface)
         #expect(host.hitTest(emptyBodyPoint) === emptySurface)
@@ -278,9 +272,8 @@ struct DayCellInteractionTests {
         #expect(!(host.hitTest(completionPoint) is WeekRowRangeGestureSurfaceView))
         #expect(!(host.hitTest(leadingHandlePoint) is WeekRowRangeGestureSurfaceView))
         #expect(!(host.hitTest(trailingHandlePoint) is WeekRowRangeGestureSurfaceView))
-        for blockedLanePoint in blockedLanePoints {
-            #expect(!(host.hitTest(blockedLanePoint) is WeekRowRangeGestureSurfaceView))
-        }
+        #expect(host.hitTest(occupiedLaneLeftMargin) is WeekRowRangeGestureSurfaceView)
+        #expect(host.hitTest(occupiedLaneBottomFree) is WeekRowRangeGestureSurfaceView)
 
         try sendMouseClick(
             to: try #require(host.hitTest(emptyBodyPoint) as? WeekRowRangeGestureSurfaceView),

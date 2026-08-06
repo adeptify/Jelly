@@ -301,12 +301,11 @@ final class CalendarInteractionCoordinator: ObservableObject {
     }
 
     func pointerDown(on date: CalendarDate, target: CalendarInteractionHitTarget, point: CGPoint) {
-        guard target == .emptyCell,
-              press == nil,
-              state == .idle
-        else {
-            return
-        }
+        guard target == .emptyCell else { return }
+        // Recover from a stale create-editor lock (form closed without cancel) or a
+        // leftover press so a second empty-cell click can open create again.
+        recoverForNewEmptyPressIfNeeded()
+        guard press == nil, state == .idle else { return }
         press = Press(date: date, point: point, target: target, source: nil)
         latestPoint = point
         latestDate = date
@@ -318,15 +317,30 @@ final class CalendarInteractionCoordinator: ObservableObject {
         source: ProjectedEntry,
         point: CGPoint
     ) {
-        guard [.barBody, .leadingHandle, .trailingHandle].contains(target),
-              press == nil,
-              state == .idle
-        else {
-            return
-        }
+        guard [.barBody, .leadingHandle, .trailingHandle].contains(target) else { return }
+        recoverForNewEmptyPressIfNeeded()
+        guard press == nil, state == .idle else { return }
         press = Press(date: date, point: point, target: target, source: source)
         latestPoint = point
         latestDate = date
+    }
+
+    /// `.editing` is only meaningful while the create form is open. If it lingers after
+    /// dismiss, empty-cell presses would be ignored forever (`state == .idle` required).
+    /// Do not clear `.pendingRecurrenceScope` — that blocks gestures until the user answers.
+    private func recoverForNewEmptyPressIfNeeded() {
+        switch state {
+        case .editing:
+            clearInteractionGesture()
+            state = .idle
+        case .idle:
+            // Orphan press without an active drag (e.g. mouseUp never delivered).
+            if press != nil {
+                clearInteractionGesture()
+            }
+        case .selectingRange, .movingItem, .resizingLeading, .resizingTrailing, .pendingRecurrenceScope:
+            break
+        }
     }
 
     func beginRange(on date: CalendarDate, point: CGPoint) {

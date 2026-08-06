@@ -250,6 +250,25 @@ struct CalendarInteractionCoordinatorTests {
         #expect(coordinator.state == .idle)
     }
 
+    @Test func secondEmptyClickWorksAfterCreateEditorDismiss() {
+        let day = date(6)
+        let coordinator = CalendarInteractionCoordinator()
+
+        coordinator.pointerDown(on: day, target: .emptyCell, point: .zero)
+        #expect(coordinator.pointerUp(at: .zero, over: day) == .openCreate(
+            .init(start: day, end: day),
+            anchor: day
+        ))
+        coordinator.openEditor(for: .init(start: day, end: day), anchor: day)
+        #expect(coordinator.state == .editing(draft: .init(start: day, end: day), anchorDate: day))
+
+        // Simulate dismiss that failed to cancel (stale .editing) — next click must still work.
+        coordinator.pointerDown(on: day, target: .emptyCell, point: CGPoint(x: 4, y: 0))
+        let second = coordinator.pointerUp(at: CGPoint(x: 4, y: 0), over: day)
+        #expect(second == .openCreate(.init(start: day, end: day), anchor: day))
+        #expect(coordinator.state == .idle)
+    }
+
     @Test func reverseRangeDragNormalizesDatesAndAnchorsReleaseDate() {
         let coordinator = CalendarInteractionCoordinator()
         coordinator.beginRange(on: date(8), point: .zero)
@@ -496,6 +515,46 @@ struct CalendarInteractionCoordinatorTests {
         #expect(quickCreate.anchorDate == date(8))
         #expect(quickCreate.initialDraft(categoryID: categoryID).startDate == date(6))
         #expect(quickCreate.initialDraft(categoryID: categoryID).endDate == date(8))
+        #expect(quickCreate.initialDraft(categoryID: categoryID).usesTime == false)
+    }
+
+    @Test func weekHourSlotCreateSeedsTimedDraft() {
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000888")!
+        let day = date(6)
+        let start = MinuteOfDay(hour: 14, minute: 0)!
+        let presentation = QuickCreatePresentation.forDay(day, startTime: start)
+        let draft = presentation.initialDraft(categoryID: categoryID)
+
+        #expect(presentation.anchorDate == day)
+        #expect(draft.startDate == day)
+        #expect(draft.endDate == day)
+        #expect(draft.usesTime)
+        #expect(draft.startTime == start)
+        #expect(draft.endTime == MinuteOfDay(hour: 15, minute: 0)!)
+    }
+
+    @Test func weekHourSlotCreateAt23SeedsOvernightEnd() {
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000888")!
+        let day = date(6)
+        let start = MinuteOfDay(hour: 23, minute: 0)!
+        let presentation = QuickCreatePresentation.forDay(day, startTime: start)
+        let draft = presentation.initialDraft(categoryID: categoryID)
+
+        #expect(draft.usesTime)
+        #expect(draft.startDate == day)
+        #expect(draft.endDate == date(7))
+        #expect(draft.startTime == start)
+        #expect(draft.endTime == MinuteOfDay(hour: 0, minute: 0)!)
+    }
+
+    @Test func weekAllDayCreateRemainsUntimed() {
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000888")!
+        let presentation = QuickCreatePresentation.forDay(date(6), startTime: nil)
+        let draft = presentation.initialDraft(categoryID: categoryID)
+
+        #expect(draft.usesTime == false)
+        #expect(draft.startDate == date(6))
+        #expect(draft.endDate == date(6))
     }
 
     private func date(_ day: Int) -> CalendarDate {

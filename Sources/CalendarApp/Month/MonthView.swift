@@ -223,7 +223,6 @@ struct MonthView: View {
     let store: CalendarStore
     private let todayRefreshPolicy: MonthViewTodayRefreshPolicy
     private let todayRefreshController: MonthViewTodayRefreshController
-    @Environment(\.openWindow) private var openWindow
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
@@ -236,17 +235,21 @@ struct MonthView: View {
     @StateObject private var weekStreamRestoration: WeekStreamRestorationController
     @AppStorage("calendar.hiddenCategoryIDs") private var storedHiddenCategoryIDs = ""
     @AppStorage(CalendarAppearancePreference.storageKey)
-    private var appearancePreferenceRaw = CalendarAppearancePreference.system.rawValue
+    private var appearancePreferenceRaw = CalendarAppearancePreference.light.rawValue
     @AppStorage(CalendarPrimaryViewMode.storageKey)
     private var primaryViewModeRaw = CalendarPrimaryViewMode.month.rawValue
     @State private var hiddenCategoryIDs: Set<UUID> = []
     @StateObject private var weekModel: WeekViewModel
     @State private var quickCreatePresentation: QuickCreatePresentation?
+    /// Forces a fresh create form each open (avoids SwiftUI reuse after first save).
+    @State private var quickCreateSessionID = UUID()
     @State private var dateFrameMap = CalendarDateFrameMap(frames: [])
     @State private var lastEditorAnchorFrame: CGRect?
     @State private var quickCreateMeasuredContentSize = CGSize.zero
     @State private var selectedDayDrawerDate: CalendarDate?
     @State private var editorSession: ItemEditorConfiguration?
+    @State private var showCategoryManager = false
+    @State private var showProgressSummary = false
     @State private var recurringEditItem: ProjectedItem?
     @State private var deleteConfirmItem: ProjectedItem?
     @State private var actionError: String?
@@ -412,6 +415,15 @@ struct MonthView: View {
                 guard size.width > 0, size.height > 0 else { return }
                 quickCreateMeasuredContentSize = size
             }
+            .environment(\.openCategoryManager, OpenCategoryManagerAction {
+                showCategoryManager = true
+            })
+            .sheet(isPresented: $showCategoryManager) {
+                CategoryManagerView(store: store)
+                    .frame(width: 680)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .preferredColorScheme(colorScheme)
+            }
     }
 
     @ViewBuilder
@@ -424,17 +436,42 @@ struct MonthView: View {
                     weekStream(viewportBounds: proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root)))
                 }
             } else {
-                weekDayHeader
-                WeekView(
-                    store: store,
-                    model: weekModel,
-                    categories: orderedCategories,
-                    hiddenCategoryIDs: $hiddenCategoryIDs,
-                    onOpenDetail: { openEditor(for: $0) },
-                    onCreate: { openQuickCreate(on: $0) }
-                )
+                // GeometryReader gives a hard height budget. ScrollView otherwise keeps a
+                // min height ≈ 24×hourHeight and the day header is pushed down the window.
+                GeometryReader { proxy in
+                    let headerH = WeekTimeGridMetrics.dayHeaderHeight
+                    VStack(spacing: 0) {
+                        weekDayHeader
+                            .frame(width: proxy.size.width, height: headerH)
+                        WeekView(
+                            store: store,
+                            model: weekModel,
+                            categories: orderedCategories,
+                            hiddenCategoryIDs: $hiddenCategoryIDs,
+                            onOpenDetail: { openEditor(for: $0) },
+                            onCreate: { date, startTime, anchorFrame in
+                                openQuickCreate(
+                                    on: date,
+                                    startTime: startTime,
+                                    anchorFrame: anchorFrame
+                                )
+                            },
+                            onCommitMutation: { pending in
+                                commitWeekMutation(pending)
+                            },
+                            onDelete: { requestDelete($0) }
+                        )
+                        .frame(
+                            width: proxy.size.width,
+                            height: max(0, proxy.size.height - headerH)
+                        )
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     @ViewBuilder
@@ -451,7 +488,8 @@ struct MonthView: View {
                     }
                 },
                 onQuickCreate: { openQuickCreate(on: $0) },
-                onOpenDetail: { openEditor(for: $0) }
+                onOpenDetail: { openEditor(for: $0) },
+                onDelete: { requestDelete($0) }
             )
             .transition(.move(edge: .trailing))
         }
@@ -475,15 +513,18 @@ struct MonthView: View {
                         .stroke(theme.subtleBorder, lineWidth: 1)
                 }
                 .shadow(color: theme.subtleShadow.opacity(0.22), radius: 16, y: 6)
+                .fixedSize(horizontal: true, vertical: true)
                 .accessibilityIdentifier("item-edit-overlay-card")
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
     @ViewBuilder
     private var quickCreateOverlay: some View {
-        GeometryReader { proxy in
-            if let presentation = quickCreatePresentation {
+        // Only mount when presenting — a permanent empty GeometryReader can steal hits.
+        if let presentation = quickCreatePresentation {
+            GeometryReader { proxy in
                 let windowBounds = proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root))
                 let overlayPresentation = QuickCreateOverlayPresentation(
                     presentation: presentation,
@@ -505,6 +546,7 @@ struct MonthView: View {
                         maximumContentHeight: overlayPresentation.contentLayout.maximumHeight,
                         onClose: dismissQuickCreate
                     )
+                    .id(quickCreateSessionID)
                     .frame(width: overlayPresentation.placement.frame.width)
                     .background(theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 12))
                     .overlay {
@@ -542,100 +584,248 @@ struct MonthView: View {
     }
 
     private var toolbar: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: 12) {
+            // Title — left, calm
+            VStack(alignment: .leading, spacing: 1) {
                 Text(primaryViewMode == .month ? monthTitle : weekModel.title)
-                    .font(CalendarTheme.monthTitleFont)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(theme.primaryText)
                 if primaryViewMode == .month,
                    MonthEmptyStateHintPolicy.shouldShow(phase: store.phase, state: store.state) {
                     Text("点击日期开始创建")
                         .font(.system(size: 11))
                         .foregroundStyle(theme.secondaryText)
-                } else if primaryViewMode == .week {
-                    Text("按小时查看本周日程 · 点击空白处新建")
-                        .font(.system(size: 11))
-                        .foregroundStyle(theme.secondaryText)
                 }
             }
-            Spacer()
-            HStack(spacing: 10) {
-                Picker("视图", selection: $primaryViewModeRaw) {
-                    ForEach(CalendarPrimaryViewMode.allCases) { mode in
-                        Text(mode.title).tag(mode.rawValue)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 88)
-                .help("月视图 / 周视图")
 
-                Button {
-                    if primaryViewMode == .month {
-                        navigateToPreviousMonth()
-                    } else {
-                        weekModel.goToPreviousWeek()
-                    }
-                } label: {
-                    Image(systemName: "chevron.left")
-                }
-                .help(primaryViewMode == .month ? "上个月" : "上一周")
-                Button("今天") {
-                    if primaryViewMode == .month {
-                        navigateToToday()
-                    } else {
-                        weekModel.goToToday()
-                    }
-                }
-                Button {
-                    if primaryViewMode == .month {
-                        navigateToNextMonth()
-                    } else {
-                        weekModel.goToNextWeek()
-                    }
-                } label: {
-                    Image(systemName: "chevron.right")
-                }
-                .help(primaryViewMode == .month ? "下个月" : "下一周")
-                Menu("分类") {
-                    CategoryFilterView(
-                        categories: orderedCategories,
-                        hiddenCategoryIDs: $hiddenCategoryIDs
-                    )
-                }
-                Button("管理分类") {
-                    openWindow(id: "category-manager")
-                }
+            Spacer(minLength: 16)
+
+            // Controls — grouped, equal visual weight
+            HStack(spacing: 8) {
+                viewModeControl
+                navigationCluster
+                progressSummaryButton
+                categoryControl
+                appearanceToggle
             }
             .disabled(store.phase != .ready)
-            appearanceToggle
         }
         .padding(.horizontal, 16)
         .frame(height: CalendarTheme.toolbarHeight)
+        .sheet(isPresented: $showProgressSummary) {
+            ProgressSummaryView(
+                store: store,
+                period: primaryViewMode == .week ? .week : .month,
+                today: model.today,
+                hiddenCategoryIDs: hiddenCategoryIDs,
+                onClose: { showProgressSummary = false }
+            )
+            .padding(20)
+            .background(theme.canvas.opacity(0.001)) // sheet chrome host
+        }
+    }
+
+    /// 本月进展 / 本周进展 — mock AI summary (prologue later).
+    private var progressSummaryButton: some View {
+        let label = primaryViewMode == .week ? "本周进展" : "本月进展"
+        return Button {
+            showProgressSummary = true
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .foregroundStyle(theme.primaryText)
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(
+                theme.subtleBorder.opacity(0.22),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help("总结从\(primaryViewMode == .week ? "本周" : "本月")第一天到今天的进展（当前为模拟 AI）")
+        .accessibilityLabel(label)
+    }
+
+    /// 月 / 周 — compact pill, no external “视图” label.
+    private var viewModeControl: some View {
+        HStack(spacing: 0) {
+            ForEach(CalendarPrimaryViewMode.allCases) { mode in
+                let selected = primaryViewMode == mode
+                Button {
+                    primaryViewModeRaw = mode.rawValue
+                } label: {
+                    Text(mode.title)
+                        .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                        .foregroundStyle(selected ? theme.primaryText : theme.secondaryText)
+                        .frame(width: 36, height: 26)
+                        .background {
+                            if selected {
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(theme.controlAccent.opacity(0.28))
+                            }
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(mode.help)
+            }
+        }
+        .padding(2)
+        .background(
+            theme.subtleBorder.opacity(0.22),
+            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("视图")
+    }
+
+    /// ⟨ 今天 ⟩ as one control group.
+    private var navigationCluster: some View {
+        HStack(spacing: 0) {
+            toolbarIconHit(
+                systemName: "chevron.left",
+                help: primaryViewMode == .month ? "上个月" : "上一周"
+            ) {
+                if primaryViewMode == .month {
+                    navigateToPreviousMonth()
+                } else {
+                    weekModel.goToPreviousWeek()
+                }
+            }
+
+            Button {
+                if primaryViewMode == .month {
+                    navigateToToday()
+                } else {
+                    weekModel.goToToday()
+                }
+            } label: {
+                Text("今天")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.primaryText)
+                    .frame(height: 26)
+                    .padding(.horizontal, 10)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("回到今天")
+
+            toolbarIconHit(
+                systemName: "chevron.right",
+                help: primaryViewMode == .month ? "下个月" : "下一周"
+            ) {
+                if primaryViewMode == .month {
+                    navigateToNextMonth()
+                } else {
+                    weekModel.goToNextWeek()
+                }
+            }
+        }
+        .padding(2)
+        .background(
+            theme.subtleBorder.opacity(0.22),
+            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+        )
+    }
+
+    /// Filter + manage in one menu (was two separate noisy controls).
+    private var categoryControl: some View {
+        let filtered = !hiddenCategoryIDs.isEmpty
+        return Menu {
+            CategoryFilterView(
+                categories: orderedCategories,
+                hiddenCategoryIDs: $hiddenCategoryIDs
+            )
+            Divider()
+            Button("管理分类…") {
+                showCategoryManager = true
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "line.3.horizontal.decrease.circle")
+                    .font(.system(size: 12, weight: .medium))
+                Text("分类")
+                    .font(.system(size: 12, weight: .medium))
+                if filtered {
+                    Circle()
+                        .fill(theme.controlAccent)
+                        .frame(width: 5, height: 5)
+                }
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .opacity(0.65)
+            }
+            .foregroundStyle(filtered ? theme.controlAccent : theme.primaryText)
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(
+                theme.subtleBorder.opacity(filtered ? 0.32 : 0.22),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .help(filtered ? "分类筛选（已隐藏 \(hiddenCategoryIDs.count) 个）" : "分类筛选与管理")
+    }
+
+    private func toolbarIconHit(
+        systemName: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(theme.secondaryText)
+                .frame(width: 28, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     private var weekDayHeader: some View {
         HStack(spacing: 0) {
             Color.clear.frame(width: WeekTimeGridMetrics.gutterWidth)
             ForEach(Array(weekModel.dayStarts.enumerated()), id: \.offset) { _, day in
-                VStack(spacing: 2) {
-                    Text(weekdayLabel(for: day))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(theme.secondaryText)
-                    Text("\(day.day)")
-                        .font(.system(size: 14, weight: day == weekModel.today ? .bold : .semibold))
-                        .foregroundStyle(day == weekModel.today ? theme.controlAccent : theme.primaryText)
-                        .frame(width: 28, height: 28)
-                        .background {
-                            if day == weekModel.today {
-                                Circle().fill(theme.todayFill)
+                GeometryReader { proxy in
+                    VStack(spacing: 1) {
+                        Text(weekdayLabel(for: day))
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(theme.secondaryText)
+                        Text("\(day.day)")
+                            .font(.system(size: 14, weight: day == weekModel.today ? .bold : .semibold))
+                            .foregroundStyle(day == weekModel.today ? theme.controlAccent : theme.primaryText)
+                            .frame(width: 26, height: 26)
+                            .background {
+                                if day == weekModel.today {
+                                    Circle().fill(theme.todayFill)
+                                }
                             }
-                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        openQuickCreate(
+                            on: day,
+                            anchorFrame: proxy.frame(
+                                in: .named(CalendarInteractionCoordinateSpace.root)
+                            )
+                        )
+                    }
                 }
-                .frame(maxWidth: .infinity)
-                .frame(height: WeekTimeGridMetrics.dayHeaderHeight)
             }
         }
+        .frame(height: WeekTimeGridMetrics.dayHeaderHeight)
+        .fixedSize(horizontal: false, vertical: true)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(theme.separator).frame(height: 0.5)
+            Rectangle().fill(theme.separator.opacity(0.7)).frame(height: 0.5)
         }
     }
 
@@ -652,31 +842,30 @@ struct MonthView: View {
     }
 
     private var appearancePreference: CalendarAppearancePreference {
-        CalendarAppearancePreference(rawValue: appearancePreferenceRaw) ?? .system
+        CalendarAppearancePreference(rawValue: appearancePreferenceRaw) ?? .light
     }
 
+    /// One click: light ↔ dark (no menu, no “follow system”).
     private var appearanceToggle: some View {
-        Menu {
-            ForEach(CalendarAppearancePreference.allCases) { preference in
-                Button {
-                    appearancePreferenceRaw = preference.rawValue
-                    CalendarAppearancePreference.applyToApplication(preference)
-                } label: {
-                    if preference == appearancePreference {
-                        Label(preference.title, systemImage: "checkmark")
-                    } else {
-                        Text(preference.title)
-                    }
-                }
-            }
+        Button {
+            let next = appearancePreference.toggled(renderedAs: colorScheme)
+            appearancePreferenceRaw = next.rawValue
+            CalendarAppearancePreference.applyToApplication(next)
         } label: {
-            Image(systemName: appearancePreference.symbolName)
-                .frame(minWidth: 18)
+            Image(systemName: appearancePreference.toggleSymbolName)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(theme.secondaryText)
+                .frame(width: 30, height: 30)
+                .background(
+                    theme.subtleBorder.opacity(0.22),
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
-        .menuStyle(.borderlessButton)
-        .help("切换主题（\(appearancePreference.title)）")
+        .buttonStyle(.plain)
+        .help(appearancePreference == .dark ? "切换到浅色" : "切换到深色")
         .accessibilityLabel("切换主题")
-        .accessibilityValue(appearancePreference.title)
+        .accessibilityValue(appearancePreference == .dark ? "深色" : "浅色")
         .accessibilityIdentifier("appearance-preference-toggle")
     }
 
@@ -794,15 +983,6 @@ struct MonthView: View {
                 editorSession = config
             }
         }
-    }
-
-    private func applyPriority(_ priority: ItemPriority, to item: ProjectedItem) {
-        sendItemAction(ItemActions.setPriority(priority, on: item), undoLabel: "已更新优先级")
-    }
-
-    private func togglePin(for item: ProjectedItem) {
-        let command = ItemActions.setPinned(!item.isPinned, on: item)
-        sendItemAction(command, undoLabel: item.isPinned ? "已取消置顶" : "已置顶")
     }
 
     private func requestDelete(_ item: ProjectedItem) {
@@ -940,8 +1120,6 @@ struct MonthView: View {
                                 dropCoordinator: dropCoordinator,
                                 onAction: handle,
                                 onCompletion: sendCompletion,
-                                onPriority: { item, priority in applyPriority(priority, to: item) },
-                                onPin: { togglePin(for: $0) },
                                 onDelete: { requestDelete($0) },
                                 selectionRange: interactionCoordinator.previewRange,
                                 onRangeGesture: { gesture in
@@ -1046,7 +1224,7 @@ struct MonthView: View {
             cancelRangeAutoScroll()
             let releaseDate = dateFrameMap.date(at: point) ?? dateFrameMap.nearestDate(to: point)
             let action = interactionCoordinator.pointerUp(at: point, over: releaseDate)
-            presentQuickCreate(for: action)
+            presentQuickCreate(for: action, clickPoint: point)
         }
     }
 
@@ -1082,15 +1260,20 @@ struct MonthView: View {
             ) else {
                 return
             }
-            if case .occurrence = pending.source {
-                interactionCoordinator.beginPendingRecurrenceScope()
-            }
-            Task {
-                do {
-                    try await dropCoordinator.accept(pending)
-                } catch {
-                    interactionCoordinator.completePendingMutation()
-                }
+            commitWeekMutation(pending)
+        }
+    }
+
+    /// Shared commit path for month-row drag and week-grid drag.
+    private func commitWeekMutation(_ pending: PendingCalendarMutation) {
+        if case .occurrence = pending.source {
+            interactionCoordinator.beginPendingRecurrenceScope()
+        }
+        Task {
+            do {
+                try await dropCoordinator.accept(pending)
+            } catch {
+                interactionCoordinator.completePendingMutation()
             }
         }
     }
@@ -1145,25 +1328,71 @@ struct MonthView: View {
         )
     }
 
-    private func openQuickCreate(on date: CalendarDate) {
-        presentQuickCreate(for: .openCreate(
-            CalendarDateRange(start: date, end: date),
-            anchor: date
-        ))
+    private func openQuickCreate(
+        on date: CalendarDate,
+        startTime: MinuteOfDay? = nil,
+        anchorFrame: CGRect? = nil
+    ) {
+        presentQuickCreate(
+            QuickCreatePresentation.forDay(date, startTime: startTime),
+            anchorFrame: anchorFrame
+        )
     }
 
-    private func presentQuickCreate(for action: CalendarInteractionAction?) {
+    private func presentQuickCreate(
+        for action: CalendarInteractionAction?,
+        clickPoint: CGPoint? = nil
+    ) {
         guard let presentation = MonthQuickCreateRouting.presentation(for: action)
         else {
             return
         }
+        // Prefer the actual click (root coords) over dateFrameMap — map frames can sit
+        // outside the visible window after scroll and pin the card to the top edge.
+        let clickAnchor = clickPoint.map {
+            CGRect(x: $0.x - 16, y: $0.y - 12, width: 32, height: 24)
+        }
+        presentQuickCreate(presentation, anchorFrame: clickAnchor)
+    }
+
+    private func presentQuickCreate(
+        _ presentation: QuickCreatePresentation,
+        anchorFrame: CGRect? = nil
+    ) {
         cancelRangeAutoScroll()
+        quickCreateSessionID = UUID()
+        lastEditorAnchorFrame = resolvedCreateAnchorFrame(
+            preferred: anchorFrame,
+            date: presentation.anchorDate
+        )
+        // Keep last measured size as a better first guess than 0×0.
+        if quickCreateMeasuredContentSize.height < 1 {
+            quickCreateMeasuredContentSize = CGSize(
+                width: QuickCreatePopover.preferredWidth,
+                height: QuickCreateOverlayPresentation.estimatedCardHeight
+            )
+        }
         withAnimation(motionPolicy.overlayAnimation) {
             quickCreatePresentation = presentation
         }
-        lastEditorAnchorFrame = dateFrameMap.frame(for: presentation.anchorDate)
-        quickCreateMeasuredContentSize = .zero
         interactionCoordinator.openEditor(for: presentation.range, anchor: presentation.anchorDate)
+    }
+
+    /// Only accept anchors that sit on-screen; otherwise fall back to window center.
+    private func resolvedCreateAnchorFrame(
+        preferred: CGRect?,
+        date: CalendarDate
+    ) -> CGRect {
+        let mapped = preferred ?? dateFrameMap.frame(for: date) ?? lastEditorAnchorFrame
+        // Without window bounds here, reject absurd frames (e.g. y ≪ 0 from scroll content).
+        if let mapped,
+           mapped.width.isFinite, mapped.height.isFinite,
+           mapped.origin.x.isFinite, mapped.origin.y.isFinite,
+           mapped.minY > -400, mapped.maxY < 4000,
+           mapped.width >= 0, mapped.height >= 0 {
+            return mapped
+        }
+        return CGRect(x: 400, y: 280, width: 40, height: 40)
     }
 
     private func dismissQuickCreate() {
@@ -1173,6 +1402,7 @@ struct MonthView: View {
         }
         lastEditorAnchorFrame = nil
         quickCreateMeasuredContentSize = .zero
+        // Always release the create lock so the next empty-cell click can start.
         interactionCoordinator.cancel()
     }
 
@@ -1262,21 +1492,21 @@ struct MonthView: View {
     }
 
     private func resolvedEditorAnchorFrame(for date: CalendarDate, windowBounds: CGRect) -> CGRect {
-        if let frame = dateFrameMap.frame(for: date) {
+        let visible = windowBounds.insetBy(dx: 8, dy: 8)
+        // 1) Explicit click / week-cell anchor captured at open
+        if let last = lastEditorAnchorFrame, last.intersects(visible) {
+            return last
+        }
+        // 2) Date cell frame only if currently on-screen
+        if let frame = dateFrameMap.frame(for: date), frame.intersects(visible) {
             return frame
         }
-        let visibleDates = dateFrameMap.visibleDates
-        if let first = visibleDates.first, date < first {
-            return CGRect(x: windowBounds.midX, y: windowBounds.minY - 1, width: 1, height: 1)
-        }
-        if let last = visibleDates.last, date > last {
-            return CGRect(x: windowBounds.midX, y: windowBounds.maxY + 1, width: 1, height: 1)
-        }
-        return lastEditorAnchorFrame ?? CGRect(
-            x: windowBounds.midX,
-            y: windowBounds.midY,
-            width: 1,
-            height: 1
+        // 3) Never use off-screen map frames (they pin the card to the top/bottom edge).
+        return CGRect(
+            x: windowBounds.midX - 20,
+            y: windowBounds.midY - 20,
+            width: 40,
+            height: 40
         )
     }
 

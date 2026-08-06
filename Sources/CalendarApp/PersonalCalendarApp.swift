@@ -16,25 +16,25 @@ enum CalendarAppCommandPolicy {
 struct PersonalCalendarApp: App {
     @State private var environment: AppEnvironment
     @AppStorage(CalendarAppearancePreference.storageKey)
-    private var appearancePreferenceRaw = CalendarAppearancePreference.system.rawValue
+    private var appearancePreferenceRaw = CalendarAppearancePreference.light.rawValue
 
     init() {
         _environment = State(initialValue: .live())
     }
 
     private var appearancePreference: CalendarAppearancePreference {
-        CalendarAppearancePreference(rawValue: appearancePreferenceRaw) ?? .system
+        CalendarAppearancePreference(rawValue: appearancePreferenceRaw) ?? .light
     }
 
     var body: some Scene {
-        Window("个人月历", id: "main-calendar") {
+        Window("Jelly", id: "main-calendar") {
             MonthView(store: environment.store)
                 .frame(minWidth: 980, minHeight: 680)
                 .preferredColorScheme(appearancePreference.preferredColorScheme)
                 .task { await environment.store.load() }
                 .onAppear { CalendarAppearancePreference.applyToApplication(appearancePreference) }
                 .onChange(of: appearancePreferenceRaw) { _, newValue in
-                    let preference = CalendarAppearancePreference(rawValue: newValue) ?? .system
+                    let preference = CalendarAppearancePreference(rawValue: newValue) ?? .light
                     CalendarAppearancePreference.applyToApplication(preference)
                 }
         }
@@ -46,17 +46,8 @@ struct PersonalCalendarApp: App {
             }
         }
 
-        Window("分类管理", id: "category-manager") {
-            CategoryManagerView(store: environment.store)
-                .frame(minWidth: 440, minHeight: 520)
-                .preferredColorScheme(appearancePreference.preferredColorScheme)
-                .onAppear { CalendarAppearancePreference.applyToApplication(appearancePreference) }
-        }
-        .commands {
-            CalendarUndoCommands(store: environment.store)
-            if CalendarAppCommandPolicy.installsBackupCommands(in: .categoryManager) {
-                BackupCommands(store: environment.store, backupService: environment.backupService)
-            }
-        }
+        // Category manager is presented as a sheet on the main calendar window so it
+        // always appears on the same display (separate Window scenes often restore to
+        // another monitor on multi-display Macs).
     }
 }

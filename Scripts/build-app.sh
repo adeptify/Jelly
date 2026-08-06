@@ -5,9 +5,9 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 PROJECT_DIR=$(cd "$SCRIPT_DIR/.." && pwd -P)
 DIST_DIR="$PROJECT_DIR/dist"
 STAGING_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/personal-calendar-build.XXXXXX")
-STAGING_APP="$STAGING_ROOT/个人月历.app"
-STAGING_ZIP="$STAGING_ROOT/个人月历.app.zip"
-STAGING_DMG="$STAGING_ROOT/个人月历.dmg"
+STAGING_APP="$STAGING_ROOT/Jelly.app"
+STAGING_ZIP="$STAGING_ROOT/Jelly.app.zip"
+STAGING_DMG="$STAGING_ROOT/Jelly.dmg"
 DMG_SOURCE="$STAGING_ROOT/dmg-source"
 ZIP_VERIFY_ROOT="$STAGING_ROOT/zip-verify"
 DMG_VERIFY_ROOT="$STAGING_ROOT/dmg-verify"
@@ -72,7 +72,7 @@ verify_zip() {
   fi
   mkdir -p "$verify_root" || return 1
   ditto -x -k "$archive" "$verify_root" || return 1
-  local app="$verify_root/个人月历.app"
+  local app="$verify_root/Jelly.app"
   if xattr -lr "$app" | grep -E 'com\.apple\.(FinderInfo|fileprovider)' >/dev/null; then
     echo "ZIP extraction contained FileProvider signing detritus." >&2
     return 1
@@ -172,7 +172,7 @@ verify_dmg() {
   }
 
   local result=0
-  local mounted_app="$active_mount/个人月历.app"
+  local mounted_app="$active_mount/Jelly.app"
   verify_app "$mounted_app" || result=1
   if [[ "$result" == 0 ]]; then
     LAST_VERIFIED_DMG_CDHASH=$(app_cdhash "$mounted_app") || result=1
@@ -299,13 +299,13 @@ DIST_REAL=$(cd "$DIST_DIR" && pwd -P)
   exit 2
 }
 
-APP_DIR="$DIST_REAL/个人月历.app"
-FORMAL_ZIP="$DIST_REAL/个人月历.app.zip"
-FORMAL_DMG="$DIST_REAL/个人月历.dmg"
-CANDIDATE_ZIP="$DIST_REAL/.个人月历.app.zip.candidate.$$"
-CANDIDATE_DMG="$DIST_REAL/.个人月历.dmg.candidate.$$"
-BACKUP_ZIP="$DIST_REAL/.个人月历.app.zip.backup.$$"
-BACKUP_DMG="$DIST_REAL/.个人月历.dmg.backup.$$"
+APP_DIR="$DIST_REAL/Jelly.app"
+FORMAL_ZIP="$DIST_REAL/Jelly.app.zip"
+FORMAL_DMG="$DIST_REAL/Jelly.dmg"
+CANDIDATE_ZIP="$DIST_REAL/.Jelly.app.zip.candidate.$$"
+CANDIDATE_DMG="$DIST_REAL/.Jelly.dmg.candidate.$$"
+BACKUP_ZIP="$DIST_REAL/.Jelly.app.zip.backup.$$"
+BACKUP_DMG="$DIST_REAL/.Jelly.dmg.backup.$$"
 
 for formal in "$FORMAL_ZIP" "$FORMAL_DMG"; do
   if [[ -L "$formal" || ( -e "$formal" && ! -f "$formal" ) ]]; then
@@ -333,9 +333,15 @@ done
 
 CONTENTS_DIR="$STAGING_APP/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
-mkdir -p "$MACOS_DIR"
+RESOURCES_DIR="$CONTENTS_DIR/Resources"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BIN_DIR/PersonalCalendar" "$MACOS_DIR/PersonalCalendar"
 cp "$PROJECT_DIR/Support/Info.plist" "$CONTENTS_DIR/Info.plist"
+if [[ ! -f "$PROJECT_DIR/Support/AppIcon.icns" ]]; then
+  echo "Missing Support/AppIcon.icns" >&2
+  exit 2
+fi
+cp "$PROJECT_DIR/Support/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 chmod +x "$MACOS_DIR/PersonalCalendar"
 plutil -lint "$CONTENTS_DIR/Info.plist" >/dev/null
 xattr -cr "$STAGING_APP"
@@ -345,9 +351,9 @@ verify_app "$STAGING_APP"
 
 ditto --norsrc -c -k --keepParent "$STAGING_APP" "$STAGING_ZIP"
 mkdir -p "$DMG_SOURCE"
-ditto --norsrc "$STAGING_APP" "$DMG_SOURCE/个人月历.app"
+ditto --norsrc "$STAGING_APP" "$DMG_SOURCE/Jelly.app"
 ln -s /Applications "$DMG_SOURCE/Applications"
-hdiutil create -volname "个人月历" -srcfolder "$DMG_SOURCE" -ov -format UDZO "$STAGING_DMG" >/dev/null
+hdiutil create -volname "Jelly" -srcfolder "$DMG_SOURCE" -ov -format UDZO "$STAGING_DMG" >/dev/null
 
 verify_pair "$STAGING_ZIP" "$STAGING_DMG" staging || {
   echo "Staged ZIP/DMG verification failed; neither package was published." >&2

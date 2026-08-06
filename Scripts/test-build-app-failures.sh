@@ -22,14 +22,14 @@ done
 
 BUILD_SCRIPT="$PROJECT_COPY/Scripts/build-app.sh"
 DIST_DIR="$PROJECT_COPY/dist"
-APP_DIR="$DIST_DIR/个人月历.app"
-ARCHIVE_PATH="$DIST_DIR/个人月历.app.zip"
-DMG_PATH="$DIST_DIR/个人月历.dmg"
+APP_DIR="$DIST_DIR/Jelly.app"
+ARCHIVE_PATH="$DIST_DIR/Jelly.app.zip"
+DMG_PATH="$DIST_DIR/Jelly.dmg"
 COMMON_ENV=(PATH="$FAKE_BIN:$PATH" BUILD_APP_FAKE_SWIFT_BIN_DIR="$SOURCE_BIN_DIR")
 
 assert_no_publish_residue() {
   local residue
-  residue=$(find "$DIST_DIR" -maxdepth 1 \( -name '.个人月历.app.zip.*' -o -name '.个人月历.dmg.*' \) -print)
+  residue=$(find "$DIST_DIR" -maxdepth 1 \( -name '.Jelly.app.zip.*' -o -name '.Jelly.dmg.*' \) -print)
   if [[ -n "$residue" ]]; then
     print -u2 "Temporary package publication residue remained in dist."
     print -u2 -- "$residue"
@@ -181,7 +181,7 @@ assert_pair_unchanged "$baseline_hashes"
 # Every hidden candidate validation branch must fail before publication while
 # preserving the exact prior pair and removing all temporary candidate files.
 if env "${COMMON_ENV[@]}" \
-  BUILD_APP_FAULT_DITTO_EXTRACT_SOURCE_CONTAINS='.个人月历.app.zip.candidate.' \
+  BUILD_APP_FAULT_DITTO_EXTRACT_SOURCE_CONTAINS='.Jelly.app.zip.candidate.' \
   BUILD_APP_FAULT_ONCE_MARKER="$TEMP_ROOT/candidate-zip-extract-fired" \
   zsh "$BUILD_SCRIPT" >/dev/null 2>&1; then
   print -u2 "Expected candidate ZIP extraction verification failure."
@@ -191,7 +191,7 @@ assert_single_fired_marker "$TEMP_ROOT/candidate-zip-extract-fired"
 assert_pair_unchanged "$baseline_hashes"
 
 if env "${COMMON_ENV[@]}" \
-  BUILD_APP_FAULT_CODESIGN_TARGET_CONTAINS='zip-verify-candidate/个人月历.app' \
+  BUILD_APP_FAULT_CODESIGN_TARGET_CONTAINS='zip-verify-candidate/Jelly.app' \
   BUILD_APP_FAULT_ONCE_MARKER="$TEMP_ROOT/candidate-zip-signature-fired" \
   zsh "$BUILD_SCRIPT" >/dev/null 2>&1; then
   print -u2 "Expected candidate ZIP signature verification failure."
@@ -201,7 +201,7 @@ assert_single_fired_marker "$TEMP_ROOT/candidate-zip-signature-fired"
 assert_pair_unchanged "$baseline_hashes"
 
 if env "${COMMON_ENV[@]}" \
-  BUILD_APP_FAULT_HDIUTIL_ATTACH_SOURCE_CONTAINS='.个人月历.dmg.candidate.' \
+  BUILD_APP_FAULT_HDIUTIL_ATTACH_SOURCE_CONTAINS='.Jelly.dmg.candidate.' \
   BUILD_APP_FAULT_ONCE_MARKER="$TEMP_ROOT/candidate-dmg-attach-fired" \
   zsh "$BUILD_SCRIPT" >/dev/null 2>&1; then
   print -u2 "Expected candidate DMG attach verification failure."
@@ -330,19 +330,19 @@ fi
 mismatch_root="$TEMP_ROOT/mismatched-dmg"
 mismatch_extract="$mismatch_root/extract"
 mismatch_source="$mismatch_root/source"
-mismatch_dmg="$mismatch_root/个人月历-mismatched.dmg"
+mismatch_dmg="$mismatch_root/Jelly-mismatched.dmg"
 mkdir -p "$mismatch_extract" "$mismatch_source"
 /usr/bin/ditto -x -k "$ARCHIVE_PATH" "$mismatch_extract"
-mismatch_app="$mismatch_extract/个人月历.app"
+mismatch_app="$mismatch_extract/Jelly.app"
 /usr/bin/plutil -replace CFBundleVersion -string 2 "$mismatch_app/Contents/Info.plist"
 /usr/bin/codesign --force --deep --sign - "$mismatch_app" >/dev/null
 /usr/bin/codesign --verify --deep --strict "$mismatch_app"
-/usr/bin/ditto --norsrc "$mismatch_app" "$mismatch_source/个人月历.app"
+/usr/bin/ditto --norsrc "$mismatch_app" "$mismatch_source/Jelly.app"
 ln -s /Applications "$mismatch_source/Applications"
-/usr/bin/hdiutil create -volname "个人月历" -srcfolder "$mismatch_source" -ov -format UDZO "$mismatch_dmg" >/dev/null
+/usr/bin/hdiutil create -volname "Jelly" -srcfolder "$mismatch_source" -ov -format UDZO "$mismatch_dmg" >/dev/null
 
 if env "${COMMON_ENV[@]}" \
-  BUILD_APP_FAULT_HDIUTIL_SUBSTITUTE_MATCH_CONTAINS='.个人月历.dmg.candidate.' \
+  BUILD_APP_FAULT_HDIUTIL_SUBSTITUTE_MATCH_CONTAINS='.Jelly.dmg.candidate.' \
   BUILD_APP_FAULT_HDIUTIL_SUBSTITUTE_SOURCE="$mismatch_dmg" \
   BUILD_APP_FAULT_ONCE_MARKER="$TEMP_ROOT/candidate-dmg-content-fired" \
   zsh "$BUILD_SCRIPT" >/dev/null 2>&1; then

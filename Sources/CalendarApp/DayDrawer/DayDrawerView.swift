@@ -9,6 +9,7 @@ struct DayDrawerView: View {
     let onClose: () -> Void
     let onQuickCreate: (CalendarDate) -> Void
     let onOpenDetail: (ProjectedItem) -> Void
+    var onDelete: ((ProjectedItem) -> Void)?
     @StateObject private var model: DayDrawerViewModel
 
     init(
@@ -18,7 +19,8 @@ struct DayDrawerView: View {
         hiddenCategoryIDs: Set<UUID>,
         onClose: @escaping () -> Void,
         onQuickCreate: @escaping (CalendarDate) -> Void,
-        onOpenDetail: @escaping (ProjectedItem) -> Void
+        onOpenDetail: @escaping (ProjectedItem) -> Void,
+        onDelete: ((ProjectedItem) -> Void)? = nil
     ) {
         self.date = date
         self.store = store
@@ -27,6 +29,7 @@ struct DayDrawerView: View {
         self.onClose = onClose
         self.onQuickCreate = onQuickCreate
         self.onOpenDetail = onOpenDetail
+        self.onDelete = onDelete
         _model = StateObject(wrappedValue: DayDrawerViewModel(
             date: date,
             state: store.state,
@@ -57,7 +60,8 @@ struct DayDrawerView: View {
                                 item: item,
                                 category: categories[item.categoryID],
                                 onCompletion: sendCompletion,
-                                onOpenDetail: onOpenDetail
+                                onOpenDetail: onOpenDetail,
+                                onDelete: { onDelete?(item) }
                             )
                         }
                     }

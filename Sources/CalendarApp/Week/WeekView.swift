@@ -5,8 +5,14 @@ enum WeekTimeGridMetrics {
     static let hourHeight: CGFloat = 48
     static let hourCount = 24
     static let gutterWidth: CGFloat = 48
-    static let allDayRowMinHeight: CGFloat = 28
-    static let dayHeaderHeight: CGFloat = 40
+    /// Compact all-day strip height (single row of chips).
+    static let allDayChipHeight: CGFloat = 22
+    static let allDayChipSpacing: CGFloat = 3
+    static let allDayVerticalPadding: CGFloat = 6
+    static let allDayMinHeight: CGFloat = 34
+    /// Viewport shows this many chips; overflow scrolls (no +N truncate).
+    static let allDayVisibleRows = 3
+    static let dayHeaderHeight: CGFloat = 44
 
     static var gridHeight: CGFloat {
         CGFloat(hourCount) * hourHeight
@@ -19,6 +25,13 @@ enum WeekTimeGridMetrics {
     static func blockHeight(startMinute: Int, endMinute: Int) -> CGFloat {
         max(hourHeight * 0.35, yOffset(minute: endMinute - startMinute))
     }
+
+    /// Fixed viewport for `allDayVisibleRows` (scroll inside for more).
+    static var allDaySectionHeight: CGFloat {
+        let content = CGFloat(allDayVisibleRows) * allDayChipHeight
+            + CGFloat(allDayVisibleRows - 1) * allDayChipSpacing
+        return max(allDayMinHeight, content + allDayVerticalPadding * 2)
+    }
 }
 
 struct WeekView: View {
@@ -27,10 +40,17 @@ struct WeekView: View {
     let categories: [CalendarCategory]
     @Binding var hiddenCategoryIDs: Set<UUID>
     let onOpenDetail: (ProjectedItem) -> Void
-    let onCreate: (CalendarDate) -> Void
+    /// Create intent: date + optional start minute (nil = all-day) + anchor in root space.
+    let onCreate: (CalendarDate, MinuteOfDay?, CGRect) -> Void
+    /// Commit a move/resize from week-grid drag (same path as month-view mutations).
+    let onCommitMutation: (PendingCalendarMutation) -> Void
+    var onDelete: ((ProjectedItem) -> Void)?
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+
+    @State private var timedDrag: TimedDragState?
+    @State private var allDayDrag: AllDayDragState?
 
     private var theme: CalendarSemanticAppearance {
         CalendarTheme.appearance(for: colorScheme)
@@ -47,9 +67,11 @@ struct WeekView: View {
     var body: some View {
         VStack(spacing: 0) {
             allDaySection
-            Divider().overlay(theme.separator)
+            Divider().overlay(theme.separator.opacity(0.7))
             timedScrollGrid
+                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
         }
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
         .background(theme.canvas)
         .onChange(of: store.state) { _, _ in
             model.update(
@@ -57,45 +79,78 @@ struct WeekView: View {
                 hiddenCategoryIDs: hiddenCategoryIDs,
                 today: model.today
             )
+            // Drop sticky drag preview only after the model has the new schedule —
+            // clearing on gesture end caused a one-frame snap-back flash.
+            timedDrag = nil
+            allDayDrag = nil
         }
         .onChange(of: hiddenCategoryIDs) { _, ids in
             model.update(state: store.state, hiddenCategoryIDs: ids, today: model.today)
         }
     }
 
+    // MARK: - All-day
+
     private var allDaySection: some View {
-        HStack(alignment: .top, spacing: 0) {
-            Text("全天")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(theme.secondaryText)
-                .frame(width: WeekTimeGridMetrics.gutterWidth, alignment: .trailing)
-                .padding(.trailing, 6)
-                .padding(.top, 6)
-            ForEach(Array(model.dayStarts.enumerated()), id: \.offset) { dayIndex, day in
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(model.allDayItems(on: dayIndex)) { item in
-                        weekChip(entry: item.entry, compactTime: nil)
+        let sectionHeight = WeekTimeGridMetrics.allDaySectionHeight
+        return GeometryReader { sectionProxy in
+            HStack(alignment: .top, spacing: 0) {
+                Text("全天")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(theme.secondaryText)
+                    .frame(width: WeekTimeGridMetrics.gutterWidth, alignment: .trailing)
+                    .padding(.trailing, 6)
+                    .padding(.top, 8)
+
+                ForEach(Array(model.dayStarts.enumerated()), id: \.offset) { dayIndex, day in
+                    let items = model.allDayItems(on: dayIndex)
+
+                    GeometryReader { proxy in
+                        ScrollView(.vertical, showsIndicators: items.count > WeekTimeGridMetrics.allDayVisibleRows) {
+                            VStack(alignment: .leading, spacing: WeekTimeGridMetrics.allDayChipSpacing) {
+                                ForEach(items) { item in
+                                    allDayChip(
+                                        entry: item.entry,
+                                        dayIndex: dayIndex,
+                                        sectionFrame: sectionProxy.frame(in: .global)
+                                    )
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, WeekTimeGridMetrics.allDayVerticalPadding)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            guard allDayDrag == nil else { return }
+                            onCreate(
+                                day,
+                                nil,
+                                proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root))
+                            )
+                        }
                     }
-                    if model.allDayItems(on: dayIndex).isEmpty {
-                        Color.clear.frame(height: 4)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: sectionHeight)
+
+                    if dayIndex < 6 {
+                        Rectangle()
+                            .fill(theme.separator.opacity(0.65))
+                            .frame(width: 0.5)
                     }
-                }
-                .frame(maxWidth: .infinity, minHeight: WeekTimeGridMetrics.allDayRowMinHeight, alignment: .topLeading)
-                .padding(.horizontal, 3)
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
-                .onTapGesture { onCreate(day) }
-                if dayIndex < 6 {
-                    Rectangle().fill(theme.separator).frame(width: 0.5)
                 }
             }
+            .frame(height: sectionHeight)
         }
-        .padding(.bottom, 4)
+        .frame(height: sectionHeight)
     }
+
+    // MARK: - Timed grid
 
     private var timedScrollGrid: some View {
         ScrollViewReader { proxy in
-            ScrollView {
+            ScrollView(.vertical, showsIndicators: true) {
                 ZStack(alignment: .topLeading) {
                     hourBackground
                     timedBlocksLayer
@@ -104,8 +159,8 @@ struct WeekView: View {
                 .padding(.bottom, 12)
                 .id("week-grid")
             }
+            .frame(minHeight: 0, maxHeight: .infinity)
             .onAppear {
-                // Scroll toward a useful daytime band (08:00).
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     withAnimation(accessibilityReduceMotion ? nil : .easeOut(duration: 0.2)) {
                         proxy.scrollTo("hour-8", anchor: .top)
@@ -113,6 +168,7 @@ struct WeekView: View {
                 }
             }
         }
+        .frame(minHeight: 0, maxHeight: .infinity)
     }
 
     private var hourBackground: some View {
@@ -134,24 +190,30 @@ struct WeekView: View {
             }
             ForEach(0..<7, id: \.self) { dayIndex in
                 ZStack {
-                    VStack(spacing: 0) {
-                        ForEach(0..<WeekTimeGridMetrics.hourCount, id: \.self) { _ in
-                            Rectangle()
-                                .fill(theme.separator.opacity(0.55))
-                                .frame(height: 0.5)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                                .frame(height: WeekTimeGridMetrics.hourHeight)
-                        }
+                    if model.dayStarts.indices.contains(dayIndex),
+                       model.dayStarts[dayIndex] == model.today {
+                        theme.todayFill.opacity(0.14)
                     }
-                    if model.dayStarts[dayIndex] == model.today {
-                        theme.todayFill.opacity(0.18)
+                    VStack(spacing: 0) {
+                        ForEach(0..<WeekTimeGridMetrics.hourCount, id: \.self) { hour in
+                            WeekHourSlot(
+                                hour: hour,
+                                dayIndex: dayIndex,
+                                dayStarts: model.dayStarts,
+                                separator: theme.separator,
+                                onCreate: { date, start, frame in
+                                    guard timedDrag == nil else { return }
+                                    onCreate(date, start, frame)
+                                }
+                            )
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity)
-                .contentShape(Rectangle())
-                .onTapGesture { onCreate(model.dayStarts[dayIndex]) }
                 if dayIndex < 6 {
-                    Rectangle().fill(theme.separator).frame(width: 0.5)
+                    Rectangle()
+                        .fill(theme.separator.opacity(0.65))
+                        .frame(width: 0.5)
                 }
             }
         }
@@ -160,49 +222,256 @@ struct WeekView: View {
     private var timedBlocksLayer: some View {
         GeometryReader { proxy in
             let dayWidth = max(0, (proxy.size.width - WeekTimeGridMetrics.gutterWidth) / 7)
+            let gridOrigin = proxy.frame(in: .global).origin
+
             ForEach(model.timedBlocks()) { block in
-                let x = WeekTimeGridMetrics.gutterWidth + CGFloat(block.dayIndex) * dayWidth + 2
-                let y = WeekTimeGridMetrics.yOffset(minute: block.startMinute)
+                let display = displayTimedBlock(block)
+                let x = WeekTimeGridMetrics.gutterWidth + CGFloat(display.dayIndex) * dayWidth + 2
+                let y = WeekTimeGridMetrics.yOffset(minute: display.startMinute)
                 let height = WeekTimeGridMetrics.blockHeight(
-                    startMinute: block.startMinute,
-                    endMinute: block.endMinute
+                    startMinute: display.startMinute,
+                    endMinute: display.endMinute
                 )
-                weekChip(
+                timedChip(
                     entry: block.entry,
-                    compactTime: CalendarItemRowPresentation.displayTimeText(for: block.entry.schedule)
+                    compactTime: CalendarItemRowPresentation.displayTimeText(
+                        for: display.schedule ?? block.entry.schedule
+                    ),
+                    blockHeight: height,
+                    isDragging: timedDrag?.entryID == ProjectedItem(entry: block.entry).id
                 )
                 .frame(width: max(24, dayWidth - 4), height: height, alignment: .topLeading)
                 .position(x: x + (dayWidth - 4) / 2, y: y + height / 2)
+                .opacity(timedDrag?.entryID == ProjectedItem(entry: block.entry).id ? 0.92 : 1)
+                .highPriorityGesture(
+                    timedDragGesture(
+                        for: block,
+                        dayWidth: dayWidth,
+                        gridGlobalOrigin: gridOrigin
+                    )
+                )
             }
         }
-        .padding(.leading, 0)
+    }
+
+    private func displayTimedBlock(_ block: WeekTimedBlock) -> (
+        dayIndex: Int,
+        startMinute: Int,
+        endMinute: Int,
+        schedule: CalendarSchedule?
+    ) {
+        guard let drag = timedDrag,
+              drag.entryID == ProjectedItem(entry: block.entry).id
+        else {
+            return (block.dayIndex, block.startMinute, block.endMinute, nil)
+        }
+        return (drag.dayIndex, drag.startMinute, drag.endMinute, drag.previewSchedule)
+    }
+
+    private func timedDragGesture(
+        for block: WeekTimedBlock,
+        dayWidth: CGFloat,
+        gridGlobalOrigin: CGPoint
+    ) -> some Gesture {
+        let entryID = ProjectedItem(entry: block.entry).id
+        let original = block.entry.schedule
+        return DragGesture(minimumDistance: 6, coordinateSpace: .global)
+            .onChanged { value in
+                let localX = value.location.x - gridGlobalOrigin.x
+                let localY = value.location.y - gridGlobalOrigin.y
+                let dayIdx = WeekGridDrag.dayIndex(atX: localX, dayWidth: dayWidth)
+                let pointerMinute = WeekGridDrag.minute(atY: localY)
+
+                if timedDrag == nil {
+                    let startLocalY = value.startLocation.y - gridGlobalOrigin.y
+                    let blockTop = WeekTimeGridMetrics.yOffset(minute: block.startMinute)
+                    let blockHeight = WeekTimeGridMetrics.blockHeight(
+                        startMinute: block.startMinute,
+                        endMinute: block.endMinute
+                    )
+                    let kind = WeekGridDrag.kind(
+                        localY: startLocalY - blockTop,
+                        blockHeight: blockHeight
+                    )
+                    let grabMinute = WeekGridDrag.minute(atY: startLocalY)
+                    timedDrag = TimedDragState(
+                        entryID: entryID,
+                        entry: block.entry,
+                        kind: kind,
+                        grabStartMinute: grabMinute,
+                        dayIndex: dayIdx,
+                        startMinute: block.startMinute,
+                        endMinute: block.endMinute,
+                        previewSchedule: original
+                    )
+                }
+
+                guard var session = timedDrag, session.entryID == entryID else { return }
+                let day = model.dayStarts[min(6, max(0, dayIdx))]
+                if let preview = try? WeekGridDrag.previewTimed(
+                    original: original,
+                    kind: session.kind,
+                    day: day,
+                    grabStartMinute: session.grabStartMinute,
+                    pointerMinute: pointerMinute
+                ) {
+                    session.previewSchedule = preview
+                    session.dayIndex = dayIdx
+                    // Visual band for same-day preview (overnight uses start day column).
+                    let s = preview.startTime?.value ?? block.startMinute
+                    var e = preview.endTime?.value ?? block.endMinute
+                    if preview.endDate > preview.startDate {
+                        e = preview.endTime?.value == 0 ? 24 * 60 : 24 * 60
+                    }
+                    session.startMinute = s
+                    session.endMinute = max(s + WeekGridDrag.minDurationMinutes, e)
+                    timedDrag = session
+                }
+            }
+            .onEnded { _ in
+                guard let session = timedDrag, session.entryID == entryID else {
+                    timedDrag = nil
+                    return
+                }
+                let preview = session.previewSchedule
+                if preview == original {
+                    timedDrag = nil
+                    return
+                }
+                // Keep `timedDrag` until `store.state` changes so the block stays at the
+                // drop position instead of flashing back to the old slot.
+                onCommitMutation(PendingCalendarMutation(
+                    source: session.entry,
+                    operation: WeekGridDrag.operation(for: session.kind),
+                    originalSchedule: original,
+                    previewSchedule: preview
+                ))
+                let heldID = entryID
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(1200))
+                    if timedDrag?.entryID == heldID {
+                        timedDrag = nil
+                    }
+                }
+            }
+    }
+
+    // MARK: - Chips
+
+    @ViewBuilder
+    private func allDayChip(
+        entry: ProjectedEntry,
+        dayIndex: Int,
+        sectionFrame: CGRect
+    ) -> some View {
+        let item = ProjectedItem(entry: entry)
+        let style = chipStyle(for: item)
+        let isDragging = allDayDrag?.entryID == item.id
+        HStack(spacing: 4) {
+            Image(systemName: item.completedAt == nil ? "circle" : "checkmark.circle.fill")
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(style.accent.opacity(0.85))
+            ItemPriorityBadge(priority: item.priority)
+            Text(entry.title)
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 5)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .foregroundStyle(style.text)
+        .background(style.background, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .opacity(item.completedAt == nil ? (isDragging ? 0.85 : 1) : CalendarTheme.completedItemOpacity(for: appearance))
+        .contentShape(Rectangle())
+        .frame(height: WeekTimeGridMetrics.allDayChipHeight)
+        .offset(x: isDragging ? allDayDrag?.xOffset ?? 0 : 0)
+        .help(entry.title)
+        .highPriorityGesture(
+            DragGesture(minimumDistance: 6, coordinateSpace: .global)
+                .onChanged { value in
+                    let dayWidth = max(1, (sectionFrame.width - WeekTimeGridMetrics.gutterWidth) / 7)
+                    let localX = value.location.x - sectionFrame.minX
+                    let targetDay = WeekGridDrag.dayIndex(atX: localX, dayWidth: dayWidth)
+                    let delta = targetDay - dayIndex
+                    if allDayDrag == nil {
+                        allDayDrag = AllDayDragState(
+                            entryID: item.id,
+                            entry: entry,
+                            originDayIndex: dayIndex,
+                            dayDelta: 0,
+                            xOffset: 0
+                        )
+                    }
+                    allDayDrag?.dayDelta = delta
+                    allDayDrag?.xOffset = value.translation.width
+                }
+                .onEnded { _ in
+                    guard let session = allDayDrag, session.entryID == item.id else {
+                        allDayDrag = nil
+                        return
+                    }
+                    let delta = session.dayDelta
+                    guard delta != 0,
+                          let preview = try? WeekGridDrag.previewAllDay(
+                              original: entry.schedule,
+                              dayDelta: delta
+                          )
+                    else {
+                        allDayDrag = nil
+                        return
+                    }
+                    // Keep preview offset until store reflects the move (no snap-back flash).
+                    allDayDrag?.xOffset = CGFloat(delta) * max(
+                        1,
+                        (sectionFrame.width - WeekTimeGridMetrics.gutterWidth) / 7
+                    )
+                    onCommitMutation(PendingCalendarMutation(
+                        source: entry,
+                        operation: .move,
+                        originalSchedule: entry.schedule,
+                        previewSchedule: preview
+                    ))
+                    let heldID = item.id
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(1200))
+                        if allDayDrag?.entryID == heldID {
+                            allDayDrag = nil
+                        }
+                    }
+                }
+        )
+        .onTapGesture {
+            guard allDayDrag == nil else { return }
+            onOpenDetail(item)
+        }
     }
 
     @ViewBuilder
-    private func weekChip(entry: ProjectedEntry, compactTime: String?) -> some View {
+    private func timedChip(
+        entry: ProjectedEntry,
+        compactTime: String?,
+        blockHeight: CGFloat,
+        isDragging: Bool
+    ) -> some View {
         let item = ProjectedItem(entry: entry)
-        let category = categoryByID[entry.categoryID]
-        let hex = category?.colorHex ?? "#8C8F96"
-        let roles = CalendarTheme.categoryItemRoles(
-            hex,
-            isCompleted: item.completedAt != nil,
-            appearance: appearance
-        )
-        let background = roles.map { CalendarTheme.categoryColor($0.background) }
-            ?? CalendarTheme.itemBackground(CalendarTheme.categoryColor(hex), appearance: appearance)
-        let text = roles.map { CalendarTheme.categoryColor($0.text) } ?? theme.primaryText
-        let accent = roles.map { CalendarTheme.categoryColor($0.accent) } ?? CalendarTheme.categoryColor(hex)
-
-        Button {
-            onOpenDetail(item)
-        } label: {
+        let style = chipStyle(for: item)
+        VStack(spacing: 0) {
+            // Edge affordances
+            Capsule()
+                .fill(style.accent.opacity(0.55))
+                .frame(width: 22, height: 3)
+                .padding(.top, 3)
             HStack(alignment: .top, spacing: 4) {
                 Image(systemName: item.completedAt == nil ? "circle" : "checkmark.circle.fill")
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(accent.opacity(0.8))
+                    .foregroundStyle(style.accent.opacity(0.85))
+                    .onTapGesture {
+                        // Completion via open detail for now; keep drag free.
+                        onOpenDetail(item)
+                    }
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 3) {
-                        ItemPriorityBadge(priority: item.priority, isPinned: item.isPinned)
+                        ItemPriorityBadge(priority: item.priority)
                         if let compactTime {
                             Text(compactTime)
                                 .font(.system(size: 10, weight: .semibold).monospacedDigit())
@@ -217,19 +486,99 @@ struct WeekView: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 5)
-            .padding(.vertical, 3)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .foregroundStyle(text)
-            .background(background, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-            .opacity(item.completedAt == nil ? 1 : CalendarTheme.completedItemOpacity(for: appearance))
+            .padding(.vertical, 2)
+            Spacer(minLength: 0)
+            Capsule()
+                .fill(style.accent.opacity(0.55))
+                .frame(width: 22, height: 3)
+                .padding(.bottom, 3)
         }
-        .buttonStyle(.plain)
-        .help(entry.title)
-        .contextMenu {
-            Button("编辑") { onOpenDetail(item) }
-            Divider()
-            // Priority/pin/delete for week grid use the same edit entry; full actions live on month chips.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .foregroundStyle(style.text)
+        .background(style.background, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .opacity(item.completedAt == nil ? 1 : CalendarTheme.completedItemOpacity(for: appearance))
+        .overlay {
+            if isDragging {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(style.accent.opacity(0.7), lineWidth: 1.5)
+            }
         }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard timedDrag == nil else { return }
+            onOpenDetail(item)
+        }
+        .help(entry.title + " · 拖动移动，上下边缘调整时间")
+    }
+
+    private struct ChipStyle {
+        let background: Color
+        let text: Color
+        let accent: Color
+    }
+
+    private func chipStyle(for item: ProjectedItem) -> ChipStyle {
+        let hex = categoryByID[item.categoryID]?.colorHex ?? "#8C8F96"
+        let roles = CalendarTheme.categoryItemRoles(
+            hex,
+            isCompleted: item.completedAt != nil,
+            appearance: appearance
+        )
+        return ChipStyle(
+            background: roles.map { CalendarTheme.categoryColor($0.background) }
+                ?? CalendarTheme.itemBackground(CalendarTheme.categoryColor(hex), appearance: appearance),
+            text: roles.map { CalendarTheme.categoryColor($0.text) } ?? theme.primaryText,
+            accent: roles.map { CalendarTheme.categoryColor($0.accent) } ?? CalendarTheme.categoryColor(hex)
+        )
     }
 }
 
+// MARK: - Drag session state
+
+private struct TimedDragState: Equatable {
+    let entryID: String
+    let entry: ProjectedEntry
+    let kind: WeekGridDrag.Kind
+    let grabStartMinute: Int
+    var dayIndex: Int
+    var startMinute: Int
+    var endMinute: Int
+    var previewSchedule: CalendarSchedule
+}
+
+private struct AllDayDragState: Equatable {
+    let entryID: String
+    let entry: ProjectedEntry
+    let originDayIndex: Int
+    var dayDelta: Int
+    var xOffset: CGFloat
+}
+
+/// One hour cell; reports its root-space frame so the create card can anchor nearby.
+private struct WeekHourSlot: View {
+    let hour: Int
+    let dayIndex: Int
+    let dayStarts: [CalendarDate]
+    let separator: Color
+    let onCreate: (CalendarDate, MinuteOfDay?, CGRect) -> Void
+
+    var body: some View {
+        GeometryReader { proxy in
+            Rectangle()
+                .fill(separator.opacity(0.45))
+                .frame(height: 0.5)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard dayStarts.indices.contains(dayIndex) else { return }
+                    let start = MinuteOfDay(hour: hour, minute: 0)!
+                    onCreate(
+                        dayStarts[dayIndex],
+                        start,
+                        proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root))
+                    )
+                }
+        }
+        .frame(height: WeekTimeGridMetrics.hourHeight)
+    }
+}

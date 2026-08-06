@@ -110,5 +110,12 @@ struct CalendarThemeTests {
         #expect(CalendarAppearancePreference.dark.title == "深色")
         #expect(CalendarAppearancePreference.storageKey == "calendar.appearancePreference")
         #expect(CalendarAppearancePreference.allCases.map(\.rawValue) == ["system", "light", "dark"])
+
+        #expect(CalendarAppearancePreference.light.toggled(renderedAs: .light) == .dark)
+        #expect(CalendarAppearancePreference.dark.toggled(renderedAs: .dark) == .light)
+        #expect(CalendarAppearancePreference.system.toggled(renderedAs: .dark) == .light)
+        #expect(CalendarAppearancePreference.system.toggled(renderedAs: .light) == .dark)
+        #expect(CalendarAppearancePreference.light.toggleSymbolName == "moon")
+        #expect(CalendarAppearancePreference.dark.toggleSymbolName == "sun.max")
     }
 }

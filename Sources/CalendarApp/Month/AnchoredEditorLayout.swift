@@ -260,11 +260,16 @@ enum AnchoredEditorLayout {
     }
 
     private static func clamped(_ frame: CGRect, to bounds: CGRect) -> CGRect {
-        CGRect(
-            x: min(max(frame.minX, bounds.minX), bounds.maxX - frame.width),
-            y: min(max(frame.minY, bounds.minY), bounds.maxY - frame.height),
-            width: frame.width,
-            height: frame.height
+        let width = min(frame.width, bounds.width)
+        let height = min(frame.height, bounds.height)
+        // When bounds is smaller than frame, maxX - width can be < minX — still pin inside.
+        let maxX = max(bounds.minX, bounds.maxX - width)
+        let maxY = max(bounds.minY, bounds.maxY - height)
+        return CGRect(
+            x: min(max(frame.minX, bounds.minX), maxX),
+            y: min(max(frame.minY, bounds.minY), maxY),
+            width: width,
+            height: height
         )
     }
 

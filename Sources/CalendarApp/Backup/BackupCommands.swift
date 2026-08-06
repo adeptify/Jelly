@@ -28,9 +28,9 @@ struct BackupCommands: Commands {
         guard store.phase == .ready else { return }
 
         let panel = NSSavePanel()
-        panel.title = "导出个人月历备份"
+        panel.title = "导出 Jelly 备份"
         panel.message = "导出可用于本应用恢复的完整日历备份。"
-        panel.nameFieldStringValue = "个人月历备份-\(backupTimestamp()).json"
+        panel.nameFieldStringValue = "Jelly备份-\(backupTimestamp()).json"
         panel.allowedContentTypes = [.json]
         panel.canCreateDirectories = true
 
@@ -56,8 +56,8 @@ struct BackupCommands: Commands {
         guard canRestore else { return }
 
         let panel = NSOpenPanel()
-        panel.title = "选择个人月历备份"
-        panel.message = "选择此前由个人月历导出的备份文件。"
+        panel.title = "选择 Jelly 备份"
+        panel.message = "选择此前由 Jelly 导出的备份文件。"
         panel.allowedContentTypes = [.json]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
@@ -76,7 +76,7 @@ struct BackupCommands: Commands {
         } catch {
             showError(
                 title: "备份文件无法恢复",
-                message: "该文件不是有效的个人月历备份，当前数据没有被修改。"
+                message: "该文件不是有效的 Jelly 备份，当前数据没有被修改。"
             )
             return
         }

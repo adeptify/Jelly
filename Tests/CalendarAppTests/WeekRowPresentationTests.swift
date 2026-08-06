@@ -77,8 +77,8 @@ struct WeekRowPresentationTests {
         #expect(source.contains("if badge.showsSelectionRing"))
         #expect(source.contains(".accessibilityLabel(badge.accessibilityLabel)"))
         #expect(source.contains(".accessibilityValue(badge.accessibilityValue)"))
-        #expect(WeekRowMetrics.dateHeaderHeight == 24)
-        #expect(WeekRowMetrics.itemCapacity(height: 252) == 10)
+        #expect(WeekRowMetrics.dateHeaderHeight == 26)
+        #expect(WeekRowMetrics.itemCapacity(height: WeekRowMetrics.defaultHeight) == 8)
     }
 
     @Test func crossDaySegmentsKeepContinuousColumnsStableIdentityAndTrueOuterEdges() throws {
@@ -113,8 +113,8 @@ struct WeekRowPresentationTests {
     }
 
     @Test func fullScreenWeekHeightExposesTenRowsBeforeOverflow() {
-        #expect(WeekRowMetrics.itemCapacity(height: 252) == 10)
-        #expect(WeekRowMetrics.itemCapacity(height: 210) < 10)
+        #expect(WeekRowMetrics.itemCapacity(height: WeekRowMetrics.defaultHeight) == 8)
+        #expect(WeekRowMetrics.itemCapacity(height: 160) < 8)
     }
 
     @Test func accessibilityReadsCompleteRangeAcrossSegments() throws {

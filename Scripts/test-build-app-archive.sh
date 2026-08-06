@@ -40,8 +40,8 @@ else
   zsh "$PROJECT_COPY/Scripts/build-app.sh"
 fi
 
-ARCHIVE="$PROJECT_COPY/dist/个人月历.app.zip"
-DMG="$PROJECT_COPY/dist/个人月历.dmg"
+ARCHIVE="$PROJECT_COPY/dist/Jelly.app.zip"
+DMG="$PROJECT_COPY/dist/Jelly.dmg"
 [[ -f "$ARCHIVE" && ! -L "$ARCHIVE" ]] || {
   echo "Expected authoritative ZIP: $ARCHIVE" >&2
   exit 1
@@ -65,13 +65,13 @@ verify_app() {
   exported_description=$(/usr/libexec/PlistBuddy -c 'Print :UTExportedTypeDeclarations:0:UTTypeDescription' "$plist")
   exported_conformance=$(/usr/libexec/PlistBuddy -c 'Print :UTExportedTypeDeclarations:0:UTTypeConformsTo' "$plist")
   [[ "$exported_identifier" == "com.oreal.personalcalendar.item" ]]
-  [[ "$exported_description" == "个人月历事项" ]]
+  [[ "$exported_description" == "Jelly 事项" ]]
   print -r -- "$exported_conformance" | grep -Eq '^[[:space:]]*public\.json$'
 }
 
 mkdir -p "$ZIP_VERIFY_ROOT"
 ditto -x -k "$ARCHIVE" "$ZIP_VERIFY_ROOT"
-ZIP_APP="$ZIP_VERIFY_ROOT/个人月历.app"
+ZIP_APP="$ZIP_VERIFY_ROOT/Jelly.app"
 if xattr -lr "$ZIP_APP" | grep -E 'com\.apple\.(FinderInfo|fileprovider)' >/dev/null; then
   echo "ZIP extraction contained FileProvider signing detritus." >&2
   exit 1
@@ -104,7 +104,7 @@ done
   echo "DMG attach did not report a mount point." >&2
   exit 1
 }
-DMG_APP="$ACTIVE_MOUNT_POINT/个人月历.app"
+DMG_APP="$ACTIVE_MOUNT_POINT/Jelly.app"
 verify_app "$DMG_APP"
 [[ -L "$ACTIVE_MOUNT_POINT/Applications" ]]
 [[ "$(readlink "$ACTIVE_MOUNT_POINT/Applications")" == "/Applications" ]]

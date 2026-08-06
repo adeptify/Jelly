@@ -40,7 +40,9 @@ struct ItemEditorViewModelTests {
             endTime: MinuteOfDay(hour: 10, minute: 0)!,
             repeatsWeekly: false,
             weekdays: [],
-            recurrenceEndDate: nil
+            recurrenceEndDate: nil,
+            priority: .none,
+            isPinned: false
         )
         let itemID = UUID(uuidString: "00000000-0000-0000-0000-000000000602")!
         let vm = ItemEditorViewModel(mode: .create, draft: draft)
@@ -424,7 +426,9 @@ struct ItemEditorViewModelTests {
             endTime: MinuteOfDay(hour: 8, minute: 0)!,
             repeatsWeekly: false,
             weekdays: [],
-            recurrenceEndDate: nil
+            recurrenceEndDate: nil,
+            priority: .none,
+            isPinned: false
         )
         let vm = ItemEditorViewModel(mode: .create, draft: draft)
         #expect(throws: ItemEditorError.invalidTimeRange) {
@@ -451,7 +455,9 @@ struct ItemEditorViewModelTests {
             endTime: MinuteOfDay(hour: 10, minute: 0)!,
             repeatsWeekly: true,
             weekdays: [.monday],
-            recurrenceEndDate: .init(year: 2026, month: 8, day: 8)!
+            recurrenceEndDate: .init(year: 2026, month: 8, day: 8)!,
+            priority: .none,
+            isPinned: false
         )
         let vm = ItemEditorViewModel(mode: .create, draft: draft)
         #expect(throws: ItemEditorError.noOccurrenceInRange) {
@@ -474,7 +480,9 @@ struct ItemEditorViewModelTests {
             usesTime: true,
             startTime: MinuteOfDay(hour: 9, minute: 0)!,
             endTime: MinuteOfDay(hour: 10, minute: 0)!,
-            repeatsWeekly: true, weekdays: [.monday, .wednesday], recurrenceEndDate: end
+            repeatsWeekly: true, weekdays: [.monday, .wednesday], recurrenceEndDate: end,
+            priority: .none,
+            isPinned: false
         )
         let seriesID = UUID()
         let command = try ItemEditorViewModel(mode: .create, draft: draft).makeCommand(

@@ -13,6 +13,9 @@ struct ItemDraft: Equatable {
     var repeatsWeekly: Bool
     var weekdays: Set<Weekday>
     var recurrenceEndDate: CalendarDate?
+    var priority: ItemPriority
+    /// Retained for schema/domain compatibility; product UI no longer exposes pin.
+    var isPinned: Bool
 }
 
 extension ItemDraft {
@@ -28,7 +31,9 @@ extension ItemDraft {
             endTime: item.schedule.endTime ?? MinuteOfDay(hour: 10, minute: 0)!,
             repeatsWeekly: false,
             weekdays: [],
-            recurrenceEndDate: nil
+            recurrenceEndDate: nil,
+            priority: item.priority,
+            isPinned: item.isPinned
         )
     }
 
@@ -44,7 +49,9 @@ extension ItemDraft {
             endTime: series.endTime ?? MinuteOfDay(hour: 10, minute: 0)!,
             repeatsWeekly: true,
             weekdays: series.weekdays,
-            recurrenceEndDate: series.recurrenceEndDate
+            recurrenceEndDate: series.recurrenceEndDate,
+            priority: series.priority,
+            isPinned: series.isPinned
         )
     }
 
@@ -60,27 +67,34 @@ extension ItemDraft {
             endTime: occurrence.schedule.endTime ?? MinuteOfDay(hour: 10, minute: 0)!,
             repeatsWeekly: true,
             weekdays: series.weekdays,
-            recurrenceEndDate: series.recurrenceEndDate
+            recurrenceEndDate: series.recurrenceEndDate,
+            priority: occurrence.priority,
+            isPinned: occurrence.isPinned
         )
     }
 
     static func newItem(
         from startDate: CalendarDate,
         through endDate: CalendarDate,
-        categoryID: UUID
+        categoryID: UUID,
+        startTime: MinuteOfDay? = nil,
+        endTime: MinuteOfDay? = nil
     ) -> ItemDraft {
-        ItemDraft(
+        let usesTime = startTime != nil
+        return ItemDraft(
             kind: .task,
             title: "",
             categoryID: categoryID,
             startDate: startDate,
             endDate: endDate,
-            usesTime: false,
-            startTime: MinuteOfDay(hour: 9, minute: 0)!,
-            endTime: MinuteOfDay(hour: 10, minute: 0)!,
+            usesTime: usesTime,
+            startTime: startTime ?? MinuteOfDay(hour: 9, minute: 0)!,
+            endTime: endTime ?? MinuteOfDay(hour: 10, minute: 0)!,
             repeatsWeekly: false,
             weekdays: [startDate.weekday],
-            recurrenceEndDate: nil
+            recurrenceEndDate: nil,
+            priority: .none,
+            isPinned: false
         )
     }
 

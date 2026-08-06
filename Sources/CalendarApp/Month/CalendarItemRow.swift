@@ -246,8 +246,6 @@ struct CalendarItemRow: View {
     let category: CalendarCategory?
     var onCompletion: ((CalendarCommand) -> Void)?
     var onOpenDetail: ((ProjectedItem) -> Void)?
-    var onPriority: ((ItemPriority) -> Void)?
-    var onPin: (() -> Void)?
     var onDelete: (() -> Void)?
     var accessibilityLabelOverride: String?
     var accessibilityValueOverride: String?
@@ -302,29 +300,14 @@ struct CalendarItemRow: View {
     }
 
     var body: some View {
-        ItemRowActionChrome(
-            item: item,
-            onEdit: { onOpenDetail?(item) },
-            onPriority: { onPriority?($0) },
-            onPin: { onPin?() },
-            onDelete: { onDelete?() }
-        ) {
+        ItemRowActionChrome(onDelete: { onDelete?() }) {
             rowBody
         }
     }
 
     private var rowBody: some View {
         HStack(spacing: 4) {
-            if continuesBefore {
-                continuationMarker(systemName: "arrow.left")
-            }
-            if showsLeadingHandle {
-                handleMarker(
-                    leadingHandleAccessibility
-                        ?? .init(label: "调整开始日期", value: CalendarItemAccessibility.fullDateText(item.schedule.startDate))
-                )
-            }
-
+            // Completion stays its own hit target; the rest of the chip opens edit.
             Button {
                 let interaction = CalendarItemRowInteractionRouter.route(
                     target: .completion,
@@ -338,21 +321,24 @@ struct CalendarItemRow: View {
                 Image(systemName: isCompletedTask ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(categoryColor.opacity(isCompletedTask ? 0.85 : 0.75))
+                    .frame(width: 16, height: CalendarTheme.itemRowHeight)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(CalendarItemAccessibility.completionLabel(isCompleted: isCompletedTask))
             .accessibilityValue(isCompletedTask ? "已完成" : "未完成")
 
-            Button {
-                let interaction = CalendarItemRowInteractionRouter.route(
-                    target: .rowBody,
-                    item: item,
-                    now: Date()
-                )
-                if interaction.selectedDetailID != nil {
-                    onOpenDetail?(item)
+            HStack(spacing: 4) {
+                if continuesBefore {
+                    continuationMarker(systemName: "arrow.left")
                 }
-            } label: {
+                if showsLeadingHandle {
+                    handleMarker(
+                        leadingHandleAccessibility
+                            ?? .init(label: "调整开始日期", value: CalendarItemAccessibility.fullDateText(item.schedule.startDate))
+                    )
+                }
+
                 GeometryReader { proxy in
                     let presentation = CalendarItemRowPresentation.make(
                         availableContentWidth: proxy.size.width,
@@ -361,7 +347,7 @@ struct CalendarItemRow: View {
                         title: item.title
                     )
                     HStack(spacing: presentation.layout.inlineSpacing) {
-                        ItemPriorityBadge(priority: item.priority, isPinned: item.isPinned)
+                        ItemPriorityBadge(priority: item.priority)
                         Text(presentation.title)
                             .lineLimit(1)
                             .truncationMode(.tail)
@@ -380,7 +366,25 @@ struct CalendarItemRow: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 }
                 .foregroundStyle(categoryText)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if showsTrailingHandle {
+                    handleMarker(
+                        trailingHandleAccessibility
+                            ?? .init(label: "调整结束日期", value: CalendarItemAccessibility.fullDateText(item.schedule.endDate))
+                    )
+                }
+                if continuesAfter {
+                    continuationMarker(systemName: "arrow.right")
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                onOpenDetail?(item)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityAddTraits(.isButton)
             .accessibilityLabel(
                 accessibilityLabelOverride
                     ?? CalendarItemAccessibility.make(
@@ -395,27 +399,21 @@ struct CalendarItemRow: View {
                         categoryName: category?.name ?? "未分类"
                     ).value
             )
-            .buttonStyle(.plain)
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            if showsTrailingHandle {
-                handleMarker(
-                    trailingHandleAccessibility
-                        ?? .init(label: "调整结束日期", value: CalendarItemAccessibility.fullDateText(item.schedule.endDate))
-                )
-            }
-            if continuesAfter {
-                continuationMarker(systemName: "arrow.right")
+            .accessibilityAction {
+                onOpenDetail?(item)
             }
         }
         .font(CalendarTheme.itemFont)
         .padding(.horizontal, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: CalendarTheme.itemRowHeight)
+        // Dim content only — keep chip fill opaque so swipe actions never bleed through.
+        .opacity(isCompletedTask ? CalendarTheme.completedItemOpacity(for: appearance) : 1)
         .background(
             categoryBackground,
             in: RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius, style: .continuous)
         )
-        .opacity(isCompletedTask ? CalendarTheme.completedItemOpacity(for: appearance) : 1)
+        .contentShape(RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius, style: .continuous))
         .draggable(transferPayload)
     }
 
@@ -439,10 +437,12 @@ struct CalendarItemRow: View {
     @ViewBuilder
     private func handleMarker(_ accessibility: CalendarResizeHandleAccessibility) -> some View {
         Capsule()
-            .fill(categoryColor)
-            .frame(width: 3, height: 12)
+            .fill(categoryColor.opacity(0.95))
+            .frame(width: 4, height: max(10, CalendarTheme.itemRowHeight - 6))
+            .frame(width: 10, height: CalendarTheme.itemRowHeight) // larger grab affordance
+            .contentShape(Rectangle())
             .accessibilityLabel(accessibility.label)
             .accessibilityValue(accessibility.value)
-            .help("\(accessibility.label)，\(accessibility.value)")
+            .help("\(accessibility.label)，拖动以调整 · \(accessibility.value)")
     }
 }
