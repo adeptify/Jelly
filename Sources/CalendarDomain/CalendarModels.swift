@@ -86,6 +86,8 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
     public var creationTimeZoneIdentifier: String
     public var priority: ItemPriority
     public var isPinned: Bool
+    /// Markdown notes / 随记. Empty when unused. Older documents omit the key.
+    public var notes: String
     public var completedAt: Date?
     public var createdAt: Date
     public var updatedAt: Date
@@ -99,6 +101,7 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         creationTimeZoneIdentifier: String = TimeZone.current.identifier,
         priority: ItemPriority = .none,
         isPinned: Bool = false,
+        notes: String = "",
         completedAt: Date?,
         createdAt: Date,
         updatedAt: Date
@@ -119,6 +122,7 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         self.creationTimeZoneIdentifier = creationTimeZoneIdentifier
         self.priority = isPinned && priority == .none ? .p0 : priority
         self.isPinned = isPinned
+        self.notes = notes
         self.completedAt = completedAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -141,6 +145,7 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         let creationTimeZoneIdentifier = try container.decode(String.self, forKey: .creationTimeZoneIdentifier)
         let priority = try container.decodeIfPresent(ItemPriority.self, forKey: .priority) ?? .none
         let isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+        let notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
         let completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
         let createdAt = try container.decode(Date.self, forKey: .createdAt)
         let updatedAt = try container.decode(Date.self, forKey: .updatedAt)
@@ -155,6 +160,7 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
                 creationTimeZoneIdentifier: creationTimeZoneIdentifier,
                 priority: priority,
                 isPinned: isPinned,
+                notes: notes,
                 completedAt: completedAt,
                 createdAt: createdAt,
                 updatedAt: updatedAt
@@ -178,6 +184,7 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         try container.encode(creationTimeZoneIdentifier, forKey: .creationTimeZoneIdentifier)
         try container.encode(priority, forKey: .priority)
         try container.encode(isPinned, forKey: .isPinned)
+        try container.encode(notes, forKey: .notes)
         try container.encodeIfPresent(completedAt, forKey: .completedAt)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
@@ -194,6 +201,7 @@ public struct CalendarItem: Identifiable, Codable, Equatable, Sendable {
         case creationTimeZoneIdentifier
         case priority
         case isPinned
+        case notes
         case completedAt
         case createdAt
         case updatedAt

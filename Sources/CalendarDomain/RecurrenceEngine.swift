@@ -105,6 +105,7 @@ public enum RecurrenceEngine {
         let categoryID = override?.categoryID ?? series.categoryID
         let priority = override?.priority ?? series.priority
         let isPinned = override?.isPinned ?? series.isPinned
+        let notes = override?.notes ?? series.notes
         let schedule: CalendarSchedule
         if let override {
             schedule = override.displayedSchedule
@@ -126,6 +127,7 @@ public enum RecurrenceEngine {
             categoryID: categoryID,
             priority: priority,
             isPinned: isPinned,
+            notes: notes,
             creationTimeZoneIdentifier: series.creationTimeZoneIdentifier,
             completedAt: completedAt,
             createdAt: series.createdAt

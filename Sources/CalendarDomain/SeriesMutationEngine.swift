@@ -39,6 +39,8 @@ public struct SeriesPatch: Sendable {
     public var endTime: OptionalPatch<MinuteOfDay>
     public var priority: ItemPriority?
     public var isPinned: Bool?
+    /// nil = leave notes unchanged; non-nil (including "") replaces notes.
+    public var notes: String?
 
     public init(
         title: String? = nil,
@@ -51,7 +53,8 @@ public struct SeriesPatch: Sendable {
         startTime: OptionalPatch<MinuteOfDay> = .unchanged,
         endTime: OptionalPatch<MinuteOfDay> = .unchanged,
         priority: ItemPriority? = nil,
-        isPinned: Bool? = nil
+        isPinned: Bool? = nil,
+        notes: String? = nil
     ) {
         self.title = title
         self.kind = kind
@@ -64,6 +67,7 @@ public struct SeriesPatch: Sendable {
         self.endTime = endTime
         self.priority = priority
         self.isPinned = isPinned
+        self.notes = notes
     }
 }
 
@@ -278,6 +282,7 @@ public enum SeriesMutationEngine {
             endTime: applying(patch.endTime, to: series.endTime),
             priority: priority,
             isPinned: isPinned,
+            notes: patch.notes ?? series.notes,
             creationTimeZoneIdentifier: series.creationTimeZoneIdentifier,
             createdAt: now,
             updatedAt: now
@@ -486,7 +491,8 @@ public enum SeriesMutationEngine {
             kind: series.kind,
             categoryID: series.categoryID,
             priority: series.priority,
-            isPinned: series.isPinned
+            isPinned: series.isPinned,
+            notes: series.notes
         )
     }
 
@@ -516,6 +522,9 @@ public enum SeriesMutationEngine {
             if isPinned, override.priority == .none {
                 override.priority = .p0
             }
+        }
+        if let notes = patch.notes {
+            override.notes = notes
         }
     }
 

@@ -75,6 +75,13 @@ public enum ProjectedItem: Identifiable, Equatable, Sendable {
         case let .occurrence(occurrence): occurrence.isPinned
         }
     }
+
+    public var notes: String {
+        switch self {
+        case let .item(item): item.notes
+        case let .occurrence(occurrence): occurrence.notes
+        }
+    }
 }
 
 private func stableDate(_ date: CalendarDate) -> String {

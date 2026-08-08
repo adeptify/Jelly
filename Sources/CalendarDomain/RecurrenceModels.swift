@@ -13,6 +13,8 @@ public struct WeeklySeries: Identifiable, Codable, Equatable, Sendable {
     public var endTime: MinuteOfDay?
     public var priority: ItemPriority
     public var isPinned: Bool
+    /// Markdown notes / 随记 shared by series instances unless overridden.
+    public var notes: String
     public var creationTimeZoneIdentifier: String
     public var createdAt: Date
     public var updatedAt: Date
@@ -30,6 +32,7 @@ public struct WeeklySeries: Identifiable, Codable, Equatable, Sendable {
         endTime: MinuteOfDay?,
         priority: ItemPriority = .none,
         isPinned: Bool = false,
+        notes: String = "",
         creationTimeZoneIdentifier: String = TimeZone.current.identifier,
         createdAt: Date,
         updatedAt: Date
@@ -78,6 +81,7 @@ public struct WeeklySeries: Identifiable, Codable, Equatable, Sendable {
         self.endTime = endTime
         self.priority = isPinned && priority == .none ? .p0 : priority
         self.isPinned = isPinned
+        self.notes = notes
         self.creationTimeZoneIdentifier = creationTimeZoneIdentifier
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -104,6 +108,7 @@ public struct WeeklySeries: Identifiable, Codable, Equatable, Sendable {
         let weekdays = try container.decode(Set<Weekday>.self, forKey: .weekdays)
         let priority = try container.decodeIfPresent(ItemPriority.self, forKey: .priority) ?? .none
         let isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+        let notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
         let creationTimeZoneIdentifier = try container.decode(String.self, forKey: .creationTimeZoneIdentifier)
         let createdAt = try container.decode(Date.self, forKey: .createdAt)
         let updatedAt = try container.decode(Date.self, forKey: .updatedAt)
@@ -122,6 +127,7 @@ public struct WeeklySeries: Identifiable, Codable, Equatable, Sendable {
                 endTime: endTime,
                 priority: priority,
                 isPinned: isPinned,
+                notes: notes,
                 creationTimeZoneIdentifier: creationTimeZoneIdentifier,
                 createdAt: createdAt,
                 updatedAt: updatedAt
@@ -149,6 +155,7 @@ public struct WeeklySeries: Identifiable, Codable, Equatable, Sendable {
         try container.encodeIfPresent(endTime, forKey: .endTime)
         try container.encode(priority, forKey: .priority)
         try container.encode(isPinned, forKey: .isPinned)
+        try container.encode(notes, forKey: .notes)
         try container.encode(creationTimeZoneIdentifier, forKey: .creationTimeZoneIdentifier)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
@@ -182,6 +189,7 @@ public struct WeeklySeries: Identifiable, Codable, Equatable, Sendable {
         case endTime
         case priority
         case isPinned
+        case notes
         case creationTimeZoneIdentifier
         case createdAt
         case updatedAt
@@ -213,6 +221,7 @@ public struct OccurrenceOverride: Codable, Equatable, Sendable {
     public var categoryID: UUID
     public var priority: ItemPriority
     public var isPinned: Bool
+    public var notes: String
 
     public init(
         displayedSchedule: CalendarSchedule,
@@ -220,7 +229,8 @@ public struct OccurrenceOverride: Codable, Equatable, Sendable {
         kind: ItemKind,
         categoryID: UUID,
         priority: ItemPriority = .none,
-        isPinned: Bool = false
+        isPinned: Bool = false,
+        notes: String = ""
     ) {
         self.displayedSchedule = displayedSchedule
         self.title = title
@@ -228,6 +238,7 @@ public struct OccurrenceOverride: Codable, Equatable, Sendable {
         self.categoryID = categoryID
         self.priority = isPinned && priority == .none ? .p0 : priority
         self.isPinned = isPinned
+        self.notes = notes
     }
 
     public init(from decoder: any Decoder) throws {
@@ -245,13 +256,15 @@ public struct OccurrenceOverride: Codable, Equatable, Sendable {
         let displayedSchedule = try container.decode(CalendarSchedule.self, forKey: .displayedSchedule)
         let priority = try container.decodeIfPresent(ItemPriority.self, forKey: .priority) ?? .none
         let isPinned = try container.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+        let notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
         self.init(
             displayedSchedule: displayedSchedule,
             title: title,
             kind: kind,
             categoryID: categoryID,
             priority: priority,
-            isPinned: isPinned
+            isPinned: isPinned,
+            notes: notes
         )
     }
 
@@ -263,6 +276,7 @@ public struct OccurrenceOverride: Codable, Equatable, Sendable {
         try container.encode(categoryID, forKey: .categoryID)
         try container.encode(priority, forKey: .priority)
         try container.encode(isPinned, forKey: .isPinned)
+        try container.encode(notes, forKey: .notes)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -272,6 +286,7 @@ public struct OccurrenceOverride: Codable, Equatable, Sendable {
         case categoryID
         case priority
         case isPinned
+        case notes
         case displayedDate
         case timeRange
     }
@@ -295,6 +310,7 @@ public struct CalendarOccurrence: Identifiable, Equatable, Sendable {
     public let categoryID: UUID
     public let priority: ItemPriority
     public let isPinned: Bool
+    public let notes: String
     public let creationTimeZoneIdentifier: String
     public let completedAt: Date?
     public let createdAt: Date
@@ -309,6 +325,7 @@ public struct CalendarOccurrence: Identifiable, Equatable, Sendable {
         categoryID: UUID,
         priority: ItemPriority = .none,
         isPinned: Bool = false,
+        notes: String = "",
         creationTimeZoneIdentifier: String,
         completedAt: Date?,
         createdAt: Date
@@ -320,6 +337,7 @@ public struct CalendarOccurrence: Identifiable, Equatable, Sendable {
         self.categoryID = categoryID
         self.priority = isPinned && priority == .none ? .p0 : priority
         self.isPinned = isPinned
+        self.notes = notes
         self.creationTimeZoneIdentifier = creationTimeZoneIdentifier
         self.completedAt = completedAt
         self.createdAt = createdAt
