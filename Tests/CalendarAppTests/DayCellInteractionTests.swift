@@ -313,8 +313,13 @@ struct DayCellInteractionTests {
             rootOrigin: CGPoint(x: 100, y: 150),
             showsLeadingHandle: true,
             showsTrailingHandle: false,
+            isPinned: false,
             onItemGesture: recorder.record,
-            onClick: recorder.click
+            onClick: recorder.click,
+            onEdit: {},
+            onPriority: { _ in },
+            onPin: {},
+            onDelete: {}
         )
         surface.frame = CGRect(x: 0, y: 0, width: 120, height: 20)
 
@@ -358,6 +363,7 @@ struct DayCellInteractionTests {
             rootOrigin: .zero,
             showsLeadingHandle: true,
             showsTrailingHandle: false,
+            isPinned: false,
             onItemGesture: { gesture in
                 switch gesture {
                 case let .began(date, target, entry, point):
@@ -373,7 +379,11 @@ struct DayCellInteractionTests {
                     }
                 }
             },
-            onClick: { _ in }
+            onClick: { _ in },
+            onEdit: {},
+            onPriority: { _ in },
+            onPin: {},
+            onDelete: {}
         )
         surface.frame = CGRect(x: 0, y: 0, width: 120, height: 20)
 

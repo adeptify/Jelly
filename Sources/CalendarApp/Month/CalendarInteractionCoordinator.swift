@@ -226,6 +226,9 @@ final class CalendarInteractionCoordinator: ObservableObject {
 
     @Published private(set) var state: CalendarInteractionState = .idle
     @Published private(set) var autoScrollDirection: CalendarInteractionAutoScrollDirection?
+    /// Live pointer in root coordinates while an item is being moved/resized.
+    /// Published separately so the floating drag chip can follow without relying on schedule changes.
+    @Published private(set) var dragPreviewPointer: CGPoint?
 
     private struct Press {
         let date: CalendarDate
@@ -270,10 +273,42 @@ final class CalendarInteractionCoordinator: ObservableObject {
         }
     }
 
+    /// Source entry while an item is being moved or resized (for floating drag preview).
+    var dragSourceEntry: ProjectedEntry? {
+        switch state {
+        case .movingItem, .resizingLeading, .resizingTrailing:
+            press?.source
+        case .idle, .selectingRange, .pendingRecurrenceScope, .editing:
+            nil
+        }
+    }
+
+    /// Identity of the item currently being moved/resized (dim the original chip).
+    var draggingSourceID: ProjectedEntryID? {
+        switch state {
+        case let .movingItem(source, _),
+             let .resizingLeading(source, _),
+             let .resizingTrailing(source, _):
+            source
+        case .idle, .selectingRange, .pendingRecurrenceScope, .editing:
+            nil
+        }
+    }
+
     var isSelectingRange: Bool {
         if case .selectingRange = state {
             true
         } else {
+            false
+        }
+    }
+
+    /// True only for item move/resize — not empty-cell range select.
+    var isDraggingItem: Bool {
+        switch state {
+        case .movingItem, .resizingLeading, .resizingTrailing:
+            true
+        case .idle, .selectingRange, .pendingRecurrenceScope, .editing:
             false
         }
     }
@@ -287,7 +322,7 @@ final class CalendarInteractionCoordinator: ObservableObject {
         }
     }
 
-    var latestPointer: CGPoint? { latestPoint }
+    var latestPointer: CGPoint? { latestPoint ?? dragPreviewPointer }
 
     var selectionCursorDate: CalendarDate? {
         switch state {
@@ -445,6 +480,7 @@ final class CalendarInteractionCoordinator: ObservableObject {
         latestDate = nil
         lastAutoScrollAt = nil
         autoScrollDirection = nil
+        dragPreviewPointer = nil
         switch state {
         case .selectingRange, .movingItem, .resizingLeading, .resizingTrailing:
             state = .idle
@@ -456,8 +492,12 @@ final class CalendarInteractionCoordinator: ObservableObject {
     private func updatePreview(for press: Press, over date: CalendarDate) {
         guard let source = press.source else {
             state = .selectingRange(anchorDate: press.date, currentDate: date)
+            dragPreviewPointer = nil
             return
         }
+
+        // Keep the floating chip glued to the pointer for the whole move/resize gesture.
+        dragPreviewPointer = latestPoint
 
         switch press.target {
         case .barBody:

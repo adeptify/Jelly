@@ -13,6 +13,7 @@ enum WeekTimeGridMetrics {
     /// Viewport shows this many chips; overflow scrolls (no +N truncate).
     static let allDayVisibleRows = 3
     static let dayHeaderHeight: CGFloat = 44
+    static let gridCoordinateSpace = "week-timed-grid"
 
     static var gridHeight: CGFloat {
         CGFloat(hourCount) * hourHeight
@@ -40,8 +41,14 @@ struct WeekView: View {
     let categories: [CalendarCategory]
     @Binding var hiddenCategoryIDs: Set<UUID>
     let onOpenDetail: (ProjectedItem) -> Void
-    /// Create intent: date + optional start minute (nil = all-day) + anchor in root space.
-    let onCreate: (CalendarDate, MinuteOfDay?, CGRect) -> Void
+    /// Create intent: start/end dates + optional times (nil times = all-day) + anchor in root space.
+    let onCreate: (
+        _ startDate: CalendarDate,
+        _ endDate: CalendarDate,
+        _ startTime: MinuteOfDay?,
+        _ endTime: MinuteOfDay?,
+        _ anchorFrame: CGRect
+    ) -> Void
     /// Commit a move/resize from week-grid drag (same path as month-view mutations).
     let onCommitMutation: (PendingCalendarMutation) -> Void
     var onDelete: ((ProjectedItem) -> Void)?
@@ -51,6 +58,7 @@ struct WeekView: View {
 
     @State private var timedDrag: TimedDragState?
     @State private var allDayDrag: AllDayDragState?
+    @State private var createSelection: CreateSelectionState?
 
     private var theme: CalendarSemanticAppearance {
         CalendarTheme.appearance(for: colorScheme)
@@ -83,6 +91,7 @@ struct WeekView: View {
             // clearing on gesture end caused a one-frame snap-back flash.
             timedDrag = nil
             allDayDrag = nil
+            createSelection = nil
         }
         .onChange(of: hiddenCategoryIDs) { _, ids in
             model.update(state: store.state, hiddenCategoryIDs: ids, today: model.today)
@@ -126,6 +135,8 @@ struct WeekView: View {
                             guard allDayDrag == nil else { return }
                             onCreate(
                                 day,
+                                day,
+                                nil,
                                 nil,
                                 proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root))
                             )
@@ -151,9 +162,25 @@ struct WeekView: View {
     private var timedScrollGrid: some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: true) {
-                ZStack(alignment: .topLeading) {
-                    hourBackground
-                    timedBlocksLayer
+                GeometryReader { gridProxy in
+                    let dayWidth = max(
+                        0,
+                        (gridProxy.size.width - WeekTimeGridMetrics.gutterWidth) / 7
+                    )
+                    let gridRootOrigin = gridProxy.frame(
+                        in: .named(CalendarInteractionCoordinateSpace.root)
+                    ).origin
+                    ZStack(alignment: .topLeading) {
+                        hourBackground
+                        createSelectionLayer(
+                            dayWidth: dayWidth,
+                            gridRootOrigin: gridRootOrigin
+                        )
+                        createSelectionHighlight(dayWidth: dayWidth)
+                        timedBlocksLayer
+                    }
+                    .frame(width: gridProxy.size.width, height: WeekTimeGridMetrics.gridHeight)
+                    .coordinateSpace(name: WeekTimeGridMetrics.gridCoordinateSpace)
                 }
                 .frame(height: WeekTimeGridMetrics.gridHeight)
                 .padding(.bottom, 12)
@@ -195,17 +222,12 @@ struct WeekView: View {
                         theme.todayFill.opacity(0.14)
                     }
                     VStack(spacing: 0) {
-                        ForEach(0..<WeekTimeGridMetrics.hourCount, id: \.self) { hour in
-                            WeekHourSlot(
-                                hour: hour,
-                                dayIndex: dayIndex,
-                                dayStarts: model.dayStarts,
-                                separator: theme.separator,
-                                onCreate: { date, start, frame in
-                                    guard timedDrag == nil else { return }
-                                    onCreate(date, start, frame)
-                                }
-                            )
+                        ForEach(0..<WeekTimeGridMetrics.hourCount, id: \.self) { _ in
+                            Rectangle()
+                                .fill(theme.separator.opacity(0.45))
+                                .frame(height: 0.5)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                                .frame(height: WeekTimeGridMetrics.hourHeight)
                         }
                     }
                 }
@@ -217,6 +239,120 @@ struct WeekView: View {
                 }
             }
         }
+        .allowsHitTesting(false)
+    }
+
+    /// Empty-grid surface: drag across hour slots to select a timed band, then open create.
+    private func createSelectionLayer(dayWidth: CGFloat, gridRootOrigin: CGPoint) -> some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(
+                    minimumDistance: 0,
+                    coordinateSpace: .named(WeekTimeGridMetrics.gridCoordinateSpace)
+                )
+                .onChanged { value in
+                    guard timedDrag == nil, allDayDrag == nil else { return }
+                    // Don't start a create selection from the hour gutter.
+                    guard value.startLocation.x >= WeekTimeGridMetrics.gutterWidth else { return }
+
+                    let originDay = WeekGridDrag.dayIndex(
+                        atX: value.startLocation.x,
+                        dayWidth: dayWidth
+                    )
+                    let originMinute = WeekGridDrag.minute(atY: value.startLocation.y)
+                    let currentMinute = WeekGridDrag.minute(atY: value.location.y)
+                    let isDragging = WeekGridCreateSelection.isRangeDrag(
+                        from: value.startLocation,
+                        to: value.location
+                    )
+                    let band = WeekGridCreateSelection.band(
+                        originDayIndex: originDay,
+                        originMinute: originMinute,
+                        currentMinute: currentMinute,
+                        isDragging: isDragging
+                    )
+                    createSelection = CreateSelectionState(
+                        band: band,
+                        isDragging: isDragging,
+                        startLocation: value.startLocation
+                    )
+                }
+                .onEnded { value in
+                    defer { createSelection = nil }
+                    guard timedDrag == nil, allDayDrag == nil else { return }
+                    guard value.startLocation.x >= WeekTimeGridMetrics.gutterWidth else { return }
+
+                    let originDay = WeekGridDrag.dayIndex(
+                        atX: value.startLocation.x,
+                        dayWidth: dayWidth
+                    )
+                    let originMinute = WeekGridDrag.minute(atY: value.startLocation.y)
+                    let currentMinute = WeekGridDrag.minute(atY: value.location.y)
+                    let isDragging = WeekGridCreateSelection.isRangeDrag(
+                        from: value.startLocation,
+                        to: value.location
+                    )
+                    let band = WeekGridCreateSelection.band(
+                        originDayIndex: originDay,
+                        originMinute: originMinute,
+                        currentMinute: currentMinute,
+                        isDragging: isDragging
+                    )
+                    guard let intent = try? WeekGridCreateSelection.intent(
+                        dayStarts: model.dayStarts,
+                        band: band
+                    ) else { return }
+
+                    let local = WeekGridCreateSelection.bandFrame(
+                        band: band,
+                        dayWidth: dayWidth
+                    )
+                    let anchor = local.offsetBy(dx: gridRootOrigin.x, dy: gridRootOrigin.y)
+                    onCreate(
+                        intent.day,
+                        intent.endDate,
+                        intent.startTime,
+                        intent.endTime,
+                        anchor
+                    )
+                }
+            )
+    }
+
+    @ViewBuilder
+    private func createSelectionHighlight(dayWidth: CGFloat) -> some View {
+        if let selection = createSelection {
+            let frame = WeekGridCreateSelection.bandFrame(
+                band: selection.band,
+                dayWidth: dayWidth
+            )
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(theme.rangePreviewFill.opacity(0.9))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(theme.rangePreviewOutline, lineWidth: 1.5)
+                }
+                .overlay(alignment: .topLeading) {
+                    Text(selectionTimeLabel(selection.band))
+                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(theme.primaryText)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                }
+                .frame(width: frame.width, height: frame.height)
+                .position(x: frame.midX, y: frame.midY)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func selectionTimeLabel(_ band: WeekGridCreateSelection.Band) -> String {
+        func fmt(_ minute: Int) -> String {
+            let clamped = min(24 * 60, max(0, minute))
+            if clamped == 24 * 60 { return "24:00" }
+            return String(format: "%02d:%02d", clamped / 60, clamped % 60)
+        }
+        return "\(fmt(band.startMinute))–\(fmt(band.endMinute))"
     }
 
     private var timedBlocksLayer: some View {
@@ -554,31 +690,8 @@ private struct AllDayDragState: Equatable {
     var xOffset: CGFloat
 }
 
-/// One hour cell; reports its root-space frame so the create card can anchor nearby.
-private struct WeekHourSlot: View {
-    let hour: Int
-    let dayIndex: Int
-    let dayStarts: [CalendarDate]
-    let separator: Color
-    let onCreate: (CalendarDate, MinuteOfDay?, CGRect) -> Void
-
-    var body: some View {
-        GeometryReader { proxy in
-            Rectangle()
-                .fill(separator.opacity(0.45))
-                .frame(height: 0.5)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    guard dayStarts.indices.contains(dayIndex) else { return }
-                    let start = MinuteOfDay(hour: hour, minute: 0)!
-                    onCreate(
-                        dayStarts[dayIndex],
-                        start,
-                        proxy.frame(in: .named(CalendarInteractionCoordinateSpace.root))
-                    )
-                }
-        }
-        .frame(height: WeekTimeGridMetrics.hourHeight)
-    }
+private struct CreateSelectionState: Equatable {
+    let band: WeekGridCreateSelection.Band
+    let isDragging: Bool
+    let startLocation: CGPoint
 }

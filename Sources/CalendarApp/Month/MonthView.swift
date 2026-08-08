@@ -354,7 +354,27 @@ struct MonthView: View {
             .overlay(alignment: .trailing) { dayDrawerOverlay }
             .overlay { editorOverlay }
             .overlay { quickCreateOverlay }
+            .overlay { itemDragPreviewOverlay }
             .overlay(alignment: .bottom) { undoBannerOverlay }
+    }
+
+    /// Floating item chip under the pointer while month-row move/resize is active.
+    @ViewBuilder
+    private var itemDragPreviewOverlay: some View {
+        if interactionCoordinator.isDraggingItem,
+           let entry = interactionCoordinator.dragSourceEntry,
+           let pointer = interactionCoordinator.dragPreviewPointer
+                ?? interactionCoordinator.latestPointer
+        {
+            ItemDragPreviewChip.make(
+                entry: entry,
+                category: store.state.categories[entry.categoryID]
+            )
+            // Lift slightly above the cursor so the target date stays readable.
+            // No animation — follow the pointer 1:1 for a solid “holding the card” feel.
+            .position(x: pointer.x, y: pointer.y - 14)
+            .allowsHitTesting(false)
+        }
     }
 
     private var lifecycleBound: some View {
@@ -449,10 +469,12 @@ struct MonthView: View {
                             categories: orderedCategories,
                             hiddenCategoryIDs: $hiddenCategoryIDs,
                             onOpenDetail: { openEditor(for: $0) },
-                            onCreate: { date, startTime, anchorFrame in
+                            onCreate: { startDate, endDate, startTime, endTime, anchorFrame in
                                 openQuickCreate(
-                                    on: date,
+                                    on: startDate,
+                                    endDate: endDate,
                                     startTime: startTime,
+                                    endTime: endTime,
                                     anchorFrame: anchorFrame
                                 )
                             },
@@ -1122,6 +1144,7 @@ struct MonthView: View {
                                 onCompletion: sendCompletion,
                                 onDelete: { requestDelete($0) },
                                 selectionRange: interactionCoordinator.previewRange,
+                                draggingSourceID: interactionCoordinator.draggingSourceID,
                                 onRangeGesture: { gesture in
                                     handleRangeGesture(
                                         gesture,
@@ -1330,11 +1353,18 @@ struct MonthView: View {
 
     private func openQuickCreate(
         on date: CalendarDate,
+        endDate: CalendarDate? = nil,
         startTime: MinuteOfDay? = nil,
+        endTime: MinuteOfDay? = nil,
         anchorFrame: CGRect? = nil
     ) {
         presentQuickCreate(
-            QuickCreatePresentation.forDay(date, startTime: startTime),
+            QuickCreatePresentation.forDay(
+                date,
+                startTime: startTime,
+                endTime: endTime,
+                endDate: endDate
+            ),
             anchorFrame: anchorFrame
         )
     }

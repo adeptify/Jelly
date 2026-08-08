@@ -86,6 +86,73 @@ struct WeekViewModelTests {
     }
 }
 
+@Suite("WeekGridCreateSelectionTests")
+struct WeekGridCreateSelectionTests {
+    @Test func clickWithoutDragDefaultsToOneHourBand() {
+        let band = WeekGridCreateSelection.band(
+            originDayIndex: 2,
+            originMinute: 9 * 60 + 7,
+            currentMinute: 9 * 60 + 7,
+            isDragging: false
+        )
+        #expect(band.dayIndex == 2)
+        #expect(band.startMinute == 9 * 60) // snapped
+        #expect(band.endMinute == 10 * 60)
+    }
+
+    @Test func dragDownSelectsMultiHourBand() {
+        let band = WeekGridCreateSelection.band(
+            originDayIndex: 1,
+            originMinute: 10 * 60,
+            currentMinute: 12 * 60 + 20,
+            isDragging: true
+        )
+        #expect(band.dayIndex == 1)
+        #expect(band.startMinute == 10 * 60)
+        #expect(band.endMinute == 12 * 60 + 15) // snap 15
+    }
+
+    @Test func dragUpInvertsRange() {
+        let band = WeekGridCreateSelection.band(
+            originDayIndex: 0,
+            originMinute: 14 * 60,
+            currentMinute: 11 * 60,
+            isDragging: true
+        )
+        #expect(band.startMinute == 11 * 60)
+        #expect(band.endMinute == 14 * 60)
+    }
+
+    @Test func intentBuildsTimedSchedule() throws {
+        let monday = CalendarDate(year: 2026, month: 8, day: 3)!
+        let days = (0..<7).map { monday.addingDays($0) }
+        let band = WeekGridCreateSelection.Band(
+            dayIndex: 2,
+            startMinute: 9 * 60,
+            endMinute: 10 * 60 + 30
+        )
+        let intent = try WeekGridCreateSelection.intent(dayStarts: days, band: band)
+        #expect(intent.day == CalendarDate(year: 2026, month: 8, day: 5)!)
+        #expect(intent.endDate == intent.day)
+        #expect(intent.startTime.value == 9 * 60)
+        #expect(intent.endTime.value == 10 * 60 + 30)
+    }
+
+    @Test func quickCreatePresentationKeepsDraggedEndTime() {
+        let day = CalendarDate(year: 2026, month: 8, day: 5)!
+        let presentation = QuickCreatePresentation.forDay(
+            day,
+            startTime: MinuteOfDay(hour: 13, minute: 0)!,
+            endTime: MinuteOfDay(hour: 15, minute: 30)!,
+            endDate: day
+        )
+        #expect(presentation.startTime?.value == 13 * 60)
+        #expect(presentation.endTime?.value == 15 * 60 + 30)
+        #expect(presentation.range.start == day)
+        #expect(presentation.range.end == day)
+    }
+}
+
 @Suite("ItemEditorTimePolicyTests")
 @MainActor
 struct ItemEditorTimePolicyTests {

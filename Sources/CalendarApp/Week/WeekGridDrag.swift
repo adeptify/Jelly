@@ -133,3 +133,121 @@ enum WeekGridDrag {
         }
     }
 }
+
+// MARK: - Empty-grid create selection (drag a time band → quick create)
+
+/// Pure helpers for “drag empty week-grid slots to create a timed item”.
+enum WeekGridCreateSelection {
+    static let dragThreshold: CGFloat = 6
+    static let defaultDurationMinutes = 60
+
+    struct Band: Equatable, Sendable {
+        /// Day column 0...6 within the focused week.
+        let dayIndex: Int
+        /// Inclusive start, minutes from midnight (0...1425).
+        let startMinute: Int
+        /// Exclusive end, minutes from midnight (15...1440).
+        let endMinute: Int
+
+        var durationMinutes: Int { max(0, endMinute - startMinute) }
+    }
+
+    struct Intent: Equatable, Sendable {
+        let day: CalendarDate
+        let startTime: MinuteOfDay
+        let endTime: MinuteOfDay
+        let endDate: CalendarDate
+    }
+
+    /// Whether the pointer has moved enough to treat the gesture as a range drag.
+    static func isRangeDrag(
+        from origin: CGPoint,
+        to current: CGPoint,
+        threshold: CGFloat = dragThreshold
+    ) -> Bool {
+        hypot(current.x - origin.x, current.y - origin.y) >= threshold
+    }
+
+    /// Build a same-day create band from origin + current pointer minutes.
+    ///
+    /// - Single click / no drag: default 1-hour block from origin.
+    /// - Drag: span between origin and current, snapped, min duration 15m.
+    /// Day column is locked to the press origin (vertical multi-slot select).
+    static func band(
+        originDayIndex: Int,
+        originMinute: Int,
+        currentMinute: Int,
+        isDragging: Bool,
+        defaultDurationMinutes: Int = defaultDurationMinutes,
+        minDurationMinutes: Int = WeekGridDrag.minDurationMinutes,
+        snapMinutes: Int = WeekGridDrag.snapMinutes
+    ) -> Band {
+        let day = min(6, max(0, originDayIndex))
+        let origin = WeekGridDrag.snap(originMinute)
+        if !isDragging {
+            let start = origin
+            let end = min(24 * 60, start + max(minDurationMinutes, defaultDurationMinutes))
+            // Near end of day: shrink rather than overflowing past midnight on click.
+            let clampedStart = min(start, 24 * 60 - minDurationMinutes)
+            return Band(
+                dayIndex: day,
+                startMinute: clampedStart,
+                endMinute: max(clampedStart + minDurationMinutes, end)
+            )
+        }
+
+        let current = WeekGridDrag.snap(currentMinute)
+        let start = min(origin, current)
+        var end = max(origin, current)
+        // Dragging within the same snap cell still needs a visible duration.
+        if end <= start {
+            end = min(24 * 60, start + minDurationMinutes)
+        }
+        // Align to snap grid: if end == start after snap of a tiny drag upward,
+        // the branch above already ensures min duration.
+        _ = snapMinutes
+        return Band(dayIndex: day, startMinute: start, endMinute: end)
+    }
+
+    static func intent(dayStarts: [CalendarDate], band: Band) throws -> Intent {
+        guard dayStarts.indices.contains(band.dayIndex) else {
+            throw WeekGridCreateSelectionError.invalidDayIndex
+        }
+        let day = dayStarts[band.dayIndex]
+        let schedule = try WeekGridDrag.timedSchedule(
+            day: day,
+            startMinute: band.startMinute,
+            endMinute: band.endMinute
+        )
+        guard let startTime = schedule.startTime, let endTime = schedule.endTime else {
+            throw WeekGridCreateSelectionError.missingTimes
+        }
+        return Intent(
+            day: day,
+            startTime: startTime,
+            endTime: endTime,
+            endDate: schedule.endDate
+        )
+    }
+
+    /// Frame of the selection band in grid-local coordinates (origin at top-leading of timed grid).
+    static func bandFrame(
+        band: Band,
+        gutterWidth: CGFloat = WeekTimeGridMetrics.gutterWidth,
+        dayWidth: CGFloat,
+        hourHeight: CGFloat = WeekTimeGridMetrics.hourHeight
+    ) -> CGRect {
+        let x = gutterWidth + CGFloat(band.dayIndex) * dayWidth + 2
+        let y = WeekTimeGridMetrics.yOffset(minute: band.startMinute)
+        let height = WeekTimeGridMetrics.blockHeight(
+            startMinute: band.startMinute,
+            endMinute: band.endMinute
+        )
+        return CGRect(x: x, y: y, width: max(24, dayWidth - 4), height: height)
+    }
+}
+
+enum WeekGridCreateSelectionError: Error {
+    case invalidDayIndex
+    case missingTimes
+}

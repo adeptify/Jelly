@@ -871,6 +871,8 @@ struct WeekRowView: View {
     let onCompletion: (CalendarCommand) -> Void
     var onDelete: ((ProjectedItem) -> Void)?
     let selectionRange: CalendarDateRange?
+    /// Source currently being dragged/resized — original chip is dimmed as a ghost.
+    var draggingSourceID: ProjectedEntryID? = nil
     let onRangeGesture: (WeekRowRangeGesture) -> Void
     let onItemGesture: (WeekRowItemGesture) -> Void
     var height: CGFloat = WeekRowMetrics.defaultHeight
@@ -920,6 +922,7 @@ struct WeekRowView: View {
                         width: columnWidth * CGFloat(segment.endColumn - segment.startColumn + 1),
                         height: WeekRowMetrics.laneHeight
                     )
+                    .opacity(draggingSourceID == segment.source ? 0.32 : 1)
                     .offset(
                         x: columnWidth * CGFloat(segment.startColumn),
                         y: WeekRowMetrics.laneOffset(segment.lane)

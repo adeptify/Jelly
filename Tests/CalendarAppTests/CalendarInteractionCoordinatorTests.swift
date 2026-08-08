@@ -26,6 +26,11 @@ struct CalendarInteractionCoordinatorTests {
             source: .item(item.id),
             previewSchedule: try schedule(11, 13)
         ))
+        #expect(coordinator.isDraggingItem)
+        #expect(coordinator.draggingSourceID == .item(item.id))
+        #expect(coordinator.dragSourceEntry == .item(item))
+        #expect(coordinator.dragPreviewPointer == CGPoint(x: 20, y: 0))
+        #expect(coordinator.latestPointer == CGPoint(x: 20, y: 0))
     }
 
     @Test func leadingAndTrailingResizeClampToOneDay() throws {

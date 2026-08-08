@@ -414,7 +414,17 @@ struct CalendarItemRow: View {
             in: RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius, style: .continuous)
         )
         .contentShape(RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius, style: .continuous))
-        .draggable(transferPayload)
+        .draggable(transferPayload) {
+            ItemDragPreviewChip(
+                title: item.title,
+                priority: item.priority,
+                schedule: item.schedule,
+                categoryHex: categoryHex,
+                isCompleted: isCompletedTask
+            )
+            .frame(width: 168)
+            .padding(4)
+        }
     }
 
     private var transferPayload: CalendarTransferPayload {
