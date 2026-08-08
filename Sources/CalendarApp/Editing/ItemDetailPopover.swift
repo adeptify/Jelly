@@ -66,6 +66,19 @@ struct ItemDetailPopover: View {
                 Text("全天")
                     .foregroundStyle(theme.secondaryText)
             }
+            if !item.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("随记")
+                        .font(EditorFormStyle.label)
+                        .foregroundStyle(theme.secondaryText)
+                    MarkdownNotesPreview(markdown: item.notes)
+                }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(theme.subtleBorder.opacity(0.16))
+                )
+            }
             if let message = localError {
                 Text(message).font(.footnote).foregroundStyle(theme.error)
             }
@@ -216,7 +229,7 @@ enum ItemEditorConfiguration: Identifiable {
 
 struct ItemEditForm: View {
     /// Compact editor card — calendar-tool density, not form-wizard spacing.
-    nonisolated static let preferredWidth: CGFloat = 340
+    nonisolated static let preferredWidth: CGFloat = 360
 
     let configuration: ItemEditorConfiguration
     let store: CalendarStore
@@ -271,6 +284,7 @@ struct ItemEditForm: View {
                 if configuration.canEditRule {
                     recurrenceBlock
                 }
+                MarkdownNotesEditor(text: $model.draft.notes)
                 if let message = localError ?? model.validationMessage {
                     Text(message)
                         .font(EditorFormStyle.caption)
@@ -292,7 +306,12 @@ struct ItemEditForm: View {
         .onChange(of: model.draft.categoryID) { _, id in
             categoryOption = id.uuidString
         }
-        .onKeyPress(.return) { save(); return .handled }
+        // Return inserts a newline in 随记; save via ⌘↩ or the button.
+        .onKeyPress(.return) {
+            guard titleFocused else { return .ignored }
+            save()
+            return .handled
+        }
         .onKeyPress(.escape) { onCancel(); return .handled }
         .confirmationDialog("删除此事项？", isPresented: $deleteConfirmationShown, titleVisibility: .visible) {
             Button("删除", role: .destructive, action: deleteItem)
@@ -335,7 +354,7 @@ struct ItemEditForm: View {
                 .keyboardShortcut(.escape, modifiers: [])
             Button("保存", action: save)
                 .controlSize(.small)
-                .keyboardShortcut(.return, modifiers: [])
+                .keyboardShortcut(.return, modifiers: .command)
                 .buttonStyle(.borderedProminent)
                 .disabled(store.phase != .ready)
         }

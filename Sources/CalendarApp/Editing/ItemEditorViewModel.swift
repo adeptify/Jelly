@@ -89,6 +89,7 @@ final class ItemEditorViewModel: ObservableObject {
                         endTime: schedule.endTime,
                         priority: draft.priority,
                         isPinned: draft.isPinned,
+                        notes: draft.notes,
                         creationTimeZoneIdentifier: timeZoneIdentifier,
                         createdAt: now,
                         updatedAt: now
@@ -103,6 +104,7 @@ final class ItemEditorViewModel: ObservableObject {
                     creationTimeZoneIdentifier: timeZoneIdentifier,
                     priority: draft.priority,
                     isPinned: draft.isPinned,
+                    notes: draft.notes,
                     completedAt: nil,
                     createdAt: now,
                     updatedAt: now
@@ -121,6 +123,7 @@ final class ItemEditorViewModel: ObservableObject {
                     creationTimeZoneIdentifier: original.creationTimeZoneIdentifier,
                     priority: draft.priority,
                     isPinned: draft.isPinned,
+                    notes: draft.notes,
                     completedAt: original.completedAt,
                     createdAt: original.createdAt,
                     updatedAt: now
@@ -299,7 +302,8 @@ final class ItemEditorViewModel: ObservableObject {
             startTime: startTime,
             endTime: endTime,
             priority: draft.priority == originalDraft.priority ? nil : draft.priority,
-            isPinned: draft.isPinned == originalDraft.isPinned ? nil : draft.isPinned
+            isPinned: draft.isPinned == originalDraft.isPinned ? nil : draft.isPinned,
+            notes: draft.notes == originalDraft.notes ? nil : draft.notes
         )
     }
 

@@ -16,6 +16,8 @@ struct ItemDraft: Equatable {
     var priority: ItemPriority
     /// Retained for schema/domain compatibility; product UI no longer exposes pin.
     var isPinned: Bool
+    /// Markdown 随记 (style-only checklists, lists, emphasis).
+    var notes: String = ""
 }
 
 extension ItemDraft {
@@ -33,7 +35,8 @@ extension ItemDraft {
             weekdays: [],
             recurrenceEndDate: nil,
             priority: item.priority,
-            isPinned: item.isPinned
+            isPinned: item.isPinned,
+            notes: item.notes
         )
     }
 
@@ -51,7 +54,8 @@ extension ItemDraft {
             weekdays: series.weekdays,
             recurrenceEndDate: series.recurrenceEndDate,
             priority: series.priority,
-            isPinned: series.isPinned
+            isPinned: series.isPinned,
+            notes: series.notes
         )
     }
 
@@ -69,7 +73,8 @@ extension ItemDraft {
             weekdays: series.weekdays,
             recurrenceEndDate: series.recurrenceEndDate,
             priority: occurrence.priority,
-            isPinned: occurrence.isPinned
+            isPinned: occurrence.isPinned,
+            notes: occurrence.notes
         )
     }
 
@@ -94,7 +99,8 @@ extension ItemDraft {
             weekdays: [startDate.weekday],
             recurrenceEndDate: nil,
             priority: .none,
-            isPinned: false
+            isPinned: false,
+            notes: ""
         )
     }
 

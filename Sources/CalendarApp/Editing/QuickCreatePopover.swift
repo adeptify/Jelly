@@ -26,9 +26,12 @@ struct QuickCreatePresentation: Equatable {
     }
 
     /// Seed a single-day create; optional hour slot fills 具体时间 (default 1h block).
+    /// Pass `endTime` (and optional `endDate`) when the user dragged a multi-slot band.
     static func forDay(
         _ date: CalendarDate,
-        startTime: MinuteOfDay? = nil
+        startTime: MinuteOfDay? = nil,
+        endTime: MinuteOfDay? = nil,
+        endDate: CalendarDate? = nil
     ) -> QuickCreatePresentation {
         guard let start = startTime else {
             return QuickCreatePresentation(
@@ -36,22 +39,39 @@ struct QuickCreatePresentation: Equatable {
                 anchorDate: date
             )
         }
+        if let endTime {
+            return QuickCreatePresentation(
+                range: CalendarDateRange(start: date, end: endDate ?? date),
+                anchorDate: date,
+                startTime: start,
+                endTime: endTime
+            )
+        }
         let next = start.value + 60
-        let endDate: CalendarDate
+        let resolvedEndDate: CalendarDate
         let end: MinuteOfDay
         if next < 24 * 60 {
-            endDate = date
+            resolvedEndDate = date
             end = MinuteOfDay(hour: next / 60, minute: next % 60)!
         } else {
             // 23:00 → overnight to next day 00:00
-            endDate = date.addingDays(1)
+            resolvedEndDate = date.addingDays(1)
             end = MinuteOfDay(hour: 0, minute: 0)!
         }
         return QuickCreatePresentation(
-            range: CalendarDateRange(start: date, end: endDate),
+            range: CalendarDateRange(start: date, end: resolvedEndDate),
             anchorDate: date,
             startTime: start,
             endTime: end
+        )
+    }
+
+    static func forTimedSelection(_ intent: WeekGridCreateSelection.Intent) -> QuickCreatePresentation {
+        forDay(
+            intent.day,
+            startTime: intent.startTime,
+            endTime: intent.endTime,
+            endDate: intent.endDate
         )
     }
 
@@ -130,7 +150,7 @@ struct QuickCreateOverlayPresentation: Equatable {
 }
 
 struct QuickCreatePopover: View {
-    nonisolated static let preferredWidth: CGFloat = 370
+    nonisolated static let preferredWidth: CGFloat = 380
 
     let store: CalendarStore
     let categories: [CalendarCategory]
@@ -184,7 +204,9 @@ struct QuickCreatePopover: View {
             .foregroundStyle(theme.primaryText)
             .tint(theme.controlAccent)
             .onAppear { titleFocused = true }
+            // Return inserts a newline in 随记; save via ⌘↩ or the button.
             .onKeyPress(.return) {
+                guard titleFocused else { return .ignored }
                 save()
                 return .handled
             }
@@ -263,6 +285,8 @@ struct QuickCreatePopover: View {
                 }
             }
 
+            MarkdownNotesEditor(text: $model.draft.notes, minHeight: 96, maxHeight: 150)
+
             if let message = localError ?? model.validationMessage {
                 Text(message)
                     .font(EditorFormStyle.caption)
@@ -277,7 +301,7 @@ struct QuickCreatePopover: View {
                 Button("保存", action: save)
                     .controlSize(.small)
                     .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.return, modifiers: [])
+                    .keyboardShortcut(.return, modifiers: .command)
                     .disabled(store.phase != .ready)
             }
         }
