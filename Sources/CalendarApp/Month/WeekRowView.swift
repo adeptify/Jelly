@@ -352,30 +352,45 @@ enum WeekRowHitRouting {
 }
 
 enum WeekRowItemHitRouting {
-    /// Wide enough to grab; checked before completion so edges aren't swallowed.
-    static let handleHitWidth: CGFloat = 18
-    /// Completion circle sits after the leading handle strip.
-    static let completionHitRange: ClosedRange<CGFloat> = 18...40
-
     static func target(
         atX x: CGFloat,
         width: CGFloat,
-        kind: ItemKind,
         showsLeadingHandle: Bool,
         showsTrailingHandle: Bool
     ) -> CalendarInteractionHitTarget {
         let clampedX = min(max(x, 0), max(0, width))
-        // Handles first — otherwise completion (10…34) ate the leading edge.
-        if showsLeadingHandle, clampedX <= handleHitWidth {
-            return .leadingHandle
-        }
-        if showsTrailingHandle, clampedX >= max(0, width - handleHitWidth) {
-            return .trailingHandle
-        }
-        if completionHitRange.contains(clampedX) {
+
+        // Completion owns the leading button, its outer padding, and the following gap.
+        // This check must precede handle routing because completion must never begin a resize.
+        if clampedX <= CalendarItemRowInteractionGeometry.completionUpperBound {
             return .completionButton
         }
+        if showsLeadingHandle,
+           CalendarItemRowInteractionGeometry.leadingHandleRange.contains(clampedX) {
+            return .leadingHandle
+        }
+        if showsTrailingHandle,
+           clampedX >= CalendarItemRowInteractionGeometry.trailingHandleLowerBound(width: width) {
+            return .trailingHandle
+        }
         return .barBody
+    }
+
+    /// The production SwiftUI drag gesture uses this seam so completion clicks cannot
+    /// accidentally start a move or resize operation.
+    static func dragTarget(
+        atX x: CGFloat,
+        width: CGFloat,
+        showsLeadingHandle: Bool,
+        showsTrailingHandle: Bool
+    ) -> CalendarInteractionHitTarget? {
+        let target = target(
+            atX: x,
+            width: width,
+            showsLeadingHandle: showsLeadingHandle,
+            showsTrailingHandle: showsTrailingHandle
+        )
+        return target == .completionButton ? nil : target
     }
 }
 
@@ -483,359 +498,6 @@ private struct WeekRowEmptyRangeGestureSurface: NSViewRepresentable {
     }
 }
 
-/// ObjC-safe target for AppKit menus (SwiftUI-hosted NSViews can drop MainActor selectors).
-private final class ItemContextMenuTarget: NSObject {
-    var onEdit: () -> Void = {}
-    var onPriority: (ItemPriority) -> Void = { _ in }
-    var onPin: () -> Void = {}
-    var onDelete: () -> Void = {}
-
-    @objc func edit() { onEdit() }
-    @objc func priorityP0() { onPriority(.p0) }
-    @objc func priorityP1() { onPriority(.p1) }
-    @objc func priorityP2() { onPriority(.p2) }
-    @objc func priorityNone() { onPriority(.none) }
-    @objc func pin() { onPin() }
-    @objc func deleteItem() { onDelete() }
-}
-
-/// Opaque AppKit hit layer over month chips: owns drag/resize + right-click menu.
-///
-/// Trackpad secondary click is often swallowed by SwiftUI before `rightMouseDown`
-/// reaches a representable. A local event monitor catches it first.
-final class WeekRowItemGestureSurfaceView: NSView {
-    private var source: ProjectedEntry
-    private var weekStart: CalendarDate
-    private var startColumn: Int
-    private var endColumn: Int
-    private var columnWidth: CGFloat
-    private var rootOrigin: CGPoint
-    private var showsLeadingHandle: Bool
-    private var showsTrailingHandle: Bool
-    private var isPinned: Bool
-    private var onItemGesture: (WeekRowItemGesture) -> Void
-    private var onClick: (CalendarInteractionHitTarget) -> Void
-    private let menuTarget = ItemContextMenuTarget()
-    private var trackedTarget: CalendarInteractionHitTarget?
-    private var trackedRootPoint: CGPoint?
-    /// Stored as nonisolated(unsafe) so teardown is safe from deinit under Swift 6.
-    nonisolated(unsafe) private var secondaryClickMonitor: Any?
-    private var rightClickRecognizer: NSClickGestureRecognizer?
-    private var isPresentingContextMenu = false
-
-    override var isFlipped: Bool { true }
-
-    init(
-        source: ProjectedEntry,
-        weekStart: CalendarDate,
-        startColumn: Int,
-        endColumn: Int,
-        columnWidth: CGFloat,
-        rootOrigin: CGPoint,
-        showsLeadingHandle: Bool,
-        showsTrailingHandle: Bool,
-        isPinned: Bool,
-        onItemGesture: @escaping (WeekRowItemGesture) -> Void,
-        onClick: @escaping (CalendarInteractionHitTarget) -> Void,
-        onEdit: @escaping () -> Void,
-        onPriority: @escaping (ItemPriority) -> Void,
-        onPin: @escaping () -> Void,
-        onDelete: @escaping () -> Void
-    ) {
-        self.source = source
-        self.weekStart = weekStart
-        self.startColumn = startColumn
-        self.endColumn = endColumn
-        self.columnWidth = columnWidth
-        self.rootOrigin = rootOrigin
-        self.showsLeadingHandle = showsLeadingHandle
-        self.showsTrailingHandle = showsTrailingHandle
-        self.isPinned = isPinned
-        self.onItemGesture = onItemGesture
-        self.onClick = onClick
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.clear.cgColor
-        menuTarget.onEdit = onEdit
-        menuTarget.onPriority = onPriority
-        menuTarget.onPin = onPin
-        menuTarget.onDelete = onDelete
-        installRightClickRecognizer()
-        // Keep AppKit `menu` property in sync so system presentation also works.
-        menu = makeContextMenu()
-    }
-
-    deinit {
-        if let secondaryClickMonitor {
-            NSEvent.removeMonitor(secondaryClickMonitor)
-        }
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    func update(
-        source: ProjectedEntry,
-        weekStart: CalendarDate,
-        startColumn: Int,
-        endColumn: Int,
-        columnWidth: CGFloat,
-        rootOrigin: CGPoint,
-        showsLeadingHandle: Bool,
-        showsTrailingHandle: Bool,
-        isPinned: Bool,
-        onItemGesture: @escaping (WeekRowItemGesture) -> Void,
-        onClick: @escaping (CalendarInteractionHitTarget) -> Void,
-        onEdit: @escaping () -> Void,
-        onPriority: @escaping (ItemPriority) -> Void,
-        onPin: @escaping () -> Void,
-        onDelete: @escaping () -> Void
-    ) {
-        self.source = source
-        self.weekStart = weekStart
-        self.startColumn = startColumn
-        self.endColumn = endColumn
-        self.columnWidth = columnWidth
-        self.rootOrigin = rootOrigin
-        self.showsLeadingHandle = showsLeadingHandle
-        self.showsTrailingHandle = showsTrailingHandle
-        self.isPinned = isPinned
-        self.onItemGesture = onItemGesture
-        self.onClick = onClick
-        menuTarget.onEdit = onEdit
-        menuTarget.onPriority = onPriority
-        menuTarget.onPin = onPin
-        menuTarget.onDelete = onDelete
-        menu = makeContextMenu()
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if window == nil {
-            tearDownSecondaryClickMonitor()
-        } else {
-            installSecondaryClickMonitor()
-        }
-    }
-
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
-    override func mouseDown(with event: NSEvent) {
-        if Self.isSecondaryClick(event) {
-            showContextMenu(with: event)
-            return
-        }
-        let localPoint = convert(event.locationInWindow, from: nil)
-        let rootPoint = rootPoint(for: localPoint)
-        let target = WeekRowItemHitRouting.target(
-            atX: localPoint.x,
-            width: bounds.width,
-            kind: source.kind,
-            showsLeadingHandle: showsLeadingHandle,
-            showsTrailingHandle: showsTrailingHandle
-        )
-        trackedTarget = target
-        trackedRootPoint = rootPoint
-        onItemGesture(.began(date(atLocalX: localPoint.x), target, source, rootPoint))
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard trackedTarget != nil else { return }
-        onItemGesture(.changed(rootPoint(for: convert(event.locationInWindow, from: nil))))
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        defer {
-            trackedTarget = nil
-            trackedRootPoint = nil
-        }
-        guard let trackedTarget, let trackedRootPoint else { return }
-        let point = rootPoint(for: convert(event.locationInWindow, from: nil))
-        onItemGesture(.ended(point))
-        guard hypot(point.x - trackedRootPoint.x, point.y - trackedRootPoint.y)
-            < CalendarInteractionCoordinator.dragThreshold
-        else {
-            return
-        }
-        onClick(trackedTarget)
-    }
-
-    override func rightMouseDown(with event: NSEvent) {
-        showContextMenu(with: event)
-    }
-
-    override func scrollWheel(with event: NSEvent) {
-        nextResponder?.scrollWheel(with: event)
-    }
-
-    override func menu(for event: NSEvent) -> NSMenu? {
-        makeContextMenu()
-    }
-
-    private func installRightClickRecognizer() {
-        let recognizer = NSClickGestureRecognizer(
-            target: self,
-            action: #selector(handleRightClickRecognizer(_:))
-        )
-        recognizer.buttonMask = 0x2 // right / secondary
-        recognizer.numberOfClicksRequired = 1
-        addGestureRecognizer(recognizer)
-        rightClickRecognizer = recognizer
-    }
-
-    @objc private func handleRightClickRecognizer(_ recognizer: NSClickGestureRecognizer) {
-        guard recognizer.state == .ended, let event = NSApp.currentEvent else { return }
-        showContextMenu(with: event)
-    }
-
-    /// Runs before SwiftUI can swallow trackpad secondary clicks.
-    private func installSecondaryClickMonitor() {
-        tearDownSecondaryClickMonitor()
-        secondaryClickMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.rightMouseDown, .leftMouseDown]
-        ) { [weak self] event in
-            guard let self else { return event }
-            guard self.window != nil, event.window === self.window else { return event }
-            guard Self.isSecondaryClick(event) else { return event }
-            let point = self.convert(event.locationInWindow, from: nil)
-            guard self.bounds.contains(point), !self.isHidden, self.alphaValue > 0.01 else {
-                return event
-            }
-            self.showContextMenu(with: event)
-            return nil
-        }
-    }
-
-    private func tearDownSecondaryClickMonitor() {
-        if let secondaryClickMonitor {
-            NSEvent.removeMonitor(secondaryClickMonitor)
-            self.secondaryClickMonitor = nil
-        }
-    }
-
-    private static func isSecondaryClick(_ event: NSEvent) -> Bool {
-        if event.type == .rightMouseDown { return true }
-        if event.buttonNumber == 1 { return true }
-        if event.type == .leftMouseDown, event.modifierFlags.contains(.control) { return true }
-        return false
-    }
-
-    private func showContextMenu(with event: NSEvent) {
-        guard !isPresentingContextMenu else { return }
-        isPresentingContextMenu = true
-        defer { isPresentingContextMenu = false }
-
-        if trackedTarget != nil {
-            onItemGesture(.ended(rootPoint(for: convert(event.locationInWindow, from: nil))))
-            trackedTarget = nil
-            trackedRootPoint = nil
-        }
-        let menu = makeContextMenu()
-        self.menu = menu
-        let localPoint = convert(event.locationInWindow, from: nil)
-        // `popUp(positioning:at:in:)` is more reliable than popUpContextMenu under SwiftUI.
-        menu.popUp(positioning: nil, at: localPoint, in: self)
-    }
-
-    private func makeContextMenu() -> NSMenu {
-        let menu = NSMenu(title: "事项")
-        menu.autoenablesItems = false
-        menu.addItem(menuItem(title: "编辑", action: #selector(ItemContextMenuTarget.edit)))
-        menu.addItem(.separator())
-        menu.addItem(menuItem(title: "P0", action: #selector(ItemContextMenuTarget.priorityP0)))
-        menu.addItem(menuItem(title: "P1", action: #selector(ItemContextMenuTarget.priorityP1)))
-        menu.addItem(menuItem(title: "P2", action: #selector(ItemContextMenuTarget.priorityP2)))
-        menu.addItem(menuItem(title: "清除优先级", action: #selector(ItemContextMenuTarget.priorityNone)))
-        menu.addItem(.separator())
-        menu.addItem(menuItem(
-            title: isPinned ? "取消置顶" : "置顶（P0）",
-            action: #selector(ItemContextMenuTarget.pin)
-        ))
-        menu.addItem(.separator())
-        menu.addItem(menuItem(title: "删除", action: #selector(ItemContextMenuTarget.deleteItem)))
-        return menu
-    }
-
-    private func menuItem(title: String, action: Selector) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        item.target = menuTarget
-        item.isEnabled = true
-        return item
-    }
-
-    private func date(atLocalX x: CGFloat) -> CalendarDate {
-        guard columnWidth > 0 else { return weekStart.addingDays(startColumn) }
-        let localColumn = min(
-            max(Int(floor(x / columnWidth)), 0),
-            endColumn - startColumn
-        )
-        return weekStart.addingDays(startColumn + localColumn)
-    }
-
-    private func rootPoint(for localPoint: CGPoint) -> CGPoint {
-        CGPoint(x: rootOrigin.x + localPoint.x, y: rootOrigin.y + localPoint.y)
-    }
-}
-
-private struct WeekRowItemGestureSurface: NSViewRepresentable {
-    let source: ProjectedEntry
-    let weekStart: CalendarDate
-    let startColumn: Int
-    let endColumn: Int
-    let columnWidth: CGFloat
-    let rootOrigin: CGPoint
-    let showsLeadingHandle: Bool
-    let showsTrailingHandle: Bool
-    let isPinned: Bool
-    let onItemGesture: (WeekRowItemGesture) -> Void
-    let onClick: (CalendarInteractionHitTarget) -> Void
-    let onEdit: () -> Void
-    let onPriority: (ItemPriority) -> Void
-    let onPin: () -> Void
-    let onDelete: () -> Void
-
-    func makeNSView(context _: Context) -> WeekRowItemGestureSurfaceView {
-        WeekRowItemGestureSurfaceView(
-            source: source,
-            weekStart: weekStart,
-            startColumn: startColumn,
-            endColumn: endColumn,
-            columnWidth: columnWidth,
-            rootOrigin: rootOrigin,
-            showsLeadingHandle: showsLeadingHandle,
-            showsTrailingHandle: showsTrailingHandle,
-            isPinned: isPinned,
-            onItemGesture: onItemGesture,
-            onClick: onClick,
-            onEdit: onEdit,
-            onPriority: onPriority,
-            onPin: onPin,
-            onDelete: onDelete
-        )
-    }
-
-    func updateNSView(_ view: WeekRowItemGestureSurfaceView, context _: Context) {
-        view.update(
-            source: source,
-            weekStart: weekStart,
-            startColumn: startColumn,
-            endColumn: endColumn,
-            columnWidth: columnWidth,
-            rootOrigin: rootOrigin,
-            showsLeadingHandle: showsLeadingHandle,
-            showsTrailingHandle: showsTrailingHandle,
-            isPinned: isPinned,
-            onItemGesture: onItemGesture,
-            onClick: onClick,
-            onEdit: onEdit,
-            onPriority: onPriority,
-            onPin: onPin,
-            onDelete: onDelete
-        )
-    }
-}
-
 enum WeekRowRangeGesture {
     case began(CalendarDate, CalendarInteractionHitTarget, CGPoint)
     case changed(CGPoint)
@@ -869,7 +531,6 @@ struct WeekRowView: View {
     @ObservedObject var dropCoordinator: CalendarDropCoordinator
     let onAction: (DayCellAction) -> Void
     let onCompletion: (CalendarCommand) -> Void
-    var onDelete: ((ProjectedItem) -> Void)?
     let selectionRange: CalendarDateRange?
     /// Source currently being dragged/resized — original chip is dimmed as a ghost.
     var draggingSourceID: ProjectedEntryID? = nil
@@ -912,8 +573,7 @@ struct WeekRowView: View {
                         onCompletion: onCompletion,
                         onOpenDetail: { item in
                             onAction(.openItem(item.id))
-                        },
-                        onDelete: onDelete
+                        }
                     )
                     // Inset chip without expanding dead zones: apply padding inside the frame
                     // so neighboring empty body stays hittable for create.
@@ -1103,7 +763,6 @@ private struct WeekRowSegmentBar: View {
     let onItemGesture: (WeekRowItemGesture) -> Void
     let onCompletion: (CalendarCommand) -> Void
     let onOpenDetail: (ProjectedItem) -> Void
-    var onDelete: ((ProjectedItem) -> Void)?
 
     @State private var isItemDragging = false
     @State private var barFrameInRoot: CGRect = .zero
@@ -1114,7 +773,7 @@ private struct WeekRowSegmentBar: View {
             category: category,
             onCompletion: onCompletion,
             onOpenDetail: onOpenDetail,
-            onDelete: { onDelete?(projectedItem) },
+            allowsSwipeToDelete: CalendarItemRowPlacement.monthGrid.allowsSwipeToDelete,
             accessibilityLabelOverride: segment.accessibilityLabel,
             accessibilityValueOverride: segment.accessibilityValue,
             continuesBefore: segment.continuesBefore,
@@ -1151,15 +810,12 @@ private struct WeekRowSegmentBar: View {
             if !isItemDragging {
                 isItemDragging = true
                 let localX = value.startLocation.x - barFrameInRoot.minX
-                let target = WeekRowItemHitRouting.target(
+                guard let target = WeekRowItemHitRouting.dragTarget(
                     atX: localX,
                     width: max(barFrameInRoot.width, 1),
-                    kind: segment.entry.kind,
                     showsLeadingHandle: segment.showsLeadingHandle,
                     showsTrailingHandle: segment.showsTrailingHandle
-                )
-                // Completion is a button; don't start a drag from it.
-                guard target != .completionButton else {
+                ) else {
                     isItemDragging = false
                     return
                 }

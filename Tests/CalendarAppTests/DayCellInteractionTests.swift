@@ -42,35 +42,98 @@ struct DayCellInteractionTests {
         #expect(WeekRowHitRouting.dayAction(for: .scroll, date: date) == nil)
     }
 
-    @Test func itemHitRoutingExposesOnlyTrueOuterHandlesAndCompletionWinsOverlap() {
+    @Test func itemHitRoutingKeepsCompletionFirstAndAssignsRightPaddingToTrailingResize() {
         #expect(WeekRowItemHitRouting.target(
-            atX: 2,
+            atX: 12,
             width: 140,
-            kind: .event,
+            showsLeadingHandle: true,
+            showsTrailingHandle: false
+        ) == .completionButton)
+        #expect(WeekRowItemHitRouting.target(
+            atX: 21,
+            width: 140,
+            showsLeadingHandle: true,
+            showsTrailingHandle: false
+        ) == .completionButton)
+        #expect(WeekRowItemHitRouting.target(
+            atX: 26,
+            width: 140,
+            showsLeadingHandle: true,
+            showsTrailingHandle: false
+        ) == .completionButton)
+        #expect(WeekRowItemHitRouting.target(
+            atX: 31,
+            width: 140,
             showsLeadingHandle: true,
             showsTrailingHandle: false
         ) == .leadingHandle)
         #expect(WeekRowItemHitRouting.target(
-            atX: 2,
+            atX: 31,
             width: 140,
-            kind: .event,
+            showsLeadingHandle: false,
+            showsTrailingHandle: false
+        ) == .barBody)
+        #expect(WeekRowItemHitRouting.target(
+            atX: 123,
+            width: 140,
             showsLeadingHandle: false,
             showsTrailingHandle: true
         ) == .barBody)
         #expect(WeekRowItemHitRouting.target(
-            atX: 138,
+            atX: 124,
             width: 140,
-            kind: .event,
             showsLeadingHandle: false,
             showsTrailingHandle: true
         ) == .trailingHandle)
         #expect(WeekRowItemHitRouting.target(
+            atX: 134,
+            width: 140,
+            showsLeadingHandle: false,
+            showsTrailingHandle: true
+        ) == .trailingHandle)
+        #expect(WeekRowItemHitRouting.target(
+            atX: 139,
+            width: 140,
+            showsLeadingHandle: false,
+            showsTrailingHandle: true
+        ) == .trailingHandle)
+        #expect(WeekRowItemHitRouting.target(
+            atX: 139,
+            width: 140,
+            showsLeadingHandle: false,
+            showsTrailingHandle: false
+        ) == .barBody)
+        #expect(WeekRowItemHitRouting.target(
+            atX: 70,
+            width: 140,
+            showsLeadingHandle: true,
+            showsTrailingHandle: true
+        ) == .barBody)
+
+        #expect(WeekRowItemHitRouting.dragTarget(
             atX: 12,
             width: 140,
-            kind: .task,
             showsLeadingHandle: true,
             showsTrailingHandle: false
-        ) == .completionButton)
+        ) == nil)
+        #expect(WeekRowItemHitRouting.dragTarget(
+            atX: 31,
+            width: 140,
+            showsLeadingHandle: true,
+            showsTrailingHandle: false
+        ) == .leadingHandle)
+        #expect(WeekRowItemHitRouting.dragTarget(
+            atX: 70,
+            width: 140,
+            showsLeadingHandle: true,
+            showsTrailingHandle: true
+        ) == .barBody)
+        #expect(WeekRowItemHitRouting.dragTarget(
+            atX: 138,
+            width: 140,
+            showsLeadingHandle: false,
+            showsTrailingHandle: true
+        ) == .trailingHandle)
     }
 
     @Test func appKitRangeGestureSurfaceEmitsOnlyForTheDedicatedEmptySurface() throws {
@@ -221,48 +284,53 @@ struct DayCellInteractionTests {
             }
         let emptySurface = try #require(rangeSurfaces.first)
         let itemCellSurface = try #require(rangeSurfaces.dropFirst().first)
-        let itemSurface = try #require(
-            descendants(of: host, as: WeekRowItemGestureSurfaceView.self).first
+        func hitPoint(from surface: NSView, _ localPoint: CGPoint) -> CGPoint {
+            let renderedPoint = surface.convert(localPoint, to: host)
+            // NSHostingView's AppKit hit-test coordinates mirror the SwiftUI render tree.
+            return CGPoint(x: renderedPoint.x, y: host.bounds.maxY - renderedPoint.y)
+        }
+        let topEmptyBodyPoint = hitPoint(
+            from: emptySurface,
+            CGPoint(x: emptySurface.bounds.midX, y: 1)
         )
-        let topEmptyBodyPoint = emptySurface.convert(
-            CGPoint(x: emptySurface.bounds.midX, y: 1),
-            to: host
+        let emptyBodyPoint = hitPoint(
+            from: emptySurface,
+            CGPoint(x: emptySurface.bounds.midX, y: emptySurface.bounds.midY)
         )
-        let emptyBodyPoint = emptySurface.convert(
-            CGPoint(x: emptySurface.bounds.midX, y: emptySurface.bounds.midY),
-            to: host
+        let headerPoint = hitPoint(
+            from: emptySurface,
+            CGPoint(x: emptySurface.bounds.midX, y: -5)
         )
-        let headerPoint = emptySurface.convert(
-            CGPoint(x: emptySurface.bounds.midX, y: -1),
-            to: host
+        // The segment begins in this date cell. Its chip is inset two points and lane zero
+        // begins at the top of the body. Probe rendered chip controls without relying on the
+        // retired AppKit overlay implementation.
+        let itemPoint = hitPoint(
+            from: itemCellSurface,
+            CGPoint(x: 70, y: WeekRowMetrics.laneHeight / 2)
         )
-        let itemPoint = itemSurface.convert(
-            CGPoint(x: itemSurface.bounds.midX, y: itemSurface.bounds.midY),
-            to: host
+        let completionPoint = hitPoint(
+            from: itemCellSurface,
+            CGPoint(x: 14, y: WeekRowMetrics.laneHeight / 2)
         )
-        let completionPoint = itemSurface.convert(
-            CGPoint(x: 12, y: itemSurface.bounds.midY),
-            to: host
+        let leadingHandlePoint = hitPoint(
+            from: itemCellSurface,
+            CGPoint(x: 33, y: WeekRowMetrics.laneHeight / 2)
         )
-        let leadingHandlePoint = itemSurface.convert(
-            CGPoint(x: 2, y: itemSurface.bounds.midY),
-            to: host
-        )
-        let trailingHandlePoint = itemSurface.convert(
-            CGPoint(x: itemSurface.bounds.maxX - 2, y: itemSurface.bounds.midY),
-            to: host
+        let trailingHandlePoint = hitPoint(
+            from: itemCellSurface,
+            CGPoint(x: itemCellSurface.bounds.width + 95, y: WeekRowMetrics.laneHeight / 2)
         )
         // Margins of an occupied lane (beside the chip) should still reach the empty surface.
-        let occupiedLaneLeftMargin = itemCellSurface.convert(
-            CGPoint(x: 1, y: 1),
-            to: host
+        let occupiedLaneLeftMargin = hitPoint(
+            from: itemCellSurface,
+            CGPoint(x: 1, y: 1)
         )
-        let occupiedLaneBottomFree = itemCellSurface.convert(
+        let occupiedLaneBottomFree = hitPoint(
+            from: itemCellSurface,
             CGPoint(
                 x: itemCellSurface.bounds.midX,
                 y: itemCellSurface.bounds.maxY - 4
-            ),
-            to: host
+            )
         )
 
         #expect(host.hitTest(topEmptyBodyPoint) === emptySurface)
@@ -284,122 +352,6 @@ struct DayCellInteractionTests {
         )
         #expect(rangeRecorder.records.map(\.kind) == [.began, .ended])
         #expect(itemRecorder.kinds.isEmpty)
-    }
-
-    @Test func appKitItemSurfaceDispatchesProductionTargetDateDragAndClickRouting() throws {
-        let weekStart = CalendarDate(year: 2026, month: 8, day: 3)!
-        let item = try CalendarItem(
-            id: UUID(),
-            kind: .task,
-            title: "可拖动事项",
-            categoryID: UUID(),
-            schedule: try CalendarSchedule(
-                startDate: weekStart.addingDays(1),
-                endDate: weekStart.addingDays(3),
-                startTime: nil,
-                endTime: nil
-            ),
-            completedAt: nil,
-            createdAt: .distantPast,
-            updatedAt: .distantPast
-        )
-        let recorder = ItemGestureRecorder()
-        let surface = WeekRowItemGestureSurfaceView(
-            source: .item(item),
-            weekStart: weekStart,
-            startColumn: 1,
-            endColumn: 3,
-            columnWidth: 40,
-            rootOrigin: CGPoint(x: 100, y: 150),
-            showsLeadingHandle: true,
-            showsTrailingHandle: false,
-            isPinned: false,
-            onItemGesture: recorder.record,
-            onClick: recorder.click,
-            onEdit: {},
-            onPriority: { _ in },
-            onPin: {},
-            onDelete: {}
-        )
-        surface.frame = CGRect(x: 0, y: 0, width: 120, height: 20)
-
-        try sendMouseSequence(to: surface)
-
-        #expect(recorder.kinds == [.began, .changed, .ended])
-        #expect(recorder.beganDate == weekStart.addingDays(1))
-        #expect(recorder.beganTarget == .completionButton)
-        #expect(recorder.clicks.isEmpty)
-
-        try sendMouseClick(to: surface, atWindowLocation: CGPoint(x: 12, y: 10))
-        #expect(recorder.clicks == [.completionButton])
-    }
-
-    @Test func appKitItemSurfaceDirectOvernightJumpUsesDeterministicCoordinatorClamp() throws {
-        let weekStart = CalendarDate(year: 2026, month: 8, day: 3)!
-        let source = try CalendarItem(
-            id: UUID(),
-            kind: .event,
-            title: "跨夜",
-            categoryID: UUID(),
-            schedule: try CalendarSchedule(
-                startDate: weekStart.addingDays(3),
-                endDate: weekStart.addingDays(5),
-                startTime: MinuteOfDay(hour: 23, minute: 0)!,
-                endTime: MinuteOfDay(hour: 1, minute: 0)!
-            ),
-            completedAt: nil,
-            createdAt: .distantPast,
-            updatedAt: .distantPast
-        )
-        let coordinator = CalendarInteractionCoordinator()
-        var submitted: PendingCalendarMutation?
-        let directTarget = CalendarDate(year: 2026, month: 8, day: 10)!
-        let surface = WeekRowItemGestureSurfaceView(
-            source: .item(source),
-            weekStart: weekStart,
-            startColumn: 3,
-            endColumn: 5,
-            columnWidth: 40,
-            rootOrigin: .zero,
-            showsLeadingHandle: true,
-            showsTrailingHandle: false,
-            isPinned: false,
-            onItemGesture: { gesture in
-                switch gesture {
-                case let .began(date, target, entry, point):
-                    coordinator.pointerDown(on: date, target: target, source: entry, point: point)
-                case let .changed(point):
-                    _ = coordinator.updatePointer(point: point, over: directTarget)
-                case let .ended(point):
-                    if case let .submitMutation(pending) = coordinator.pointerUp(
-                        at: point,
-                        over: directTarget
-                    ) {
-                        submitted = pending
-                    }
-                }
-            },
-            onClick: { _ in },
-            onEdit: {},
-            onPriority: { _ in },
-            onPin: {},
-            onDelete: {}
-        )
-        surface.frame = CGRect(x: 0, y: 0, width: 120, height: 20)
-
-        try sendMouseDrag(
-            to: surface,
-            from: CGPoint(x: 2, y: 10),
-            through: CGPoint(x: 100, y: 10)
-        )
-
-        let expected = try CalendarSchedule(
-            startDate: CalendarDate(year: 2026, month: 8, day: 7)!,
-            endDate: CalendarDate(year: 2026, month: 8, day: 8)!,
-            startTime: MinuteOfDay(hour: 23, minute: 0)!,
-            endTime: MinuteOfDay(hour: 1, minute: 0)!
-        )
-        #expect(submitted?.previewSchedule == expected)
     }
 
     @Test func flippedParentMapsTopAndBottomMouseLocationsIntoTheSwiftUIRootCoordinateSystem() throws {
@@ -501,48 +453,6 @@ struct DayCellInteractionTests {
         view.mouseUp(with: up)
     }
 
-    private func sendMouseDrag(
-        to view: NSView,
-        from start: CGPoint,
-        through end: CGPoint
-    ) throws {
-        let down = try #require(NSEvent.mouseEvent(
-            with: .leftMouseDown,
-            location: start,
-            modifierFlags: [],
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            eventNumber: 0,
-            clickCount: 1,
-            pressure: 1
-        ))
-        let dragged = try #require(NSEvent.mouseEvent(
-            with: .leftMouseDragged,
-            location: end,
-            modifierFlags: [],
-            timestamp: 0.1,
-            windowNumber: 0,
-            context: nil,
-            eventNumber: 0,
-            clickCount: 1,
-            pressure: 1
-        ))
-        let up = try #require(NSEvent.mouseEvent(
-            with: .leftMouseUp,
-            location: end,
-            modifierFlags: [],
-            timestamp: 0.2,
-            windowNumber: 0,
-            context: nil,
-            eventNumber: 0,
-            clickCount: 1,
-            pressure: 1
-        ))
-        view.mouseDown(with: down)
-        view.mouseDragged(with: dragged)
-        view.mouseUp(with: up)
-    }
 }
 
 @MainActor
@@ -598,25 +508,16 @@ private final class FlippedEventContainer: NSView {
 @MainActor
 private final class ItemGestureRecorder {
     var kinds: [ItemGestureRecordKind] = []
-    var beganDate: CalendarDate?
-    var beganTarget: CalendarInteractionHitTarget?
-    var clicks: [CalendarInteractionHitTarget] = []
 
     func record(_ gesture: WeekRowItemGesture) {
         switch gesture {
-        case let .began(date, target, _, _):
+        case .began:
             kinds.append(.began)
-            beganDate = date
-            beganTarget = target
         case .changed:
             kinds.append(.changed)
         case .ended:
             kinds.append(.ended)
         }
-    }
-
-    func click(_ target: CalendarInteractionHitTarget) {
-        clicks.append(target)
     }
 }
 

@@ -1142,7 +1142,6 @@ struct MonthView: View {
                                 dropCoordinator: dropCoordinator,
                                 onAction: handle,
                                 onCompletion: sendCompletion,
-                                onDelete: { requestDelete($0) },
                                 selectionRange: interactionCoordinator.previewRange,
                                 draggingSourceID: interactionCoordinator.draggingSourceID,
                                 onRangeGesture: { gesture in

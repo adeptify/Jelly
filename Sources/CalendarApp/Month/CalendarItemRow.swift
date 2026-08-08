@@ -132,6 +132,28 @@ struct CalendarItemRowLayout: Equatable {
     )
 }
 
+/// Geometry shared by the rendered chip and its parent drag hit routing.
+/// Keep these values here so the visible completion/resize affordances cannot drift
+/// away from the regions used by `WeekRowItemHitRouting`.
+enum CalendarItemRowInteractionGeometry {
+    static let horizontalPadding: CGFloat = 6
+    static let contentSpacing: CGFloat = 4
+    static let completionWidth: CGFloat = 16
+    static let handleWidth: CGFloat = 10
+
+    static var completionUpperBound: CGFloat {
+        horizontalPadding + completionWidth + contentSpacing
+    }
+
+    static var leadingHandleRange: ClosedRange<CGFloat> {
+        completionUpperBound...(completionUpperBound + handleWidth)
+    }
+
+    static func trailingHandleLowerBound(width: CGFloat) -> CGFloat {
+        max(completionUpperBound, width - horizontalPadding - handleWidth)
+    }
+}
+
 struct CalendarItemRowPresentation: Equatable {
     /// Always nil on-screen: category is color-only (TickTick-style). Kept in accessibility labels.
     let categoryName: String?
@@ -247,6 +269,7 @@ struct CalendarItemRow: View {
     var onCompletion: ((CalendarCommand) -> Void)?
     var onOpenDetail: ((ProjectedItem) -> Void)?
     var onDelete: (() -> Void)?
+    var allowsSwipeToDelete = true
     var accessibilityLabelOverride: String?
     var accessibilityValueOverride: String?
     var continuesBefore = false
@@ -300,13 +323,16 @@ struct CalendarItemRow: View {
     }
 
     var body: some View {
-        ItemRowActionChrome(onDelete: { onDelete?() }) {
+        ItemRowActionChrome(
+            allowsSwipeToDelete: allowsSwipeToDelete,
+            onDelete: { onDelete?() }
+        ) {
             rowBody
         }
     }
 
     private var rowBody: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: CalendarItemRowInteractionGeometry.contentSpacing) {
             // Completion stays its own hit target; the rest of the chip opens edit.
             Button {
                 let interaction = CalendarItemRowInteractionRouter.route(
@@ -321,14 +347,17 @@ struct CalendarItemRow: View {
                 Image(systemName: isCompletedTask ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(categoryColor.opacity(isCompletedTask ? 0.85 : 0.75))
-                    .frame(width: 16, height: CalendarTheme.itemRowHeight)
+                    .frame(
+                        width: CalendarItemRowInteractionGeometry.completionWidth,
+                        height: CalendarTheme.itemRowHeight
+                    )
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(CalendarItemAccessibility.completionLabel(isCompleted: isCompletedTask))
             .accessibilityValue(isCompletedTask ? "已完成" : "未完成")
 
-            HStack(spacing: 4) {
+            HStack(spacing: CalendarItemRowInteractionGeometry.contentSpacing) {
                 if continuesBefore {
                     continuationMarker(systemName: "arrow.left")
                 }
@@ -404,7 +433,7 @@ struct CalendarItemRow: View {
             }
         }
         .font(CalendarTheme.itemFont)
-        .padding(.horizontal, 6)
+        .padding(.horizontal, CalendarItemRowInteractionGeometry.horizontalPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: CalendarTheme.itemRowHeight)
         // Dim content only — keep chip fill opaque so swipe actions never bleed through.
@@ -449,7 +478,10 @@ struct CalendarItemRow: View {
         Capsule()
             .fill(categoryColor.opacity(0.95))
             .frame(width: 4, height: max(10, CalendarTheme.itemRowHeight - 6))
-            .frame(width: 10, height: CalendarTheme.itemRowHeight) // larger grab affordance
+            .frame(
+                width: CalendarItemRowInteractionGeometry.handleWidth,
+                height: CalendarTheme.itemRowHeight
+            ) // larger grab affordance
             .contentShape(Rectangle())
             .accessibilityLabel(accessibility.label)
             .accessibilityValue(accessibility.value)

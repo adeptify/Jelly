@@ -6,6 +6,20 @@ import Testing
 @Suite("CalendarItemRowPresentationTests")
 @MainActor
 struct CalendarItemRowPresentationTests {
+    @Test func productionPlacementsInstallSwipeDeleteOnlyInDayDrawer() {
+        let monthGrid = ItemRowActionChromePolicy(
+            allowsSwipeToDelete: CalendarItemRowPlacement.monthGrid.allowsSwipeToDelete
+        )
+        let dayDrawer = ItemRowActionChromePolicy(
+            allowsSwipeToDelete: CalendarItemRowPlacement.dayDrawer.allowsSwipeToDelete
+        )
+
+        #expect(monthGrid.installsSwipeGesture == false)
+        #expect(monthGrid.showsDeleteAction == false)
+        #expect(dayDrawer.installsSwipeGesture == true)
+        #expect(dayDrawer.showsDeleteAction == true)
+    }
+
     @Test func compactTimedRowKeepsFullStartTimeAndTitleWithoutCategoryLabel() throws {
         let range = try LocalTimeRange(
             start: .init(hour: 9, minute: 0)!,

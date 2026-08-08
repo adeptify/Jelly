@@ -61,7 +61,8 @@ struct DayDrawerView: View {
                                 category: categories[item.categoryID],
                                 onCompletion: sendCompletion,
                                 onOpenDetail: onOpenDetail,
-                                onDelete: { onDelete?(item) }
+                                onDelete: { onDelete?(item) },
+                                allowsSwipeToDelete: CalendarItemRowPlacement.dayDrawer.allowsSwipeToDelete
                             )
                         }
                     }

@@ -1,8 +1,28 @@
 import CalendarDomain
 import SwiftUI
 
+enum CalendarItemRowPlacement: Equatable {
+    case monthGrid
+    case dayDrawer
+
+    var allowsSwipeToDelete: Bool {
+        switch self {
+        case .monthGrid: false
+        case .dayDrawer: true
+        }
+    }
+}
+
+struct ItemRowActionChromePolicy: Equatable {
+    let allowsSwipeToDelete: Bool
+
+    var installsSwipeGesture: Bool { allowsSwipeToDelete }
+    var showsDeleteAction: Bool { allowsSwipeToDelete }
+}
+
 /// Left-swipe delete chrome for a calendar item chip. Priority is edited in the detail form.
 struct ItemRowActionChrome<Content: View>: View {
+    let allowsSwipeToDelete: Bool
     let onDelete: () -> Void
     @ViewBuilder var content: () -> Content
 
@@ -18,7 +38,29 @@ struct ItemRowActionChrome<Content: View>: View {
         CalendarTheme.appearance(for: colorScheme)
     }
 
+    init(
+        allowsSwipeToDelete: Bool = true,
+        onDelete: @escaping () -> Void,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.allowsSwipeToDelete = allowsSwipeToDelete
+        self.onDelete = onDelete
+        self.content = content
+    }
+
+    @ViewBuilder
     var body: some View {
+        let policy = ItemRowActionChromePolicy(allowsSwipeToDelete: allowsSwipeToDelete)
+        if policy.installsSwipeGesture {
+            swipeEnabledBody
+        } else {
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .clipped()
+        }
+    }
+
+    private var swipeEnabledBody: some View {
         ZStack(alignment: .trailing) {
             actionStrip
                 .opacity(isRevealed ? 1 : 0)
@@ -27,22 +69,24 @@ struct ItemRowActionChrome<Content: View>: View {
             content()
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .offset(x: offset)
-                .gesture(
-                    DragGesture(minimumDistance: 16)
-                        .onChanged { value in
-                            let dx = value.translation.width
-                            offset = min(0, max(-revealWidth, dx))
-                        }
-                        .onEnded { value in
-                            let shouldOpen = value.translation.width < -revealWidth * 0.35
-                                || value.predictedEndTranslation.width < -revealWidth * 0.5
-                            withAnimation(.easeOut(duration: 0.18)) {
-                                offset = shouldOpen ? -revealWidth : 0
-                            }
-                        }
-                )
+                .highPriorityGesture(swipeGesture)
         }
         .clipped()
+    }
+
+    private var swipeGesture: some Gesture {
+        DragGesture(minimumDistance: 16)
+            .onChanged { value in
+                let dx = value.translation.width
+                offset = min(0, max(-revealWidth, dx))
+            }
+            .onEnded { value in
+                let shouldOpen = value.translation.width < -revealWidth * 0.35
+                    || value.predictedEndTranslation.width < -revealWidth * 0.5
+                withAnimation(.easeOut(duration: 0.18)) {
+                    offset = shouldOpen ? -revealWidth : 0
+                }
+            }
     }
 
     private var actionStrip: some View {
