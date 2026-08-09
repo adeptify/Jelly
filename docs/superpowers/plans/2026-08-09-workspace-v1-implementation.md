@@ -73,9 +73,9 @@ public struct WorkspaceSaveReceipt: Equatable, Sendable {
     public let persistedDraft: PersistedDraftReceipt?
 }
 
-private struct LoadedSource: Sendable {
-    let rawData: Data
-    let provenance: WorkspaceLoadProvenance
+private enum LoadedSource: Sendable {
+    case absent
+    case bytes(rawData: Data, provenance: WorkspaceLoadProvenance)
 }
 ~~~
 
@@ -88,12 +88,12 @@ load 原始字节并保留 source schema/hash
 → 保存字节精确快照
 → 重新读取快照并校验 hash
 → 原子写 RecoveryManifest
-→ 重新读取主文件并确认仍为 load hash
-→ 编码 V3 并原子替换主文件
+→ 在共享协调锁内比较主文件与 load hash，并原子替换为编码后的 V3
+→ 读回 V3 并整体更新 LoadedSource
 → 返回 WorkspaceSaveReceipt
 ~~~
 
-若源是已登记的 V3，后续保存只走验证、编码、原子替换和 receipt；若主文件在 load 后被外部修改，返回 sourceChanged 并保持当前文件。
+若源是已登记的 V3，后续保存只走验证、编码、协调式 CAS、读回和 receipt；若主文件在 load 后被协作式写入者修改，返回 sourceChanged 并保持当前文件。从 snapshot preflight 到 CAS、读回和 LoadedSource 更新不得出现 actor suspension。主文件 compare-and-replace 的保证范围是所有 Jelly 进程和遵守同一文件协调/锁协议的写入者；普通文件系统无法阻止完全不协作的进程在任意两条系统调用之间改写文件，因此不得宣称对这种写入者具备绝对 CAS。每次成功 save/restore 后必须用候选 V3 的 exact rawData 与新 provenance 整体替换 LoadedSource，不能只更新 expected hash。
 
 ## Transaction, Undo, and Journal Contract
 
@@ -625,9 +625,9 @@ For a submitted document, derive `affectedBlockIDs` from added/removed Blocks an
 
 **Consistency repair exception:** `.repairConsistency` is the only command that cannot run the normal strict input validator because its input is intentionally dangling. It first runs the public consistency inspector and structural safety checks, requires the payload checksum and resolution-key set to match every current repairable relationship issue, applies all resolutions atomically, then runs the same strict final `WorkspaceValidator`. This is not a public bypass validator. Non-relationship problems such as `invalidBlockDocument` are fatal load issues handled by backup/restore, not relink/unlink. Ordinary commands retain strict input and final validation.
 
-- [ ] Write RED tests proving every successful state-changing command is all-or-nothing and increments Workspace revision exactly once. Cancellation, idempotent completion, stale metadata and any other no-op return noChange and cause no revision, save or undo record.
+- [x] Write RED tests proving every successful state-changing command is all-or-nothing and increments Workspace revision exactly once. Cancellation, idempotent completion, stale metadata and any other no-op return noChange and cause no revision, save or undo record.
 
-- [ ] Write discriminating RED for the Gate amendments: disjoint/same-field Note draft merge and forged modifiedFields; exact linked-Block disposition keys plus task→non-task/completion rejection; base-link-context concurrent add, delete and rebind at an affected Block plus a non-affected-link positive merge; fixed-ID legacy replay with accepted/rejected/stale diagnostics; repeated completion preserving its first timestamp; exact Inspiration raw-source checksum; canonical delete preview and stale authorization; multiple dangling edges repaired in one payload plus shared-link multi-defect grouping; restore with distinct per-Note source revisions; and every typed noChange/conflict reason.
+- [x] Write discriminating RED for the Gate amendments: disjoint/same-field Note draft merge and forged modifiedFields; exact linked-Block disposition keys plus task→non-task/completion rejection; base-link-context concurrent add, delete and rebind at an affected Block plus a non-affected-link positive merge; fixed-ID legacy replay with accepted/rejected/stale diagnostics; repeated completion preserving its first timestamp; exact Inspiration raw-source checksum; canonical delete preview and stale authorization; multiple dangling edges repaired in one payload plus shared-link multi-defect grouping; restore with distinct per-Note source revisions; and every typed noChange/conflict reason.
 
 ~~~swift
 @Test func deletingCategoryMigratesEveryWorkspaceReferenceAtomically() throws {
@@ -644,7 +644,7 @@ For a submitted document, derive `affectedBlockIDs` from added/removed Blocks an
 }
 ~~~
 
-- [ ] Run RED.
+- [x] Run RED.
 
 ~~~zsh
 ./Scripts/test.sh --filter WorkspaceDomainTests.WorkspaceReducerTests
@@ -653,7 +653,7 @@ For a submitted document, derive `affectedBlockIDs` from added/removed Blocks an
 ./Scripts/test.sh --filter WorkspaceDomainTests.InspirationLifecycleTests
 ~~~
 
-- [ ] Define commands with explicit payloads; no UI-derived implicit branch.
+- [x] Define commands with explicit payloads; no UI-derived implicit branch.
 
 ~~~swift
 public enum LegacyDiagnosticDisposition: Equatable, Sendable {
@@ -875,7 +875,7 @@ public enum WorkspaceCommand: Sendable {
 }
 ~~~
 
-- [ ] Implement one reducer pipeline: copy current state, apply command, and return noChange when business content is identical. For a real change, increment changed Note revisions, increment Workspace revision once, run WorkspaceValidator, and return candidate plus changed-note IDs and optional persisted-draft context.
+- [x] Implement one reducer pipeline: copy current state, apply command, and return noChange when business content is identical. For a real change, increment changed Note revisions, increment Workspace revision once, run WorkspaceValidator, and return candidate plus changed-note IDs and optional persisted-draft context.
 
 ~~~swift
 public enum WorkspaceReductionResult: Equatable, Sendable {
@@ -919,20 +919,20 @@ public struct WorkspaceReduction: Equatable, Sendable {
 }
 ~~~
 
-- [ ] Define and test the raw CalendarCommand allow/intercept matrix. Workspace category commands sent through .calendar are rejected. Item deletion is intercepted to remove item relation/task links without deleting Notes. Series mutation uses reduceWithOutcome then migrates relations. Entire-series deletion removes its baseline/overrides. All remaining allowed item/series commands still pass through CalendarReducer and final WorkspaceValidator.
-- [ ] Implement legacy Markdown resolution atomically with context-legal payloads. Existing-note attach accepts only previewAndMerge/cancel; choosing “create new” dispatches `createPrimaryNoteForCalendar` carrying the complete injected Note seed and import authorization. The reducer re-imports with exactly the authorized fixed Block IDs and checked-task timestamp; those IDs must be sufficient, exhausted exactly and collision-free. The created Note document must equal the authorized preview. Merge replaces a canonical empty Note document, otherwise appends imported Blocks in order. Success clears only the selected scope: item notes, a notes-empty only-this OccurrenceOverride, or the newly split series notes. Cancel returns typed noChange.
-- [ ] Add public deterministic `LegacyMarkdownMigrationPlanner.preview` and checksum helpers. `expectedSourceChecksum` covers scope identity, owner/OccurrenceKey, this-and-future boundary and exact Markdown bytes. Diagnostics checksum covers the ordered `(lineNumber,message)` list. `.rejectIfPresent` rejects any diagnostic; `.accept` must match the re-imported diagnostic checksum. Re-check source, target Note revision, IDs, preview document and diagnostics only when the command dequeues; any mismatch returns `.noChange(.staleLegacyPreview)` and does not split, create/modify Note or clear text.
-- [ ] Implement updateNote as the exact three-way merge above. Validate base snapshot/checksum/derived modified fields; return the complete typed conflict on any same-field or relevant link-context conflict. Generic drafts cannot change a retained linked Task Block completion. Derive and require the exact removal-disposition key set before changing any document, link or item.
-- [ ] Implement typed composite reducers for createPrimaryNoteForCalendar, attachPrimaryNote, scheduleNoteOnCalendar and scheduleTaskBlock. Each accepts every required stable ID, scope and newSeriesID in one payload; no App task performs two commands to emulate one transaction.
-- [ ] Add reducer failure probes at each composite boundary: invalid Note, Markdown diagnostic requiring confirmation, duplicate item ID, unknown block, recurring item, primary conflict, split failure and post-mutation validator failure. Each leaves item, series, Note, links, legacy notes and revisions equal to the input state.
-- [ ] Implement primary/reference commands, explicit old-primary demote/detach choice, and multiple Notes per calendar target with at most one primary. If a target's current primary owns a TaskBlock link, changing/removing it requires `unlinkPreservingCompletion`; an extra disposition is rejected. The link is removed first, both sides keep their last identical completion, then the primary/reference change applies.
-- [ ] Implement public `PermanentDeletePlanner.preview(subject,in:)` as the only authorization oracle. It canonical-sorts exact effects by case tag plus stable IDs and hashes subject + source Workspace revision + effects with deterministic encoding. Authorization must match subject, current revision and checksum. Note delete sets baseline primary to nil, removes baseline references, changes occurrence `.replace(deleted)` to `.clear`, removes the Note from added/removed occurrence sets, removes TaskBlock/InspirationNote links, and preserves CalendarItems/Inspirations. Empty relation entries are compacted except an intentional `.clear`. Inspiration delete converts every matching live link to the authorized `deletedAt` tombstone, then removes only the Inspiration. Stale authorization returns typed noChange.
-- [ ] Implement TaskBlockCalendarLink: one task Block ↔ at most one non-recurring CalendarItem; one item ↔ at most one task Block; both share the same primary Note; one completedAt is written to both; recurrence is rejected. `TaskCompletionTarget` resolves either side to the same link. `.complete(ifTransitioningAt:)` uses the supplied instant only when both sides are incomplete; if both are already complete it preserves the old timestamp and returns typed noChange. `.incomplete` writes nil to both; repeated incomplete is noChange. Invalid/mismatched input is rejected before mutation.
-- [ ] Cover link lifecycle: deleting the calendar item unlinks while preserving Block completion; a NoteDraftSubmission that removes a linked Block must carry a per-Block keep-item/delete-item disposition; changing/removing the primary must carry unlinkPreservingCompletion; unlink preserves the last identical completedAt then permits independent changes.
-- [ ] Implement InspirationNoteLink as bidirectional inspectable data. First conversion consumes the payload's complete proposed Note with stable Note/Block IDs, validates it, creates it and the live link in one transaction. Repeated conversion ignores the unused proposal and returns `.noChange(.inspirationAlreadyConverted(existingNoteID))` so App opens the one existing derived Note. Define `WorkspaceChecksum.inspirationSourceChecksum` over Inspiration ID, inputKind and exact raw input: text bytes; URL absoluteString; or bookmark bytes plus displayName. Metadata expectation excludes current metadata, includes no normalized substitute, and a mismatch returns `.noChange(.staleMetadata)` without touching raw input.
-- [ ] Implement public consistency inspection with deterministic issue IDs/checksum from canonical locator + defect. `WorkspaceConsistencyRepairPayload` must cover every current repairable issue exactly once; missing/extra IDs, stale checksum or incompatible endpoint kinds do not mutate. `.unlink` removes only the located edge; `.relink` changes only its invalid endpoint and rejects collisions. When one original link has multiple defective endpoints, group its resolutions by the original locator and construct the one replacement edge only after all endpoint resolutions validate. All surviving Notes, Calendar objects and Inspirations remain. Apply the complete set atomically so the one final strict WorkspaceValidator can pass. A report containing fatal non-relationship issues cannot be repaired by this command.
-- [ ] Implement WorkspaceContentSnapshot with revisions excluded plus `WorkspaceRestoreContentPayload(content, sourceRevisionHighWatermark, sourceNoteRevisions)`. The revision map keys equal the snapshot Note IDs exactly and every value is in `0...sourceRevisionHighWatermark`; invalid metadata or Int64 overflow is rejected before mutation. Restore chooses candidate Workspace revision as max(current Workspace revision, source high watermark, every source/current Note revision) + 1. For each surviving Note: unchanged business content keeps max(current, source) revision; changed content uses max(current, source) + 1; a Note absent from current but restored uses the candidate Workspace revision. WorkspaceValidator enforces every Note revision is nonnegative and no greater than Workspace revision.
-- [ ] Run GREEN and full domain tests.
+- [x] Define and test the raw CalendarCommand allow/intercept matrix. Workspace category commands sent through .calendar are rejected. Item deletion is intercepted to remove item relation/task links without deleting Notes. Series mutation uses reduceWithOutcome then migrates relations. Entire-series deletion removes its baseline/overrides. All remaining allowed item/series commands still pass through CalendarReducer and final WorkspaceValidator.
+- [x] Implement legacy Markdown resolution atomically with context-legal payloads. Existing-note attach accepts only previewAndMerge/cancel; choosing “create new” dispatches `createPrimaryNoteForCalendar` carrying the complete injected Note seed and import authorization. The reducer re-imports with exactly the authorized fixed Block IDs and checked-task timestamp; those IDs must be sufficient, exhausted exactly and collision-free. The created Note document must equal the authorized preview. Merge replaces a canonical empty Note document, otherwise appends imported Blocks in order. Success clears only the selected scope: item notes, a notes-empty only-this OccurrenceOverride, or the newly split series notes. Cancel returns typed noChange.
+- [x] Add public deterministic `LegacyMarkdownMigrationPlanner.preview` and checksum helpers. `expectedSourceChecksum` covers scope identity, owner/OccurrenceKey, this-and-future boundary and exact Markdown bytes. Diagnostics checksum covers the ordered `(lineNumber,message)` list. `.rejectIfPresent` rejects any diagnostic; `.accept` must match the re-imported diagnostic checksum. Re-check source, target Note revision, IDs, preview document and diagnostics only when the command dequeues; any mismatch returns `.noChange(.staleLegacyPreview)` and does not split, create/modify Note or clear text.
+- [x] Implement updateNote as the exact three-way merge above. Validate base snapshot/checksum/derived modified fields; return the complete typed conflict on any same-field or relevant link-context conflict. Generic drafts cannot change a retained linked Task Block completion. Derive and require the exact removal-disposition key set before changing any document, link or item.
+- [x] Implement typed composite reducers for createPrimaryNoteForCalendar, attachPrimaryNote, scheduleNoteOnCalendar and scheduleTaskBlock. Each accepts every required stable ID, scope and newSeriesID in one payload; no App task performs two commands to emulate one transaction.
+- [x] Add reducer failure probes at each composite boundary: invalid Note, Markdown diagnostic requiring confirmation, duplicate item ID, unknown block, recurring item, primary conflict, split failure and post-mutation validator failure. Each leaves item, series, Note, links, legacy notes and revisions equal to the input state.
+- [x] Implement primary/reference commands, explicit old-primary demote/detach choice, and multiple Notes per calendar target with at most one primary. If a target's current primary owns a TaskBlock link, changing/removing it requires `unlinkPreservingCompletion`; an extra disposition is rejected. The link is removed first, both sides keep their last identical completedAt, then the primary/reference change applies.
+- [x] Implement public `PermanentDeletePlanner.preview(subject,in:)` as the only authorization oracle. It canonical-sorts exact effects by case tag plus stable IDs and hashes subject + source Workspace revision + effects with deterministic encoding. Authorization must match subject, current revision and checksum. Note delete sets baseline primary to nil, removes baseline references, changes occurrence `.replace(deleted)` to `.clear`, removes the Note from added/removed occurrence sets, removes TaskBlock/InspirationNote links, and preserves CalendarItems/Inspirations. Empty relation entries are compacted except an intentional `.clear`. Inspiration delete converts every matching live link to the authorized `deletedAt` tombstone, then removes only the Inspiration. Stale authorization returns typed noChange.
+- [x] Implement TaskBlockCalendarLink: one task Block ↔ at most one non-recurring CalendarItem; one item ↔ at most one task Block; both share the same primary Note; one completedAt is written to both; recurrence is rejected. `TaskCompletionTarget` resolves either side to the same link. `.complete(ifTransitioningAt:)` uses the supplied instant only when both sides are incomplete; if both are already complete it preserves the old timestamp and returns typed noChange. `.incomplete` writes nil to both; repeated incomplete is noChange. Invalid/mismatched input is rejected before mutation.
+- [x] Cover link lifecycle: deleting the calendar item unlinks while preserving Block completion; a NoteDraftSubmission that removes a linked Block must carry a per-Block keep-item/delete-item disposition; changing/removing the primary must carry unlinkPreservingCompletion; unlink preserves the last identical completedAt then permits independent changes.
+- [x] Implement InspirationNoteLink as bidirectional inspectable data. First conversion consumes the payload's complete proposed Note with stable Note/Block IDs, validates it, creates it and the live link in one transaction. Repeated conversion ignores the unused proposal and returns `.noChange(.inspirationAlreadyConverted(existingNoteID))` so App opens the one existing derived Note. Define `WorkspaceChecksum.inspirationSourceChecksum` over Inspiration ID, inputKind and exact raw input: text bytes; URL absoluteString; or bookmark bytes plus displayName. Metadata expectation excludes current metadata, includes no normalized substitute, and a mismatch returns `.noChange(.staleMetadata)` without touching raw input.
+- [x] Implement public consistency inspection with deterministic issue IDs/checksum from canonical locator + defect. `WorkspaceConsistencyRepairPayload` must cover every current repairable issue exactly once; missing/extra IDs, stale checksum or incompatible endpoint kinds do not mutate. `.unlink` removes only the located edge; `.relink` changes only its invalid endpoint and rejects collisions. When one original link has multiple defective endpoints, group its resolutions by the original locator and construct the one replacement edge only after all endpoint resolutions validate. All surviving Notes, Calendar objects and Inspirations remain. Apply the complete set atomically so the one final strict WorkspaceValidator can pass. A report containing fatal non-relationship issues cannot be repaired by this command.
+- [x] Implement WorkspaceContentSnapshot with revisions excluded plus `WorkspaceRestoreContentPayload(content, sourceRevisionHighWatermark, sourceNoteRevisions)`. The revision map keys equal the snapshot Note IDs exactly and every value is in `0...sourceRevisionHighWatermark`; invalid metadata or Int64 overflow is rejected before mutation. Restore chooses candidate Workspace revision as max(current Workspace revision, source high watermark, every source/current Note revision) + 1. For each surviving Note: unchanged business content keeps max(current, source) revision; changed content uses max(current, source) + 1; a Note absent from current but restored uses the candidate Workspace revision. WorkspaceValidator enforces every Note revision is nonnegative and no greater than Workspace revision.
+- [x] Run GREEN and full domain tests.
 
 ~~~zsh
 ./Scripts/test.sh --filter WorkspaceDomainTests.WorkspaceReducerTests
@@ -944,7 +944,7 @@ public struct WorkspaceReduction: Equatable, Sendable {
 git diff --check
 ~~~
 
-- [ ] Commit.
+- [x] Commit.
 
 ~~~zsh
 git add Sources/WorkspaceDomain Tests/WorkspaceDomainTests
@@ -955,9 +955,7 @@ git commit -m "feat(workspace): 完成跨对象原子命令"
 
 **Files**
 
-- Modify: Package.swift
 - Create: Sources/CalendarPersistence/WorkspaceDocument.swift
-- Create: Sources/CalendarPersistence/V2CalendarDocument.swift
 - Create: Sources/CalendarPersistence/WorkspaceDocumentCodec.swift
 - Create: Sources/CalendarPersistence/WorkspaceRepository.swift
 - Create: Sources/CalendarPersistence/JSONWorkspaceRepository.swift
@@ -968,7 +966,7 @@ git commit -m "feat(workspace): 完成跨对象原子命令"
 - Create: Sources/CalendarPersistence/DraftJournalRepository.swift
 - Create: Sources/CalendarPersistence/WorkspaceRestorePlan.swift
 - Modify: Sources/CalendarPersistence/BackupService.swift
-- Retain for legacy decode: Sources/CalendarPersistence/CalendarDocument.swift
+- Retain and freeze as the only V2 DTO/decoder: Sources/CalendarPersistence/CalendarDocument.swift
 - Retain for legacy decode: Sources/CalendarPersistence/V1CalendarDocument.swift
 - Modify temporarily: Sources/CalendarPersistence/CalendarRepository.swift
 - Retain only until Task 6 cutover: Sources/CalendarPersistence/JSONCalendarRepository.swift
@@ -996,8 +994,9 @@ git commit -m "feat(workspace): 完成跨对象原子命令"
 }
 ~~~
 
-- [ ] Write RED failure-injection tests for snapshot write, snapshot read/hash verification, manifest write, source hash recheck and main replace. Assert main bytes remain byte-for-byte V1/V2 for every pre-replace failure.
+- [ ] Write RED failure-injection tests for snapshot write, snapshot read/hash verification, manifest write, source hash recheck, coordinated compare-and-replace and main replace. Assert main bytes remain byte-for-byte V1/V2 for every pre-replace failure. Add a hook that attempts a cooperating main-file mutation after the repository has prepared the candidate but before the CAS primitive compares and renames; the stale candidate must lose without overwrite.
 - [ ] Add RED cases for source changed before snapshot producing neither snapshot nor manifest entry, source changed after manifest but before replace preserving the changed main, identical source hash reusing the verified record, and a different source hash adding a record without deleting the old snapshot/record.
+- [ ] Add RED concurrency cases for two saves and for save interleaved with commitRestore. The second transaction must not enter the snapshot/manifest/CAS chain until the first has finished and LoadedSource has been replaced. No test may pass merely because an outdated actor continuation resumes last.
 - [ ] Run RED.
 
 ~~~zsh
@@ -1010,7 +1009,7 @@ git commit -m "feat(workspace): 完成跨对象原子命令"
 ~~~
 
 - [ ] Implement an envelope-first decoder. V1 uses the existing V1 DTO to construct valid V2 CalendarState semantics before wrapping V3; unknown schema returns before payload decode.
-- [ ] Move AtomicFileWriting and FoundationAtomicFileWriter unchanged into AtomicFileWriter.swift. Port every applicable atomic-write, snapshot, rollback, corruption and reopen assertion from JSONCalendarRepositoryTests into the Workspace repository suites. Keep the now-protocol-only CalendarRepository and JSONCalendarRepository just long enough for the still-unmigrated Task 5 App to compile; Task 6 removes both and the old tests in the same single-Store cutover. CalendarDocument/V1CalendarDocument remain decode-only DTO/codecs, never repositories.
+- [ ] Move the existing unconditional AtomicFileWriting and FoundationAtomicFileWriter API into AtomicFileWriter.swift for sidecars, and add a separate main-file CAS primitive that accepts expected SHA-256 plus candidate bytes. It acquires the shared Jelly advisory lock/file-coordination critical section, re-reads and compares the main file inside that same critical section, then renames without releasing the lock. Its stated guarantee covers Jelly/cooperating writers only; a typed sourceChanged result is not an assertion of impossible protection from an uncooperative process. Port every applicable atomic-write, snapshot, rollback, corruption and reopen assertion from JSONCalendarRepositoryTests into the Workspace repository suites. Keep the now-protocol-only CalendarRepository and JSONCalendarRepository just long enough for the still-unmigrated Task 5 App to compile; Task 6 removes both and the old tests in the same single-Store cutover. CalendarDocument is the one frozen schema-2 DTO/decoder and V1CalendarDocument is schema 1; do not create a parallel V2 migration algorithm.
 - [ ] Define repository load/save contracts.
 
 ~~~swift
@@ -1029,7 +1028,7 @@ public protocol WorkspaceRepository: Sendable {
 }
 ~~~
 
-- [ ] Implement JSONWorkspaceRepository as one actor retaining LoadedSource(rawData, provenance). Snapshot bytes come only from LoadedSource.rawData, never a decoded/re-encoded state. Before first V3 replace: preflight current main against the loaded hash, write raw snapshot, read and hash it, atomically register manifest, re-read main hash, then replace.
+- [ ] Implement JSONWorkspaceRepository as one actor retaining `LoadedSource.absent` or `LoadedSource.bytes(rawData, provenance)`. Snapshot bytes come only from LoadedSource rawData, never a decoded/re-encoded state. Before first V3 replace: preflight current main against the loaded hash, write raw snapshot, read and hash it, atomically register manifest, then invoke the main-file CAS. From preflight through snapshot/manifest/CAS and LoadedSource replacement, the repository must not `await` or call a reentrant actor: all file helpers are synchronous actor-isolated value/reference helpers, or the whole chain is guarded by an explicit non-reentrant transaction lock. An absent main is not represented by fake zero bytes; its first seed write is a coordinated create-if-absent CAS, is read back and verified, and only then becomes `.bytes`.
 
 ~~~swift
 public struct RecoveryManifest: Codable, Equatable, Sendable {
@@ -1046,13 +1045,16 @@ public struct RecoverySnapshotRecord: Codable, Equatable, Sendable {
 }
 ~~~
 
-- [ ] Make manifest and Journal independent atomic files. The manifest appends a new record for new source bytes, reuses a verified record for identical bytes, and never discards older records. A snapshot without a verified manifest entry cannot permit main replacement.
-- [ ] Apply compare-and-swap protection to every save, not only migration: re-read the current main hash immediately before replace, reject external changes, and after each successful own replace update the actor’s expected hash to the newly written bytes.
-- [ ] Implement DraftJournal entries with noteID, baseWorkspaceRevision Int64, baseNoteRevision Int64, draftGeneration UInt64, full Note snapshot, updatedAt, normalized noteSnapshotChecksum, journalChecksum and optional saved receipt. Validate journalChecksum before any recovery comparison and clear only on an exact receipt match.
-- [ ] Treat a missing main file as a fresh V3 seed with no legacy snapshot requirement. A V1/V2 source requires the migration chain; an already registered V3 source uses normal atomic saves.
+- [ ] Make manifest and Journal independent atomic files. The manifest appends a new record for new source bytes, reuses a record only after re-reading the referenced snapshot and matching hash plus byteCount, and never discards older records. Reject absolute snapshot paths, `..`, symlink/path escape outside the snapshot directory and malformed manifests; fail closed. A snapshot without a verified manifest entry cannot permit main replacement.
+- [ ] Apply the coordinated compare-and-replace primitive to every save, not only migration. For cooperating writers the compare and rename occur in one critical section. After each successful own replace, read back the exact candidate and replace the actor's complete LoadedSource with schema-3 raw bytes, hash and byte count.
+- [ ] Define the durable Journal envelope and actor API. `StoredDraftJournalRecord(entry,savedReceipt,recordChecksum)` is the atomic on-disk unit. `persist(entry)`, `record(receipt)` and `clear(ifMatching:)` each perform one actor-isolated read-validate-modify-atomic-write operation; `record`/`clear` compare noteID, generation, note snapshot checksum and persisted Note revision. A generation-5 receipt cannot overwrite or clear generation 6. Validate the record checksum before any recovery comparison; Journal-clear failure leaves the matching receipt durable for restart reconciliation.
+- [ ] Before `save(state,draft:)` encodes anything, validate WorkspaceState and, when draft is present, require its Note to exist and its normalized checksum to equal `PersistableDraftContext.noteSnapshotChecksum`. Construct the persisted receipt only from that exact Note's revision in the candidate being written. Add missing-Note, checksum-mismatch and correct-receipt REDs.
+- [ ] Treat a missing main file as `.absent` and a fresh V3 seed with no legacy snapshot requirement. The create-if-absent write failure leaves it absent. A V1/V2 source requires the migration chain; an already registered V3 source uses normal coordinated saves. Add missing seed failure, V1 load followed by two saves, and reopen provenance tests.
 - [ ] On load, run a non-destructive WorkspaceConsistencyInspector before strict mutation validation. Dangling relationships remain in the decoded state but are excluded from clickable projections and returned as WorkspaceLoadResult.consistencyIssues. The Store enters needsRelationshipRepair and permits only backup/restore or an explicit relink/unlink command until issues are resolved; it never silently drops the relationship to make a save pass.
 - [ ] Add tests for generation 5 receipt after generation 6, unrelated calendar saves, title-only edits, Journal clear failure and restart reconciliation.
-- [ ] Add pure BackupService validation/planning for JSONWorkspaceRepository.prepareRestore. PreparedWorkspaceRestore contains decoded business content, source revision high watermark, source schema/hash and validated raw source bytes. To keep Task 5 independently compiling, retain the existing deprecated Calendar-only export(state:), validatedState and restore(from:repository:rollbackURL:) wrappers unchanged and backed only by the temporary JSONCalendarRepository actor. Task 6 migrates BackupCommands/Store and removes those wrappers together with the old repository. In the final architecture, the Store applies WorkspaceReducer.restoreContent against latest FIFO state, then JSONWorkspaceRepository.commitRestore creates raw rollback and atomically replaces the main file with the normalized-revision V3 candidate; no BackupService or UI path writes the main file outside that actor.
+- [ ] Add pure BackupService validation/planning for JSONWorkspaceRepository.prepareRestore. `PreparedWorkspaceRestore` carries validated raw source bytes and provenance, `WorkspaceContentSnapshot`, source revision high watermark, exact `[NoteID: Int64]` source revisions, and a unique rollback URL. The Note-revision keys must equal prepared content Note IDs. `commitRestore(prepared,state:)` revalidates raw hash/count, requires the candidate business content to equal prepared content, validates the candidate Workspace, and rejects any binding mismatch before writing rollback.
+- [ ] Fix commitRestore ordering: while holding the same non-reentrant repository transaction, lock/read the current exact main bytes, write a unique raw rollback, read it back and verify hash plus byteCount, then invoke the coordinated main-file CAS and finally replace LoadedSource. Rollback write/readback corruption, sourceChanged and main replace failures must leave the main bytes untouched. A rollback is recovery evidence and is never silently deleted on failure.
+- [ ] Add the public Workspace backup export path that Task 6 will call, for example `BackupService.exportCurrent(from:to:)`. It reads, envelope-validates and exports the repository's exact currently persisted raw V1, V2 or V3 bytes, atomically writes the destination and reads back hash plus byteCount. A V1/V2 load whose first user action is backup therefore succeeds without forcing or simulating a V3 migration save; add that RED. It never re-encodes an in-memory subgraph. To keep Task 5 independently compiling, retain the existing deprecated Calendar-only export(state:), validatedState and restore(from:repository:rollbackURL:) wrappers unchanged and backed only by the temporary JSONCalendarRepository actor. Task 6 migrates BackupCommands/Store to the Workspace export/prepareRestore APIs and removes those wrappers together with the old repository. In the final architecture, the Store applies WorkspaceReducer.restoreContent against latest FIFO state, then JSONWorkspaceRepository.commitRestore performs the verified rollback/CAS transaction; no BackupService or UI path writes the main file outside that actor.
 - [ ] Run GREEN and full persistence tests.
 
 ~~~zsh
@@ -1071,7 +1073,7 @@ git diff --check
 - [ ] Commit.
 
 ~~~zsh
-git add Package.swift Sources/CalendarPersistence Tests/CalendarPersistenceTests
+git add Sources/CalendarPersistence Tests/CalendarPersistenceTests
 git commit -m "feat(storage): 安全迁移工作空间 V3 并增加草稿恢复"
 ~~~
 
