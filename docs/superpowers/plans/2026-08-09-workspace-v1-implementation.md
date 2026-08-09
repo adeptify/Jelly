@@ -152,7 +152,7 @@ public enum WorkspaceTransaction {
 
 **Consumes:** CalendarDomain.CalendarState and CalendarStateValidator.
 
-- [ ] Add the WorkspaceDomain product/target and WorkspaceDomainTests target; update persistence/app test dependencies exactly as defined in the module contract.
+- [x] Add the WorkspaceDomain product/target and WorkspaceDomainTests target; update persistence/app test dependencies exactly as defined in the module contract.
 
 ~~~swift
 .library(name: "WorkspaceDomain", targets: ["WorkspaceDomain"])
@@ -163,7 +163,7 @@ public enum WorkspaceTransaction {
 )
 ~~~
 
-- [ ] Write model tests proving stable Codable round trips, archivedAt lifecycle, task completedAt payload, input/resolved inspiration enums, and WorkspaceState preserving the exact CalendarState.
+- [x] Write model tests proving stable Codable round trips, archivedAt lifecycle, task completedAt payload, input/resolved inspiration enums, and WorkspaceState preserving the exact CalendarState.
 
 ~~~swift
 @Test func workspaceRoundTripPreservesCalendarAndStableIDs() throws {
@@ -186,14 +186,14 @@ public enum WorkspaceTransaction {
 }
 ~~~
 
-- [ ] Run RED and confirm both filters fail because the target/types do not exist.
+- [x] Run RED and confirm both filters fail because the target/types do not exist.
 
 ~~~zsh
 ./Scripts/test.sh --filter WorkspaceDomainTests.WorkspaceModelTests
 ./Scripts/test.sh --filter WorkspaceDomainTests.BlockDocumentValidatorTests
 ~~~
 
-- [ ] Implement typed IDs and exact model enums.
+- [x] Implement typed IDs and exact model enums.
 
 ~~~swift
 public struct NoteID: Hashable, Codable, Sendable {
@@ -290,7 +290,7 @@ public struct SourceMetadata: Codable, Equatable, Sendable {
 }
 ~~~
 
-- [ ] Implement BlockDocumentValidator with explicit errors for duplicate block IDs, unsupported schema, indent outside 0...3, orphaned nested list/task blocks, task payload on non-task block, missing task payload on task block, non-list indent, divider carrying text, and invalid link URL.
+- [x] Implement BlockDocumentValidator with explicit errors for duplicate block IDs, unsupported schema, indent outside 0...3, orphaned nested list/task blocks, task payload on non-task block, missing task payload on task block, non-list indent, divider carrying text, and invalid link URL.
 
 ~~~swift
 public enum BlockDocumentValidationError: Error, Equatable, Sendable {
@@ -305,10 +305,10 @@ public enum BlockDocumentValidationError: Error, Equatable, Sendable {
 }
 ~~~
 
-- [ ] Implement WorkspaceChecksum as a deterministic normalized representation over NoteID, title, BlockDocument, categoryID and archivedAt; prove dictionary order and encoder formatting do not change the checksum.
-- [ ] Define the Codable storage shapes for CalendarNoteRelationGraph, TaskBlockCalendarLink and InspirationNoteLink so WorkspaceState compiles as the complete V3 root. Task 3 adds recurrence resolution/migration behavior; Task 4 adds transactional behavior.
-- [ ] Implement WorkspaceValidator as one public validation entry point that validates CalendarState, categories, Notes, Inspirations, relation endpoints, tombstones, task links, primary-note uniqueness and primary-vs-reference disjointness. Task 3 extends this same validator with effective occurrence resolution and the rule that an effective primary Note cannot coexist with nonempty legacy Markdown in the same item/series/occurrence scope; no task adds a bypass validator.
-- [ ] Run GREEN, then the pre-existing CalendarDomain suite.
+- [x] Implement WorkspaceChecksum as a deterministic normalized representation over NoteID, title, BlockDocument, categoryID and archivedAt; prove dictionary order and encoder formatting do not change the checksum.
+- [x] Define the Codable storage shapes for CalendarNoteRelationGraph, TaskBlockCalendarLink and InspirationNoteLink so WorkspaceState compiles as the complete V3 root. Task 3 adds recurrence resolution/migration behavior; Task 4 adds transactional behavior.
+- [x] Implement WorkspaceValidator as one public validation entry point that validates CalendarState, categories, Notes, Inspirations, relation endpoints, tombstones, task links, primary-note uniqueness and primary-vs-reference disjointness. Task 3 extends this same validator with effective occurrence resolution and the rule that an effective primary Note cannot coexist with nonempty legacy Markdown in the same item/series/occurrence scope; no task adds a bypass validator.
+- [x] Run GREEN, then the pre-existing CalendarDomain suite.
 
 ~~~zsh
 ./Scripts/test.sh --filter WorkspaceDomainTests.WorkspaceModelTests
@@ -317,7 +317,7 @@ public enum BlockDocumentValidationError: Error, Equatable, Sendable {
 git diff --check
 ~~~
 
-- [ ] Commit.
+- [x] Commit.
 
 ~~~zsh
 git add Package.swift Sources/WorkspaceDomain Tests/WorkspaceDomainTests
