@@ -277,8 +277,7 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
                 case .confirmedAbsent:
                     currentSource = .absent
                 case let .bytes(rawData):
-                    if let result = try? WorkspaceDocumentCodec.decode(rawData),
-                       (try? WorkspaceValidator.validate(result.state)) != nil {
+                    if let result = try? WorkspaceDocumentCodec.decode(rawData) {
                         currentSource = .valid(rawData: rawData, result: result)
                     } else {
                         currentSource = .opaqueInvalid(rawData: rawData, identity: identity(for: rawData))

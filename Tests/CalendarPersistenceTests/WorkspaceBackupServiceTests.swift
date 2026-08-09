@@ -354,6 +354,83 @@ struct WorkspaceBackupServiceTests {
         }
     }
 
+    @Test func repairableV3PeerRemainsValidAcrossRollbackAndDefiniteCASFailures() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        let currentData = try WorkspaceDocumentCodec.encode(current)
+        var repairable = WorkspaceState.empty(calendar: WorkspacePersistenceFixtures.calendarState)
+        repairable.calendarNoteRelations.baselines[.item(UUID())] = .init(
+            primaryNoteID: nil,
+            referenceNoteIDs: []
+        )
+        let peerData = try JSONEncoder.workspaceDeterministic.encode(
+            WorkspaceDocument(schemaVersion: 3, state: repairable)
+        )
+        let peerLoad = try WorkspaceDocumentCodec.decode(peerData)
+        #expect(peerLoad.consistencyIssues.count == 1)
+        #expect(peerLoad.consistencyIssues.first?.defect == .missingCalendarOwner)
+        let restored = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 2)
+        let source = directory.file("repairable-restore.json")
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let preview = try await BackupService().inspectRestoreSource(source)
+
+        for failure in ["rollback", "definite-cas"] {
+            let main = directory.file("repairable-\(failure)-main.json")
+            try currentData.write(to: main)
+            let repository: JSONWorkspaceRepository
+            let expectedError: WorkspacePersistenceError
+            if failure == "rollback" {
+                repository = JSONWorkspaceRepository(
+                    documentURL: main,
+                    seed: { current },
+                    rollbackWriter: WorkspacePersistenceAlwaysFailingExclusiveWriter()
+                )
+                expectedError = .rollbackWriteFailed
+            } else {
+                repository = JSONWorkspaceRepository(
+                    documentURL: main,
+                    seed: { current },
+                    mainFileWriter: WorkspacePersistenceAlwaysFailingMainWriter()
+                )
+                expectedError = .atomicWriteFailed
+            }
+            _ = try await repository.load()
+            let prepared = try await repository.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+            try peerData.write(to: main)
+
+            var observed: Error?
+            do {
+                _ = try await repository.commitRestore(prepared, state: restored)
+            } catch {
+                observed = error
+            }
+
+            #expect((observed as? WorkspacePersistenceError) == expectedError)
+            #expect(try Data(contentsOf: main) == peerData)
+            let loadedData: Data?
+            do {
+                loadedData = try await repository.currentDocumentData()
+            } catch {
+                Issue.record("repairable peer was not retained as valid after \(failure): \(error)")
+                loadedData = nil
+            }
+            #expect(loadedData == peerData)
+            await #expect(throws: WorkspacePersistenceError.invalidDocument) {
+                _ = try await repository.currentRawRecoveryData()
+            }
+            if failure == "rollback" {
+                #expect(FileManager.default.fileExists(atPath: prepared.rollbackURL.path) == false)
+            } else {
+                #expect(try Data(contentsOf: prepared.rollbackURL) == peerData)
+            }
+            #expect(try await repository.reconcilePendingCommit() == .notCommitted(.init()))
+            await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+                _ = try await repository.commitRestore(prepared, state: restored)
+            }
+        }
+    }
+
     @Test func restoringOverV2RegistersExactSnapshotAndManifestBeforeMainReplacement() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
