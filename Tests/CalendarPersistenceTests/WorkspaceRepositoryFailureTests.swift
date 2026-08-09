@@ -229,9 +229,18 @@ struct WorkspaceRepositoryFailureTests {
             _ = try await repository.save(state)
         }
         defer { writer.restoreParentSearchability(at: main) }
-        #expect(try await repository.reconcilePendingCommit() == .sourceChanged)
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.reconcilePendingCommit()
+        }
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.currentDocumentData()
+        }
 
         writer.restoreParentSearchability(at: main)
+        #expect(try await repository.reconcilePendingCommit() == .committed(
+            WorkspaceSaveReceipt(workspaceRevision: state.revision, persistedDraft: nil)
+        ))
+        #expect(try await repository.reconcilePendingCommit() == .notCommitted)
         #expect(try Data(contentsOf: main) == candidate)
     }
 
@@ -331,6 +340,12 @@ struct WorkspaceRepositoryFailureTests {
         await #expect(throws: WorkspacePersistenceError.commitUncertain) {
             _ = try await repository.currentDocumentData()
         }
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.load()
+        }
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.save(try WorkspacePersistenceFixtures.workspaceWithOneNote())
+        }
         #expect(try await repository.reconcilePendingCommit() == .notCommitted)
         #expect(try await repository.currentDocumentData() == v2)
     }
@@ -416,8 +431,17 @@ struct WorkspaceRepositoryFailureTests {
         }
         defer { readbackFailure.restoreReadability(at: main) }
 
-        #expect(try await repository.reconcilePendingCommit() == .sourceChanged)
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.reconcilePendingCommit()
+        }
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.load()
+        }
         readbackFailure.restoreReadability(at: main)
+        #expect(try await repository.reconcilePendingCommit() == .committed(
+            WorkspaceSaveReceipt(workspaceRevision: state.revision, persistedDraft: nil)
+        ))
+        #expect(try await repository.reconcilePendingCommit() == .notCommitted)
         #expect(try Data(contentsOf: main) == candidate)
     }
 

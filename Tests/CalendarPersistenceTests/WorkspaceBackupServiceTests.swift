@@ -458,6 +458,9 @@ struct WorkspaceBackupServiceTests {
         }
         defer { readbackFailure.restoreReadability(at: main) }
         await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.reconcilePendingCommit()
+        }
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
             _ = try await repository.load()
         }
         await #expect(throws: WorkspacePersistenceError.commitUncertain) {

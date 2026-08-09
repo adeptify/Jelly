@@ -284,33 +284,35 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
                 case .confirmedAbsent:
                     current = nil
                 case .unreadableUnknown:
+                    throw WorkspacePersistenceError.commitUncertain
+                }
+                if current == pending.candidateRawData {
+                    do {
+                        try replaceLoadedSourceWithVerifiedRawData(
+                            pending.candidateRawData,
+                            expectedCandidate: pending.candidateRawData
+                        )
+                    } catch {
+                        throw WorkspacePersistenceError.commitUncertain
+                    }
                     completePendingRestoreCapability(pending.restoreCapabilityID)
                     pendingCommit = nil
-                    return .sourceChanged
+                    return .committed(pending.receipt)
                 }
-            if current == pending.candidateRawData {
-                try replaceLoadedSourceWithVerifiedRawData(
-                    pending.candidateRawData,
-                    expectedCandidate: pending.candidateRawData
-                )
+                if matchesPreviousSource(current, pending.previousSource) {
+                    loadedSource = pending.previousSource
+                    completePendingRestoreCapability(pending.restoreCapabilityID)
+                    pendingCommit = nil
+                    return .notCommitted
+                }
                 completePendingRestoreCapability(pending.restoreCapabilityID)
                 pendingCommit = nil
-                return .committed(pending.receipt)
+                return .sourceChanged
             }
-            if matchesPreviousSource(current, pending.previousSource) {
-                loadedSource = pending.previousSource
-                completePendingRestoreCapability(pending.restoreCapabilityID)
-                pendingCommit = nil
-                return .notCommitted
-            }
-            completePendingRestoreCapability(pending.restoreCapabilityID)
-            pendingCommit = nil
-            return .sourceChanged
-            }
+        } catch let error as WorkspacePersistenceError where error == .commitUncertain {
+            throw error
         } catch {
-            completePendingRestoreCapability(pending.restoreCapabilityID)
-            pendingCommit = nil
-            return .sourceChanged
+            throw WorkspacePersistenceError.commitUncertain
         }
     }
 
