@@ -235,8 +235,10 @@ public enum InlineMark: String, Codable, Hashable, Sendable {
 public struct NoteDraftSubmission: Equatable, Sendable {
     public let noteID: NoteID
     public let editSessionID: UUID
-    public let baseNoteRevision: Int64?
-    public let baseNoteSnapshotChecksum: String?
+    public let baseSnapshot: Note
+    public let baseNoteRevision: Int64
+    public let baseNoteSnapshotChecksum: String
+    public let baseLinkedTaskBlockLinks: Set<TaskBlockCalendarLink>
     public let draftGeneration: UInt64
     public let snapshot: Note
     public let noteSnapshotChecksum: String
@@ -595,6 +597,10 @@ git commit -m "feat(workspace): 串联重复事项与笔记关系迁移"
 - Create: Sources/WorkspaceDomain/WorkspaceReducer+Relations.swift
 - Create: Sources/WorkspaceDomain/WorkspaceReducer+Inspiration.swift
 - Create: Sources/WorkspaceDomain/WorkspaceReducer+Categories.swift
+- Modify: Sources/WorkspaceDomain/DraftContracts.swift
+- Modify: Sources/WorkspaceDomain/WorkspaceConsistencyIssue.swift
+- Modify: Sources/WorkspaceDomain/WorkspaceChecksum.swift
+- Create: Sources/WorkspaceDomain/WorkspaceDeletePlanning.swift
 - Modify: Sources/WorkspaceDomain/TaskBlockCalendarLink.swift
 - Modify: Sources/WorkspaceDomain/InspirationNoteLink.swift
 - Create: Sources/WorkspaceDomain/WorkspaceContentSnapshot.swift
@@ -603,6 +609,7 @@ git commit -m "feat(workspace): 串联重复事项与笔记关系迁移"
 - Create: Tests/WorkspaceDomainTests/WorkspaceCategoryCommandTests.swift
 - Create: Tests/WorkspaceDomainTests/TaskBlockCalendarLinkTests.swift
 - Create: Tests/WorkspaceDomainTests/InspirationLifecycleTests.swift
+- Modify: Tests/WorkspaceDomainTests/WorkspaceModelTests.swift
 
 **Produces:** Pure, deterministic, cross-object transactions for calendar, notes, relations, task links, inspiration links, categories, delete/archive and undo content restoration.
 
@@ -610,7 +617,17 @@ git commit -m "feat(workspace): 串联重复事项与笔记关系迁移"
 
 For every calendar/relationship transaction the reducer order is fixed: validate the input Workspace; copy a candidate; call `CalendarReducer.reduceWithOutcome`; call `SeriesRelationMigration.apply(outcome, resultingGraph:)`; apply the requested relationship exactly once; compare business content and return noChange when equal; otherwise allocate Note/Workspace revisions; run the final `WorkspaceValidator` over that exact revision-bearing candidate; then return. An optional pre-revision candidate check may fail early, but never replaces the final validation. `occurrenceThisAndFuture` performs the injected-ID empty `SeriesPatch()` split, migrates relations, and applies the relation once to `.series(outcome.newSeriesID)`. Any calendar, collision, migration or validator failure returns the exact input Workspace with no revision/undo/save side effect.
 
+**Pre-implementation Gate amendment — result semantics:** cancellation and an identical desired business state return typed `noChange`; a stale async metadata result is also a typed, silent noChange. Stale legacy/delete/consistency previews return typed noChange reasons so App can refresh the preview. A draft three-way conflict returns `.conflict` with a complete public conflict payload and leaves the Journal eligible for recovery. Structurally invalid commands throw an `Equatable, Sendable` `WorkspaceReducerError`. None of these paths allocates revision or changed-note IDs.
+
+**Draft three-way merge contract:** `NoteDraftSubmission` additionally carries a normalized `baseSnapshot: Note` and the complete `baseLinkedTaskBlockLinks` for that Note when editing began. Its ID/revision/checksum must agree with `noteID`, `baseNoteRevision` and `baseNoteSnapshotChecksum`; every base link must belong to that Note and a task Block in the base document. `modifiedFields` must equal the fields whose normalized business values differ between base and submitted snapshot. Each field merges independently: submitted equals base keeps current; current equals base takes submitted; submitted equals current takes either; otherwise the whole submission returns a conflict naming that field. Unmodified submitted fields never overwrite current fields. A changed Note keeps `createdAt`, takes `updatedAt = now`, and receives one later revision allocation.
+
+For a submitted document, derive `affectedBlockIDs` from added/removed Blocks and any stable Block whose normalized kind/content/taskState changed from base to submitted. Compare base versus current link projections for this Note at those IDs; any concurrent link add, delete or rebind is a draft conflict, while links on unaffected Block IDs merge independently. Then derive the exact set of currently linked task Blocks that are absent or no longer `.task` in the submitted document. `linkedBlockDeletionDispositions.keys` must equal that set byte-for-byte; missing or extra keys are errors. `.keepCalendarItem` removes only the TaskBlock link and preserves the item, item relation and the last equal completion value. `.deleteCalendarItem` also removes the item and its item-owned relation while preserving the Note. A retained linked task Block may change text/marks but its `completedAt` cannot be changed through `updateNote`; completion must use `setTaskCompletion`.
+
+**Consistency repair exception:** `.repairConsistency` is the only command that cannot run the normal strict input validator because its input is intentionally dangling. It first runs the public consistency inspector and structural safety checks, requires the payload checksum and resolution-key set to match every current repairable relationship issue, applies all resolutions atomically, then runs the same strict final `WorkspaceValidator`. This is not a public bypass validator. Non-relationship problems such as `invalidBlockDocument` are fatal load issues handled by backup/restore, not relink/unlink. Ordinary commands retain strict input and final validation.
+
 - [ ] Write RED tests proving every successful state-changing command is all-or-nothing and increments Workspace revision exactly once. Cancellation, idempotent completion, stale metadata and any other no-op return noChange and cause no revision, save or undo record.
+
+- [ ] Write discriminating RED for the Gate amendments: disjoint/same-field Note draft merge and forged modifiedFields; exact linked-Block disposition keys plus task→non-task/completion rejection; base-link-context concurrent add, delete and rebind at an affected Block plus a non-affected-link positive merge; fixed-ID legacy replay with accepted/rejected/stale diagnostics; repeated completion preserving its first timestamp; exact Inspiration raw-source checksum; canonical delete preview and stale authorization; multiple dangling edges repaired in one payload plus shared-link multi-defect grouping; restore with distinct per-Note source revisions; and every typed noChange/conflict reason.
 
 ~~~swift
 @Test func deletingCategoryMigratesEveryWorkspaceReferenceAtomically() throws {
@@ -639,12 +656,23 @@ For every calendar/relationship transaction the reducer order is fixed: validate
 - [ ] Define commands with explicit payloads; no UI-derived implicit branch.
 
 ~~~swift
-public enum LegacyNotesResolution: Sendable {
+public enum LegacyDiagnosticDisposition: Equatable, Sendable {
+    case rejectIfPresent
+    case accept(expectedDiagnosticsChecksum: String)
+}
+
+public struct LegacyMarkdownImportAuthorization: Equatable, Sendable {
+    public let expectedSourceChecksum: String
+    public let injectedBlockIDs: [BlockID]
+    public let checkedTaskCompletedAt: Date
+    public let diagnostics: LegacyDiagnosticDisposition
+}
+
+public enum ExistingPrimaryLegacyResolution: Equatable, Sendable {
     case previewAndMerge(
         expectedNoteRevision: Int64,
-        expectedLegacySourceChecksum: String
+        importAuthorization: LegacyMarkdownImportAuthorization
     )
-    case createNewPrimary(expectedLegacySourceChecksum: String)
     case cancel
 }
 
@@ -657,8 +685,33 @@ public enum TaskBlockPrimaryChangeDisposition: Sendable {
     case unlinkPreservingCompletion
 }
 
+public enum PermanentDeleteSubject: Hashable, Sendable {
+    case note(NoteID)
+    case inspiration(InspirationID, deletedAt: Date)
+}
+
 public struct PermanentDeleteAuthorization: Equatable, Sendable {
+    public let subject: PermanentDeleteSubject
+    public let sourceWorkspaceRevision: Int64
     public let impactChecksum: String
+}
+
+public struct PermanentDeletePreview: Equatable, Sendable {
+    public let subject: PermanentDeleteSubject
+    public let sourceWorkspaceRevision: Int64
+    public let effects: [PermanentDeleteEffect]
+    public let checksum: String
+}
+
+public enum PermanentDeleteEffect: Hashable, Codable, Sendable {
+    case clearBaselinePrimary(CalendarNoteOwnerID)
+    case removeBaselineReference(CalendarNoteOwnerID)
+    case clearOccurrenceReplacement(OccurrenceKey)
+    case removeOccurrenceAddedReference(OccurrenceKey)
+    case removeOccurrenceRemovedReference(OccurrenceKey)
+    case removeTaskBlockLink(TaskBlockCalendarLink)
+    case removeInspirationNoteLink(InspirationNoteLink)
+    case tombstoneInspirationNoteLink(noteID: NoteID, inspirationID: InspirationID)
 }
 
 public enum CalendarRelationScope: Equatable, Sendable {
@@ -671,7 +724,7 @@ public enum CalendarRelationScope: Equatable, Sendable {
 public struct AttachPrimaryNotePayload: Sendable {
     public let scope: CalendarRelationScope
     public let noteID: NoteID
-    public let legacyResolution: LegacyNotesResolution?
+    public let legacyResolution: ExistingPrimaryLegacyResolution?
     public let replacing: PrimaryReplacementDisposition?
     public let linkedTaskDisposition: TaskBlockPrimaryChangeDisposition?
 }
@@ -679,7 +732,7 @@ public struct AttachPrimaryNotePayload: Sendable {
 public struct CreatePrimaryNoteForCalendarPayload: Sendable {
     public let scope: CalendarRelationScope
     public let note: Note
-    public let legacyResolution: LegacyNotesResolution?
+    public let legacyImportAuthorization: LegacyMarkdownImportAuthorization?
 }
 
 public struct ScheduleNoteOnCalendarPayload: Sendable {
@@ -691,6 +744,93 @@ public struct ScheduleTaskBlockPayload: Sendable {
     public let noteID: NoteID
     public let blockID: BlockID
     public let item: CalendarItem
+}
+
+public struct CreateNotePayload: Sendable {
+    public let note: Note
+}
+
+public struct CreateInspirationPayload: Sendable {
+    public let inspiration: Inspiration
+}
+
+public struct ConvertInspirationToNotePayload: Sendable {
+    public let inspirationID: InspirationID
+    public let proposedNote: Note
+}
+
+public enum TaskCompletionTarget: Hashable, Sendable {
+    case calendarItem(UUID)
+    case taskBlock(noteID: NoteID, blockID: BlockID)
+}
+
+public enum TaskCompletionValue: Equatable, Sendable {
+    case incomplete
+    case complete(ifTransitioningAt: Date)
+}
+
+public struct InspirationMetadataExpectation: Equatable, Sendable {
+    public let sourceChecksum: String
+}
+
+public struct WorkspaceConsistencyRepairPayload: Equatable, Sendable {
+    public let expectedIssuesChecksum: String
+    public let resolutions: [WorkspaceConsistencyIssueID: WorkspaceConsistencyResolution]
+}
+
+public struct WorkspaceRestoreContentPayload: Equatable, Sendable {
+    public let content: WorkspaceContentSnapshot
+    public let sourceRevisionHighWatermark: Int64
+    public let sourceNoteRevisions: [NoteID: Int64]
+}
+
+public struct WorkspaceConsistencyIssueID: Hashable, Codable, Sendable {
+    public let rawValue: String
+}
+
+public struct WorkspaceConsistencyIssue: Hashable, Codable, Sendable {
+    public let id: WorkspaceConsistencyIssueID
+    public let locator: WorkspaceRelationshipLocator
+    public let defect: WorkspaceRelationshipDefect
+}
+
+public enum WorkspaceRelationshipLocator: Hashable, Codable, Sendable {
+    case calendarBaseline(CalendarNoteOwnerID)
+    case occurrenceOverride(OccurrenceKey)
+    case calendarNote(CalendarNoteRelationSlot)
+    case taskBlock(TaskBlockCalendarLink)
+    case inspirationNote(InspirationNoteLink)
+}
+
+public enum CalendarNoteRelationSlot: Hashable, Codable, Sendable {
+    case baselinePrimary(owner: CalendarNoteOwnerID, noteID: NoteID)
+    case baselineReference(owner: CalendarNoteOwnerID, noteID: NoteID)
+    case occurrencePrimary(key: OccurrenceKey, noteID: NoteID)
+    case occurrenceAddedReference(key: OccurrenceKey, noteID: NoteID)
+    case occurrenceRemovedReference(key: OccurrenceKey, noteID: NoteID)
+}
+
+public enum WorkspaceRelationshipDefect: Hashable, Codable, Sendable {
+    case missingCalendarOwner
+    case missingOccurrence
+    case missingNote
+    case missingCalendarItem
+    case missingTaskBlock
+    case missingInspiration
+}
+
+public enum WorkspaceRelationshipEndpoint: Hashable, Codable, Sendable {
+    case calendarOwner(CalendarNoteOwnerID)
+    case occurrence(OccurrenceKey)
+    case note(NoteID)
+    case calendarItem(UUID)
+    case taskBlock(noteID: NoteID, blockID: BlockID)
+    case inspiration(InspirationID)
+}
+
+public enum WorkspaceConsistencyResolution: Hashable, Codable, Sendable {
+    case unlink
+    case relink(WorkspaceRelationshipEndpoint)
 }
 
 public enum WorkspaceCommand: Sendable {
@@ -710,7 +850,7 @@ public enum WorkspaceCommand: Sendable {
     )
     case scheduleNoteOnCalendar(ScheduleNoteOnCalendarPayload)
     case scheduleTaskBlock(ScheduleTaskBlockPayload)
-    case setTaskCompletion(TaskCompletionTarget, completedAt: Date?)
+    case setTaskCompletion(TaskCompletionTarget, value: TaskCompletionValue)
     case createInspiration(CreateInspirationPayload)
     case updateInspirationMetadata(
         InspirationID,
@@ -718,7 +858,7 @@ public enum WorkspaceCommand: Sendable {
         metadata: SourceMetadata,
         resolvedKind: ResolvedSourceKind
     )
-    case convertInspirationToNote(InspirationID)
+    case convertInspirationToNote(ConvertInspirationToNotePayload)
     case archiveInspiration(InspirationID, at: Date)
     case restoreInspiration(InspirationID, at: Date)
     case permanentlyDeleteInspiration(
@@ -730,10 +870,7 @@ public enum WorkspaceCommand: Sendable {
     case updateCategory(CalendarCategory)
     case reorderCategories([UUID])
     case deleteCategory(UUID)
-    case resolveConsistencyIssue(
-        WorkspaceConsistencyIssueID,
-        resolution: WorkspaceConsistencyResolution
-    )
+    case repairConsistency(WorkspaceConsistencyRepairPayload)
     case restoreContent(WorkspaceRestoreContentPayload)
 }
 ~~~
@@ -742,12 +879,36 @@ public enum WorkspaceCommand: Sendable {
 
 ~~~swift
 public enum WorkspaceReductionResult: Equatable, Sendable {
-    case noChange
+    case noChange(WorkspaceNoChangeReason)
+    case conflict(WorkspaceConflict)
     case changed(WorkspaceReduction)
 
     public var change: WorkspaceReduction? {
         if case let .changed(value) = self { value } else { nil }
     }
+}
+
+public enum WorkspaceNoChangeReason: Equatable, Sendable {
+    case identical
+    case cancelled
+    case staleLegacyPreview
+    case staleMetadata
+    case staleDeleteAuthorization
+    case staleConsistencyPreview
+    case inspirationAlreadyConverted(NoteID)
+}
+
+public enum WorkspaceConflict: Equatable, Sendable {
+    case noteDraft(NoteDraftConflict)
+}
+
+public struct NoteDraftConflict: Equatable, Sendable {
+    public let noteID: NoteID
+    public let currentRevision: Int64
+    public let conflictingFields: Set<NoteDraftField>
+    public let base: Note
+    public let submitted: Note
+    public let current: Note
 }
 
 public struct WorkspaceReduction: Equatable, Sendable {
@@ -759,16 +920,18 @@ public struct WorkspaceReduction: Equatable, Sendable {
 ~~~
 
 - [ ] Define and test the raw CalendarCommand allow/intercept matrix. Workspace category commands sent through .calendar are rejected. Item deletion is intercepted to remove item relation/task links without deleting Notes. Series mutation uses reduceWithOutcome then migrates relations. Entire-series deletion removes its baseline/overrides. All remaining allowed item/series commands still pass through CalendarReducer and final WorkspaceValidator.
-- [ ] Implement legacy Markdown resolution atomically. createNewPrimary imports to a new Note, attaches it, and clears only the selected scope: item notes for item, a notes-empty OccurrenceOverride for only-this, or the newly split series notes for this-and-future. previewAndMerge verifies expected Note revision, imports/appends, attaches and clears that same scope. cancel returns no mutation.
-- [ ] Compute expectedLegacySourceChecksum over the selected scope identity, owner/OccurrenceKey, this-and-future boundary when present, and exact Markdown bytes shown in preview. Re-check it only when the command dequeues; any Note revision or legacy-source mismatch returns noChange/stale-preview, does not split, save, clear text or create an undo record.
+- [ ] Implement legacy Markdown resolution atomically with context-legal payloads. Existing-note attach accepts only previewAndMerge/cancel; choosing “create new” dispatches `createPrimaryNoteForCalendar` carrying the complete injected Note seed and import authorization. The reducer re-imports with exactly the authorized fixed Block IDs and checked-task timestamp; those IDs must be sufficient, exhausted exactly and collision-free. The created Note document must equal the authorized preview. Merge replaces a canonical empty Note document, otherwise appends imported Blocks in order. Success clears only the selected scope: item notes, a notes-empty only-this OccurrenceOverride, or the newly split series notes. Cancel returns typed noChange.
+- [ ] Add public deterministic `LegacyMarkdownMigrationPlanner.preview` and checksum helpers. `expectedSourceChecksum` covers scope identity, owner/OccurrenceKey, this-and-future boundary and exact Markdown bytes. Diagnostics checksum covers the ordered `(lineNumber,message)` list. `.rejectIfPresent` rejects any diagnostic; `.accept` must match the re-imported diagnostic checksum. Re-check source, target Note revision, IDs, preview document and diagnostics only when the command dequeues; any mismatch returns `.noChange(.staleLegacyPreview)` and does not split, create/modify Note or clear text.
+- [ ] Implement updateNote as the exact three-way merge above. Validate base snapshot/checksum/derived modified fields; return the complete typed conflict on any same-field or relevant link-context conflict. Generic drafts cannot change a retained linked Task Block completion. Derive and require the exact removal-disposition key set before changing any document, link or item.
 - [ ] Implement typed composite reducers for createPrimaryNoteForCalendar, attachPrimaryNote, scheduleNoteOnCalendar and scheduleTaskBlock. Each accepts every required stable ID, scope and newSeriesID in one payload; no App task performs two commands to emulate one transaction.
 - [ ] Add reducer failure probes at each composite boundary: invalid Note, Markdown diagnostic requiring confirmation, duplicate item ID, unknown block, recurring item, primary conflict, split failure and post-mutation validator failure. Each leaves item, series, Note, links, legacy notes and revisions equal to the input state.
-- [ ] Implement primary/reference commands, explicit old-primary demote/detach choice, Note permanent-delete cleanup, and multiple Notes per calendar target with at most one primary.
-- [ ] Implement TaskBlockCalendarLink: one task Block ↔ at most one non-recurring CalendarItem; one item ↔ at most one task Block; both share the same primary Note; one completedAt is written to both; recurrence is rejected. Repeating the same desired completion is idempotent and does not refresh the timestamp.
+- [ ] Implement primary/reference commands, explicit old-primary demote/detach choice, and multiple Notes per calendar target with at most one primary. If a target's current primary owns a TaskBlock link, changing/removing it requires `unlinkPreservingCompletion`; an extra disposition is rejected. The link is removed first, both sides keep their last identical completion, then the primary/reference change applies.
+- [ ] Implement public `PermanentDeletePlanner.preview(subject,in:)` as the only authorization oracle. It canonical-sorts exact effects by case tag plus stable IDs and hashes subject + source Workspace revision + effects with deterministic encoding. Authorization must match subject, current revision and checksum. Note delete sets baseline primary to nil, removes baseline references, changes occurrence `.replace(deleted)` to `.clear`, removes the Note from added/removed occurrence sets, removes TaskBlock/InspirationNote links, and preserves CalendarItems/Inspirations. Empty relation entries are compacted except an intentional `.clear`. Inspiration delete converts every matching live link to the authorized `deletedAt` tombstone, then removes only the Inspiration. Stale authorization returns typed noChange.
+- [ ] Implement TaskBlockCalendarLink: one task Block ↔ at most one non-recurring CalendarItem; one item ↔ at most one task Block; both share the same primary Note; one completedAt is written to both; recurrence is rejected. `TaskCompletionTarget` resolves either side to the same link. `.complete(ifTransitioningAt:)` uses the supplied instant only when both sides are incomplete; if both are already complete it preserves the old timestamp and returns typed noChange. `.incomplete` writes nil to both; repeated incomplete is noChange. Invalid/mismatched input is rejected before mutation.
 - [ ] Cover link lifecycle: deleting the calendar item unlinks while preserving Block completion; a NoteDraftSubmission that removes a linked Block must carry a per-Block keep-item/delete-item disposition; changing/removing the primary must carry unlinkPreservingCompletion; unlink preserves the last identical completedAt then permits independent changes.
-- [ ] Implement InspirationNoteLink as bidirectional inspectable data. Permanent Inspiration deletion changes every live reference to a tombstone without retaining raw text/URL so Note renders 原始灵感已删除. Repeated conversion opens the one existing derived Note.
-- [ ] Implement explicit consistency-issue resolution for dangling relationships: relink to a valid endpoint or unlink the invalid relationship while preserving every surviving Note, Calendar object and Inspiration. It participates in revision, undo and one Workspace save.
-- [ ] Implement WorkspaceContentSnapshot with revisions excluded plus WorkspaceRestoreContentPayload carrying a sourceRevisionHighWatermark. Restore chooses candidate Workspace revision as max(current Workspace revision, source high watermark, every source/current Note revision) + 1. For each surviving Note: unchanged content keeps max(current, source) revision; changed content uses max(current, source) + 1; a Note absent from current but restored uses the candidate Workspace revision. WorkspaceValidator enforces every Note revision is nonnegative and no greater than Workspace revision.
+- [ ] Implement InspirationNoteLink as bidirectional inspectable data. First conversion consumes the payload's complete proposed Note with stable Note/Block IDs, validates it, creates it and the live link in one transaction. Repeated conversion ignores the unused proposal and returns `.noChange(.inspirationAlreadyConverted(existingNoteID))` so App opens the one existing derived Note. Define `WorkspaceChecksum.inspirationSourceChecksum` over Inspiration ID, inputKind and exact raw input: text bytes; URL absoluteString; or bookmark bytes plus displayName. Metadata expectation excludes current metadata, includes no normalized substitute, and a mismatch returns `.noChange(.staleMetadata)` without touching raw input.
+- [ ] Implement public consistency inspection with deterministic issue IDs/checksum from canonical locator + defect. `WorkspaceConsistencyRepairPayload` must cover every current repairable issue exactly once; missing/extra IDs, stale checksum or incompatible endpoint kinds do not mutate. `.unlink` removes only the located edge; `.relink` changes only its invalid endpoint and rejects collisions. When one original link has multiple defective endpoints, group its resolutions by the original locator and construct the one replacement edge only after all endpoint resolutions validate. All surviving Notes, Calendar objects and Inspirations remain. Apply the complete set atomically so the one final strict WorkspaceValidator can pass. A report containing fatal non-relationship issues cannot be repaired by this command.
+- [ ] Implement WorkspaceContentSnapshot with revisions excluded plus `WorkspaceRestoreContentPayload(content, sourceRevisionHighWatermark, sourceNoteRevisions)`. The revision map keys equal the snapshot Note IDs exactly and every value is in `0...sourceRevisionHighWatermark`; invalid metadata or Int64 overflow is rejected before mutation. Restore chooses candidate Workspace revision as max(current Workspace revision, source high watermark, every source/current Note revision) + 1. For each surviving Note: unchanged business content keeps max(current, source) revision; changed content uses max(current, source) + 1; a Note absent from current but restored uses the candidate Workspace revision. WorkspaceValidator enforces every Note revision is nonnegative and no greater than Workspace revision.
 - [ ] Run GREEN and full domain tests.
 
 ~~~zsh
@@ -1511,7 +1674,7 @@ git commit -m "feat(notes): 联动待办 Block 与日历事项"
 
 - [ ] Implement a content-first inbox/detail split. The left column derives 待处理, 已形成笔记 and 已归档 from lifecycle plus live links; the right shows original content, source metadata, created time, shared category and actions. A persistently visible capture field accepts plain text or URL with one Return. Expose the same Category manager from this module’s toolbar; File remains reserved without an active picker.
 - [ ] Save rawText or rawURL before URL metadata; a URL starts with resolvedSourceKind .unknown and fetch status pending. URLMetadataResolver uses URLSession with explicit timeout, response size cap, accepted content types and no script execution. Failure changes only enrichment state and exposes retry.
-- [ ] Apply metadata with inspirationID + InspirationMetadataExpectation containing the captured rawURL and updatedAt; stale responses are ignored without adding an Inspiration-only revision. Unknown resolvedKind remains valid.
+- [ ] Apply metadata with inspirationID + the public InspirationMetadataExpectation sourceChecksum captured before fetch; it covers ID/inputKind and exact raw source bytes but not metadata/updatedAt. Stale responses return the typed staleMetadata noChange without adding an Inspiration-only revision. Unknown resolvedKind remains valid.
 - [ ] Convert to Note in one transaction: text becomes an initial paragraph; URL becomes a supported link Block using resolved title when available; add InspirationNoteLink and keep the Inspiration as the authoritative live source record. The Note source UI resolves through that link rather than storing a hidden metadata copy. Repeated conversion opens the existing Note.
 - [ ] Add an in-app shortcut that activates the Inspiration quick-input field, plus 转成笔记, 归档, 恢复, 复制链接 and metadata retry actions. Drive the rail’s restrained pending dot/count from active Inspirations without a live Note link. Enable Inspiration only after capture/detail/failure/conversion/archive paths are live.
 - [ ] Run GREEN.
