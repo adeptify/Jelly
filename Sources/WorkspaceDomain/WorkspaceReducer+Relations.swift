@@ -481,8 +481,9 @@ extension WorkspaceReducer {
 
     private static func consistencyRepairPriority(_ locator: WorkspaceRelationshipLocator) -> Int {
         switch locator {
-        case .calendarNote, .taskBlock, .inspirationNote: 0
+        case .calendarNote, .inspirationNote: 0
         case .calendarBaseline, .occurrenceOverride: 1
+        case .taskBlock: 2
         }
     }
 

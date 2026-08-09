@@ -34,12 +34,16 @@ extension WorkspaceReducer {
         }
         let base = submission.baseSnapshot
         let submitted = submission.snapshot
+        let baseLinkBlockIDs = submission.baseLinkedTaskBlockLinks.map(\.blockID)
+        let baseLinkItemIDs = submission.baseLinkedTaskBlockLinks.map(\.calendarItemID)
         guard base.id == submission.noteID,
               submitted.id == submission.noteID,
               submission.baseNoteRevision == base.revision,
               submission.baseNoteSnapshotChecksum == (try WorkspaceChecksum.noteSnapshotChecksum(base)),
               submission.noteSnapshotChecksum == (try WorkspaceChecksum.noteSnapshotChecksum(submitted)),
               submission.modifiedFields == derivedFields(base: base, submitted: submitted),
+              Set(baseLinkBlockIDs).count == baseLinkBlockIDs.count,
+              Set(baseLinkItemIDs).count == baseLinkItemIDs.count,
               submission.baseLinkedTaskBlockLinks.allSatisfy({ link in
                   link.noteID == base.id
                       && base.document.blocks.contains(where: { $0.id == link.blockID && $0.kind == .task })
@@ -163,10 +167,23 @@ extension WorkspaceReducer {
         guard block.taskState?.completedAt == payload.item.completedAt else {
             throw WorkspaceReducerError.taskCompletionMismatch
         }
-        guard !candidate.taskBlockLinks.contains(where: {
-            $0.blockID == payload.blockID || $0.calendarItemID == payload.item.id
-        }) else {
-            throw WorkspaceReducerError.duplicateTaskBlockLink
+        let expectedLink = TaskBlockCalendarLink(
+            noteID: payload.noteID,
+            blockID: payload.blockID,
+            calendarItemID: payload.item.id
+        )
+        let existingBlockLink = candidate.taskBlockLinks.first { $0.blockID == payload.blockID }
+        let existingItemLink = candidate.taskBlockLinks.first { $0.calendarItemID == payload.item.id }
+        if existingBlockLink != nil || existingItemLink != nil {
+            guard existingBlockLink == expectedLink,
+                  existingItemLink == expectedLink,
+                  var existingItem = candidate.calendar.items[payload.item.id]
+            else {
+                throw WorkspaceReducerError.duplicateTaskBlockLink
+            }
+            existingItem.schedule = payload.item.schedule
+            try applyCalendar(.updateItem(existingItem), to: &candidate, now: now, metadata: &metadata)
+            return
         }
         try applyCalendar(.createItem(payload.item), to: &candidate, now: now, metadata: &metadata)
         let owner = CalendarNoteOwnerID.item(payload.item.id)
@@ -178,11 +195,7 @@ extension WorkspaceReducer {
             primaryNoteID: payload.noteID,
             referenceNoteIDs: []
         )
-        candidate.taskBlockLinks.insert(.init(
-            noteID: payload.noteID,
-            blockID: payload.blockID,
-            calendarItemID: payload.item.id
-        ))
+        candidate.taskBlockLinks.insert(expectedLink)
     }
 
     static func setTaskCompletion(

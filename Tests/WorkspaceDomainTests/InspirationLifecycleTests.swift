@@ -170,6 +170,41 @@ struct InspirationLifecycleTests {
         #expect(state.notes[unusedProposal.id]?.title != "不应使用")
     }
 
+    @Test func repeatedConversionSelectsCanonicalNoteIDAcrossMultipleLiveLinks() throws {
+        var workspace = try Task4Fixture.workspace()
+        let linkedNoteIDs = (940...947).map { NoteID(Task4Fixture.uuid($0)) }
+        for (index, noteID) in linkedNoteIDs.enumerated() {
+            workspace.notes[noteID] = Task4Fixture.note(
+                id: noteID,
+                title: "派生笔记 \(index)",
+                revision: 1
+            )
+            workspace.inspirationNoteLinks.insert(.init(
+                source: .live(Task4Fixture.inspirationID),
+                noteID: noteID,
+                createdAt: Task4Fixture.now
+            ))
+        }
+        try WorkspaceValidator.validate(workspace)
+
+        let result = try WorkspaceReducer.reduce(
+            workspace,
+            command: .convertInspirationToNote(.init(
+                inspirationID: Task4Fixture.inspirationID,
+                proposedNote: Task4Fixture.note(
+                    id: Task4Fixture.newNoteID,
+                    title: "不应创建",
+                    revision: 0
+                )
+            )),
+            now: Task4Fixture.later
+        )
+
+        #expect(result == .noChange(.inspirationAlreadyConverted(try #require(linkedNoteIDs.first))))
+        #expect(workspace.notes[Task4Fixture.newNoteID] == nil)
+        #expect(workspace.inspirationNoteLinks.count == linkedNoteIDs.count)
+    }
+
     @Test func invalidProposedNoteFailsWithoutLinkOrPartialCreation() throws {
         let workspace = try Task4Fixture.workspace()
         var invalid = Task4Fixture.note(id: Task4Fixture.newNoteID, title: "非法", revision: 0)

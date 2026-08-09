@@ -158,6 +158,42 @@ struct WorkspaceReducerTests {
         #expect(workspace.notes[base.id] == base)
     }
 
+    @Test func noteDraftBaseIdentityFieldsAreNonoptionalContractValues() throws {
+        let workspace = try Task4Fixture.workspace()
+        let base = try #require(workspace.notes[Task4Fixture.noteID])
+        let submission = try Task4Fixture.submission(base: base, submitted: base)
+
+        #expect(String(reflecting: type(of: submission.baseNoteRevision)) == "Swift.Int64")
+        #expect(String(reflecting: type(of: submission.baseNoteSnapshotChecksum)) == "Swift.String")
+    }
+
+    @Test func malformedDraftBaseLinkTopologyThrowsTypedErrorWithoutTrap() throws {
+        let workspace = try Task4Fixture.workspaceWithLinkedTask()
+        let base = try #require(workspace.notes[Task4Fixture.noteID])
+        let link = try #require(workspace.taskBlockLinks.first)
+        let duplicateBlockLink = TaskBlockCalendarLink(
+            noteID: link.noteID,
+            blockID: link.blockID,
+            calendarItemID: Task4Fixture.otherItemID
+        )
+        var submitted = base
+        submitted.document.blocks[0].inlineContent = .plain("修改任务")
+
+        #expect(throws: WorkspaceReducerError.invalidDraftSubmission) {
+            try WorkspaceReducer.reduce(
+                workspace,
+                command: .updateNote(try Task4Fixture.submission(
+                    base: base,
+                    submitted: submitted,
+                    baseLinks: [link, duplicateBlockLink]
+                )),
+                now: Task4Fixture.later
+            )
+        }
+        #expect(workspace.revision == 5)
+        #expect(workspace.taskBlockLinks == [link])
+    }
+
     @Test func draftAffectedLinkContextConflictsButUnaffectedLinkMerges() throws {
         let baseWorkspace = try Task4Fixture.workspaceWithLinkedTask()
         let base = try #require(baseWorkspace.notes[Task4Fixture.noteID])
@@ -886,6 +922,61 @@ struct WorkspaceReducerTests {
         )
         #expect(repaired.change?.state.calendarNoteRelations.baselines[.item(Task4Fixture.itemID)]?.primaryNoteID == Task4Fixture.otherNoteID)
         try WorkspaceValidator.validate(try #require(repaired.change).state)
+    }
+
+    @Test func consistencyRepairMovesBaselineOwnerBeforeDependentTaskBlockRelink() throws {
+        var broken = try Task4Fixture.workspace()
+        broken.notes[Task4Fixture.noteID] = Task4Fixture.note(
+            id: Task4Fixture.noteID,
+            title: "待修任务",
+            revision: 3,
+            task: true
+        )
+        let missingItemID = Task4Fixture.uuid(932)
+        let missingOwner = CalendarNoteOwnerID.item(missingItemID)
+        let brokenLink = TaskBlockCalendarLink(
+            noteID: Task4Fixture.noteID,
+            blockID: Task4Fixture.taskBlockID,
+            calendarItemID: missingItemID
+        )
+        broken.calendarNoteRelations.baselines[missingOwner] = .init(
+            primaryNoteID: Task4Fixture.noteID,
+            referenceNoteIDs: []
+        )
+        broken.taskBlockLinks = [brokenLink]
+
+        let report = WorkspaceConsistencyInspector.inspect(broken)
+        #expect(report.hasFatalIssues == false)
+        #expect(report.issues.count == 2)
+        var resolutions = [WorkspaceConsistencyIssueID: WorkspaceConsistencyResolution]()
+        for issue in report.issues {
+            switch (issue.locator, issue.defect) {
+            case (.calendarBaseline(missingOwner), .missingCalendarOwner):
+                resolutions[issue.id] = .relink(.calendarOwner(.item(Task4Fixture.itemID)))
+            case (.taskBlock(brokenLink), .missingCalendarItem):
+                resolutions[issue.id] = .relink(.calendarItem(Task4Fixture.itemID))
+            default:
+                Issue.record("出现未预期的组合 consistency issue：\(issue)")
+            }
+        }
+
+        let repaired = try WorkspaceReducer.reduce(
+            broken,
+            command: .repairConsistency(.init(
+                expectedIssuesChecksum: report.issuesChecksum,
+                resolutions: resolutions
+            )),
+            now: Task4Fixture.later
+        )
+        let state = try #require(repaired.change).state
+        #expect(state.calendarNoteRelations.baselines[missingOwner] == nil)
+        #expect(state.calendarNoteRelations.baselines[.item(Task4Fixture.itemID)]?.primaryNoteID == Task4Fixture.noteID)
+        #expect(state.taskBlockLinks == [.init(
+            noteID: Task4Fixture.noteID,
+            blockID: Task4Fixture.taskBlockID,
+            calendarItemID: Task4Fixture.itemID
+        )])
+        try WorkspaceValidator.validate(state)
     }
 
     @Test func fatalInvalidDocumentIsNotARepairableRelationshipIssue() throws {

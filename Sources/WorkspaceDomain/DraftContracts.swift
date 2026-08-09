@@ -15,8 +15,8 @@ public enum LinkedTaskBlockDeletionDisposition: String, Codable, Equatable, Send
 public struct NoteDraftSubmission: Equatable, Sendable {
     public let noteID: NoteID
     public let editSessionID: UUID
-    public let baseNoteRevision: Int64?
-    public let baseNoteSnapshotChecksum: String?
+    public let baseNoteRevision: Int64
+    public let baseNoteSnapshotChecksum: String
     public let baseSnapshot: Note
     public let baseLinkedTaskBlockLinks: Set<TaskBlockCalendarLink>
     public let draftGeneration: UInt64
@@ -28,8 +28,8 @@ public struct NoteDraftSubmission: Equatable, Sendable {
     public init(
         noteID: NoteID,
         editSessionID: UUID,
-        baseNoteRevision: Int64?,
-        baseNoteSnapshotChecksum: String?,
+        baseNoteRevision: Int64,
+        baseNoteSnapshotChecksum: String,
         baseSnapshot: Note,
         baseLinkedTaskBlockLinks: Set<TaskBlockCalendarLink>,
         draftGeneration: UInt64,

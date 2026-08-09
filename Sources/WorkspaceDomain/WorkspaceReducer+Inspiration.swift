@@ -50,9 +50,14 @@ extension WorkspaceReducer {
         guard candidate.inspirations[payload.inspirationID] != nil else {
             throw WorkspaceReducerError.missingInspiration(payload.inspirationID)
         }
-        if let existing = candidate.inspirationNoteLinks.first(where: { link in
-            if case let .live(linkedID) = link.source { linkedID == payload.inspirationID } else { false }
-        }) {
+        let existing = candidate.inspirationNoteLinks
+            .filter { link in
+                if case let .live(linkedID) = link.source { linkedID == payload.inspirationID } else { false }
+            }
+            .min { lhs, rhs in
+                lhs.noteID.rawValue.uuidString < rhs.noteID.rawValue.uuidString
+            }
+        if let existing {
             return .result(.noChange(.inspirationAlreadyConverted(existing.noteID)))
         }
         try createNote(payload.proposedNote, in: &candidate)

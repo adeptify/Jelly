@@ -37,6 +37,97 @@ struct TaskBlockCalendarLinkTests {
         #expect(change.changedNoteIDs.isEmpty)
     }
 
+    @Test func repeatedScheduleReschedulesExistingItemAndPreservesUniqueLinkAndPrimary() throws {
+        let workspace = try Task4Fixture.workspaceWithLinkedTask()
+        var rescheduled = try #require(workspace.calendar.items[Task4Fixture.itemID])
+        rescheduled.schedule = try CalendarSchedule(
+            startDate: Task4Fixture.day.addingDays(3),
+            endDate: Task4Fixture.day.addingDays(3),
+            startTime: nil,
+            endTime: nil
+        )
+        rescheduled.title = "不应覆盖现有事项标题"
+        rescheduled.notes = "不应覆盖现有事项随记"
+
+        let result = try WorkspaceReducer.reduce(
+            workspace,
+            command: .scheduleTaskBlock(.init(
+                noteID: Task4Fixture.noteID,
+                blockID: Task4Fixture.taskBlockID,
+                item: rescheduled
+            )),
+            now: Task4Fixture.later
+        )
+        let change = try #require(result.change)
+        #expect(change.state.calendar.items[Task4Fixture.itemID]?.schedule == rescheduled.schedule)
+        #expect(change.state.calendar.items[Task4Fixture.itemID]?.title == workspace.calendar.items[Task4Fixture.itemID]?.title)
+        #expect(change.state.calendar.items[Task4Fixture.itemID]?.notes == workspace.calendar.items[Task4Fixture.itemID]?.notes)
+        #expect(change.state.taskBlockLinks == workspace.taskBlockLinks)
+        #expect(change.state.taskBlockLinks.count == 1)
+        #expect(change.state.calendarNoteRelations.baselines[.item(Task4Fixture.itemID)]?.primaryNoteID == Task4Fixture.noteID)
+        #expect(change.state.notes[Task4Fixture.noteID]?.revision == workspace.notes[Task4Fixture.noteID]?.revision)
+        #expect(change.state.revision == workspace.revision + 1)
+        #expect(change.changedNoteIDs.isEmpty)
+    }
+
+    @Test func repeatedIdenticalScheduleIsTypedNoChange() throws {
+        let workspace = try Task4Fixture.workspaceWithLinkedTask()
+        let existing = try #require(workspace.calendar.items[Task4Fixture.itemID])
+
+        let result = try WorkspaceReducer.reduce(
+            workspace,
+            command: .scheduleTaskBlock(.init(
+                noteID: Task4Fixture.noteID,
+                blockID: Task4Fixture.taskBlockID,
+                item: existing
+            )),
+            now: Task4Fixture.later
+        )
+
+        #expect(result == .noChange(.identical))
+        #expect(workspace.revision == 5)
+        #expect(workspace.taskBlockLinks.count == 1)
+    }
+
+    @Test func repeatedScheduleRejectsBlockOrItemEndpointCollisionsAtomically() throws {
+        let workspace = try Task4Fixture.workspaceWithLinkedTask()
+        let differentItem = try Task4Fixture.item(id: Task4Fixture.otherItemID, title: "另一个事项")
+        #expect(throws: WorkspaceReducerError.duplicateTaskBlockLink) {
+            try WorkspaceReducer.reduce(
+                workspace,
+                command: .scheduleTaskBlock(.init(
+                    noteID: Task4Fixture.noteID,
+                    blockID: Task4Fixture.taskBlockID,
+                    item: differentItem
+                )),
+                now: Task4Fixture.later
+            )
+        }
+
+        var differentBlockWorkspace = workspace
+        differentBlockWorkspace.notes[Task4Fixture.otherNoteID] = Task4Fixture.note(
+            id: Task4Fixture.otherNoteID,
+            title: "另一任务",
+            revision: 2,
+            task: true
+        )
+        let existingItem = try #require(workspace.calendar.items[Task4Fixture.itemID])
+        #expect(throws: WorkspaceReducerError.duplicateTaskBlockLink) {
+            try WorkspaceReducer.reduce(
+                differentBlockWorkspace,
+                command: .scheduleTaskBlock(.init(
+                    noteID: Task4Fixture.otherNoteID,
+                    blockID: Task4Fixture.otherTaskBlockID,
+                    item: existingItem
+                )),
+                now: Task4Fixture.later
+            )
+        }
+        #expect(workspace.calendar.items[Task4Fixture.otherItemID] == nil)
+        #expect(workspace.taskBlockLinks.count == 1)
+        #expect(workspace.revision == 5)
+    }
+
     @Test func scheduleTaskBlockRejectsUnknownNonTaskDuplicateAndCompletionMismatchAtomically() throws {
         var workspace = try Task4Fixture.workspaceWithoutItem()
         let paragraphItem = try Task4Fixture.item(id: Task4Fixture.itemID, title: "错误")
