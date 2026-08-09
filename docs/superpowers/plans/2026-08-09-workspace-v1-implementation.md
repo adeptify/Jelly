@@ -44,7 +44,7 @@ CalendarPersistence │
 - CalendarState 继续拥有 categories、items、recurrence、uncategorizedID；WorkspaceState 用 calendar 字段包含它。
 - WorkspaceState 直接拥有 notes、inspirations、calendarNoteRelations、taskBlockLinks、inspirationNoteLinks、revision。
 - 分类唯一权威位置仍是 workspace.calendar.categories；只有 WorkspaceCommand 的分类命令可以修改。
-- CalendarStore 与 CalendarRepository 在单 Store 切换任务内退役；不得与 WorkspaceStore 并存。
+- CalendarStore 与 CalendarRepository 在 Task 6C 的单次消费者切换中退役。Task 6B 允许新的 WorkspaceStore 作为尚未接入 AppEnvironment 的、仅由 focused tests 构造的 dormant core 与旧 CalendarStore 源码短暂同仓；任何生产 composition root、视图或命令不得同时构造或调用两者，也不得形成第二条 Workspace 业务写路径。Task 6C 完成后 Sources/Tests 中不得再存在旧类型、别名或 wrapper。
 
 ## Persistence and Revision Contract
 
@@ -61,8 +61,14 @@ public struct WorkspaceLoadResult: Equatable, Sendable {
     public let consistencyIssues: [WorkspaceConsistencyIssue]
 }
 
+public enum DraftJournalSessionID: Hashable, Codable, Sendable {
+    case editor(UUID)
+    case legacyTask5
+}
+
 public struct PersistedDraftReceipt: Equatable, Codable, Sendable {
     public let noteID: NoteID
+    public let editSessionID: DraftJournalSessionID
     public let draftGeneration: UInt64
     public let noteSnapshotChecksum: String
     public let persistedNoteRevision: Int64
@@ -73,15 +79,56 @@ public struct WorkspaceSaveReceipt: Equatable, Sendable {
     public let persistedDraft: PersistedDraftReceipt?
 }
 
+public enum WorkspaceCommittedOperation: Equatable, Sendable {
+    case save(WorkspaceSaveReceipt)
+    case restore(WorkspaceRestoreOutcome)
+}
+
 public enum WorkspaceCommitReconciliation: Equatable, Sendable {
-    case committed(WorkspaceSaveReceipt)
-    case notCommitted
-    case sourceChanged
+    case committed(WorkspaceCommittedOperation)
+    case notCommitted(WorkspacePendingCommitArtifacts)
+    case sourceChanged(WorkspacePendingCommitArtifacts)
+    case stillPending(WorkspacePendingCommitArtifacts)
+}
+
+public struct WorkspaceRawSourceIdentity: Equatable, Codable, Sendable {
+    public let sha256: String
+    public let byteCount: Int
+}
+
+public enum WorkspaceRollbackArtifact: Equatable, Sendable {
+    case file(URL, WorkspaceRawSourceIdentity)
+    case nonePreviousSourceAbsent
+}
+
+public struct WorkspaceRestoreOutcome: Equatable, Sendable {
+    public let receipt: WorkspaceSaveReceipt
+    public let rollback: WorkspaceRollbackArtifact
+}
+
+public struct WorkspacePendingCommitArtifacts: Equatable, Sendable {
+    public let rollback: WorkspaceRollbackArtifact?
+}
+
+public enum WorkspaceDirectCommitFailure: Error, Equatable, Sendable {
+    case sourceChanged(WorkspacePendingCommitArtifacts)
+}
+
+public enum WorkspacePersistenceBlockReason: Equatable, Sendable {
+    case unreadablePrimary
+    case opaqueInvalidPrimary
+    case loadFailed
+}
+
+public enum WorkspaceExternalSourceChangeReason: Equatable, Sendable {
+    case externalBytesChanged
+    case publishedDraftNotPersisted
 }
 
 private enum LoadedSource: Sendable {
     case absent
-    case bytes(rawData: Data, provenance: WorkspaceLoadProvenance)
+    case valid(rawData: Data, result: WorkspaceLoadResult)
+    case opaqueInvalid(rawData: Data, identity: WorkspaceRawSourceIdentity)
 }
 ~~~
 
@@ -107,9 +154,28 @@ load 原始字节并保留 source schema/hash
 public enum WorkspaceTransaction {
     case command(WorkspaceCommand, undoLabel: String?)
     case noteDraft(NoteDraftSubmission)
-    case restore(WorkspaceRestoreRequest)
+    case restore(preview: WorkspaceRestorePreview, rollbackDirectoryURL: URL)
     case undo
     case redo
+}
+
+public enum WorkspaceTransactionOutcome: Equatable, Sendable {
+    case committed(WorkspaceSaveReceipt, journal: JournalResolutionStatus)
+    case restored(WorkspaceRestoreOutcome)
+    case noChange(WorkspaceNoChangeReason, journal: JournalResolutionStatus)
+    case conflict(WorkspaceConflict)
+    case draftSuperseded
+    case commitPending(transactionID: UUID, artifacts: WorkspacePendingCommitArtifacts)
+    case notCommitted(transactionID: UUID, journal: JournalResolutionStatus, artifacts: WorkspacePendingCommitArtifacts)
+    case externalSourceChanged(transactionID: UUID?, reason: WorkspaceExternalSourceChangeReason, journal: JournalResolutionStatus, artifacts: WorkspacePendingCommitArtifacts)
+    case persistenceBlocked(transactionID: UUID?, reason: WorkspacePersistenceBlockReason, journal: JournalResolutionStatus)
+}
+
+public enum PendingCommitRetryOutcome: Equatable, Sendable {
+    case committed(WorkspaceCommittedOperation, journal: JournalResolutionStatus)
+    case notCommitted(transactionID: UUID, journal: JournalResolutionStatus, artifacts: WorkspacePendingCommitArtifacts)
+    case sourceChanged(transactionID: UUID, journal: JournalResolutionStatus, artifacts: WorkspacePendingCommitArtifacts)
+    case stillPending(transactionID: UUID, artifacts: WorkspacePendingCommitArtifacts)
 }
 
 @MainActor
@@ -117,21 +183,24 @@ public enum WorkspaceTransaction {
     private(set) var state: WorkspaceState
     var calendarState: CalendarState { state.calendar }
 
-    func send(_ command: WorkspaceCommand, undoLabel: String?) async throws
-    func sendCalendar(_ command: CalendarCommand, undoLabel: String?) async throws
-    func submitDraft(_ submission: NoteDraftSubmission) async throws
-    func restore(_ request: WorkspaceRestoreRequest) async throws
-    func undo() async throws
-    func redo() async throws
+    func sendWorkspace(_ command: WorkspaceCommand, undoLabel: String?) async throws -> WorkspaceTransactionOutcome
+    func sendCalendar(_ command: CalendarCommand, undoLabel: String?) async throws -> WorkspaceTransactionOutcome
+    func submitDraft(_ submission: NoteDraftSubmission) async throws -> WorkspaceTransactionOutcome
+    func restore(_ preview: WorkspaceRestorePreview, rollbackDirectoryURL: URL) async throws -> WorkspaceTransactionOutcome
+    func undo() async throws -> WorkspaceTransactionOutcome
+    func redo() async throws -> WorkspaceTransactionOutcome
+    func retryPendingCommit(_ transactionID: UUID) async throws -> PendingCommitRetryOutcome
+    func retryJournalCleanup(_ identity: DraftJournalIdentity) async -> JournalResolutionStatus
 }
 ~~~
 
-- send、sendCalendar、submitDraft、restore、undo、redo 只入队，不因上一条正在保存而拒绝。
+- sendWorkspace、sendCalendar、submitDraft、restore、undo、redo 只入队，不因上一条正在保存而拒绝。
 - drain 每次取一条，在执行时读取最新 state，构造 candidate，WorkspaceValidator 校验，repository.save 成功后才发布。
-- Note draft 只携带 noteID、draftGeneration、snapshot 和 checksum，不携带整个 WorkspaceState。
+- Note draft 携带 noteID、editSessionID、draftGeneration、baseSnapshot、modifiedFields、snapshot 和 checksum，不携带整个 WorkspaceState。PersistableDraftContext、DraftJournalEntry 和 PersistedDraftReceipt 都必须携带同一个 editSessionID。
 - generation 5 的 receipt 到达时若 Journal 已是 generation 6，不能清理 generation 6。
 - Journal 清理失败不回滚已成功的主保存；保留可识别的已持久 receipt，启动时按 receipt 精确消解。
-- UndoRecord 保存业务内容前后态；undo/redo 恢复业务值后，workspace.revision = current + 1，受影响 Note revision = 当前该 Note revision + 1。
+- Draft Journal 是按 `(noteID, editSessionID)` 分区的多记录 envelope，不是一个全局槽位；不同 Note 或不同编辑会话的 generation 互不覆盖。
+- UndoRecord 保存可逆 optimistic write-set 与受影响 Note 的 revision high-watermark，不保存/恢复整个 WorkspaceState。undo/redo 只在 touched before/after 值仍匹配时应用 delta；workspace.revision = current + 1，受影响 Note revision 从 session ledger 当前高水位 + 1，已删除 Note 的高水位也不得丢失。
 
 ## Task 1: Add WorkspaceDomain and Lock Core Models
 
@@ -959,6 +1028,8 @@ git commit -m "feat(workspace): 完成跨对象原子命令"
 
 ## Task 5: Build V3 Migration, Provenance, Snapshot, Recovery, and Journal Persistence
 
+> **Historical baseline superseded by Task 6A:** the checked Task 5 protocol, `LoadedSource.bytes`, single-record Journal and restore signatures below describe the safely shipped baseline at `e4db14c`. Task 6A replaces those shapes in place with the one complete protocol and migration contract in Task 6; implementers must not preserve Task 5 shapes as compatibility overloads or a second business path.
+
 **Files**
 
 - Create: Sources/CalendarPersistence/WorkspaceDocument.swift
@@ -1093,6 +1164,19 @@ git commit -m "feat(storage): 安全迁移工作空间 V3 并增加草稿恢复"
 - Create: Sources/CalendarApp/Workspace/WorkspaceUndoRecord.swift
 - Create: Sources/CalendarApp/Workspace/DraftJournalCoordinator.swift
 - Create: Sources/CalendarApp/Workspace/AppDataDirectoryResolver.swift
+- Create: Sources/CalendarApp/Workspace/EditorFocusRegistry.swift
+- Create: Sources/WorkspaceDomain/WorkspaceUndoReducer.swift
+- Create: Sources/WorkspaceDomain/WorkspaceExternalSourceAdoptionPlanner.swift
+- Create: Sources/WorkspaceDomain/NoteDraftSequenceRebasePlanner.swift
+- Modify: Sources/WorkspaceDomain/DraftContracts.swift
+- Modify: Sources/WorkspaceDomain/WorkspaceReducer.swift
+- Modify: Sources/WorkspaceDomain/WorkspaceReducer+Notes.swift
+- Modify: Sources/CalendarPersistence/WorkspaceRepository.swift
+- Modify: Sources/CalendarPersistence/WorkspaceDocument.swift
+- Modify: Sources/CalendarPersistence/WorkspaceRestorePlan.swift
+- Modify: Sources/CalendarPersistence/JSONWorkspaceRepository.swift
+- Modify: Sources/CalendarPersistence/DraftJournal.swift
+- Modify: Sources/CalendarPersistence/DraftJournalRepository.swift
 - Modify: Sources/CalendarApp/AppEnvironment.swift
 - Modify: Sources/CalendarApp/PersonalCalendarApp.swift
 - Modify: Sources/CalendarApp/CalendarUndoCommands.swift
@@ -1109,77 +1193,240 @@ git commit -m "feat(storage): 安全迁移工作空间 V3 并增加草稿恢复"
 - Create: Tests/CalendarAppTests/WorkspaceStoreTests.swift
 - Create: Tests/CalendarAppTests/DraftJournalCoordinatorTests.swift
 - Create: Tests/CalendarAppTests/AppDataDirectoryResolverTests.swift
+- Create: Tests/WorkspaceDomainTests/WorkspaceUndoReducerTests.swift
+- Create: Tests/WorkspaceDomainTests/WorkspaceExternalSourceAdoptionPlannerTests.swift
+- Create: Tests/WorkspaceDomainTests/NoteDraftSequenceRebasePlannerTests.swift
+- Modify: Tests/CalendarPersistenceTests/DraftJournalRepositoryTests.swift
+- Modify: Tests/CalendarPersistenceTests/JSONWorkspaceRepositoryTests.swift
+- Modify: Tests/CalendarPersistenceTests/WorkspaceBackupServiceTests.swift
+- Modify: Tests/CalendarPersistenceTests/WorkspaceRepositoryFailureTests.swift
+- Create: docs/validation/workspace-v3/task-6-legacy-assertion-map.md
+- Create: docs/validation/workspace-v3/task-6-legacy-test-inventory.txt
+- Create: Scripts/verify-task6-legacy-assertion-map.sh
 
 **Produces:** One in-memory/store truth, one queued save path, monotonic revisions, focus-routed undo/redo, Journal-first autosave and explicit isolated acceptance data path.
 
 **Consumes:** WorkspaceReducer and JSONWorkspaceRepository.
 
-- [ ] Inventory every production/test reference before editing. Port failure-before-publish, restore, undo and in-memory repository assertions from CalendarStoreTests into WorkspaceStoreTests; replace InMemoryCalendarRepository with an InMemoryWorkspaceRepository across TestSupport and all CalendarApp tests; then remove the old test file. Make the gate fail if CalendarStore, CalendarRepository or JSONCalendarRepository remains anywhere in Sources or Tests.
+**Task 6 scoped execution order:** this task is three independently reviewed slices. 6A adds persistence prerequisites and must pass CalendarPersistence before Store production code. 6B adds the typed queue/Store/Journal/undo/resolver while the old CalendarStore remains only as a compile scaffold; no App consumer is half-migrated. 6C migrates every App/test consumer and then deletes all legacy Store/repository/wrapper paths in one final cutover. Each slice gets its own implementation commit and fresh Sol xhigh scoped review; findings are fixed before the next slice starts.
 
-~~~zsh
-rg -n 'CalendarStore|CalendarRepository|JSONCalendarRepository' Sources/CalendarApp
+### Task 6A persistence prerequisite contract
+
+- The Journal is a multi-record durable envelope keyed by `DraftJournalIdentity(noteID, editSessionID)`, not one global record. Add `editSessionID` to DraftJournalEntry, PersistableDraftContext and PersistedDraftReceipt. Generation ordering is scoped to one identity; Note A generation 6 never suppresses Note B generation 1. The envelope is canonical-sorted and checksummed, and corrupt/unreadable storage is never treated as absent.
+- The current Task 5 single-record file is a versioned legacy DTO, not corrupt data. Decode it only when its complete old shape and checksums are valid; map its entry, pendingReceipt and savedReceipt to the namespaced `.legacyTask5` session case, then atomically replace it with the multi-record envelope. A migration write failure preserves the exact old bytes and reports failure; malformed current or legacy bytes are `invalidJournal`, never absent. New submissions map their UUID to `.editor(uuid)`, so legacy and editor identities cannot collide even when UUID bytes match.
+- Lock the public persistence protocol before RED so Store and test doubles share one executable contract:
+
+~~~swift
+public struct PersistableDraftContext: Equatable, Sendable {
+    public let noteID: NoteID
+    public let editSessionID: DraftJournalSessionID
+    public let draftGeneration: UInt64
+    public let noteSnapshotChecksum: String
+    public let persistedNoteRevision: Int64
+}
+
+public enum WorkspaceDraftPersistenceVerification: Equatable, Sendable {
+    case verified(PersistedDraftReceipt)
+    case notPersisted
+    case sourceChanged
+    case unreadableUnknown
+}
+
+public enum WorkspaceReloadedSource: Equatable, Sendable {
+    case absent
+    case valid(WorkspaceLoadResult)
+    case opaqueInvalid(WorkspaceRawSourceIdentity)
+    case unreadableUnknown
+}
+
+public struct WorkspaceRestorePreview: Equatable, Sendable {
+    public let sourceURL: URL
+    public let rawSourceData: Data
+    public let sourceIdentity: WorkspaceRawSourceIdentity
+    public let loadResult: WorkspaceLoadResult
+    public let sourceNoteRevisions: [NoteID: Int64]
+}
+
+public struct WorkspaceRawRecoveryArtifact: Equatable, Sendable {
+    public let rawData: Data
+    public let identity: WorkspaceRawSourceIdentity
+}
+
+public protocol WorkspaceRepository: Sendable {
+    func load() async throws -> WorkspaceLoadResult
+    func save(_ state: WorkspaceState, draft: PersistableDraftContext?) async throws
+        -> WorkspaceSaveReceipt
+    func verifyPersistedDraft(_ context: PersistableDraftContext) async throws
+        -> WorkspaceDraftPersistenceVerification
+    func prepareRestore(_ preview: WorkspaceRestorePreview, rollbackDirectoryURL: URL) async throws
+        -> PreparedWorkspaceRestore
+    func discardPreparedRestore(_ prepared: PreparedWorkspaceRestore) async -> Bool
+    func commitRestore(_ prepared: PreparedWorkspaceRestore, state: WorkspaceState) async throws
+        -> WorkspaceRestoreOutcome
+    func currentDocumentData() async throws -> Data
+    func reloadCurrentSourceAfterExternalChange() async throws -> WorkspaceReloadedSource
+    func currentRawRecoveryData() async throws -> WorkspaceRawRecoveryArtifact
+    func reconcilePendingCommit() async throws -> WorkspaceCommitReconciliation
+}
 ~~~
 
-- [ ] Write RED tests for failure-before-publish, two queued commands, noChange causing no save/revision/undo, edit-save while calendar mutates, calendar-save while typing continues, queued restore of an older V3/V2/V1 source concurrent with a newer draft, restore failure-before-publish, restart after restore preserving normalized monotonic revisions, old receipt late arrival, Journal clear failure, load failure, undo/redo monotonic revisions and editor-focus undo routing.
+  This full protocol supersedes the Task 5 shape in one compile step; remove the old `prepareRestore(WorkspaceRestoreRequest)` and `commitRestore(...)->WorkspaceSaveReceipt` overloads rather than retaining parallel paths. Task 5's checked-off text records the earlier implementation state, while this block is the authoritative post-Task-6 protocol. `BackupService.inspectRestoreSource(_ sourceURL: URL) async throws -> WorkspaceRestorePreview` is a pure read/validate operation and issues no capability. `verifyPersistedDraft` runs under the same coordination lock and distinguishes exact main-file proof, Note mismatch, readable third source and unreadable/unknown probing; only `.verified` authorizes Journal acknowledgement. `WorkspaceRawRecoveryArtifact` carries the exact bytes and identity but is explicitly not a validated backup. `save` rejects a draft context unless its note/session/generation/checksum identify the candidate Note and `context.persistedNoteRevision == state.notes[noteID].revision`; the repository constructs and returns the same exact receipt from that candidate.
+- Add one atomic Journal RMW API:
+
+~~~swift
+rebaseAndBind(
+    expected: DraftJournalIdentityAndGeneration,
+    finalCandidateNote: Note,
+    receipt: PersistedDraftReceipt
+) -> DraftJournalBindingResult // bound | supersededByNewerDraft
+~~~
+
+  It validates the old exact record, rewrites its protected snapshot/checksum to the final merged candidate and binds the exact receipt in the same file replacement. Add exact `record`, `unbindPending`, `acknowledgeAlreadyPersisted` and `clear` operations for one identity. No sequence may overwrite a newer generation between rebase and bind.
+- WorkspaceReducer emits draftContext only after revision allocation and uses the final candidate Note checksum plus editSessionID. A disjoint merge therefore persists and receipts the merged candidate rather than the stale submitted snapshot. If rebaseAndBind reports a newer Journal record, the older draft transaction performs no main save, publish or undo mutation, never touches the newer Journal record, and returns `draftSuperseded`; it must not persist the superseded candidate without a receipt.
+- Identical draft noChange never writes the Workspace. Before exact Journal acknowledgement, WorkspaceRepository verifies under its coordination lock that the currently persisted main file contains the final Note checksum/revision; only that proof may drive `acknowledgeAlreadyPersisted` and clear. Conflict or failed verification preserves the Journal.
+- Map every nonverified noChange result explicitly: `.sourceChanged` enters externalSourceChanged(reason: externalBytesChanged), fails queued callers once and preserves the bare Journal entry; `.unreadableUnknown` enters unreadablePrimaryLoadFailed and preserves it; `.notPersisted` enters externalSourceChanged(reason: publishedDraftNotPersisted), because the published state was not proven to match the valid main file. The last case never claims noChange or cleanupPending. Its recovery is explicit reload/adoption of the valid main source followed by re-enqueueing the still-protected Journal entry against that adopted state. Until that succeeds, ordinary commands stay frozen.
+- Continuations for those mappings are terminal and exact: sourceChanged and notPersisted return `.externalSourceChanged` for the current head and every already queued caller exactly once, each with its own transaction ID, then reject new ordinary calls immediately in the frozen phase. unreadableUnknown returns `.persistenceBlocked(reason: .unreadablePrimary)` to the current head and every queued caller exactly once, then immediately returns the same typed block for new ordinary calls. None of these paths leaves a continuation suspended or clears the bare Journal entry.
+- Split restore inspection from capability issuance. `BackupService.inspectRestoreSource` returns a pure WorkspaceRestorePreview with exact source hash/count/schema, content, per-Note revisions and consistency issues; it does not mutate repository state. `prepareRestore` is called only at the queue head after confirmation and binds the expected preview identity. Add exact `discardPreparedRestore`, invoked on every post-prepare noChange, stale preview, reducer error or cancellation.
+- Extend LoadedSource with opaque-invalid exact raw bytes/hash/count. A readable corrupt primary is retained as opaque before load throws; it supports an explicitly labelled raw recovery copy and a verified rollback+CAS restore. An absent primary restores through create-if-absent and returns `rollback: .nonePreviousSourceAbsent`. An unreadable/unknown primary fails closed and is neither absent nor replaceable.
+- `reloadCurrentSourceAfterExternalChange()` runs under the same Jelly lock/no-follow probe and wholly rebinds `.absent`, `.valid(rawData, WorkspaceLoadResult)` or `.opaqueInvalid(rawData, identity)`; it returns the typed public projection above. Unreadable remains frozen. `currentRawRecoveryData()` exposes opaque recovery evidence without pretending it is a valid backup. Ordinary `currentDocumentData()` remains envelope-valid only.
+- Add WorkspaceExternalSourceAdoptionPlanner with the exact pure signature `plan(current:external:sessionNoteHighWatermarks:) throws -> WorkspaceExternalSourceAdoption`. Its output contains candidate, updated high-watermarks, requiresNormalization and consistencyIssues. Workspace revision is `max(current, source)` when revision-insensitive business content is identical and `checked(max(current, source) + 1)` when it differs. Each surviving Note follows the same per-Note rule; externally deleted Notes still contribute their current/source maximum to the returned ledger, so a later same-ID recreation cannot regress. Overflow is a typed failure. A source with repairable issues is held as an unpublished pending external repair candidate; explicit repair runs against that candidate, then the same normalization planner runs again, and only a successful save publishes candidate and commits the returned ledger. Absent, opaque, unreadable, planner failure and save failure leave published state and ledger unchanged.
+
+### Task 6B queue, Store, Journal and undo contract
+
+- Public requests return the typed WorkspaceTransactionOutcome from the global contract. Reducer noChange/conflict, a deterministically not-committed write and external source change are never collapsed into Void or a generic error. Restore uses `.restored(WorkspaceRestoreOutcome)` so the exact rollback artifact is not lost.
+- `retryPendingCommit(transactionID)` returns `PendingCommitRetryOutcome`; it is the only API that can return `.stillPending`. This keeps the original transaction's one-time `commitPending` response distinct from a later explicit retry's committed/notCommitted/sourceChanged terminal result.
+- WorkspaceTransactionQueue is MainActor FIFO and reduces only when dequeued against the latest published state. Enqueue allocates a stable transaction ID. Cancellation before append rejects; after append the transaction is non-cancellable. Every caller continuation is resumed exactly once.
+- WorkspaceStore receives one deterministic `@Sendable () -> Date` clock and uses one captured instant per dequeued transaction; reducers, completion commands and undo/redo never call Date independently.
+- On repository commitUncertain the head performs one immediate reconciliation only. Once a repository pending identity exists, `reconcilePendingCommit` must return `.stillPending(artifacts)` for every unreadable/unknown/lock/decode uncertainty rather than rethrowing a payload-less commitUncertain; this is how the Store obtains rollback evidence for commitPending. If reconciliation is still pending, the head parks with candidate, committed-operation metadata, undo metadata and Journal binding intact; its caller is resumed once with commitPending and its continuation is discarded. No automatic retry loop runs. `retryPendingCommit(transactionID)` is explicit and never resumes the old caller again.
+- Pending metadata distinguishes `.save(receipt)` from `.restore(outcome)`. A restore exposes its rollback artifact in the initial commitPending artifacts as soon as rollback creation is verified; a later committed reconciliation returns `.restore(WorkspaceRestoreOutcome)`. notCommitted and sourceChanged also return the already generated rollback artifact, which remains durable recovery evidence and is never silently deleted. An ordinary save has `rollback == nil`.
+- A definite direct CAS sourceChanged does not enter pending reconciliation. Once restore rollback creation has begun, JSONWorkspaceRepository throws `WorkspaceDirectCommitFailure.sourceChanged(artifacts)` with the verified rollback file or `.nonePreviousSourceAbsent`; an ordinary save uses the same typed failure with `rollback == nil`. Store converts it to `.externalSourceChanged` and preserves/exposes the artifact. A payload-less `WorkspacePersistenceError.sourceChanged` is removed in Task 6A. RED covers ordinary save, valid/opaque previous-source restore and absent create-race restore.
+- Reconciliation terminal matrix is fixed:
+  - committed: publish candidate and update undo/redo exactly once even if later Journal cleanup fails; record/clear the exact Journal receipt and release the head with the typed Journal resolution below;
+  - notCommitted: do not publish or alter undo, exact-unbind the pending Journal receipt while retaining its entry; only successful unbind releases the head and continues FIFO;
+  - sourceChanged: do not publish, exact-unbind while retaining the entry, fail every queued caller exactly once, and enter externalSourceChanged until explicit reload/adoption or verified restore; unbind failure is retained as observable cleanup work rather than misreported as a save failure;
+  - stillPending: remain parked with the returned artifacts, without busy-loop or duplicate continuation.
+- Journal terminal side effects use a typed `JournalResolutionStatus = .clean | .cleanupPending(identity, step)` where step is record, acknowledge, unbind or clear. Bind is intentionally excluded: bind failure occurs before main save, preserves the bare Journal entry, returns a pre-commit transaction failure and never enters terminal cleanup or releases the candidate through cleanup retry. A committed main file is always published once and returns `.committed(receipt, cleanupPending)` if record/clear fails; it is never rolled back or reported as not saved. noChange exact proof similarly returns `.noChange(reason, cleanupPending)` if acknowledgement/clear fails. Any cleanupPending parks FIFO at `parkedJournalCleanup`; notCommitted/sourceChanged never carry a dirty pending receipt into a later business transaction. `retryJournalCleanup(identity)` retries only the stored exact Journal transition, never calls repository reconciliation, never republishes state and never resumes the already completed original continuation. Success releases a committed/noChange/notCommitted cleanup park and drains FIFO; sourceChanged becomes cleanup-clean but remains frozen until reload/adoption/restore. Another failure remains parked with the same token. Startup resolves: bare entry through locked main verification → acknowledge → clear; pending + main exact receipt → record → clear; pending + definite previous → unbind; saved → clear; unreadable/unknown main or Journal → frozen with bytes untouched.
+- Store phases are typed and observable: notLoaded, loading, ready, mutating, parkedCommitUncertain(transactionID), parkedJournalCleanup(identity, step), needsRelationshipRepair, externalSourceChanged(reason), opaquePrimaryLoadFailed, unreadablePrimaryLoadFailed and loadFailed. External-source reasons include externalBytesChanged and publishedDraftNotPersisted. Repair/frozen modes permit only valid backup/raw recovery, reload/adoption, protected-draft replay, restore and exact repairConsistency as applicable; ordinary commands, drafts, undo and redo are rejected.
+- Journal terminal status is executable, not a display string:
+
+~~~swift
+public enum JournalCleanupStep: Equatable, Sendable {
+    case record, acknowledge, unbind, clear
+}
+
+public enum JournalResolutionStatus: Equatable, Sendable {
+    case clean
+    case cleanupPending(identity: DraftJournalIdentity, step: JournalCleanupStep)
+}
+~~~
+
+- DraftJournalCoordinator persists the entry before enqueue, atomically rebases/binds the final candidate before main save, and applies the exact reconciliation and cleanup matrix. Journal write/bind failure prevents main save; post-commit record/clear failure follows the committed cleanupPending rule above.
+- Add pure `NoteDraftSequenceRebasePlanner` with `plan(previousAccepted: PreviousAcceptedDraft, next: NoteDraftSubmission, latest: Note) throws -> NoteDraftSequenceRebaseResult`. For a queued N+1 of the same Journal identity, retain its original base and field delta. Rebase is authorized only when every field changed by the prior accepted N in latest still exactly equals N's accepted after-value; the planner then substitutes that accepted after-value as N+1's new base and replays only N+1's delta. It never merely raises a revision/checksum or replaces a whole Note. A third-party change to the same field remains a typed conflict; disjoint latest changes survive. Store retains the last accepted original-base/accepted-after metadata per active identity until no queued generation depends on it. Tests cover suspended N followed by same-field N+1, disjoint N+1, and a third-party same-field edit between them.
+- WorkspaceUndoRecord is a reversible optimistic write-set, not a whole-Workspace restore. It stores revision-insensitive before/after business projections only for touched fields in the calendar subgraph, Notes, Inspirations and relation/link entries, plus per-Note revision high-watermarks. Note structural create/delete entries additionally store the expected incarnation revision at materialization; independent same-ID recreation therefore conflicts even if its business content is identical. `WorkspaceUndoReducer.apply` compares ordinary field projections while ignoring revision/updatedAt bookkeeping, but compares structural lifecycle entries against exact absence or the expected incarnation. It applies inverse/forward deltas to the latest state and returns both candidate and a remapped reverse record whose expected projection/incarnation matches the newly materialized values. This makes immediate redo and repeated undo legal after new revisions are allocated. Unrelated later Note drafts survive calendar-only undo; a later edit to a touched field conflicts. Store keeps a session Note revision ledger including deleted Notes as max-seen revisions; same-ID recreation advances from that ledger. Workspace revision is checked current+1 for each successful undo/redo; affected Notes use checked ledger+1, untouched Notes keep their revisions. Overflow, validation, touched-value/incarnation conflict or persistence failure leaves state, both stacks and ledger byte-for-byte/Equatable unchanged; a new transaction clears redo only after successful persistence.
+- Calendar `.updateItem` is normalized at dequeue to preserve latest `completedAt`; completion is owned only by the dedicated completion command. Add both queue order REDs so an old editor payload cannot reopen/complete a task accidentally.
+- EditorFocusRegistry weakly holds the focused UndoManager and pairs it with an owner token. Undo/redo routing returns `.noFocusedOwner`, `.focusedPerformed` or `.focusedUnavailable`: only `.noFocusedOwner` permits WorkspaceStore fallback; an alive focused manager with an empty/disabled stack returns `.focusedUnavailable` and consumes/disables the command, never undoing the workspace. If the weak manager is released, the registry first clears that exact owner token and may then return `.noFocusedOwner`. A stale blur/deinit from Editor A cannot clear Editor B. Commands expose Command-Z and Shift-Command-Z; observable canUndo/canRedo switches with focus ownership and follows the focused editor, otherwise WorkspaceStore.
+- BackupCommands owns no repository. It calls Store methods only: exportBackup, inspectRestoreSource, restore(preview:rollbackDirectoryURL:), exportRawRecoveryCopy, retryPendingCommit and retryJournalCleanup. Restore returns typed receipt plus rollback artifact so UI never claims a rollback file for an absent previous source.
+- Explicit external adoption publishes directly only when the source is valid, has no consistency issues, `external.provenance.sourceSchema == 3`, `candidate == external.state` and `requiresNormalization == false`. Otherwise the candidate and returned ledger remain unpublished until normalization save succeeds. External repair runs first against the held external candidate, then re-runs the same planner; planner overflow, validator failure or save failure keeps published state and the session ledger unchanged.
+
+### Task 6C App cutover and data-directory contract
+
+- AppDataURLs explicitly contains root, mainDocument, migrationSnapshotDirectory, recoveryManifest, draftJournal, rollbackDirectory and automaticRecoveryDirectory. A trimmed nonempty JELLY_ACCEPTANCE_DATA_DIRECTORY must be an absolute non-root path, is standardized and created without modifying HOME, and fails closed if it is a file, cannot be searched/written, or resolves through a symlink escape. User-selected export destinations remain outside this automatic-sidecar root.
+- WorkspaceStore exposes WorkspaceState as `state`, CalendarState as read-only `calendarState`, sendWorkspace and sendCalendar wrappers, typed phase/errors/outcomes, statePublicationGeneration, undo/redo availability and the repair/recovery methods above. All Calendar views read calendarState; no compatibility alias named CalendarStore remains after cutover.
+- CategoryManagerViewModel sends only Workspace create/update/reorder/delete category commands. Raw Calendar category commands remain rejected.
+- Before editing the legacy tests, capture their exact 25 + 14 `@Test` function names in `task-6-legacy-test-inventory.txt`. Maintain `task-6-legacy-assertion-map.md` with exactly one row per inventory name. `Scripts/verify-task6-legacy-assertion-map.sh --inventory` verifies inventory counts/uniqueness and, while old files exist, exact extraction; it permits targets marked `UNMAPPED`. `--complete` rejects missing/blank/UNMAPPED/duplicate targets and verifies every mapped target test exists in Tests. Preflight runs only `--inventory`; deletion requires `--complete` plus green mapped targets, and final post-deletion verification again runs `--complete` from the committed inventory.
+
+- [ ] Preflight before implementation: inventory every production/test reference across Sources and Tests, record exact counts, capture the 25 + 14 legacy test names in the committed inventory, create one `UNMAPPED` row per legacy name, and make the script's `--inventory` mode pass against the still-present legacy files. Do not run `--complete`, create any Task 6B test or add any Store production file during 6A.
+
+~~~zsh
+rg -n 'CalendarStore|CalendarRepository|JSONCalendarRepository|InMemoryCalendarRepository' Sources Tests
+~~~
+
+- [ ] **Task 6A RED only:** write persistence/domain prerequisite tests for multi-Note/session Journal records and deterministic legacy single-record migration; disjoint-merge final-candidate context and atomic rebase+bind; conflict/noChange/superseded generation; exact actor-level record/acknowledge/unbind/clear failure atomicity and durability; corrupt/unreadable Journal; pure restore preview/cancel/discard; absent and opaque-primary restore; raw recovery export; unreadable fail-closed; reload valid/opaque/absent/unreadable external sources; lower-revision adoption, deleted-Note ledger, overflow and external repairable issues. Store publication/save-failure nonpublication, parking, continuation and terminal cleanup orchestration belong only to 6B. Run these REDs before editing production, then implement 6A without creating WorkspaceStore, WorkspaceTransactionQueue, DraftJournalCoordinator or any 6B test file.
+
+~~~zsh
+./Scripts/test.sh --filter WorkspaceDomainTests.WorkspaceReducerTests
+./Scripts/test.sh --filter WorkspaceDomainTests.WorkspaceExternalSourceAdoptionPlannerTests
+./Scripts/test.sh --filter CalendarPersistenceTests.DraftJournalRepositoryTests
+./Scripts/test.sh --filter CalendarPersistenceTests.JSONWorkspaceRepositoryTests
+./Scripts/test.sh --filter CalendarPersistenceTests.WorkspaceBackupServiceTests
+./Scripts/test.sh --filter CalendarPersistenceTests.WorkspaceRepositoryFailureTests
+~~~
+
+- [ ] **Task 6A GREEN/review/commit:** implement only the 6A persistence prerequisites: multi-record Journal with atomic rebase/bind/unbind and legacy migration, final-candidate draft context, verified noChange, pure restore preview/discard, opaque/absent restore, raw recovery copy, external-source reload and adoption planner. Run WorkspaceDomainTests, CalendarPersistenceTests and full tests. Obtain fresh Sol xhigh scoped review, fix every Critical/Important finding, rerun, and commit 6A before any 6B RED lands.
+- [ ] **Task 6B RED only after the reviewed 6A commit:** create queue/Store/Coordinator/undo/focus/resolver tests for failure-before-publish, two queued commands, pre/post-enqueue cancellation, every continuation exactly once, verified noChange causing no save/revision/undo, all three nonverified noChange mappings, edit-save while calendar mutates, sequential generations while save is suspended, calendar-save while typing continues, every Journal cleanup failure, the complete commitUncertain park/retry terminal matrix including restore rollback artifacts, queued restore of older V3/V2/V1 concurrent with a newer draft, restore failure-before-publish, restart after restore preserving normalized revisions, old receipt late arrival, consistency repair mode, sourceChanged reload/adoption and adoption-save failure nonpublication, opaque/unreadable load, optimistic delta undo/redo, revision overflow and owner-token editor focus routing. Include create→undo→redo→undo, delete→undo→redo→undo, same-ID recreation conflict, unrelated draft survival, same-field late conflict, weak UndoManager deallocation/focus transfer/fallback, and old `.updateItem` completion payload queue order.
 
 ~~~swift
 @Test func queuedDraftReducesAfterCalendarMutationAgainstLatestState() async throws {
     let repository = SuspendedWorkspaceRepository()
     let store = WorkspaceStore(initialState: fixture, repository: repository, journal: journal, clock: clock)
-    async let first: Void = store.sendCalendar(.createItem(item), undoLabel: "新建事项")
+    async let first = store.sendCalendar(.createItem(item), undoLabel: "新建事项")
     await repository.waitUntilSaveStarted()
-    async let second: Void = store.submitDraft(generation6)
+    async let second = store.submitDraft(generation6)
     await repository.resumeSave()
-    try await first
-    try await second
+    #expect(try await first == .committed(expectedCalendarReceipt, journal: .clean))
+    #expect(try await second == .committed(expectedDraftReceipt, journal: .clean))
     #expect(store.calendarState.items[item.id] == item)
     #expect(store.state.notes[noteID]?.title == generation6.snapshot.title)
 }
 
 @Test func undoCreatesNewMonotonicRevisions() async throws {
-    let afterEdit = try await store.apply(noteEdit)
-    let workspaceRevision = afterEdit.revision
-    let noteRevision = afterEdit.notes[noteID]!.revision
-    try await store.undo()
+    _ = try await store.sendWorkspace(noteEdit, undoLabel: "编辑笔记")
+    let workspaceRevision = store.state.revision
+    let noteRevision = store.state.notes[noteID]!.revision
+    _ = try await store.undo()
     #expect(store.state.revision == workspaceRevision + 1)
     #expect(store.state.notes[noteID]!.revision == noteRevision + 1)
 }
 ~~~
 
-- [ ] Run RED.
+- [ ] Run the Task 6B RED set. These files do not exist during 6A, so SwiftPM can compile and green the 6A test targets independently.
 
 ~~~zsh
+./Scripts/test.sh --filter WorkspaceDomainTests.WorkspaceUndoReducerTests
+./Scripts/test.sh --filter WorkspaceDomainTests.NoteDraftSequenceRebasePlannerTests
 ./Scripts/test.sh --filter CalendarAppTests.WorkspaceStoreTests
 ./Scripts/test.sh --filter CalendarAppTests.DraftJournalCoordinatorTests
 ./Scripts/test.sh --filter CalendarAppTests.AppDataDirectoryResolverTests
 ~~~
 
-- [ ] Implement WorkspaceTransactionQueue as a MainActor FIFO. Each request is reduced only when dequeued; while repository.save awaits, newer requests remain queued. Resume each continuation exactly once. A repository `commitUncertain` keeps that transaction at the queue head and blocks later work until `reconcilePendingCommit` returns committed/notCommitted/sourceChanged; it is never treated as an ordinary write-before-commit failure.
-- [ ] Implement WorkspaceStore with calendarState projection and sendCalendar wrapper. sendCalendar creates WorkspaceCommand.calendar and follows the same reducer/validator/repository path.
-- [ ] Route restore through WorkspaceTransactionQueue as prepareRestore → WorkspaceReducer.restoreContent against latest state → commitRestore. A successful restore publishes once and clears incompatible undo/redo only after disk replacement; failure keeps state/stacks unchanged. A draft queued after restore reduces against the restored latest state and remains protected/conflicted rather than disappearing.
-- [ ] A Note draft applies only its modifiedFields to the latest Note. Disjoint category/archive/title/document changes are merged; a same-field change whose base revision/checksum no longer matches becomes an explicit draft conflict and remains in Journal. A draft can never overwrite the entire latest Note or Workspace merely because its snapshot is older.
+- [ ] Implement WorkspaceTransactionQueue with the fixed typed FIFO/park/retry/continuation matrix. It must never busy-loop, suspend a caller forever, resume twice, or start a later head while one is parked.
+- [ ] Implement WorkspaceStore with state/calendarState projections, typed outcomes/phases, sendWorkspace/sendCalendar, consistency repair mode, external reload/adoption and Store-owned backup/recovery APIs. sendCalendar creates WorkspaceCommand.calendar and follows the same reducer/validator/repository path.
+- [ ] Route restore as inspect without capability → user confirmation → queue head reduce against latest preview → exact prepare → commitRestore. Discard any issued capability on every non-commit path. Successful restore publishes once and clears incompatible undo/redo only after disk replacement; failure keeps state/stacks unchanged. A draft queued after restore reduces against the restored latest state and remains protected/conflicted rather than disappearing.
+- [ ] A Note draft applies only its modifiedFields to the latest Note. Disjoint changes use final-candidate Journal rebase; same-field change becomes typed conflict and remains protected. Sequential generations in the same edit session rebase on the last applied generation, while a newer Journal record prevents an older transaction from touching its receipt. A draft never overwrites the entire latest Note or Workspace because its original snapshot is older.
 - [ ] Implement failure semantics: reducer/validator/repository failure leaves published state, revision and undo stacks unchanged; successful save publishes once and then updates undo/redo metadata.
-- [ ] Implement WorkspaceUndoRecord as business-content snapshots plus changed Note IDs. Undo/redo are queued persisted commands with current + 1 revisions; redo clears only after a successful new user transaction.
-- [ ] Replace global undo routing with editor focus priority.
+- [ ] Implement WorkspaceUndoRecord and pure WorkspaceUndoReducer as the optimistic reversible write-set and revision-ledger contract above. Undo/redo are queued persisted transactions; touched-value conflict, validation, overflow or persistence failure leaves state/stacks byte-for-byte/Equatable unchanged.
+- [ ] Replace global undo routing with owner-token editor focus priority for both undo and redo.
 
 ~~~swift
 @MainActor
 final class EditorFocusRegistry: ObservableObject {
-    weak var focusedUndoManager: UndoManager?
-    var hasFocusedBlockEditor: Bool { focusedUndoManager != nil }
+    func register(_ manager: UndoManager, ownerID: UUID)
+    func clear(ownerID: UUID)
+    func routeUndo() -> EditorUndoRouteResult
+    func routeRedo() -> EditorUndoRouteResult
+}
+
+enum EditorUndoRouteResult: Equatable, Sendable {
+    case noFocusedOwner
+    case focusedPerformed
+    case focusedUnavailable
 }
 
 func performUndo() {
-    if let manager = focusRegistry.focusedUndoManager {
-        manager.undo()
-    } else {
-        Task { try await workspaceStore.undo() }
+    if focusRegistry.routeUndo() == .noFocusedOwner {
+        Task { _ = try await workspaceStore.undo() }
+    }
+}
+
+func performRedo() {
+    if focusRegistry.routeRedo() == .noFocusedOwner {
+        Task { _ = try await workspaceStore.redo() }
     }
 }
 ~~~
 
-- [ ] Implement DraftJournalCoordinator ordering: persist Journal entry before enqueueing draft; after WorkspaceReducer creates the final candidate, atomically `bindPending` the exact expected receipt before calling repository.save; record only the exact returned/reconciled receipt; clear only exact noteID + generation + checksum + persistedNoteRevision. A commit-uncertain attempt keeps the pending binding and Journal until reconciliation. Journal clear failure preserves the receipt for restart reconciliation.
-- [ ] Add AppDataDirectoryResolver. Default remains Application Support/PersonalCalendar; a nonempty JELLY_ACCEPTANCE_DATA_DIRECTORY places main/snapshot/manifest/journal/backup below the supplied directory. Never alter HOME.
+- [ ] Implement DraftJournalCoordinator ordering with the multi-record atomic rebase/bind contract. Persist before enqueue; bind final candidate before save; record only returned/reconciled receipt; exact-unbind notCommitted/sourceChanged; clear only the exact saved identity/generation/checksum/revision. A parked commit retains the binding. Journal clear failure preserves the saved receipt for restart.
+- [ ] Add AppDataDirectoryResolver and AppDataURLs with the strict override and sidecar-path contract above. Default remains Application Support/PersonalCalendar. Never alter HOME.
 
 ~~~swift
 enum AppDataDirectoryResolver {
@@ -1190,25 +1437,31 @@ enum AppDataDirectoryResolver {
 }
 ~~~
 
-- [ ] Migrate MonthView, editors, categories, backup and restore to WorkspaceStore. CategoryManagerViewModel sends Workspace category commands. Remove the old Store and old business repository path.
+- [ ] **Task 6B GREEN/review/commit:** run WorkspaceDomainTests, CalendarPersistenceTests, focused CalendarApp Store tests and full tests. Obtain fresh Sol xhigh review focused on queue continuation/park/retry, Journal cleanup, failure publication, repair/adoption, sequential generation delta replay, multi-round delta undo revisions and focus ownership; fix every Critical/Important finding, rerun, and commit while WorkspaceStore remains dormant and unconstructed by the App composition root.
+- [ ] **Task 6C cutover:** only after the reviewed 6B commit, port every row in the assertion map, replace InMemoryCalendarRepository with InMemoryWorkspaceRepository across TestSupport, and migrate MonthView, WeekView, DayDrawer, editors, drag/drop, progress, categories, backup/restore, AppEnvironment, PersonalCalendarApp and all tests to WorkspaceStore in one consumer cutover. Views read calendarState; CategoryManagerViewModel sends Workspace category commands; BackupCommands calls Store only.
 - [ ] Remove the deprecated Calendar-only BackupService export/validate/restore wrappers after BackupCommands and WorkspaceStore use prepareRestore/queued commitRestore. Port their useful tests to WorkspaceBackupServiceTests before deletion.
+- [ ] Complete and verify every row in the 39-row legacy assertion map with `Scripts/verify-task6-legacy-assertion-map.sh --complete`, run every mapped target, then in the same final cutover delete CalendarStore, CalendarRepository, JSONCalendarRepository, InMemoryCalendarRepository, their old tests and all deprecated wrappers. Run `--complete` again after deletion from the committed inventory. Do not leave aliases, compatibility shims or a second business save path.
 - [ ] Run GREEN, all existing app tests and release compile.
 
 ~~~zsh
 ./Scripts/test.sh --filter CalendarAppTests.WorkspaceStoreTests
 ./Scripts/test.sh --filter CalendarAppTests.DraftJournalCoordinatorTests
 ./Scripts/test.sh --filter CalendarAppTests.AppDataDirectoryResolverTests
+./Scripts/test.sh --filter CalendarPersistenceTests
 ./Scripts/test.sh --filter CalendarAppTests
+./Scripts/test.sh
+./Scripts/verify-task6-legacy-assertion-map.sh --complete
 ! rg -n 'CalendarStore|CalendarRepository|JSONCalendarRepository' Sources Tests
+! rg -n 'InMemoryCalendarRepository' Sources Tests
 swift build -c release
 git diff --check
 ~~~
 
-- [ ] Request fresh Sol xhigh review focused on single-store ownership, queue ordering, failure publication, revision monotonicity, Journal receipts and undo focus; fix every Critical/Important finding and rerun all Task 6 filters plus CalendarAppTests.
-- [ ] Commit.
+- [ ] Request fresh Sol xhigh final Task 6 review focused on single-store ownership, all 39 legacy assertion mappings, Calendar behavior preservation, queue/Journal/restore UI wiring and dead-path removal; fix every Critical/Important finding and rerun CalendarAppTests, CalendarPersistenceTests, full tests and release build.
+- [ ] Commit the 6A persistence prerequisite, 6B Store core and 6C cutover as separately reviewable commits; add one final tracking commit only after all Task 6 checkboxes and gates pass.
 
 ~~~zsh
-git add Sources/CalendarApp Sources/CalendarPersistence Tests/CalendarAppTests Tests/CalendarPersistenceTests
+git add Sources/CalendarApp Sources/CalendarPersistence Sources/WorkspaceDomain Tests/CalendarAppTests Tests/CalendarPersistenceTests Tests/WorkspaceDomainTests Scripts/verify-task6-legacy-assertion-map.sh docs/validation/workspace-v3/task-6-legacy-assertion-map.md docs/validation/workspace-v3/task-6-legacy-test-inventory.txt
 git commit -m "refactor(app): 切换为唯一工作空间存储与串行保存"
 ~~~
 
