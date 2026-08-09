@@ -374,7 +374,21 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         let status = await DraftJournalCoordinator.retryCleanup(
             identity, step: step, receipt: journalCleanupReceipts[identity], journal: journal
         )
-        if case .clean = status {
+        switch status {
+        case let .cleanupPending(nextIdentity, _):
+            // A retry can make partial progress (for example record succeeds
+            // and clear then fails).  Park the returned, not captured, step
+            // so the next retry cannot repeat an already completed action.
+            parkJournalCleanup(
+                status,
+                receipt: journalCleanupReceipts[identity],
+                terminalPhase: journalCleanupTerminalPhases[identity] ?? .ready
+            )
+            if nextIdentity != identity {
+                journalCleanupReceipts.removeValue(forKey: identity)
+                journalCleanupTerminalPhases.removeValue(forKey: identity)
+            }
+        case .clean:
             journalCleanupReceipts.removeValue(forKey: identity)
             let terminalPhase = journalCleanupTerminalPhases.removeValue(forKey: identity) ?? .ready
             phase = terminalPhase

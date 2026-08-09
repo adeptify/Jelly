@@ -102,6 +102,29 @@ struct JSONWorkspaceRepositoryTests {
         #expect(try await repository.load().state == restored)
     }
 
+    @Test func absentRestoreDoesNotRequireRollbackDirectoryIO() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("main.json")
+        let source = directory.file("restore.json")
+        let blockedParent = directory.file("not-a-directory")
+        let restored = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        try Data("regular file, not a rollback directory".utf8).write(to: blockedParent)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let repository = JSONWorkspaceRepository(documentURL: main, seed: { restored })
+        _ = try await repository.load()
+
+        let prepared = try await repository.prepareRestore(
+            try await BackupService().inspectRestoreSource(source),
+            rollbackDirectoryURL: blockedParent.appendingPathComponent("nested", isDirectory: true)
+        )
+        let outcome = try await repository.commitRestore(prepared, state: restored)
+
+        #expect(outcome.rollback == .nonePreviousSourceAbsent)
+        #expect(try Data(contentsOf: blockedParent) == Data("regular file, not a rollback directory".utf8))
+        #expect(try await repository.load().state == restored)
+    }
+
     @Test func opaquePrimaryIsRetainedForRawRecoveryAndCanBeRestoredWithRollback() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }

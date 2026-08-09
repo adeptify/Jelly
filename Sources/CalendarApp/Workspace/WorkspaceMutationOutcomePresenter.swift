@@ -102,6 +102,48 @@ enum WorkspaceMutationOutcomePresenter {
         }
     }
 
+    /// Restore is a replacement operation, so terminal failures must never
+    /// borrow the editor's "save" wording. The rollback artifact is part of
+    /// the user-visible truth of that replacement attempt.
+    static func restorePresentation(for outcome: WorkspaceTransactionOutcome) -> WorkspaceMutationPresentation {
+        switch outcome {
+        case let .restored(restored):
+            return .init(
+                allowsDismissal: true,
+                message: "恢复完成。\(rollbackMessage(for: restored.rollback))",
+                recoveryAction: nil
+            )
+        case .commitPending:
+            return presentation(for: outcome)
+        case let .notCommitted(_, journal, artifacts):
+            return failedSavePresentation(
+                journal: journal,
+                message: "恢复没有提交，当前数据没有被替换。\(rollbackMessage(for: artifacts.rollback))"
+            )
+        case let .externalSourceChanged(_, _, journal, artifacts):
+            return failedSavePresentation(
+                journal: journal,
+                message: "恢复期间本地数据发生变化，当前数据未覆盖外部内容。\(rollbackMessage(for: artifacts.rollback))"
+            )
+        case let .persistenceBlocked(_, reason, journal):
+            let message = switch reason {
+            case .opaqueInvalidPrimary:
+                "恢复未开始：本地数据无法解析；请先导出原始恢复副本。"
+            case .unreadablePrimary:
+                "恢复未开始：本地数据暂时无法读取，原始字节也不可用。"
+            case .loadFailed:
+                "恢复未开始：本地数据加载失败；请先恢复或重新载入。"
+            }
+            return failedSavePresentation(journal: journal, message: message)
+        case .conflict:
+            return .retain("恢复与当前工作空间状态冲突，当前数据没有被替换。")
+        case .draftSuperseded:
+            return .retain("已有更新的编辑版本，恢复没有覆盖它。")
+        case .committed, .noChange:
+            return .retain("恢复内容与当前工作空间相同，当前数据没有被替换。")
+        }
+    }
+
     static func presentation(for outcome: PendingCommitRetryOutcome) -> WorkspaceMutationPresentation {
         switch outcome {
         case let .committed(operation, journal):
@@ -217,6 +259,11 @@ enum WorkspaceMutationOutcomePresenter {
         return replacement == terminalMessage
             ? "\(terminalMessage) 草稿清理也需要继续完成。"
             : replacement
+    }
+
+    private static func rollbackMessage(for rollback: WorkspaceRollbackArtifact?) -> String {
+        guard let rollback else { return "恢复前的数据是否已保留仍未知。" }
+        return rollbackMessage(for: rollback)
     }
 
     private static func rollbackMessage(for rollback: WorkspaceRollbackArtifact) -> String {

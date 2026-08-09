@@ -54,6 +54,12 @@ struct LegacyCalendarDecoderRegressionTests {
                 }
             },
             legacyV2DocumentData(from: state) { document in
+                try mutateLegacyRecurrence(&document) { recurrence in
+                    recurrence["series"] = []
+                    recurrence["completions"] = []
+                }
+            },
+            legacyV2DocumentData(from: state) { document in
                 try mutateLegacyFirstOccurrencePair(in: &document, collection: "exceptions") { key, _ in
                     key["originalDate"] = ["year": 2026, "month": 9, "day": 1]
                 }

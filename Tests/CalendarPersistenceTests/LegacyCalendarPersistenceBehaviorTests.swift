@@ -18,7 +18,6 @@ struct LegacyCalendarPersistenceBehaviorTests {
         let url = directory.file("workspace.json")
         let writer = JSONWorkspaceRepository(documentURL: url, seed: { seed })
 
-        _ = try await writer.load()
         _ = try await writer.save(expected)
 
         let reader = JSONWorkspaceRepository(documentURL: url, seed: { seed })
@@ -31,15 +30,7 @@ struct LegacyCalendarPersistenceBehaviorTests {
         let state = result.state.calendar
 
         #expect(result.provenance.sourceSchema == 1)
-        #expect(state.uncategorizedID == LegacyV1CompleteGraphFixture.categoryID)
-        #expect(state.categories[LegacyV1CompleteGraphFixture.categoryID]?.id == LegacyV1CompleteGraphFixture.categoryID)
-        #expect(state.items[LegacyV1CompleteGraphFixture.itemID]?.id == LegacyV1CompleteGraphFixture.itemID)
-        #expect(state.items[LegacyV1CompleteGraphFixture.itemID]?.completedAt == LegacyV1CompleteGraphFixture.itemCompletionDate)
-        #expect(state.recurrence.series[LegacyV1CompleteGraphFixture.seriesID]?.id == LegacyV1CompleteGraphFixture.seriesID)
-        #expect(state.recurrence.exceptions[LegacyV1CompleteGraphFixture.movedKey] != nil)
-        #expect(state.recurrence.exceptions[LegacyV1CompleteGraphFixture.skippedKey] == .skipped)
-        #expect(state.recurrence.completions[LegacyV1CompleteGraphFixture.completionKey]?.key == LegacyV1CompleteGraphFixture.completionKey)
-        #expect(state.recurrence.completions[LegacyV1CompleteGraphFixture.completionKey]?.completedAt == LegacyV1CompleteGraphFixture.occurrenceCompletionDate)
+        try legacyAssertCompleteV1CalendarGraph(state)
         #expect(original == LegacyV1CompleteGraphFixture.data)
     }
 
@@ -152,9 +143,12 @@ struct LegacyCalendarPersistenceBehaviorTests {
         let current = WorkspaceState.empty(calendar: try legacyPopulatedCalendarState())
         var restored = current
         restored.revision = 1
+        let main = directory.file("main.json")
+        let currentData = try WorkspaceDocumentCodec.encode(current)
+        try currentData.write(to: main)
         let source = directory.file("restore.json")
         try WorkspaceDocumentCodec.encode(restored).write(to: source)
-        let repository = JSONWorkspaceRepository(documentURL: directory.file("main.json"), seed: { current })
+        let repository = JSONWorkspaceRepository(documentURL: main, seed: { current })
         _ = try await repository.load()
         let rollbackDirectory = directory.file("Rollbacks")
         #expect(FileManager.default.fileExists(atPath: rollbackDirectory.path) == false)
@@ -162,9 +156,15 @@ struct LegacyCalendarPersistenceBehaviorTests {
         let prepared = try await repository.prepareRestore(
             try await BackupService().inspectRestoreSource(source), rollbackDirectoryURL: rollbackDirectory
         )
-        _ = try await repository.commitRestore(prepared, state: restored)
+        let outcome = try await repository.commitRestore(prepared, state: restored)
 
         #expect(FileManager.default.fileExists(atPath: rollbackDirectory.path))
+        guard case let .file(rollbackURL, _) = outcome.rollback else {
+            Issue.record("已有主数据的恢复必须生成回滚文件")
+            return
+        }
+        #expect(try Data(contentsOf: rollbackURL) == currentData)
+        #expect(FileManager.default.fileExists(atPath: directory.file("Unrelated").path) == false)
         #expect(try await repository.load().state == restored)
     }
 
@@ -172,6 +172,15 @@ struct LegacyCalendarPersistenceBehaviorTests {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
         var calendar = try legacyPopulatedCalendarState()
+        let seriesID = try #require(calendar.recurrence.series.keys.first)
+        var series = try #require(calendar.recurrence.series[seriesID])
+        series.createdAt = Date(timeIntervalSince1970: 0.123456)
+        series.updatedAt = Date(timeIntervalSince1970: 0.123456)
+        calendar.recurrence.series[seriesID] = series
+        let completionKey = try #require(calendar.recurrence.completions.keys.first)
+        var completion = try #require(calendar.recurrence.completions[completionKey])
+        completion.completedAt = Date(timeIntervalSince1970: 0.456789)
+        calendar.recurrence.completions[completionKey] = completion
         let id = UUID(uuidString: "00000000-0000-0000-0000-000000000403")!
         calendar.items[id] = try CalendarItem(
             id: id, kind: .task, title: "排序保持", categoryID: calendar.uncategorizedID,
@@ -189,7 +198,8 @@ struct LegacyCalendarPersistenceBehaviorTests {
         _ = try await reopened.save(decoded.state)
 
         #expect(decoded.state.calendar.items[id]?.createdAt == Date(timeIntervalSince1970: 0.223456))
-        #expect(decoded.state.calendar.recurrence.completions.values.first?.completedAt == .distantPast)
+        #expect(decoded.state.calendar.recurrence.series[seriesID]?.createdAt == Date(timeIntervalSince1970: 0.123456))
+        #expect(decoded.state.calendar.recurrence.completions[completionKey]?.completedAt == Date(timeIntervalSince1970: 0.456789))
         #expect(decoded.state.calendar.items.values.sorted { $0.createdAt < $1.createdAt }.map(\.id)
             == expected.calendar.items.values.sorted { $0.createdAt < $1.createdAt }.map(\.id))
         #expect(try Data(contentsOf: url) == firstBytes)
@@ -217,6 +227,73 @@ private final class LegacyLockedCounter: @unchecked Sendable {
 private func legacySchemaVersion(at url: URL) throws -> Int {
     let object = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
     return try #require(object?["schemaVersion"] as? Int)
+}
+
+private func legacyAssertCompleteV1CalendarGraph(_ state: CalendarState) throws {
+    #expect(state.categories.count == 1)
+    #expect(state.items.count == 1)
+    #expect(state.recurrence.series.count == 1)
+    #expect(state.recurrence.exceptions.count == 2)
+    #expect(state.recurrence.completions.count == 1)
+    #expect(state.uncategorizedID == LegacyV1CompleteGraphFixture.categoryID)
+
+    let category = try #require(state.categories[LegacyV1CompleteGraphFixture.categoryID])
+    #expect(category.id == LegacyV1CompleteGraphFixture.categoryID)
+    #expect(category.name == "未分类")
+    #expect(category.colorHex == "#8E8E93")
+    #expect(category.sortIndex == 0)
+    #expect(category.createdAt == Date(timeIntervalSince1970: 1_700_000_000))
+    #expect(category.updatedAt == Date(timeIntervalSince1970: 1_700_000_000.1))
+
+    let item = try #require(state.items[LegacyV1CompleteGraphFixture.itemID])
+    #expect(item.id == LegacyV1CompleteGraphFixture.itemID)
+    #expect(item.kind == .task)
+    #expect(item.title == "单日事项")
+    #expect(item.categoryID == LegacyV1CompleteGraphFixture.categoryID)
+    let expectedItemSchedule = try CalendarSchedule(
+        startDate: .init(year: 2026, month: 8, day: 6)!,
+        endDate: .init(year: 2026, month: 8, day: 6)!,
+        startTime: MinuteOfDay(hour: 9, minute: 0), endTime: MinuteOfDay(hour: 10, minute: 0)
+    )
+    #expect(item.schedule == expectedItemSchedule)
+    #expect(item.creationTimeZoneIdentifier == "Asia/Shanghai")
+    #expect(item.completedAt == LegacyV1CompleteGraphFixture.itemCompletionDate)
+    #expect(item.createdAt == Date(timeIntervalSince1970: 1_700_000_000.2))
+    #expect(item.updatedAt == Date(timeIntervalSince1970: 1_700_000_000.3))
+
+    let series = try #require(state.recurrence.series[LegacyV1CompleteGraphFixture.seriesID])
+    #expect(series.id == LegacyV1CompleteGraphFixture.seriesID)
+    #expect(series.kind == .task)
+    #expect(series.title == "每周回顾")
+    #expect(series.categoryID == LegacyV1CompleteGraphFixture.categoryID)
+    #expect(series.ruleStartDate == .init(year: 2026, month: 8, day: 3)!)
+    #expect(series.recurrenceEndDate == .init(year: 2026, month: 8, day: 31)!)
+    #expect(series.weekdays == [.monday, .thursday])
+    #expect(series.durationDays == 1)
+    #expect(series.startTime == MinuteOfDay(hour: 9, minute: 30))
+    #expect(series.endTime == MinuteOfDay(hour: 10, minute: 15))
+    #expect(series.creationTimeZoneIdentifier == "Asia/Shanghai")
+    #expect(series.createdAt == Date(timeIntervalSince1970: 1_700_000_000.4))
+    #expect(series.updatedAt == Date(timeIntervalSince1970: 1_700_000_000.5))
+
+    let moved = try #require(state.recurrence.exceptions[LegacyV1CompleteGraphFixture.movedKey])
+    guard case let .modified(override) = moved else {
+        Issue.record("V1 的移动例外必须保留为移动例外")
+        return
+    }
+    let expectedMovedSchedule = try CalendarSchedule(
+        startDate: .init(year: 2026, month: 8, day: 13)!,
+        endDate: .init(year: 2026, month: 8, day: 13)!,
+        startTime: MinuteOfDay(hour: 11, minute: 0), endTime: MinuteOfDay(hour: 12, minute: 0)
+    )
+    #expect(override.displayedSchedule == expectedMovedSchedule)
+    #expect(override.title == "已移动")
+    #expect(override.kind == .task)
+    #expect(override.categoryID == LegacyV1CompleteGraphFixture.categoryID)
+    #expect(state.recurrence.exceptions[LegacyV1CompleteGraphFixture.skippedKey] == .skipped)
+    let completion = try #require(state.recurrence.completions[LegacyV1CompleteGraphFixture.completionKey])
+    #expect(completion.key == LegacyV1CompleteGraphFixture.completionKey)
+    #expect(completion.completedAt == LegacyV1CompleteGraphFixture.occurrenceCompletionDate)
 }
 
 private enum LegacyV1CompleteGraphFixture {

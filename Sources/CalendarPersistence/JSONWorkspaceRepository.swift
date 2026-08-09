@@ -541,14 +541,6 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
     ) throws -> WorkspaceRollbackArtifact {
         switch source {
         case .absent:
-            do {
-                try FileManager.default.createDirectory(
-                    at: url.deletingLastPathComponent(),
-                    withIntermediateDirectories: true
-                )
-            } catch {
-                throw WorkspacePersistenceError.rollbackWriteFailed
-            }
             return .nonePreviousSourceAbsent
         case let .valid(rawData, _), let .opaqueInvalid(rawData, _):
             try writeVerifiedRollback(rawData, to: url)

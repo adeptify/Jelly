@@ -85,12 +85,13 @@ struct BackupCommands: Commands {
         Task { @MainActor in
             do {
                 let outcome = try await store.retryPendingCommit(transactionID)
-                let message = BackupRecoveryPolicy.message(for: outcome) + artifactMessage(for: outcome)
+                let message = BackupRecoveryPolicy.message(for: outcome)
+                let title = BackupRecoveryPolicy.retryTitle(for: outcome)
                 switch outcome {
                 case .committed:
-                    showInformation(title: "保存确认结果", message: message)
+                    showInformation(title: title, message: message)
                 case .notCommitted, .sourceChanged, .stillPending:
-                    showError(title: "保存确认结果", message: message)
+                    showError(title: title, message: message)
                 }
             } catch {
                 showError(
@@ -109,9 +110,10 @@ struct BackupCommands: Commands {
             case .clean:
                 showInformation(title: "草稿清理结果", message: message)
             case .cleanupPending:
+                let detail = BackupRecoveryPolicy.cleanupDetail(for: status) ?? ""
                 showError(
                     title: "草稿清理结果",
-                    message: "\(message)\n\n记录：\(identity.noteID.rawValue.uuidString)，步骤：\(step.displayName)。"
+                    message: "\(message)\n\n\(detail)"
                 )
             }
         }
@@ -145,7 +147,7 @@ struct BackupCommands: Commands {
             case let .restored(restored):
                 showInformation(title: "备份已恢复", message: rollbackMessage(for: restored.rollback))
             default:
-                let presentation = WorkspaceMutationOutcomePresenter.presentation(for: outcome)
+                let presentation = WorkspaceMutationOutcomePresenter.restorePresentation(for: outcome)
                 showError(
                     title: "恢复确认结果",
                     message: presentation.message ?? "恢复没有完成；当前数据是否已替换尚未确认。"
@@ -180,18 +182,6 @@ struct BackupCommands: Commands {
         }
     }
 
-    private func artifactMessage(for outcome: PendingCommitRetryOutcome) -> String {
-        let artifacts: WorkspacePendingCommitArtifacts?
-        switch outcome {
-        case .committed:
-            artifacts = nil
-        case let .notCommitted(_, _, value), let .sourceChanged(_, _, value), let .stillPending(_, value):
-            artifacts = value
-        }
-        guard let rollback = artifacts?.rollback else { return "" }
-        return "\n\n\(rollbackMessage(for: rollback))"
-    }
-
     private func backupTimestamp() -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -208,17 +198,6 @@ struct BackupCommands: Commands {
     private func showError(title: String, message: String) {
         let alert = NSAlert(); alert.messageText = title; alert.informativeText = message
         alert.alertStyle = .warning; alert.addButton(withTitle: "知道了"); alert.runModal()
-    }
-}
-
-private extension JournalCleanupStep {
-    var displayName: String {
-        switch self {
-        case .record: "记录保存回执"
-        case .acknowledge: "确认草稿回执"
-        case .unbind: "解除草稿绑定"
-        case .clear: "清除草稿记录"
-        }
     }
 }
 

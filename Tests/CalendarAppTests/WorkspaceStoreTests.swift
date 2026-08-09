@@ -1449,6 +1449,47 @@ struct WorkspaceStoreTests {
         #expect(try await journal.current()?.records.isEmpty == true)
     }
 
+    @Test func recordCleanupRetryAdvancesToClearAndSecondRetryUsesOnlyTheNewStep() async throws {
+        let (state, _, original) = try draftFixture()
+        var snapshot = original.snapshot
+        snapshot.title = "两阶段清理"
+        let submission = NoteDraftSubmission(
+            noteID: original.noteID, editSessionID: original.editSessionID, baseNoteRevision: original.baseNoteRevision,
+            baseNoteSnapshotChecksum: original.baseNoteSnapshotChecksum, baseSnapshot: original.baseSnapshot,
+            baseLinkedTaskBlockLinks: original.baseLinkedTaskBlockLinks, draftGeneration: original.draftGeneration,
+            snapshot: snapshot, noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(snapshot),
+            modifiedFields: [.title], linkedBlockDeletionDispositions: [:]
+        )
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("jelly-6c-two-stage-cleanup-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = SwitchableStoreJournalWriter()
+        let journal = DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"), writer: writer)
+        let repository = WorkspaceStoreTestRepository(initial: state)
+        let store = WorkspaceStore(initialState: state, repository: repository, journal: journal)
+        await store.load()
+        writer.failOnWriteNumber = 3
+
+        let first = try await store.submitDraft(submission)
+        let identity = DraftJournalIdentity(noteID: submission.noteID, editSessionID: .editor(submission.editSessionID))
+        guard case .committed(_, journal: .cleanupPending(identity, .record)) = first else {
+            Issue.record("初次 record 失败必须停车在 record")
+            return
+        }
+        #expect(store.phase == .parkedJournalCleanup(identity, .record))
+        writer.failOnWriteNumber = 5
+
+        #expect(await store.retryJournalCleanup(identity) == .cleanupPending(identity: identity, step: .clear))
+        #expect(store.phase == .parkedJournalCleanup(identity, .clear))
+        let afterRecord = try #require(await journal.current()?.records.first)
+        #expect(afterRecord.savedReceipt != nil)
+        writer.failOnWriteNumber = nil
+
+        #expect(await store.retryJournalCleanup(identity) == .clean)
+        #expect(store.phase == .ready)
+        #expect(try await journal.current()?.records.isEmpty == true)
+        #expect(await repository.saveCount == 1)
+    }
+
     @Test func verifiedNoChangeAcknowledgementFailureRetriesTheSameJournalStep() async throws {
         let (state, note, submission) = try draftFixture()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("jelly-6b-ack-cleanup-\(UUID().uuidString)", isDirectory: true)
@@ -1822,6 +1863,8 @@ struct WorkspaceStoreTests {
         let pending = try await store.restore(preview, rollbackDirectoryURL: directory.appendingPathComponent("rollbacks", isDirectory: true))
         let transactionID = try #require({ if case let .commitPending(value, _) = pending { value } else { nil } }())
         #expect(store.state == initial)
+        #expect(store.phase == .parkedCommitUncertain(transactionID))
+        #expect(BackupRecoveryPolicy.actions(for: store.phase) == [.retryPendingCommit(transactionID)])
         let restoredOutcome = WorkspaceRestoreOutcome(
             receipt: .init(workspaceRevision: 2, persistedDraft: nil), rollback: .nonePreviousSourceAbsent
         )
@@ -3082,8 +3125,15 @@ extension WorkspaceStoreTests {
         #expect(store.state == before)
         #expect(store.statePublicationGeneration == beforeGeneration)
         #expect(try Data(contentsOf: primary) == beforeBytes)
-        #expect(try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            .contains { $0.lastPathComponent == "Rollbacks" })
+        let rollbackDirectory = directory.appendingPathComponent("Rollbacks", isDirectory: true)
+        #expect(FileManager.default.fileExists(atPath: rollbackDirectory.path))
+        let rollbackFiles = try FileManager.default.contentsOfDirectory(
+            at: rollbackDirectory,
+            includingPropertiesForKeys: nil
+        )
+        #expect(rollbackFiles.count == 1)
+        let rollbackFile = try #require(rollbackFiles.first)
+        #expect(try Data(contentsOf: rollbackFile) == beforeBytes)
     }
 
     @Test func legacySuccessfulRestorePublishesOnceAndClearsUndo() async throws {
@@ -3110,6 +3160,12 @@ extension WorkspaceStoreTests {
         #expect(store.canUndo == false)
         #expect(store.canRedo == false)
         #expect(store.state != beforeRestore)
+        #expect(store.state.revision > beforeRestore.revision)
+        await #expect(throws: WorkspaceStoreError.nothingToUndo) {
+            _ = try await store.undo()
+        }
+        let reopened = JSONWorkspaceRepository(documentURL: primary, seed: { initial })
+        #expect(try await reopened.load().state == store.state)
     }
 }
 
@@ -3129,12 +3185,71 @@ private func legacyStoreDirectory() throws -> URL {
 
 private func legacyAssertCompleteV1Graph(_ state: CalendarState) throws {
     #expect(state.uncategorizedID == legacyStoreCategoryID)
-    #expect(state.categories[legacyStoreCategoryID]?.id == legacyStoreCategoryID)
-    #expect(state.items[legacyStoreItemID]?.id == legacyStoreItemID)
-    #expect(state.recurrence.series[legacyStoreSeriesID]?.id == legacyStoreSeriesID)
-    #expect(state.recurrence.exceptions[legacyStoreMovedKey] != nil)
+    #expect(state.categories.count == 1)
+    #expect(state.items.count == 1)
+    #expect(state.recurrence.series.count == 1)
+    #expect(state.recurrence.exceptions.count == 2)
+    #expect(state.recurrence.completions.count == 1)
+
+    let category = try #require(state.categories[legacyStoreCategoryID])
+    #expect(category.id == legacyStoreCategoryID)
+    #expect(category.name == "未分类")
+    #expect(category.colorHex == "#8E8E93")
+    #expect(category.sortIndex == 0)
+    #expect(category.createdAt == Date(timeIntervalSince1970: 1_700_000_000))
+    #expect(category.updatedAt == Date(timeIntervalSince1970: 1_700_000_000.1))
+
+    let item = try #require(state.items[legacyStoreItemID])
+    let expectedItemSchedule = try CalendarSchedule(
+        startDate: .init(year: 2026, month: 8, day: 6)!,
+        endDate: .init(year: 2026, month: 8, day: 6)!,
+        startTime: MinuteOfDay(hour: 9, minute: 0),
+        endTime: MinuteOfDay(hour: 10, minute: 0)
+    )
+    #expect(item.id == legacyStoreItemID)
+    #expect(item.kind == .task)
+    #expect(item.title == "单日事项")
+    #expect(item.categoryID == legacyStoreCategoryID)
+    #expect(item.schedule == expectedItemSchedule)
+    #expect(item.creationTimeZoneIdentifier == "Asia/Shanghai")
+    #expect(item.completedAt == Date(timeIntervalSince1970: 1_700_000_100.25))
+    #expect(item.createdAt == Date(timeIntervalSince1970: 1_700_000_000.2))
+    #expect(item.updatedAt == Date(timeIntervalSince1970: 1_700_000_000.3))
+
+    let series = try #require(state.recurrence.series[legacyStoreSeriesID])
+    #expect(series.id == legacyStoreSeriesID)
+    #expect(series.kind == .task)
+    #expect(series.title == "每周回顾")
+    #expect(series.categoryID == legacyStoreCategoryID)
+    #expect(series.ruleStartDate == .init(year: 2026, month: 8, day: 3)!)
+    #expect(series.recurrenceEndDate == .init(year: 2026, month: 8, day: 31)!)
+    #expect(series.weekdays == [.monday, .thursday])
+    #expect(series.durationDays == 1)
+    #expect(series.startTime == MinuteOfDay(hour: 9, minute: 30))
+    #expect(series.endTime == MinuteOfDay(hour: 10, minute: 15))
+    #expect(series.creationTimeZoneIdentifier == "Asia/Shanghai")
+    #expect(series.createdAt == Date(timeIntervalSince1970: 1_700_000_000.4))
+    #expect(series.updatedAt == Date(timeIntervalSince1970: 1_700_000_000.5))
+
+    let moved = try #require(state.recurrence.exceptions[legacyStoreMovedKey])
+    guard case let .modified(override) = moved else {
+        Issue.record("完整 V1 图中的移动例外必须保持移动例外")
+        return
+    }
+    let expectedMovedSchedule = try CalendarSchedule(
+        startDate: .init(year: 2026, month: 8, day: 13)!,
+        endDate: .init(year: 2026, month: 8, day: 13)!,
+        startTime: MinuteOfDay(hour: 11, minute: 0),
+        endTime: MinuteOfDay(hour: 12, minute: 0)
+    )
+    #expect(override.displayedSchedule == expectedMovedSchedule)
+    #expect(override.title == "已移动")
+    #expect(override.kind == .task)
+    #expect(override.categoryID == legacyStoreCategoryID)
     #expect(state.recurrence.exceptions[legacyStoreSkippedKey] == .skipped)
-    #expect(state.recurrence.completions[legacyStoreCompletionKey]?.key == legacyStoreCompletionKey)
+    let completion = try #require(state.recurrence.completions[legacyStoreCompletionKey])
+    #expect(completion.key == legacyStoreCompletionKey)
+    #expect(completion.completedAt == legacyStoreOccurrenceCompletionDate)
 }
 
 private final class LegacyStoreFailingRollbackWriter: ExclusiveFileWriting, @unchecked Sendable {

@@ -55,4 +55,28 @@ struct BackupRecoveryPolicyTests {
         #expect(!BackupRecoveryPolicy.allowsRestore(from: .unreadablePrimaryLoadFailed))
         #expect(!BackupRecoveryPolicy.allowsRestore(from: .parkedCommitUncertain(UUID())))
     }
+
+    @Test func restoreRetriesDescribeRestoreRatherThanSaveAndUseReturnedCleanupToken() {
+        let transactionID = UUID()
+        let rollback = URL(fileURLWithPath: "/tmp/jelly-policy-restore.json")
+        let artifacts = WorkspacePendingCommitArtifacts(
+            rollback: .file(rollback, .init(sha256: "hash", byteCount: 4))
+        )
+        #expect(BackupRecoveryPolicy.message(for: .notCommitted(
+            transactionID: transactionID, journal: .clean, artifacts: artifacts
+        )) == "已确认此前恢复没有替换当前数据。恢复前的数据已保留在：\n/tmp/jelly-policy-restore.json")
+        #expect(BackupRecoveryPolicy.message(for: .sourceChanged(
+            transactionID: transactionID, journal: .clean, artifacts: .init(rollback: .nonePreviousSourceAbsent)
+        )) == "恢复期间本地数据发生变化，当前数据未覆盖外部内容。恢复前没有可回滚的主数据文件。")
+        #expect(BackupRecoveryPolicy.retryTitle(for: .notCommitted(
+            transactionID: transactionID, journal: .clean, artifacts: artifacts
+        )) == "恢复确认结果")
+        #expect(BackupRecoveryPolicy.retryTitle(for: .stillPending(
+            transactionID: transactionID, artifacts: .init()
+        )) == "保存确认结果")
+
+        let returnedIdentity = DraftJournalIdentity(noteID: NoteID(UUID()), editSessionID: .editor(UUID()))
+        #expect(BackupRecoveryPolicy.cleanupDetail(for: .cleanupPending(identity: returnedIdentity, step: .clear)) ==
+            "记录：\(returnedIdentity.noteID.rawValue.uuidString)，步骤：清除草稿记录。")
+    }
 }
