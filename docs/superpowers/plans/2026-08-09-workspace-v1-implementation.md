@@ -344,12 +344,18 @@ git commit -m "feat(workspace): 建立工作空间领域模型与校验"
 
 **Preflight contract amendment:** `DocumentBlock` persists the complete fenced-code info string as `codeInfoString: String? = nil`; a first-token language is only a derived projection, never the stored truth. Missing legacy JSON decodes to `nil`, and `WorkspaceChecksum` includes this field. Non-code blocks require `nil`. Code blocks accept `nil` or a canonical nonempty string with leading/trailing ASCII space/tab removed; CR, LF and NUL are invalid, while internal spaces, tabs, punctuation and backticks are preserved. When an info string contains a backtick, export uses a tilde fence; otherwise export chooses a backtick or tilde fence longer than every matching delimiter run in the source, so complete info metadata and code text round-trip without loss.
 
-- [ ] Write table-driven round-trip tests for every block kind, 0...3 indentation, checked and unchecked tasks with completedAt intentionally omitted from Markdown export, Chinese text, inline links, fenced code and escaped marker characters. Lock old JSON without `codeInfoString`, `nil`/`swift`/`swift linenums=1`, non-code rejection, whitespace canonicalization, CR/LF/NUL rejection, backtick-bearing info strings, longer delimiter runs, checksum sensitivity and full Markdown → model → Markdown → model info-string preservation.
+**Checked-task import contract:** Markdown preserves checked/unchecked state but intentionally omits the exact `completedAt`. `importMarkdown` therefore requires one explicit `checkedTaskCompletedAt: Date`; every `[x]` in that import uses the same injected value and every `[ ]` uses `nil`. The codec never calls `Date()`, invents a sentinel, or mutates revisions. Exporting an arbitrary completed timestamp and reimporting it preserves completion semantics but replaces the timestamp with the injected value, so the exact `WorkspaceChecksum` changes. Migration/retry callers must capture one stable operation time and reuse it.
+
+- [ ] Write table-driven round-trip tests for every block kind, 0...3 indentation, checked and unchecked tasks with completedAt intentionally omitted from Markdown export, Chinese text, inline links, fenced code and escaped marker characters. Lock old JSON without `codeInfoString`, `nil`/`swift`/`swift linenums=1`, non-code rejection, whitespace canonicalization, CR/LF/NUL rejection, backtick-bearing info strings, longer delimiter runs, checksum sensitivity and full Markdown → model → Markdown → model info-string preservation. Use a fixed injected completion time for equality fixtures; separately prove multiple `[x]` share it, `[ ]` remains `nil`, and reimporting a different original completion time preserves the boolean state while replacing the timestamp and changing checksum.
 
 ~~~swift
 @Test(arguments: BlockMarkdownFixture.all)
 func roundTripPreservesSupportedStructure(_ fixture: BlockMarkdownFixture) throws {
-    let imported = try BlockMarkdownCodec.importMarkdown(fixture.markdown, idSource: fixture.ids)
+    let imported = try BlockMarkdownCodec.importMarkdown(
+        fixture.markdown,
+        idSource: fixture.ids,
+        checkedTaskCompletedAt: fixture.checkedTaskCompletedAt
+    )
     #expect(imported.document == fixture.document)
     #expect(try BlockMarkdownCodec.exportMarkdown(imported.document) == fixture.canonicalMarkdown)
 }
@@ -372,7 +378,8 @@ public struct BlockMarkdownImportResult: Equatable, Sendable {
 public enum BlockMarkdownCodec {
     public static func importMarkdown(
         _ markdown: String,
-        idSource: BlockIDSource = .random
+        idSource: BlockIDSource = .random,
+        checkedTaskCompletedAt: Date
     ) throws -> BlockMarkdownImportResult
 
     public static func exportMarkdown(_ document: BlockDocument) throws -> String
