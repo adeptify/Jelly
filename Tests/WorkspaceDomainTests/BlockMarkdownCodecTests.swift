@@ -449,6 +449,97 @@ struct BlockMarkdownCodecTests {
         ])
     }
 
+    @Test(arguments: ProseContinuationWhitespaceFixture.all)
+    func proseContinuationEncodingPreservesContentWhitespaceBeforeEveryBlockPrefix(
+        _ fixture: ProseContinuationWhitespaceFixture
+    ) throws {
+        let document = fixture.document(id: Self.ids(count: 1, start: 760)[0])
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+        let reimported = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(Self.ids(count: 1, start: 760)),
+            checkedTaskCompletedAt: .distantPast
+        ).document
+
+        #expect(markdown == fixture.canonicalMarkdown)
+        #expect(reimported == document)
+        #expect(!markdown.components(separatedBy: "\n").contains { $0.hasSuffix(" ") || $0.hasSuffix("\t") })
+    }
+
+    @Test func blankWithoutItsOwnContinuationTokenEndsParagraphQuoteAndMultilineLink() throws {
+        let paragraph = try BlockMarkdownCodec.importMarkdown(
+            "A\(ContinuationToken.soft)\n\n# B",
+            idSource: .fixed(Self.ids(count: 2, start: 800)),
+            checkedTaskCompletedAt: .distantPast
+        )
+        let quote = try BlockMarkdownCodec.importMarkdown(
+            "> A\(ContinuationToken.soft)\n\n> B",
+            idSource: .fixed(Self.ids(count: 2, start: 802)),
+            checkedTaskCompletedAt: .distantPast
+        )
+        let malformedLink = try BlockMarkdownCodec.importMarkdown(
+            "[A\n\nB](https://example.com/blank)",
+            idSource: .fixed(Self.ids(count: 2, start: 804)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(paragraph.document.blocks.map(\.kind) == [.paragraph, .heading1])
+        #expect(paragraph.document.blocks.map(\.inlineContent) == [.plain("A\n"), .plain("B")])
+        #expect(quote.document.blocks.map(\.kind) == [.quote, .quote])
+        #expect(quote.document.blocks.map(\.inlineContent) == [.plain("A\n"), .plain("B")])
+        #expect(malformedLink.document.blocks.map(\.kind) == [.paragraph, .paragraph])
+        #expect(malformedLink.document.blocks.map(\.inlineContent) == [.plain("[A"), .plain("B](https://example.com/blank)")])
+        #expect(malformedLink.diagnostics.map(\.lineNumber) == [1])
+    }
+
+    @Test func standaloneLinkTerminalContinuationConsumesExactlyItsNextPhysicalLine() throws {
+        let url = URL(string: "https://example.com/continued")!
+        let continued = try BlockMarkdownCodec.importMarkdown(
+            "[A](https://example.com/continued)\(ContinuationToken.soft)\n# next\n正文",
+            idSource: .fixed(Self.ids(count: 3, start: 810)),
+            checkedTaskCompletedAt: .distantPast
+        )
+        let eof = try BlockMarkdownCodec.importMarkdown(
+            "[A](https://example.com/continued)\(ContinuationToken.soft)",
+            idSource: .fixed(Self.ids(count: 1, start: 812)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(continued.document.blocks.map(\.kind) == [.link, .paragraph])
+        #expect(continued.document.blocks[0].inlineContent.spans == [.init(text: "A\n# next", linkURL: url)])
+        #expect(continued.document.blocks[1].inlineContent == .plain("正文"))
+        #expect(eof.document.blocks == [
+            .init(
+                id: Self.ids(count: 1, start: 812)[0],
+                kind: .link,
+                inlineContent: .init(spans: [.init(text: "A\n", linkURL: url)]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+    }
+
+    @Test func multilineInlineCodePreservesRawCodeTextWhileEncodingItsLineBreak() throws {
+        let document = BlockDocument(blocks: [
+            .init(
+                id: Self.ids(count: 1, start: 820)[0],
+                kind: .paragraph,
+                inlineContent: .init(spans: [.init(text: "a*\nB", marks: [.code])]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+        let reimported = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(Self.ids(count: 1, start: 820)),
+            checkedTaskCompletedAt: .distantPast
+        ).document
+
+        #expect(markdown == "`a*\(ContinuationToken.soft)\nB`")
+        #expect(reimported == document)
+    }
+
     @Test func unmarkedListAndTaskSiblingChildParentTransitionsKeepAllIndentLevels() throws {
         let result = try BlockMarkdownCodec.importMarkdown(
             "- root\n    - [ ] child task\n        1. grandchild\n            - [x] deep task\n            - deep sibling\n        1. parent sibling\n    - [ ] root child sibling\n- root sibling",
@@ -655,6 +746,94 @@ struct MultilineProseFixture: Sendable {
             canonicalMarkdown: "[a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc](https://example.com/multiline)\(ContinuationToken.soft)"
         )
     ]
+}
+
+struct ProseContinuationWhitespaceFixture: Sendable {
+    let name: String
+    let kind: BlockKind
+    let modelText: String
+    let encodedContent: String
+
+    private static let linkURL = URL(string: "https://example.com/whitespace")!
+
+    static let all: [ProseContinuationWhitespaceFixture] = {
+        let kinds: [(String, BlockKind)] = [
+            ("paragraph", .paragraph),
+            ("heading 1", .heading1),
+            ("heading 2", .heading2),
+            ("heading 3", .heading3),
+            ("bullet", .bullet),
+            ("ordered", .ordered),
+            ("task", .task),
+            ("quote", .quote),
+            ("link", .link)
+        ]
+        let whitespaceCases: [(String, String, String)] = [
+            ("empty first line", "\na", "\(ContinuationToken.soft)\na"),
+            ("one ASCII space", "a \nb", "a \(ContinuationToken.soft)\nb"),
+            ("two ASCII spaces hard break", "a  \nb", "a\(ContinuationToken.hard)\nb"),
+            ("three ASCII spaces", "a   \nb", "a \(ContinuationToken.hard)\nb"),
+            ("one tab", "a\t\nb", "a\t\(ContinuationToken.soft)\nb"),
+            ("two tabs", "a\t\t\nb", "a\t\t\(ContinuationToken.soft)\nb"),
+            ("mixed tab then hard break", "a \t  \nb", "a \t\(ContinuationToken.hard)\nb")
+        ]
+        return kinds.flatMap { kind in
+            whitespaceCases.map { whitespace in
+                .init(
+                    name: "\(kind.0) \(whitespace.0)",
+                    kind: kind.1,
+                    modelText: whitespace.1,
+                    encodedContent: whitespace.2
+                )
+            }
+        }
+    }()
+
+    func document(id: BlockID) -> BlockDocument {
+        let inlineContent: InlineContent
+        if kind == .link {
+            inlineContent = .init(spans: [.init(text: modelText, linkURL: Self.linkURL)])
+        } else {
+            inlineContent = .plain(modelText)
+        }
+        return .init(blocks: [
+            .init(
+                id: id,
+                kind: kind,
+                inlineContent: inlineContent,
+                taskState: kind == .task ? .init(completedAt: nil) : nil,
+                indentLevel: 0
+            )
+        ])
+    }
+
+    var canonicalMarkdown: String {
+        switch kind {
+        case .paragraph:
+            encodedContent
+        case .heading1:
+            "# \(encodedContent)"
+        case .heading2:
+            "## \(encodedContent)"
+        case .heading3:
+            "### \(encodedContent)"
+        case .bullet:
+            "- \(encodedContent)"
+        case .ordered:
+            "1. \(encodedContent)"
+        case .task:
+            "- [ ] \(encodedContent)"
+        case .quote:
+            encodedContent
+                .components(separatedBy: "\n")
+                .map { "> \($0)" }
+                .joined(separator: "\n")
+        case .link:
+            "[\(encodedContent)](\(Self.linkURL.absoluteString))"
+        case .code, .divider:
+            fatalError("Fixture only supports prose block kinds")
+        }
+    }
 }
 
 struct BlockMarkdownFixture: Sendable {

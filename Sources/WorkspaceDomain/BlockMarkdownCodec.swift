@@ -205,6 +205,9 @@ public enum BlockMarkdownCodec {
                 if let terminalBoundary = standaloneLink.terminalBoundary {
                     append(terminalBoundary.modelText, to: &content)
                 }
+                if let continuationText = standaloneLink.continuationText {
+                    append(continuationText, to: &content)
+                }
                 try appendBlock(
                     kind: .link,
                     inlineContent: content
@@ -358,6 +361,7 @@ private enum ContinuationBoundary: CaseIterable {
 private struct ScannedStandaloneLink {
     let link: StandaloneLink
     let terminalBoundary: ContinuationBoundary?
+    let continuationText: String?
     let nextIndex: Int
 }
 
@@ -469,10 +473,11 @@ private func standaloneLink(
     diagnostics: inout [BlockMarkdownDiagnostic]
 ) -> ScannedStandaloneLink? {
     var candidate = lines[index]
+    var currentLine = lines[index]
     var nextIndex = index + 1
 
     while true {
-        let terminalBoundary = trailingContinuationBoundary(in: candidate)
+        let terminalBoundary = trailingContinuationBoundary(in: currentLine)
         let candidateWithoutBoundary = terminalBoundary.map { removeTrailingContinuationBoundary($0, from: candidate) } ?? candidate
         if let link = standaloneLink(in: candidateWithoutBoundary) {
             let decodedLabel = decodeContinuationBoundaries(
@@ -480,16 +485,46 @@ private func standaloneLink(
                 firstLineNumber: index + 1,
                 diagnostics: &diagnostics
             )
+            guard let terminalBoundary else {
+                return .init(
+                    link: .init(label: decodedLabel, url: link.url),
+                    terminalBoundary: nil,
+                    continuationText: nil,
+                    nextIndex: nextIndex
+                )
+            }
+            guard nextIndex < lines.count else {
+                return .init(
+                    link: .init(label: decodedLabel, url: link.url),
+                    terminalBoundary: terminalBoundary,
+                    continuationText: nil,
+                    nextIndex: nextIndex
+                )
+            }
+            let continuation = consumeExplicitContinuation(
+                startingWith: lines[nextIndex],
+                in: lines,
+                after: nextIndex + 1,
+                lineNumber: nextIndex + 1,
+                diagnostics: &diagnostics
+            )
             return .init(
                 link: .init(label: decodedLabel, url: link.url),
                 terminalBoundary: terminalBoundary,
-                nextIndex: nextIndex
+                continuationText: continuation.text,
+                nextIndex: continuation.nextIndex
             )
         }
         guard hasUnclosedStandaloneLinkLabel(in: candidate), nextIndex < lines.count else {
             return nil
         }
+        guard !currentLine.isEmpty,
+              (!lines[nextIndex].isEmpty || terminalBoundary != nil) else {
+            diagnostics.append(.init(lineNumber: index + 1, message: "未闭合的跨行链接已保留为正文"))
+            return nil
+        }
         candidate += "\n" + lines[nextIndex]
+        currentLine = lines[nextIndex]
         nextIndex += 1
     }
 }
@@ -549,6 +584,9 @@ private func consumeParagraph(
 
         text += line
         currentIndex += 1
+        if line.isEmpty {
+            return (text, currentIndex)
+        }
         guard currentIndex < lines.count,
               !lines[currentIndex].isEmpty,
               !isBlockStart(lines[currentIndex]),
@@ -590,6 +628,9 @@ private func consumeQuote(
         }
 
         text += currentLine
+        if currentLine.isEmpty {
+            return (text, nextIndex)
+        }
         guard nextIndex < lines.count, lines[nextIndex].hasPrefix(">") else {
             return (text, nextIndex)
         }
@@ -836,13 +877,23 @@ private func unescapedDelimiterIndex(
     return nil
 }
 
-private func exportInline(_ content: InlineContent) -> String {
+private struct ProseInlineExport {
+    let markdown: String
+    let terminalBoundary: ContinuationBoundary?
+}
+
+private func exportInline(
+    _ content: InlineContent,
+    renderingText: (String) -> String = escapePlainText,
+    codeRenderingText: ((String) -> String)? = nil
+) -> String {
     content.spans.map { span in
-        var rendered = escapePlainText(span.text)
+        var rendered = renderingText(span.text)
         if span.marks.contains(.code) {
             let length = max(1, longestRun(of: "`", in: span.text) + 1)
             let delimiter = String(repeating: "`", count: length)
-            rendered = "\(delimiter)\(span.text)\(delimiter)"
+            let codeText = codeRenderingText?(span.text) ?? span.text
+            rendered = "\(delimiter)\(codeText)\(delimiter)"
         }
         if span.marks.contains(.bold), span.marks.contains(.italic) {
             rendered = "***\(rendered)***"
@@ -858,36 +909,49 @@ private func exportInline(_ content: InlineContent) -> String {
     }.joined()
 }
 
-private func exportParagraph(_ content: InlineContent) -> String {
-    exportInline(content)
-        .components(separatedBy: "\n")
-        .enumerated()
-        .map { offset, line in offset == 0 ? escapeBlockStart(line) : line }
-        .joined(separator: "\n")
-}
-
-private func exportMultilineBlockContent(_ content: InlineContent) -> String {
-    exportInline(content)
-}
-
-private func exportLink(_ content: InlineContent) -> String {
-    guard let terminalBoundary = terminalContinuationBoundary(in: content) else {
-        return exportMultilineBlockContent(content)
-    }
-    return exportMultilineBlockContent(removingTerminalContinuationBoundary(terminalBoundary, from: content)) + terminalBoundary.token
-}
-
-private func exportQuote(_ content: InlineContent) -> String {
-    guard !content.spans.isEmpty else { return ">" }
+private func exportProseInline(_ content: InlineContent) -> ProseInlineExport {
     let terminalBoundary = terminalContinuationBoundary(in: content)
     let contentWithoutTerminalBoundary = terminalBoundary.map {
         removingTerminalContinuationBoundary($0, from: content)
     } ?? content
-    let quoted = exportInline(contentWithoutTerminalBoundary)
+    return .init(
+        markdown: exportInline(
+            contentWithoutTerminalBoundary,
+            renderingText: exportProseText,
+            codeRenderingText: exportProseCodeText
+        ),
+        terminalBoundary: terminalBoundary
+    )
+}
+
+private func exportParagraph(_ content: InlineContent) -> String {
+    let prose = exportProseInline(content)
+    let rendered = prose.markdown
+        .components(separatedBy: "\n")
+        .enumerated()
+        .map { offset, line in offset == 0 ? escapeBlockStart(line) : line }
+        .joined(separator: "\n")
+    return rendered + (prose.terminalBoundary?.token ?? "")
+}
+
+private func exportMultilineBlockContent(_ content: InlineContent) -> String {
+    let prose = exportProseInline(content)
+    return prose.markdown + (prose.terminalBoundary?.token ?? "")
+}
+
+private func exportLink(_ content: InlineContent) -> String {
+    let prose = exportProseInline(content)
+    return prose.markdown + (prose.terminalBoundary?.token ?? "")
+}
+
+private func exportQuote(_ content: InlineContent) -> String {
+    guard !content.spans.isEmpty else { return ">" }
+    let prose = exportProseInline(content)
+    let quoted = prose.markdown
         .components(separatedBy: "\n")
         .map { "> \($0)" }
         .joined(separator: "\n")
-    return terminalBoundary.map { quoted + $0.token } ?? quoted
+    return quoted + (prose.terminalBoundary?.token ?? "")
 }
 
 private func terminalContinuationBoundary(in content: InlineContent) -> ContinuationBoundary? {
@@ -895,7 +959,7 @@ private func terminalContinuationBoundary(in content: InlineContent) -> Continua
         return nil
     }
     let textBeforeNewline = String(lastSpan.text.dropLast())
-    return textBeforeNewline.trailingWhitespaceCount >= 2 ? .hard : .soft
+    return textBeforeNewline.hasSuffix("  ") ? .hard : .soft
 }
 
 private func removingTerminalContinuationBoundary(
@@ -906,7 +970,7 @@ private func removingTerminalContinuationBoundary(
     guard !result.spans.isEmpty else { return result }
     result.spans[result.spans.count - 1].text.removeLast()
     if boundary == .hard {
-        result.spans[result.spans.count - 1].text = result.spans[result.spans.count - 1].text.trimmingTrailingWhitespace()
+        result.spans[result.spans.count - 1].text.removeLast(2)
     }
     return result
 }
@@ -950,21 +1014,32 @@ private func escapePlainText(_ text: String) -> String {
     }
 }
 
-private func canonicalizeProseTrailingWhitespace(_ text: String) -> String {
-    var lines = text.components(separatedBy: "\n")
-    let endsWithNewline = lines.last == ""
-    if endsWithNewline {
-        lines.removeLast()
-    }
+private func exportProseText(_ text: String) -> String {
+    exportProseText(text, renderingLine: escapePlainText)
+}
+
+private func exportProseCodeText(_ text: String) -> String {
+    exportProseText(text, renderingLine: { $0 })
+}
+
+private func exportProseText(
+    _ text: String,
+    renderingLine: (String) -> String
+) -> String {
+    let lines = text.components(separatedBy: "\n")
     return lines.enumerated().map { offset, line in
-        let trimmed = line.trimmingTrailingWhitespace()
-        let hasContinuation = offset < lines.count - 1 || endsWithNewline
-        guard hasContinuation else { return trimmed }
-        if line.trailingWhitespaceCount >= 2 {
-            return trimmed + ContinuationBoundary.hard.token
+        guard offset < lines.count - 1 else {
+            return renderingLine(line)
         }
-        return trimmed + ContinuationBoundary.soft.token
+        if line.hasSuffix("  ") {
+            return renderingLine(String(line.dropLast(2))) + ContinuationBoundary.hard.token
+        }
+        return renderingLine(line) + ContinuationBoundary.soft.token
     }.joined(separator: "\n")
+}
+
+private func canonicalizeProseTrailingWhitespace(_ text: String) -> String {
+    text.trimmingTrailingWhitespace()
 }
 
 private func escapeBlockStart(_ line: String) -> String {
