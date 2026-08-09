@@ -30,7 +30,7 @@ extension WorkspaceReducer {
         metadata: inout WorkspaceMutationMetadata
     ) throws -> WorkspaceCommandControl {
         guard let current = candidate.notes[submission.noteID] else {
-            throw WorkspaceReducerError.missingNote(submission.noteID)
+            return .result(.conflict(.noteMissing(submission.noteID)))
         }
         let base = submission.baseSnapshot
         let submitted = submission.snapshot

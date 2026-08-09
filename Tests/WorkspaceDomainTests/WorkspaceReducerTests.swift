@@ -124,6 +124,20 @@ struct WorkspaceReducerTests {
         #expect(currentWorkspace.revision == 6)
     }
 
+    @Test func draftWhoseNoteWasRemovedReturnsAnHonestTypedMissingNoteConflict() throws {
+        var workspace = try Task4Fixture.workspace()
+        let removed = try #require(workspace.notes[Task4Fixture.noteID])
+        workspace.notes.removeValue(forKey: Task4Fixture.noteID)
+        let submission = try Task4Fixture.submission(base: removed, submitted: removed)
+
+        let result = try WorkspaceReducer.reduce(
+            workspace, command: .updateNote(submission), now: Task4Fixture.later
+        )
+
+        #expect(result == .conflict(.noteMissing(removed.id)))
+        #expect(workspace.notes[removed.id] == nil)
+    }
+
     @Test func forgedDraftFieldsAndBaseIdentityMismatchThrowAtomically() throws {
         let workspace = try Task4Fixture.workspace()
         let base = try #require(workspace.notes[Task4Fixture.noteID])

@@ -269,6 +269,7 @@ public enum WorkspaceNoChangeReason: Equatable, Sendable {
 
 public enum WorkspaceConflict: Equatable, Sendable {
     case noteDraft(NoteDraftConflict)
+    case noteMissing(NoteID)
 }
 
 public struct NoteDraftConflict: Equatable, Sendable {

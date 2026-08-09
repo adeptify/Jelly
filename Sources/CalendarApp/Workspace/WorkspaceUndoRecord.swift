@@ -1,0 +1,3 @@
+import WorkspaceDomain
+
+typealias WorkspaceStoreUndoRecord = WorkspaceUndoRecord
