@@ -122,10 +122,23 @@ public enum BlockMarkdownCodec {
                     firstLineNumber: index + 1,
                     diagnostics: &diagnostics
                 )
-                activeListLevels.removeAll()
-                try addBlock(.link, content: MarkdownInlineLexer.decode(scanned.text, firstLineNumber: index + 1, diagnostics: &diagnostics))
-                index = scanned.nextIndex
-                continue
+                var markerDiagnostics: [BlockMarkdownDiagnostic] = []
+                let content = MarkdownInlineLexer.decode(
+                    scanned.text,
+                    firstLineNumber: index + 1,
+                    diagnostics: &markerDiagnostics
+                )
+                if MarkdownInlineLexer.hasActiveSpanManifest(in: scanned.text),
+                   markerDiagnostics.isEmpty,
+                   content.spans.contains(where: { span in
+                       span.linkURL.map(markdownValidURL) == true
+                   }) {
+                    activeListLevels.removeAll()
+                    try addBlock(.link, content: content)
+                    index = scanned.nextIndex
+                    continue
+                }
+                diagnostics.append(.init(lineNumber: index + 1, message: "无效的 Jelly link block 标记已保留为正文"))
             }
 
             if line.hasPrefix(">") {
@@ -304,6 +317,18 @@ private enum LogicalLineBoundary: CaseIterable {
     }
 }
 
+private enum LogicalBoundaryOwnership {
+    case internalLine
+    case spanTerminal
+}
+
+private struct LogicalBoundaryEvent {
+    let boundary: LogicalLineBoundary
+    let ownership: LogicalBoundaryOwnership
+    let range: Range<String.Index>
+    let nextIndex: String.Index
+}
+
 private struct MarkdownFenceOpening {
     let character: Character
     let length: Int
@@ -423,7 +448,13 @@ private func consumeMarkedPhysicalLines(
     var next = start
     while true {
         MarkdownInlineLexer.diagnoseMalformedControls(in: current, lineNumber: currentLineNumber, diagnostics: &diagnostics)
-        guard MarkdownInlineLexer.activeBoundary(in: current) != nil, next < lines.count else {
+        guard let event = MarkdownInlineLexer.boundaryEvent(in: current),
+              event.nextIndex == current.endIndex,
+              next < lines.count else {
+            return .init(text: text, nextIndex: next)
+        }
+        if event.ownership == .spanTerminal,
+           (lines[next].isEmpty || markdownStartsBlock(lines[next])) {
             return .init(text: text, nextIndex: next)
         }
         current = lines[next]
@@ -445,9 +476,15 @@ private func consumeParagraphPhysicalLines(
         MarkdownInlineLexer.diagnoseMalformedControls(in: current, lineNumber: index + 1, diagnostics: &diagnostics)
         text += current
         index += 1
-        if MarkdownInlineLexer.activeBoundary(in: current) != nil, index < lines.count {
-            text += "\n"
-            continue
+        if let event = MarkdownInlineLexer.boundaryEvent(in: current),
+           event.nextIndex == current.endIndex,
+           index < lines.count {
+            if event.ownership == .internalLine ||
+                (!lines[index].isEmpty && !markdownStartsBlock(lines[index])) {
+                text += "\n"
+                continue
+            }
+            return .init(text: text, nextIndex: index)
         }
         guard index < lines.count,
               !lines[index].isEmpty,
@@ -472,7 +509,13 @@ private func consumeQuotePhysicalLines(
     while true {
         MarkdownInlineLexer.diagnoseMalformedControls(in: current, lineNumber: lineNumber, diagnostics: &diagnostics)
         text += current
-        if MarkdownInlineLexer.activeBoundary(in: current) != nil, next < lines.count {
+        if let event = MarkdownInlineLexer.boundaryEvent(in: current),
+           event.nextIndex == current.endIndex,
+           next < lines.count {
+            if event.ownership == .spanTerminal,
+               !lines[next].hasPrefix(">") {
+                return .init(text: text, nextIndex: next)
+            }
             text += "\n"
             current = lines[next].hasPrefix(">") ? markdownQuoteContent(lines[next]) : lines[next]
             lineNumber = next + 1
@@ -506,16 +549,25 @@ private func markdownStandaloneLink(
     var current = lines[start]
     var next = start + 1
     while true {
-        let candidate = markdownRemovingTerminalBoundary(from: text)
-        if let external = markdownWholeExternalLink(current: candidate) {
-            let continued = consumeMarkedPhysicalLines(
-                startingWith: text,
-                in: lines,
-                after: next,
-                firstLineNumber: start + 1,
-                diagnostics: &diagnostics
-            )
-            return .init(text: continued.text, nextIndex: continued.nextIndex, url: external.url)
+        MarkdownInlineLexer.diagnoseMalformedControls(
+            in: current,
+            lineNumber: next,
+            diagnostics: &diagnostics
+        )
+        if let event = MarkdownInlineLexer.boundaryEvent(in: current),
+           event.nextIndex == current.endIndex,
+           event.ownership == .internalLine {
+            let candidate = String(text.dropLast(event.boundary.token.count))
+            if let external = markdownWholeExternalLink(current: candidate) {
+                if next < lines.count {
+                    text += "\n" + lines[next]
+                    next += 1
+                }
+                return .init(text: text, nextIndex: next, url: external.url)
+            }
+        }
+        if let external = markdownWholeExternalLink(current: text) {
+            return .init(text: text, nextIndex: next, url: external.url)
         }
         if markdownHasUnclosedLinkLabel(text), next < lines.count, lines[next].isEmpty {
             diagnostics.append(.init(lineNumber: start + 1, message: "未闭合的跨行链接已保留为正文"))
@@ -529,24 +581,13 @@ private func markdownStandaloneLink(
     }
 }
 
-private func markdownRemovingTerminalBoundary(from line: String) -> String {
-    for boundary in LogicalLineBoundary.allCases where line.hasSuffix(boundary.token) {
-        let start = line.index(line.endIndex, offsetBy: -boundary.token.count)
-        if line[..<start].reversed().prefix(while: { $0 == "\\" }).count.isMultiple(of: 2) {
-            return String(line[..<start])
-        }
-    }
-    return line
-}
-
 private func markdownCouldStartExternalLink(in lines: [String], at index: Int) -> Bool {
     var ignored: [BlockMarkdownDiagnostic] = []
     return markdownStandaloneLink(in: lines, at: index, diagnostics: &ignored) != nil
 }
 
 private func markdownHasUnclosedLinkLabel(_ source: String) -> Bool {
-    let chars = Array(source)
-    return chars.first == "[" && markdownUnescapedIndex(of: "]", in: chars, startingAt: 1) == nil
+    source.first == "[" && markdownLinkLabelEnd(in: source, after: source.startIndex) == nil
 }
 
 private func markdownStartsBlock(_ line: String) -> Bool {
@@ -561,32 +602,95 @@ private func markdownStartsBlock(_ line: String) -> Bool {
 }
 
 private func markdownWholeExternalLink(current source: String) -> (label: String, url: URL)? {
-    let characters = Array(source)
-    guard characters.first == "[",
-          let labelEnd = markdownUnescapedIndex(of: "]", in: characters, startingAt: 1),
-          labelEnd + 1 < characters.count,
-          characters[labelEnd + 1] == "(",
-          let urlEnd = markdownUnescapedIndex(of: ")", in: characters, startingAt: labelEnd + 2),
-          urlEnd + 1 == characters.count else {
-        return nil
-    }
-    let rawURL = String(characters[(labelEnd + 2)..<urlEnd])
-    guard let url = URL(string: rawURL), markdownValidURL(url) else { return nil }
-    return (String(characters[1..<labelEnd]), url)
+    guard let link = markdownInlineLink(in: source, at: source.startIndex),
+          link.endIndex == source.endIndex else { return nil }
+    return (link.label, link.url)
 }
 
-private func markdownUnescapedIndex(of delimiter: Character, in characters: [Character], startingAt start: Int) -> Int? {
-    var index = start
-    while index < characters.count {
-        if characters[index] == "\\" {
-            index += 2
-        } else if characters[index] == delimiter {
-            return index
-        } else {
-            index += 1
+private struct MarkdownInlineLinkMatch {
+    let label: String
+    let url: URL
+    let endIndex: String.Index
+}
+
+private func markdownInlineLink(
+    in source: String,
+    at start: String.Index
+) -> MarkdownInlineLinkMatch? {
+    guard start < source.endIndex, source[start] == "[",
+          let labelEnd = markdownLinkLabelEnd(in: source, after: start) else { return nil }
+    let destinationStart = source.index(after: labelEnd)
+    guard destinationStart < source.endIndex, source[destinationStart] == "(" else { return nil }
+
+    var depth = 1
+    var index = source.index(after: destinationStart)
+    let rawURLStart = index
+    while index < source.endIndex {
+        if source[index] == "\\" {
+            index = source.index(after: index)
+            if index < source.endIndex { index = source.index(after: index) }
+            continue
         }
+        if source[index] == "(" {
+            depth += 1
+        } else if source[index] == ")" {
+            depth -= 1
+            if depth == 0 {
+                let rawURL = markdownUnescapedLinkDestination(String(source[rawURLStart..<index]))
+                guard let url = URL(string: rawURL), markdownValidURL(url) else { return nil }
+                return .init(
+                    label: String(source[source.index(after: start)..<labelEnd]),
+                    url: url,
+                    endIndex: source.index(after: index)
+                )
+            }
+        }
+        index = source.index(after: index)
     }
     return nil
+}
+
+private func markdownLinkLabelEnd(
+    in source: String,
+    after opening: String.Index
+) -> String.Index? {
+    var index = source.index(after: opening)
+    while index < source.endIndex {
+        if source[index] == "\\" {
+            index = source.index(after: index)
+            if index < source.endIndex { index = source.index(after: index) }
+            continue
+        }
+        if source[index] == "`" {
+            let length = markdownRunLength(in: source, at: index, matching: "`")
+            let contentStart = source.index(index, offsetBy: length)
+            if let close = markdownClosingRun(in: source, after: contentStart, character: "`", length: length) {
+                index = source.index(close, offsetBy: length)
+                continue
+            }
+        }
+        if source[index] == "]" { return index }
+        index = source.index(after: index)
+    }
+    return nil
+}
+
+private func markdownUnescapedLinkDestination(_ source: String) -> String {
+    var output = ""
+    var index = source.startIndex
+    while index < source.endIndex {
+        if source[index] == "\\" {
+            let next = source.index(after: index)
+            if next < source.endIndex, source[next] == "(" || source[next] == ")" || source[next] == "\\" {
+                output.append(source[next])
+                index = source.index(after: next)
+                continue
+            }
+        }
+        output.append(source[index])
+        index = source.index(after: index)
+    }
+    return output
 }
 
 private enum MarkdownInlineSerializer {
@@ -601,8 +705,7 @@ private enum MarkdownInlineSerializer {
         guard !span.text.isEmpty else { return MarkdownInlineLexer.manifest(for: span) }
         let payload = encodePayload(
             span.text,
-            rawCode: span.marks.contains(.code),
-            emitPhysicalLineAfterTerminalBoundary: false
+            rawCode: span.marks.contains(.code)
         )
         var visible = payload
         if span.marks.contains(.code) {
@@ -626,8 +729,7 @@ private enum MarkdownInlineSerializer {
 
     private static func encodePayload(
         _ text: String,
-        rawCode: Bool,
-        emitPhysicalLineAfterTerminalBoundary: Bool
+        rawCode: Bool
     ) -> String {
         let parts = text.components(separatedBy: "\n")
         guard parts.count > 1 else { return escapePayloadFragment(text, rawCode: rawCode) }
@@ -642,28 +744,38 @@ private enum MarkdownInlineSerializer {
             let line = parts[index]
             let hard = line.hasSuffix("  ")
             let preserved = hard ? String(line.dropLast(2)) : line
-            rendered += escapePayloadFragment(preserved, rawCode: rawCode)
+            rendered += escapePayloadFragment(preserved, rawCode: rawCode, followedByActiveControl: true)
             rendered += (hard ? LogicalLineBoundary.hard : .soft).token
-            if !isTerminalBoundary || emitPhysicalLineAfterTerminalBoundary {
+            if !isTerminalBoundary {
                 rendered += "\n"
             }
         }
         return rendered
     }
 
-    private static func escapePayloadFragment(_ text: String, rawCode: Bool) -> String {
-        let characters = Array(text)
+    private static func escapePayloadFragment(
+        _ text: String,
+        rawCode: Bool,
+        followedByActiveControl: Bool = false
+    ) -> String {
         var output = ""
-        var index = 0
-        while index < characters.count {
-            if characters[index] == "\\" {
+        var index = text.startIndex
+        while index < text.endIndex {
+            if text[index] == "\\" {
                 let start = index
-                while index < characters.count, characters[index] == "\\" { index += 1 }
-                let count = index - start
-                if MarkdownInlineLexer.reservedPrefixStarts(in: characters, at: index) {
+                while index < text.endIndex, text[index] == "\\" {
+                    index = text.index(after: index)
+                }
+                let count = text.distance(from: start, to: index)
+                if index == text.endIndex, followedByActiveControl {
+                    output += String(repeating: "\\", count: count * 2)
+                    continue
+                }
+                if let controlEnd = MarkdownInlineLexer.reservedControlEnd(in: text, from: index) {
                     output += String(repeating: "\\", count: count * 2 + 1)
-                    output.append(contentsOf: String(characters[index...]))
-                    break
+                    output += text[index..<controlEnd]
+                    index = controlEnd
+                    continue
                 }
                 if rawCode {
                     output += String(repeating: "\\", count: count)
@@ -672,17 +784,18 @@ private enum MarkdownInlineSerializer {
                 }
                 continue
             }
-            if MarkdownInlineLexer.reservedPrefixStarts(in: characters, at: index) {
+            if let controlEnd = MarkdownInlineLexer.reservedControlEnd(in: text, from: index) {
                 output += "\\"
-                output.append(contentsOf: String(characters[index...]))
-                break
+                output += text[index..<controlEnd]
+                index = controlEnd
+                continue
             }
-            let character = characters[index]
+            let character = text[index]
             if !rawCode && "*[]()`".contains(character) {
                 output += "\\"
             }
             output.append(character)
-            index += 1
+            index = text.index(after: index)
         }
         return output
     }
@@ -698,7 +811,6 @@ private enum MarkdownInlineLexer {
         let marks: Set<InlineMark>
         let url: URL?
         let range: Range<String.Index>
-        let raw: String
     }
 
     private struct DecodedVisibleSpan {
@@ -715,14 +827,15 @@ private enum MarkdownInlineLexer {
         firstLineNumber: Int,
         diagnostics: inout [BlockMarkdownDiagnostic]
     ) -> InlineContent {
-        if source == emptySpanSentinel {
+        let canonicalSource = removingLeadingBlockEscape(from: source)
+        if canonicalSource == emptySpanSentinel {
             return .init(spans: [])
         }
-        if hasActiveSpanManifest(in: source) {
-            return decodeManifested(source, firstLineNumber: firstLineNumber, diagnostics: &diagnostics)
+        if hasActiveSpanManifest(in: canonicalSource) {
+            return decodeManifested(canonicalSource, firstLineNumber: firstLineNumber, diagnostics: &diagnostics)
         }
-        let preservesRawMarkdown = hasActiveMalformedReservedPrefix(in: source)
-        let payload = decodePayload(source, rawCode: true, firstLineNumber: firstLineNumber, diagnostics: &diagnostics)
+        let preservesRawMarkdown = hasActiveMalformedReservedPrefix(in: canonicalSource)
+        let payload = decodePayload(canonicalSource, rawCode: true)
         return preservesRawMarkdown ? .plain(payload.text) : MarkdownFallbackInlineDecoder.decode(payload.text)
     }
 
@@ -730,23 +843,88 @@ private enum MarkdownInlineLexer {
         nextManifest(in: source, from: source.startIndex) != nil
     }
 
-    static func activeBoundary(in line: String) -> LogicalLineBoundary? {
-        for boundary in LogicalLineBoundary.allCases {
-            var search = line.startIndex..<line.endIndex
-            while let range = line.range(of: boundary.token, range: search) {
-                if isEscaped(line, at: range.lowerBound) {
-                    search = range.upperBound..<line.endIndex
-                    continue
+    private static func removingLeadingBlockEscape(from source: String) -> String {
+        guard source.first == "\\" else { return source }
+        let candidate = String(source.dropFirst())
+        guard hasActiveSpanManifest(in: candidate), markdownStartsBlock(candidate) else { return source }
+        return candidate
+    }
+
+    static func boundaryEvent(in line: String) -> LogicalBoundaryEvent? {
+        var index = line.startIndex
+        while index < line.endIndex {
+            var backslashCount = 0
+            if line[index] == "\\" {
+                while index < line.endIndex, line[index] == "\\" {
+                    backslashCount += 1
+                    index = line.index(after: index)
                 }
-                let suffix = String(line[range.upperBound...])
-                if suffix.isEmpty || suffix.hasPrefix("\n") ||
-                    (suffix.hasSuffix("-->") && suffix.contains(spanPrefix)) {
-                    return boundary
-                }
-                search = range.upperBound..<line.endIndex
             }
+            if backslashCount.isMultiple(of: 2),
+               let control = boundary(in: line, at: index) {
+                if control.range.upperBound == line.endIndex {
+                    return .init(
+                        boundary: control.boundary,
+                        ownership: .internalLine,
+                        range: control.range,
+                        nextIndex: control.range.upperBound
+                    )
+                }
+                if let manifest = nextManifest(in: line, from: control.range.upperBound),
+                   manifest.range.upperBound == line.endIndex,
+                   hasLegalTerminalSuffix(
+                       in: line,
+                       from: control.range.upperBound,
+                       to: manifest.range.lowerBound,
+                       manifest: manifest
+                   ) {
+                    return .init(
+                        boundary: control.boundary,
+                        ownership: .spanTerminal,
+                        range: control.range,
+                        nextIndex: manifest.range.upperBound
+                    )
+                }
+            }
+            guard index < line.endIndex else { break }
+            index = line.index(after: index)
         }
         return nil
+    }
+
+    private static func hasLegalTerminalSuffix(
+        in source: String,
+        from start: String.Index,
+        to end: String.Index,
+        manifest: SpanManifest
+    ) -> Bool {
+        var index = start
+        if manifest.marks.contains(.code) {
+            guard index < end, source[index] == "`" else { return false }
+            while index < end, source[index] == "`" {
+                index = source.index(after: index)
+            }
+        }
+        let emphasisClose: String
+        if manifest.marks.contains(.bold), manifest.marks.contains(.italic) {
+            emphasisClose = "***"
+        } else if manifest.marks.contains(.bold) {
+            emphasisClose = "**"
+        } else if manifest.marks.contains(.italic) {
+            emphasisClose = "*"
+        } else {
+            emphasisClose = ""
+        }
+        if !emphasisClose.isEmpty {
+            guard source[index..<end].hasPrefix(emphasisClose) else { return false }
+            index = source.index(index, offsetBy: emphasisClose.count)
+        }
+        if let url = manifest.url {
+            let linkClose = "](\(url.absoluteString))"
+            guard source[index..<end].hasPrefix(linkClose) else { return false }
+            index = source.index(index, offsetBy: linkClose.count)
+        }
+        return index == end
     }
 
     static func diagnoseMalformedControls(
@@ -758,8 +936,7 @@ private enum MarkdownInlineLexer {
         while let range = line.range(of: reservedPrefix, range: search) {
             defer { search = range.upperBound..<line.endIndex }
             guard !isEscaped(line, at: range.lowerBound) else { continue }
-            if LogicalLineBoundary.allCases.contains(where: { line[range.lowerBound...].hasPrefix($0.token) }),
-               activeBoundary(in: line) != nil {
+            if boundaryEvent(in: line)?.range.lowerBound == range.lowerBound {
                 continue
             }
             if nextManifest(in: line, from: range.lowerBound)?.range.lowerBound == range.lowerBound {
@@ -776,9 +953,9 @@ private enum MarkdownInlineLexer {
         }
     }
 
-    static func reservedPrefixStarts(in characters: [Character], at index: Int) -> Bool {
-        guard index < characters.count else { return false }
-        return String(characters[index...]).hasPrefix(reservedPrefix)
+    static func reservedControlEnd(in source: String, from index: String.Index) -> String.Index? {
+        guard index < source.endIndex, source[index...].hasPrefix(reservedPrefix) else { return nil }
+        return source.range(of: "-->", range: index..<source.endIndex)?.upperBound
     }
 
     private static func decodeManifested(
@@ -791,12 +968,15 @@ private enum MarkdownInlineLexer {
         var lineNumber = firstLineNumber
         while let manifest = nextManifest(in: source, from: cursor) {
             let raw = String(source[cursor..<manifest.range.lowerBound])
-            guard var decoded = decodeVisibleSpan(raw, firstLineNumber: lineNumber, diagnostics: &diagnostics) else {
-                diagnostics.append(.init(lineNumber: lineNumber, message: "span 标记与可见 Markdown 不一致，已保留为正文"))
+            let manifestLineNumber = lineNumber + raw.reduce(into: 0) { count, character in
+                if character == "\n" { count += 1 }
+            }
+            guard var decoded = decodeVisibleSpan(raw) else {
+                diagnostics.append(.init(lineNumber: manifestLineNumber, message: "span 标记与可见 Markdown 不一致，已保留为正文"))
                 return .plain(source)
             }
             if !raw.isEmpty, (decoded.span.marks != manifest.marks || decoded.span.linkURL != manifest.url) {
-                diagnostics.append(.init(lineNumber: lineNumber, message: "span 标记与可见 Markdown 不一致，已保留为正文"))
+                diagnostics.append(.init(lineNumber: manifestLineNumber, message: "span 标记与可见 Markdown 不一致，已保留为正文"))
                 return .plain(source)
             }
             if raw.isEmpty {
@@ -804,6 +984,7 @@ private enum MarkdownInlineLexer {
                 decoded.span.linkURL = manifest.url
             }
             var next = manifest.range.upperBound
+            lineNumber = manifestLineNumber
             if decoded.endedWithBoundary {
                 if next == source.endIndex {
                     spans.append(decoded.span)
@@ -827,11 +1008,7 @@ private enum MarkdownInlineLexer {
         return .init(spans: spans)
     }
 
-    private static func decodeVisibleSpan(
-        _ raw: String,
-        firstLineNumber: Int,
-        diagnostics: inout [BlockMarkdownDiagnostic]
-    ) -> DecodedVisibleSpan? {
+    private static func decodeVisibleSpan(_ raw: String) -> DecodedVisibleSpan? {
         guard !raw.isEmpty else { return .init(span: .init(text: ""), endedWithBoundary: false) }
         var visible = raw
         var marks = Set<InlineMark>()
@@ -861,112 +1038,99 @@ private enum MarkdownInlineLexer {
             visible = String(characters[length..<(characters.count - length)])
             marks.insert(.code)
         }
-        let payload = decodePayload(visible, rawCode: marks.contains(.code), firstLineNumber: firstLineNumber, diagnostics: &diagnostics)
+        let payload = decodePayload(visible, rawCode: marks.contains(.code))
         return .init(span: .init(text: payload.text, marks: marks, linkURL: url), endedWithBoundary: payload.endedWithBoundary)
     }
 
     private static func decodePayload(
         _ source: String,
-        rawCode: Bool,
-        firstLineNumber: Int,
-        diagnostics: inout [BlockMarkdownDiagnostic]
+        rawCode: Bool
     ) -> (text: String, endedWithBoundary: Bool) {
-        let characters = Array(source)
         var output = ""
-        var index = 0
-        while index < characters.count {
-            if characters[index] == "\\" {
+        var index = source.startIndex
+        while index < source.endIndex {
+            if source[index] == "\\" {
                 let start = index
-                while index < characters.count, characters[index] == "\\" { index += 1 }
-                let count = index - start
-                if reservedPrefixStarts(in: characters, at: index) {
-                    let rest = String(characters[index...])
-                    if count.isMultiple(of: 2), let boundary = boundaryPrefix(in: rest) {
+                while index < source.endIndex, source[index] == "\\" {
+                    index = source.index(after: index)
+                }
+                let count = source.distance(from: start, to: index)
+                if index < source.endIndex, source[index...].hasPrefix(reservedPrefix) {
+                    if count.isMultiple(of: 2), let control = boundary(in: source, at: index) {
                         output += String(repeating: "\\", count: count / 2)
-                        return consumeBoundary(boundary, characters: characters, after: index + boundary.token.count, output: output, rawCode: rawCode, lineNumber: firstLineNumber, diagnostics: &diagnostics)
+                        let after = control.range.upperBound
+                        if after == source.endIndex {
+                            output += control.boundary.modelSuffix
+                            return (output, true)
+                        }
+                        if source[after] == "\n" {
+                            output += control.boundary.modelSuffix
+                            index = source.index(after: after)
+                            continue
+                        }
+                        output += control.boundary.token
+                        index = after
+                        continue
                     }
-                    output += String(repeating: "\\", count: (count - 1) / 2)
-                    output += rest
-                    return (output, false)
+                    let literalBackslashes = count.isMultiple(of: 2) ? count / 2 : (count - 1) / 2
+                    output += String(repeating: "\\", count: literalBackslashes)
+                    if let controlEnd = reservedControlEnd(in: source, from: index) {
+                        output.append(contentsOf: source[index..<controlEnd])
+                        index = controlEnd
+                    } else {
+                        output.append(source[index])
+                        index = source.index(after: index)
+                    }
+                    continue
                 }
                 if rawCode {
                     output += String(repeating: "\\", count: count)
                 } else {
                     output += String(repeating: "\\", count: count / 2)
-                    if count % 2 == 1, index < characters.count, markdownEscapable(characters[index]) {
-                        output.append(characters[index])
-                        index += 1
+                    if count % 2 == 1, index < source.endIndex, markdownEscapable(source[index]) {
+                        output.append(source[index])
+                        index = source.index(after: index)
                     } else if count % 2 == 1 {
                         output += "\\"
                     }
                 }
                 continue
             }
-            let rest = String(characters[index...])
-            if let boundary = boundaryPrefix(in: rest) {
-                return consumeBoundary(boundary, characters: characters, after: index + boundary.token.count, output: output, rawCode: rawCode, lineNumber: firstLineNumber, diagnostics: &diagnostics)
+            if let control = boundary(in: source, at: index) {
+                let after = control.range.upperBound
+                if after == source.endIndex {
+                    output += control.boundary.modelSuffix
+                    return (output, true)
+                }
+                if source[after] == "\n" {
+                    output += control.boundary.modelSuffix
+                    index = source.index(after: after)
+                    continue
+                }
+                output += control.boundary.token
+                index = after
+                continue
             }
-            if rest.hasPrefix(reservedPrefix) {
-                if let end = rest.range(of: "-->") {
-                    let control = String(rest[..<end.upperBound])
-                    output += control
-                    index += control.count
+            if source[index...].hasPrefix(reservedPrefix) {
+                if let controlEnd = reservedControlEnd(in: source, from: index) {
+                    output.append(contentsOf: source[index..<controlEnd])
+                    index = controlEnd
                 } else {
-                    output.append(characters[index])
-                    index += 1
+                    output.append(source[index])
+                    index = source.index(after: index)
                 }
                 continue
             }
-            if !rawCode, characters[index] == "\\", index + 1 < characters.count, markdownEscapable(characters[index + 1]) {
-                output.append(characters[index + 1])
-                index += 2
-            } else {
-                output.append(characters[index])
-                index += 1
-            }
+            output.append(source[index])
+            index = source.index(after: index)
         }
         return (output, false)
     }
 
-    private static func consumeBoundary(
-        _ boundary: LogicalLineBoundary,
-        characters: [Character],
-        after index: Int,
-        output: String,
-        rawCode: Bool,
-        lineNumber: Int,
-        diagnostics: inout [BlockMarkdownDiagnostic]
-    ) -> (text: String, endedWithBoundary: Bool) {
-        if index == characters.count {
-            return (output + boundary.modelSuffix, true)
-        }
-        guard characters[index] == "\n" else {
-            return (output + boundary.token + String(characters[index...]), false)
-        }
-        var remainderDiagnostics = diagnostics
-        let remainder = decodePayload(
-            String(characters[(index + 1)...]),
-            rawCode: rawCode,
-            firstLineNumber: lineNumber + 1,
-            diagnostics: &remainderDiagnostics
-        )
-        diagnostics = remainderDiagnostics
-        return (output + boundary.modelSuffix + remainder.text, remainder.endedWithBoundary)
-    }
-
     private static func unwrapWholeLink(_ source: String) -> (label: String, url: URL)? {
-        let characters = Array(source)
-        guard characters.first == "[",
-              let labelEnd = markdownUnescapedIndex(of: "]", in: characters, startingAt: 1),
-              labelEnd + 1 < characters.count,
-              characters[labelEnd + 1] == "(",
-              let urlEnd = markdownUnescapedIndex(of: ")", in: characters, startingAt: labelEnd + 2),
-              urlEnd + 1 == characters.count else {
-            return nil
-        }
-        let rawURL = String(characters[(labelEnd + 2)..<urlEnd])
-        guard let url = URL(string: rawURL), markdownValidURL(url) else { return nil }
-        return (String(characters[1..<labelEnd]), url)
+        guard let link = markdownInlineLink(in: source, at: source.startIndex),
+              link.endIndex == source.endIndex else { return nil }
+        return (link.label, link.url)
     }
 
     private static func nextManifest(in source: String, from start: String.Index) -> SpanManifest? {
@@ -980,7 +1144,7 @@ private enum MarkdownInlineLexer {
             let body = String(source[prefix.upperBound..<end.lowerBound])
             guard let parsed = parseManifestBody(body) else { continue }
             let range = prefix.lowerBound..<end.upperBound
-            return .init(marks: parsed.marks, url: parsed.url, range: range, raw: String(source[range]))
+            return .init(marks: parsed.marks, url: parsed.url, range: range)
         }
         return nil
     }
@@ -1039,8 +1203,16 @@ private enum MarkdownInlineLexer {
         return .some(url)
     }
 
-    private static func boundaryPrefix(in text: String) -> LogicalLineBoundary? {
-        LogicalLineBoundary.allCases.first { text.hasPrefix($0.token) }
+    private static func boundary(
+        in source: String,
+        at index: String.Index
+    ) -> (boundary: LogicalLineBoundary, range: Range<String.Index>)? {
+        guard index < source.endIndex else { return nil }
+        for boundary in LogicalLineBoundary.allCases where source[index...].hasPrefix(boundary.token) {
+            let end = source.index(index, offsetBy: boundary.token.count)
+            return (boundary, index..<end)
+        }
+        return nil
     }
 
     private static func hasActiveMalformedReservedPrefix(in source: String) -> Bool {
@@ -1048,8 +1220,13 @@ private enum MarkdownInlineLexer {
         while let range = source.range(of: reservedPrefix, range: search) {
             defer { search = range.upperBound..<source.endIndex }
             guard !isEscaped(source, at: range.lowerBound) else { continue }
-            let rest = String(source[range.lowerBound...])
-            if boundaryPrefix(in: rest) != nil, activeBoundary(in: source) != nil {
+            if let control = boundary(in: source, at: range.lowerBound) {
+                let after = control.range.upperBound
+                if after == source.endIndex || source[after] == "\n" {
+                    continue
+                }
+            }
+            if nextManifest(in: source, from: range.lowerBound)?.range.lowerBound == range.lowerBound {
                 continue
             }
             return true
@@ -1075,10 +1252,9 @@ private enum MarkdownInlineLexer {
 
 private enum MarkdownFallbackInlineDecoder {
     static func decode(_ source: String) -> InlineContent {
-        let characters = Array(source)
         var spans: [InlineSpan] = []
         var plain = ""
-        var index = 0
+        var index = source.startIndex
 
         func flushPlain() {
             guard !plain.isEmpty else { return }
@@ -1107,57 +1283,48 @@ private enum MarkdownFallbackInlineDecoder {
             }
         }
 
-        while index < characters.count {
-            if characters[index] == "\\", index + 1 < characters.count, markdownFallbackEscapable(characters[index + 1]) {
-                plain.append(characters[index + 1])
-                index += 2
+        while index < source.endIndex {
+            let next = source.index(after: index)
+            if source[index] == "\\", next < source.endIndex, markdownFallbackEscapable(source[next]) {
+                plain.append(source[next])
+                index = source.index(after: next)
                 continue
             }
-            if characters[index] == "[", let link = markdownExternalLinkAt(characters, start: index) {
+            if source[index] == "[", let link = markdownInlineLink(in: source, at: index) {
                 appendNested(link.label, marks: [], url: link.url)
-                index = link.end
+                index = link.endIndex
                 continue
             }
-            if characters[index] == "`" {
-                let length = markdownRunLength(in: characters, at: index, matching: "`")
-                if let close = markdownClosingRun(in: characters, after: index + length, character: "`", length: length) {
-                    appendMarked(String(characters[(index + length)..<close]), marks: [.code])
-                    index = close + length
+            if source[index] == "`" {
+                let length = markdownRunLength(in: source, at: index, matching: "`")
+                let contentStart = source.index(index, offsetBy: length)
+                if let close = markdownClosingRun(in: source, after: contentStart, character: "`", length: length) {
+                    appendMarked(String(source[contentStart..<close]), marks: [.code])
+                    index = source.index(close, offsetBy: length)
                     continue
                 }
             }
-            if characters[index] == "*" {
-                let run = markdownRunLength(in: characters, at: index, matching: "*")
+            if source[index] == "*" {
+                let run = markdownRunLength(in: source, at: index, matching: "*")
                 let length = run >= 3 ? 3 : (run >= 2 ? 2 : 1)
-                if let close = markdownClosingRun(in: characters, after: index + length, character: "*", length: length) {
+                let contentStart = source.index(index, offsetBy: length)
+                if let close = markdownClosingRun(in: source, after: contentStart, character: "*", length: length) {
                     let marks: Set<InlineMark> = switch length {
                     case 1: [.italic]
                     case 2: [.bold]
                     default: [.bold, .italic]
                     }
-                    appendNested(String(characters[(index + length)..<close]), marks: marks)
-                    index = close + length
+                    appendNested(String(source[contentStart..<close]), marks: marks)
+                    index = source.index(close, offsetBy: length)
                     continue
                 }
             }
-            plain.append(characters[index])
-            index += 1
+            plain.append(source[index])
+            index = next
         }
         flushPlain()
         return .init(spans: spans)
     }
-}
-
-private func markdownExternalLinkAt(_ characters: [Character], start: Int) -> (label: String, url: URL, end: Int)? {
-    guard let labelEnd = markdownUnescapedIndex(of: "]", in: characters, startingAt: start + 1),
-          labelEnd + 1 < characters.count,
-          characters[labelEnd + 1] == "(",
-          let urlEnd = markdownUnescapedIndex(of: ")", in: characters, startingAt: labelEnd + 2) else {
-        return nil
-    }
-    let rawURL = String(characters[(labelEnd + 2)..<urlEnd])
-    guard let url = URL(string: rawURL), markdownValidURL(url) else { return nil }
-    return (String(characters[(start + 1)..<labelEnd]), url, urlEnd + 1)
 }
 
 private func encodeCodeFence(_ block: DocumentBlock) -> String {
@@ -1183,6 +1350,37 @@ private func markdownFallbackEscapable(_ character: Character) -> Bool {
 
 private func markdownListIndent(_ level: Int) -> String {
     String(repeating: "    ", count: level)
+}
+
+private func markdownRunLength(
+    in source: String,
+    at index: String.Index,
+    matching character: Character
+) -> Int {
+    var cursor = index
+    var length = 0
+    while cursor < source.endIndex, source[cursor] == character {
+        length += 1
+        cursor = source.index(after: cursor)
+    }
+    return length
+}
+
+private func markdownClosingRun(
+    in source: String,
+    after start: String.Index,
+    character: Character,
+    length: Int
+) -> String.Index? {
+    var index = start
+    while index < source.endIndex {
+        if source[index] == character,
+           markdownRunLength(in: source, at: index, matching: character) >= length {
+            return index
+        }
+        index = source.index(after: index)
+    }
+    return nil
 }
 
 private func markdownRunLength(in characters: [Character], at index: Int, matching character: Character) -> Int {

@@ -30,6 +30,7 @@ struct BlockMarkdownCodecTests {
         #expect(imported.diagnostics == [])
         #expect(imported.document == fixture.document)
         let canonical = try BlockMarkdownCodec.exportMarkdown(imported.document)
+        #expect(canonical == fixture.canonicalMarkdown)
         let reimportedCanonical = try BlockMarkdownCodec.importMarkdown(
             canonical,
             idSource: fixture.ids,
@@ -324,7 +325,7 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown.contains("<!--jelly:span:v1;"))
+        #expect(markdown == fixture.canonicalMarkdown)
         #expect(reimported == fixture.document)
     }
 
@@ -396,7 +397,7 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown.contains(SpanManifestToken.span(marks: "~")))
+        #expect(markdown == fixture.canonicalMarkdown + SpanManifestToken.span(marks: "~"))
         #expect(reimported == document)
     }
 
@@ -492,7 +493,7 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown.contains("<!--jelly:span:v1;"))
+        #expect(markdown == fixture.canonicalMarkdown)
         #expect(reimported == document)
         #expect(!markdown.components(separatedBy: "\n").contains { $0.hasSuffix(" ") || $0.hasSuffix("\t") })
     }
@@ -642,8 +643,7 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         )
 
-        #expect(markdown.contains(fixture.requiredManifest))
-        #expect(markdown.contains(fixture.expectedControl))
+        #expect(markdown == fixture.expectedMarkdown)
         #expect(!markdown.hasSuffix("\n"))
         #expect(!markdown.components(separatedBy: "\n").contains { $0.hasSuffix(" ") || $0.hasSuffix("\t") })
         #expect(reimported.diagnostics == [])
@@ -799,6 +799,247 @@ struct BlockMarkdownCodecTests {
         }
     }
 
+    @Test func spanTerminalEOLStopsBeforeTheFollowingListBlock() throws {
+        let document = BlockDocument(blocks: [
+            .init(
+                id: Self.ids(count: 1, start: 950)[0],
+                kind: .bullet,
+                inlineContent: .plain("A\n"),
+                taskState: nil,
+                indentLevel: 0
+            ),
+            .init(
+                id: Self.ids(count: 1, start: 951)[0],
+                kind: .bullet,
+                inlineContent: .plain("B"),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let expected = "- A\(ContinuationToken.soft)\(SpanManifestToken.span(marks: "~"))\n- B\(SpanManifestToken.span(marks: "~"))"
+
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+        let result = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(document.blocks.map(\.id)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(markdown == expected)
+        #expect(result.diagnostics == [])
+        #expect(result.document == document)
+    }
+
+    @Test func standaloneLinkInternalEOLStopsAtItsClosingDestination() throws {
+        let url = URL(string: "https://example.com/continued")!
+        let markdown = "[A\(ContinuationToken.soft)\nB](https://example.com/continued)\n# H"
+        let result = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(Self.ids(count: 2, start: 952)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(result.diagnostics == [])
+        #expect(result.document.blocks == [
+            .init(
+                id: Self.ids(count: 1, start: 952)[0],
+                kind: .link,
+                inlineContent: .init(spans: [.init(text: "A\nB", linkURL: url)]),
+                taskState: nil,
+                indentLevel: 0
+            ),
+            .init(
+                id: Self.ids(count: 1, start: 953)[0],
+                kind: .heading1,
+                inlineContent: .plain("H"),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+    }
+
+    @Test func literalJellyControlsDoNotHideLaterBoundariesOrInjectManifests() throws {
+        let privateControl = "<!--jelly:private:v1-->"
+        let literalManifest = SpanManifestToken.span(marks: "~")
+        let documents = [
+            BlockDocument(blocks: [
+                .init(
+                    id: Self.ids(count: 1, start: 954)[0],
+                    kind: .paragraph,
+                    inlineContent: .plain("A\(privateControl)B\nC"),
+                    taskState: nil,
+                    indentLevel: 0
+                )
+            ]),
+            BlockDocument(blocks: [
+                .init(
+                    id: Self.ids(count: 1, start: 955)[0],
+                    kind: .paragraph,
+                    inlineContent: .plain("A\(privateControl)B\(literalManifest)C"),
+                    taskState: nil,
+                    indentLevel: 0
+                )
+            ])
+        ]
+        let expectedMarkdown = [
+            "A\\\(privateControl)B\(ContinuationToken.soft)\nC\(literalManifest)",
+            "A\\\(privateControl)B\\\(literalManifest)C\(literalManifest)"
+        ]
+
+        for (document, expected) in zip(documents, expectedMarkdown) {
+            let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+            let result = try BlockMarkdownCodec.importMarkdown(
+                markdown,
+                idSource: .fixed(document.blocks.map(\.id)),
+                checkedTaskCompletedAt: .distantPast
+            )
+            #expect(markdown == expected)
+            #expect(result.diagnostics == [])
+            #expect(result.document == document)
+        }
+
+        let imported = try BlockMarkdownCodec.importMarkdown(
+            expectedMarkdown[0],
+            idSource: .fixed(Self.ids(count: 1, start: 956)),
+            checkedTaskCompletedAt: .distantPast
+        )
+        #expect(imported.diagnostics == [])
+        #expect(imported.document.blocks[0].inlineContent == .plain("A\(privateControl)B\nC"))
+    }
+
+    @Test(arguments: [0, 1, 2, 3])
+    func inlineCodeExportDoublesBackslashesBeforeActiveControls(_ backslashCount: Int) throws {
+        let text = "A" + String(repeating: "\\", count: backslashCount) + "\nB"
+        let document = BlockDocument(blocks: [
+            .init(
+                id: Self.ids(count: 1, start: 957)[0],
+                kind: .paragraph,
+                inlineContent: .init(spans: [.init(text: text, marks: [.code])]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let expected = "`A" + String(repeating: "\\", count: backslashCount * 2) +
+            ContinuationToken.soft + "\nB`" + SpanManifestToken.span(marks: "c")
+
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+        let result = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(document.blocks.map(\.id)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(markdown == expected)
+        #expect(result.diagnostics == [])
+        #expect(result.document == document)
+    }
+
+    @Test func codeLinkedSpanSupportsBracketTextAndBalancedURLParentheses() throws {
+        let url = URL(string: "https://example.com/wiki/Foo_(bar)")!
+        let document = BlockDocument(blocks: [
+            .init(
+                id: Self.ids(count: 1, start: 958)[0],
+                kind: .paragraph,
+                inlineContent: .init(spans: [.init(text: "A]B", marks: [.code], linkURL: url)]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let expected = "[`A]B`](https://example.com/wiki/Foo_(bar))" +
+            SpanManifestToken.span(marks: "c", url: "aHR0cHM6Ly9leGFtcGxlLmNvbS93aWtpL0Zvb18oYmFyKQ")
+
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+        let result = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(document.blocks.map(\.id)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(markdown == expected)
+        #expect(result.diagnostics == [])
+        #expect(result.document == document)
+    }
+
+    @Test func orphanLinkBlockMarkerRemainsParagraphTextAndIsDiagnosed() throws {
+        let source = "\(SpanManifestToken.blockLink)[A](https://example.com/a)"
+        let result = try BlockMarkdownCodec.importMarkdown(
+            source,
+            idSource: .fixed(Self.ids(count: 1, start: 959)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(result.document.blocks == [
+            .init(
+                id: Self.ids(count: 1, start: 959)[0],
+                kind: .paragraph,
+                inlineContent: .plain(source),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        #expect(result.diagnostics.map(\.lineNumber) == [1])
+    }
+
+    @Test func paragraphBlockEscapeIsRemovedBeforeManifestWrapperValidation() throws {
+        let document = BlockDocument(blocks: [
+            .init(
+                id: Self.ids(count: 1, start: 960)[0],
+                kind: .paragraph,
+                inlineContent: .init(spans: [.init(text: "a``b", marks: [.code])]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let expected = "\\```a``b```\(SpanManifestToken.span(marks: "c"))"
+
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+        let result = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(document.blocks.map(\.id)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(markdown == expected)
+        #expect(result.diagnostics == [])
+        #expect(result.document == document)
+    }
+
+    @Test func manifestedImportScalesLinearlyWithPayloadSize() throws {
+        func importDuration(size: Int) throws -> TimeInterval {
+            let source = String(repeating: "a", count: size) + SpanManifestToken.span(marks: "~")
+            var best = TimeInterval.greatestFiniteMagnitude
+            for _ in 0..<3 {
+                let start = Date.timeIntervalSinceReferenceDate
+                let result = try BlockMarkdownCodec.importMarkdown(
+                    source,
+                    idSource: .fixed(Self.ids(count: 1, start: 961)),
+                    checkedTaskCompletedAt: .distantPast
+                )
+                best = min(best, Date.timeIntervalSinceReferenceDate - start)
+                #expect(result.document.blocks[0].inlineContent == .plain(String(repeating: "a", count: size)))
+            }
+            return best
+        }
+
+        _ = try importDuration(size: 256)
+        let small = try importDuration(size: 2_000)
+        let large = try importDuration(size: 16_000)
+
+        #expect(large < small * 20)
+    }
+
+    @Test func manifestedMismatchReportsThePhysicalLineContainingItsManifest() throws {
+        let source = "A\(ContinuationToken.soft)\nB\(SpanManifestToken.span(marks: "b"))"
+        let result = try BlockMarkdownCodec.importMarkdown(
+            source,
+            idSource: .fixed(Self.ids(count: 1, start: 962)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(result.document.blocks[0].inlineContent == .plain(source))
+        #expect(result.diagnostics.map(\.lineNumber) == [2])
+    }
+
     private static func ids(count: Int, start: Int) -> [BlockID] {
         (0..<count).map { offset in
             let value = start + offset
@@ -813,14 +1054,7 @@ struct SpanAwareInlineFixture: Sendable {
     let marks: Set<InlineMark>
     let linkURL: URL?
     let text: String
-    let expectedControl: String
-
-    var requiredManifest: String {
-        SpanManifestToken.span(
-            marks: Self.manifestMarks(for: marks),
-            url: linkURL.map { Self.base64URL($0.absoluteString) } ?? "~"
-        )
-    }
+    let expectedMarkdown: String
 
     func document(id: BlockID) -> BlockDocument {
         .init(blocks: [
@@ -834,52 +1068,31 @@ struct SpanAwareInlineFixture: Sendable {
         ])
     }
 
-    static let markMatrix: [SpanAwareInlineFixture] = {
-        let markCases: [(String, Set<InlineMark>)] = [
-            ("code", [.code]),
-            ("bold", [.bold]),
-            ("italic", [.italic]),
-            ("bold italic", [.bold, .italic]),
-            ("code bold italic", [.code, .bold, .italic])
-        ]
-        let linkCases: [(String, URL?)] = [
-            ("plain", nil),
-            ("linked", URL(string: "https://example.com/span")!)
-        ]
-        let lineCases = [
-            ("internal LF", "A\nB", ContinuationToken.soft),
-            ("terminal LF", "A\n", ContinuationToken.soft)
-        ]
-        return markCases.flatMap { markCase in
-            linkCases.flatMap { linkCase in
-                lineCases.map { lineCase in
-                    .init(
-                        name: "\(markCase.0) \(linkCase.0) \(lineCase.0)",
-                        marks: markCase.1,
-                        linkURL: linkCase.1,
-                        text: lineCase.1,
-                        expectedControl: lineCase.2
-                    )
-                }
-            }
-        }
-    }()
+    private static let linkedURL = URL(string: "https://example.com/span")!
+    private static let linkedURLManifest = "aHR0cHM6Ly9leGFtcGxlLmNvbS9zcGFu"
 
-    private static func manifestMarks(for marks: Set<InlineMark>) -> String {
-        var result = ""
-        if marks.contains(.bold) { result += "b" }
-        if marks.contains(.code) { result += "c" }
-        if marks.contains(.italic) { result += "i" }
-        return result.isEmpty ? "~" : result
-    }
-
-    private static func base64URL(_ value: String) -> String {
-        Data(value.utf8)
-            .base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-    }
+    static let markMatrix: [SpanAwareInlineFixture] = [
+        .init(name: "code plain internal LF", marks: [.code], linkURL: nil, text: "A\nB", expectedMarkdown: "`A\(ContinuationToken.soft)\nB`\(SpanManifestToken.span(marks: "c"))"),
+        .init(name: "code plain terminal LF", marks: [.code], linkURL: nil, text: "A\n", expectedMarkdown: "`A\(ContinuationToken.soft)`\(SpanManifestToken.span(marks: "c"))"),
+        .init(name: "code linked internal LF", marks: [.code], linkURL: linkedURL, text: "A\nB", expectedMarkdown: "[`A\(ContinuationToken.soft)\nB`](https://example.com/span)\(SpanManifestToken.span(marks: "c", url: linkedURLManifest))"),
+        .init(name: "code linked terminal LF", marks: [.code], linkURL: linkedURL, text: "A\n", expectedMarkdown: "[`A\(ContinuationToken.soft)`](https://example.com/span)\(SpanManifestToken.span(marks: "c", url: linkedURLManifest))"),
+        .init(name: "bold plain internal LF", marks: [.bold], linkURL: nil, text: "A\nB", expectedMarkdown: "**A\(ContinuationToken.soft)\nB**\(SpanManifestToken.span(marks: "b"))"),
+        .init(name: "bold plain terminal LF", marks: [.bold], linkURL: nil, text: "A\n", expectedMarkdown: "**A\(ContinuationToken.soft)**\(SpanManifestToken.span(marks: "b"))"),
+        .init(name: "bold linked internal LF", marks: [.bold], linkURL: linkedURL, text: "A\nB", expectedMarkdown: "[**A\(ContinuationToken.soft)\nB**](https://example.com/span)\(SpanManifestToken.span(marks: "b", url: linkedURLManifest))"),
+        .init(name: "bold linked terminal LF", marks: [.bold], linkURL: linkedURL, text: "A\n", expectedMarkdown: "[**A\(ContinuationToken.soft)**](https://example.com/span)\(SpanManifestToken.span(marks: "b", url: linkedURLManifest))"),
+        .init(name: "italic plain internal LF", marks: [.italic], linkURL: nil, text: "A\nB", expectedMarkdown: "*A\(ContinuationToken.soft)\nB*\(SpanManifestToken.span(marks: "i"))"),
+        .init(name: "italic plain terminal LF", marks: [.italic], linkURL: nil, text: "A\n", expectedMarkdown: "*A\(ContinuationToken.soft)*\(SpanManifestToken.span(marks: "i"))"),
+        .init(name: "italic linked internal LF", marks: [.italic], linkURL: linkedURL, text: "A\nB", expectedMarkdown: "[*A\(ContinuationToken.soft)\nB*](https://example.com/span)\(SpanManifestToken.span(marks: "i", url: linkedURLManifest))"),
+        .init(name: "italic linked terminal LF", marks: [.italic], linkURL: linkedURL, text: "A\n", expectedMarkdown: "[*A\(ContinuationToken.soft)*](https://example.com/span)\(SpanManifestToken.span(marks: "i", url: linkedURLManifest))"),
+        .init(name: "bold italic plain internal LF", marks: [.bold, .italic], linkURL: nil, text: "A\nB", expectedMarkdown: "***A\(ContinuationToken.soft)\nB***\(SpanManifestToken.span(marks: "bi"))"),
+        .init(name: "bold italic plain terminal LF", marks: [.bold, .italic], linkURL: nil, text: "A\n", expectedMarkdown: "***A\(ContinuationToken.soft)***\(SpanManifestToken.span(marks: "bi"))"),
+        .init(name: "bold italic linked internal LF", marks: [.bold, .italic], linkURL: linkedURL, text: "A\nB", expectedMarkdown: "[***A\(ContinuationToken.soft)\nB***](https://example.com/span)\(SpanManifestToken.span(marks: "bi", url: linkedURLManifest))"),
+        .init(name: "bold italic linked terminal LF", marks: [.bold, .italic], linkURL: linkedURL, text: "A\n", expectedMarkdown: "[***A\(ContinuationToken.soft)***](https://example.com/span)\(SpanManifestToken.span(marks: "bi", url: linkedURLManifest))"),
+        .init(name: "code bold italic plain internal LF", marks: [.code, .bold, .italic], linkURL: nil, text: "A\nB", expectedMarkdown: "***`A\(ContinuationToken.soft)\nB`***\(SpanManifestToken.span(marks: "bci"))"),
+        .init(name: "code bold italic plain terminal LF", marks: [.code, .bold, .italic], linkURL: nil, text: "A\n", expectedMarkdown: "***`A\(ContinuationToken.soft)`***\(SpanManifestToken.span(marks: "bci"))"),
+        .init(name: "code bold italic linked internal LF", marks: [.code, .bold, .italic], linkURL: linkedURL, text: "A\nB", expectedMarkdown: "[***`A\(ContinuationToken.soft)\nB`***](https://example.com/span)\(SpanManifestToken.span(marks: "bci", url: linkedURLManifest))"),
+        .init(name: "code bold italic linked terminal LF", marks: [.code, .bold, .italic], linkURL: linkedURL, text: "A\n", expectedMarkdown: "[***`A\(ContinuationToken.soft)`***](https://example.com/span)\(SpanManifestToken.span(marks: "bci", url: linkedURLManifest))")
+    ]
 }
 
 struct ContinuationParityFixture: Sendable {
@@ -981,47 +1194,47 @@ struct MultilineProseFixture: Sendable {
         .init(
             name: "paragraph",
             document: .init(blocks: [.init(id: id(600), kind: .paragraph, inlineContent: content, taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)"
+            canonicalMarkdown: "a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)\(SpanManifestToken.span(marks: "~"))"
         ),
         .init(
             name: "heading 1",
             document: .init(blocks: [.init(id: id(601), kind: .heading1, inlineContent: content, taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "# a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)"
+            canonicalMarkdown: "# a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)\(SpanManifestToken.span(marks: "~"))"
         ),
         .init(
             name: "heading 2",
             document: .init(blocks: [.init(id: id(602), kind: .heading2, inlineContent: content, taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "## a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)"
+            canonicalMarkdown: "## a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)\(SpanManifestToken.span(marks: "~"))"
         ),
         .init(
             name: "heading 3",
             document: .init(blocks: [.init(id: id(603), kind: .heading3, inlineContent: content, taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "### a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)"
+            canonicalMarkdown: "### a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)\(SpanManifestToken.span(marks: "~"))"
         ),
         .init(
             name: "bullet",
             document: .init(blocks: [.init(id: id(604), kind: .bullet, inlineContent: content, taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "- a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)"
+            canonicalMarkdown: "- a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)\(SpanManifestToken.span(marks: "~"))"
         ),
         .init(
             name: "ordered",
             document: .init(blocks: [.init(id: id(605), kind: .ordered, inlineContent: content, taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "1. a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)"
+            canonicalMarkdown: "1. a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)\(SpanManifestToken.span(marks: "~"))"
         ),
         .init(
             name: "task",
             document: .init(blocks: [.init(id: id(606), kind: .task, inlineContent: content, taskState: .init(completedAt: .distantPast), indentLevel: 0)]),
-            canonicalMarkdown: "- [x] a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)"
+            canonicalMarkdown: "- [x] a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)\(SpanManifestToken.span(marks: "~"))"
         ),
         .init(
             name: "quote",
             document: .init(blocks: [.init(id: id(607), kind: .quote, inlineContent: content, taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "> a\(ContinuationToken.soft)\n> b\(ContinuationToken.hard)\n> c\(ContinuationToken.soft)"
+            canonicalMarkdown: "> a\(ContinuationToken.soft)\n> b\(ContinuationToken.hard)\n> c\(ContinuationToken.soft)\(SpanManifestToken.span(marks: "~"))"
         ),
         .init(
             name: "link",
             document: .init(blocks: [.init(id: id(608), kind: .link, inlineContent: .init(spans: [.init(text: "a\nb  \nc\n", linkURL: linkURL)]), taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "[a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc](https://example.com/multiline)\(ContinuationToken.soft)"
+            canonicalMarkdown: "\(SpanManifestToken.blockLink)[a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)](https://example.com/multiline)\(SpanManifestToken.span(marks: "~", url: "aHR0cHM6Ly9leGFtcGxlLmNvbS9tdWx0aWxpbmU"))"
         )
     ]
 }
@@ -1086,31 +1299,35 @@ struct ProseContinuationWhitespaceFixture: Sendable {
     }
 
     var canonicalMarkdown: String {
+        let visible: String
         switch kind {
         case .paragraph:
-            encodedContent
+            visible = encodedContent
         case .heading1:
-            "# \(encodedContent)"
+            visible = "# \(encodedContent)"
         case .heading2:
-            "## \(encodedContent)"
+            visible = "## \(encodedContent)"
         case .heading3:
-            "### \(encodedContent)"
+            visible = "### \(encodedContent)"
         case .bullet:
-            "- \(encodedContent)"
+            visible = "- \(encodedContent)"
         case .ordered:
-            "1. \(encodedContent)"
+            visible = "1. \(encodedContent)"
         case .task:
-            "- [ ] \(encodedContent)"
+            visible = "- [ ] \(encodedContent)"
         case .quote:
-            encodedContent
+            visible = encodedContent
                 .components(separatedBy: "\n")
                 .map { "> \($0)" }
                 .joined(separator: "\n")
         case .link:
-            "[\(encodedContent)](\(Self.linkURL.absoluteString))"
+            return SpanManifestToken.blockLink +
+                "[\(encodedContent)](\(Self.linkURL.absoluteString))" +
+                SpanManifestToken.span(marks: "~", url: "aHR0cHM6Ly9leGFtcGxlLmNvbS93aGl0ZXNwYWNl")
         case .code, .divider:
             fatalError("Fixture only supports prose block kinds")
         }
+        return visible + SpanManifestToken.span(marks: "~")
     }
 }
 
@@ -1128,7 +1345,7 @@ struct BlockMarkdownFixture: Sendable {
         fixture(
             name: "inline prose with Chinese soft break and inline link",
             markdown: "原始 **加粗**、*斜体*、`代码` 与 [链接](https://example.com/a)\n第二行",
-            canonicalMarkdown: "原始 **加粗**、*斜体*、`代码` 与 [链接](https://example.com/a)\(ContinuationToken.soft)\n第二行",
+            canonicalMarkdown: "原始 \(SpanManifestToken.span(marks: "~"))**加粗**\(SpanManifestToken.span(marks: "b"))、\(SpanManifestToken.span(marks: "~"))*斜体*\(SpanManifestToken.span(marks: "i"))、\(SpanManifestToken.span(marks: "~"))`代码`\(SpanManifestToken.span(marks: "c")) 与 \(SpanManifestToken.span(marks: "~"))[链接](https://example.com/a)\(SpanManifestToken.span(marks: "~", url: "aHR0cHM6Ly9leGFtcGxlLmNvbS9h"))\(ContinuationToken.soft)\n第二行\(SpanManifestToken.span(marks: "~"))",
             blocks: [
                 .init(
                     kind: .paragraph,
@@ -1152,7 +1369,7 @@ struct BlockMarkdownFixture: Sendable {
         fixture(
             name: "three heading levels",
             markdown: "# 一级\n\n## 二级\n\n### 三级",
-            canonicalMarkdown: "# 一级\n\n## 二级\n\n### 三级",
+            canonicalMarkdown: "# 一级\(SpanManifestToken.span(marks: "~"))\n\n## 二级\(SpanManifestToken.span(marks: "~"))\n\n### 三级\(SpanManifestToken.span(marks: "~"))",
             blocks: [
                 .init(kind: .heading1, content: .plain("一级"), taskState: nil, indent: 0, codeInfoString: nil),
                 .init(kind: .heading2, content: .plain("二级"), taskState: nil, indent: 0, codeInfoString: nil),
@@ -1162,7 +1379,7 @@ struct BlockMarkdownFixture: Sendable {
         fixture(
             name: "nested bullet ordered and task blocks",
             markdown: "- 一级\n    1. 二级\n        - [ ] 未完成\n            - [x] 已完成",
-            canonicalMarkdown: "- 一级\n    1. 二级\n        - [ ] 未完成\n            - [x] 已完成",
+            canonicalMarkdown: "- 一级\(SpanManifestToken.span(marks: "~"))\n    1. 二级\(SpanManifestToken.span(marks: "~"))\n        - [ ] 未完成\(SpanManifestToken.span(marks: "~"))\n            - [x] 已完成\(SpanManifestToken.span(marks: "~"))",
             blocks: [
                 .init(kind: .bullet, content: .plain("一级"), taskState: nil, indent: 0, codeInfoString: nil),
                 .init(kind: .ordered, content: .plain("二级"), taskState: nil, indent: 1, codeInfoString: nil),
@@ -1173,7 +1390,7 @@ struct BlockMarkdownFixture: Sendable {
         fixture(
             name: "quote with soft break",
             markdown: "> 第一行\n> 第二行",
-            canonicalMarkdown: "> 第一行\(ContinuationToken.soft)\n> 第二行",
+            canonicalMarkdown: "> 第一行\(ContinuationToken.soft)\n> 第二行\(SpanManifestToken.span(marks: "~"))",
             blocks: [
                 .init(kind: .quote, content: .plain("第一行\n第二行"), taskState: nil, indent: 0, codeInfoString: nil)
             ]
@@ -1197,7 +1414,7 @@ struct BlockMarkdownFixture: Sendable {
         fixture(
             name: "link block",
             markdown: "[规范](https://example.com/spec)",
-            canonicalMarkdown: "[规范](https://example.com/spec)",
+            canonicalMarkdown: "\(SpanManifestToken.blockLink)[规范](https://example.com/spec)\(SpanManifestToken.span(marks: "~", url: "aHR0cHM6Ly9leGFtcGxlLmNvbS9zcGVj"))",
             blocks: [
                 .init(kind: .link, content: .init(spans: [.init(text: "规范", linkURL: URL(string: "https://example.com/spec")!)]), taskState: nil, indent: 0, codeInfoString: nil)
             ]
@@ -1205,7 +1422,7 @@ struct BlockMarkdownFixture: Sendable {
         fixture(
             name: "escaped markers remain literal",
             markdown: "\\*不是斜体\\* 与 \\[方括号\\] 和 \\`反引号\\`",
-            canonicalMarkdown: "\\*不是斜体\\* 与 \\[方括号\\] 和 \\`反引号\\`",
+            canonicalMarkdown: "\\*不是斜体\\* 与 \\[方括号\\] 和 \\`反引号\\`\(SpanManifestToken.span(marks: "~"))",
             blocks: [
                 .init(kind: .paragraph, content: .plain("*不是斜体* 与 [方括号] 和 `反引号`"), taskState: nil, indent: 0, codeInfoString: nil)
             ]
