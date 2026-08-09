@@ -718,75 +718,144 @@ private struct MarkdownBacktickDelimiterIndex {
     }
 }
 
-private func markdownInlineLink(
-    in source: String,
-    at start: String.Index,
-    delimiters suppliedDelimiters: MarkdownBacktickDelimiterIndex? = nil
-) -> MarkdownInlineLinkMatch? {
-    let delimiters = suppliedDelimiters ?? MarkdownBacktickDelimiterIndex(source)
-    guard start < source.endIndex, source[start] == "[",
-          let labelEnd = markdownLinkLabelEnd(
-              in: source,
-              after: start,
-              delimiters: delimiters
-          ) else { return nil }
-    let destinationStart = source.index(after: labelEnd)
-    guard destinationStart < source.endIndex, source[destinationStart] == "(" else { return nil }
+private struct MarkdownLinkDelimiterIndex {
+    private let labelEndsByOpening: [String.Index: String.Index]
+    private let parenthesisEndsByOpening: [String.Index: String.Index]
+    private let angleEndsByOpening: [String.Index: String.Index]
 
-    let destinationContentStart = source.index(after: destinationStart)
-    if destinationContentStart < source.endIndex, source[destinationContentStart] == "<" {
-        var index = source.index(after: destinationContentStart)
-        let rawURLStart = index
+    init(_ source: String, codeDelimiters: MarkdownBacktickDelimiterIndex) {
+        var labelEnds: [String.Index: String.Index] = [:]
+        var pendingLabelOpenings: [String.Index] = []
+        var index = source.startIndex
         while index < source.endIndex {
             if source[index] == "\\" {
                 index = source.index(after: index)
                 if index < source.endIndex { index = source.index(after: index) }
                 continue
             }
-            if source[index] == ">" {
-                let closingParenthesis = source.index(after: index)
-                guard closingParenthesis < source.endIndex,
-                      source[closingParenthesis] == ")" else { return nil }
-                let rawURL = markdownUnescapedAngleDestination(String(source[rawURLStart..<index]))
-                guard let url = URL(string: rawURL), markdownValidURL(url) else { return nil }
-                return .init(
-                    label: String(source[source.index(after: start)..<labelEnd]),
-                    url: url,
-                    endIndex: source.index(after: closingParenthesis)
-                )
+            if let openingRun = codeDelimiters.run(at: index) {
+                if let closingRun = codeDelimiters.closingRun(after: openingRun) {
+                    index = closingRun.end
+                    continue
+                }
+                index = openingRun.end
+                continue
             }
-            if source[index] == "\n" || source[index] == "<" { return nil }
+            if source[index] == "[" {
+                pendingLabelOpenings.append(index)
+            } else if source[index] == "]" {
+                for opening in pendingLabelOpenings {
+                    labelEnds[opening] = index
+                }
+                pendingLabelOpenings.removeAll(keepingCapacity: true)
+            }
             index = source.index(after: index)
         }
-        return nil
+        labelEndsByOpening = labelEnds
+
+        var parenthesisEnds: [String.Index: String.Index] = [:]
+        var parenthesisStack: [String.Index] = []
+        index = source.startIndex
+        while index < source.endIndex {
+            if source[index] == "\\" {
+                index = source.index(after: index)
+                if index < source.endIndex { index = source.index(after: index) }
+                continue
+            }
+            if source[index] == "(" {
+                parenthesisStack.append(index)
+            } else if source[index] == ")", let opening = parenthesisStack.popLast() {
+                parenthesisEnds[opening] = index
+            }
+            index = source.index(after: index)
+        }
+        parenthesisEndsByOpening = parenthesisEnds
+
+        var angleEnds: [String.Index: String.Index] = [:]
+        var pendingAngleOpening: String.Index?
+        index = source.startIndex
+        while index < source.endIndex {
+            if source[index] == "\\" {
+                index = source.index(after: index)
+                if index < source.endIndex { index = source.index(after: index) }
+                continue
+            }
+            if source[index] == "\n" {
+                pendingAngleOpening = nil
+            } else if source[index] == "<" {
+                pendingAngleOpening = index
+            } else if source[index] == ">", let opening = pendingAngleOpening {
+                angleEnds[opening] = index
+                pendingAngleOpening = nil
+            }
+            index = source.index(after: index)
+        }
+        angleEndsByOpening = angleEnds
     }
 
-    var depth = 1
-    var index = destinationContentStart
-    let rawURLStart = index
-    while index < source.endIndex {
-        if source[index] == "\\" {
-            index = source.index(after: index)
-            if index < source.endIndex { index = source.index(after: index) }
-            continue
-        }
-        if source[index] == "(" {
-            depth += 1
-        } else if source[index] == ")" {
-            depth -= 1
-            if depth == 0 {
-                let rawURL = markdownUnescapedLinkDestination(String(source[rawURLStart..<index]))
-                guard let url = URL(string: rawURL), markdownValidURL(url) else { return nil }
-                return .init(
-                    label: String(source[source.index(after: start)..<labelEnd]),
-                    url: url,
-                    endIndex: source.index(after: index)
-                )
-            }
-        }
-        index = source.index(after: index)
+    func labelEnd(after opening: String.Index) -> String.Index? {
+        labelEndsByOpening[opening]
     }
-    return nil
+
+    func parenthesisEnd(after opening: String.Index) -> String.Index? {
+        parenthesisEndsByOpening[opening]
+    }
+
+    func angleEnd(after opening: String.Index) -> String.Index? {
+        angleEndsByOpening[opening]
+    }
+}
+
+private struct MarkdownInlineDelimiterIndex {
+    let code: MarkdownBacktickDelimiterIndex
+    let link: MarkdownLinkDelimiterIndex
+
+    init(_ source: String) {
+        let code = MarkdownBacktickDelimiterIndex(source)
+        self.code = code
+        link = MarkdownLinkDelimiterIndex(source, codeDelimiters: code)
+    }
+}
+
+private func markdownInlineLink(
+    in source: String,
+    at start: String.Index,
+    delimiters suppliedDelimiters: MarkdownInlineDelimiterIndex? = nil
+) -> MarkdownInlineLinkMatch? {
+    let delimiters = suppliedDelimiters ?? MarkdownInlineDelimiterIndex(source)
+    guard start < source.endIndex, source[start] == "[",
+          let labelEnd = delimiters.link.labelEnd(after: start) else { return nil }
+    let destinationStart = source.index(after: labelEnd)
+    guard destinationStart < source.endIndex, source[destinationStart] == "(" else { return nil }
+
+    let destinationContentStart = source.index(after: destinationStart)
+    if destinationContentStart < source.endIndex, source[destinationContentStart] == "<" {
+        guard let closingAngle = delimiters.link.angleEnd(after: destinationContentStart) else {
+            return nil
+        }
+        let closingParenthesis = source.index(after: closingAngle)
+        guard closingParenthesis < source.endIndex,
+              source[closingParenthesis] == ")" else { return nil }
+        let rawURLStart = source.index(after: destinationContentStart)
+        let rawURL = markdownUnescapedAngleDestination(String(source[rawURLStart..<closingAngle]))
+        guard let url = URL(string: rawURL), markdownValidURL(url) else { return nil }
+        return .init(
+            label: String(source[source.index(after: start)..<labelEnd]),
+            url: url,
+            endIndex: source.index(after: closingParenthesis)
+        )
+    }
+
+    guard let closingParenthesis = delimiters.link.parenthesisEnd(after: destinationStart) else {
+        return nil
+    }
+    let rawURL = markdownUnescapedLinkDestination(String(source[destinationContentStart..<closingParenthesis]))
+    guard let url = URL(string: rawURL), markdownValidURL(url) else { return nil }
+    return .init(
+        label: String(source[source.index(after: start)..<labelEnd]),
+        url: url,
+        endIndex: source.index(after: closingParenthesis)
+    )
 }
 
 private func markdownUnescapedAngleDestination(_ source: String) -> String {
@@ -811,37 +880,7 @@ private func markdownLinkLabelEnd(
     in source: String,
     after opening: String.Index
 ) -> String.Index? {
-    markdownLinkLabelEnd(
-        in: source,
-        after: opening,
-        delimiters: MarkdownBacktickDelimiterIndex(source)
-    )
-}
-
-private func markdownLinkLabelEnd(
-    in source: String,
-    after opening: String.Index,
-    delimiters: MarkdownBacktickDelimiterIndex
-) -> String.Index? {
-    var index = source.index(after: opening)
-    while index < source.endIndex {
-        if source[index] == "\\" {
-            index = source.index(after: index)
-            if index < source.endIndex { index = source.index(after: index) }
-            continue
-        }
-        if let openingRun = delimiters.run(at: index) {
-            if let closingRun = delimiters.closingRun(after: openingRun) {
-                index = closingRun.end
-                continue
-            }
-            index = openingRun.end
-            continue
-        }
-        if source[index] == "]" { return index }
-        index = source.index(after: index)
-    }
-    return nil
+    MarkdownInlineDelimiterIndex(source).link.labelEnd(after: opening)
 }
 
 private func markdownUnescapedLinkDestination(_ source: String) -> String {
@@ -1450,7 +1489,7 @@ private enum MarkdownFallbackInlineDecoder {
         var spans: [InlineSpan] = []
         var plain = ""
         var index = source.startIndex
-        let codeDelimiters = MarkdownBacktickDelimiterIndex(source)
+        let delimiters = MarkdownInlineDelimiterIndex(source)
 
         func flushPlain() {
             guard !plain.isEmpty else { return }
@@ -1490,14 +1529,14 @@ private enum MarkdownFallbackInlineDecoder {
                let link = markdownInlineLink(
                    in: source,
                    at: index,
-                   delimiters: codeDelimiters
+                   delimiters: delimiters
                ) {
                 appendNested(link.label, marks: [], url: link.url)
                 index = link.endIndex
                 continue
             }
-            if let openingRun = codeDelimiters.run(at: index) {
-                if let closingRun = codeDelimiters.closingRun(after: openingRun) {
+            if let openingRun = delimiters.code.run(at: index) {
+                if let closingRun = delimiters.code.closingRun(after: openingRun) {
                     appendMarked(String(source[openingRun.end..<closingRun.start]), marks: [.code])
                     index = closingRun.end
                     continue

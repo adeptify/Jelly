@@ -1261,6 +1261,32 @@ struct BlockMarkdownCodecTests {
         #expect(large < small * 3.2)
     }
 
+    @Test func repeatedUnmatchedLinkOpenersImportScalesLinearlyAndStayVerbatim() throws {
+        func importDuration(size: Int) throws -> TimeInterval {
+            let source = String(repeating: "[", count: size)
+            var best = TimeInterval.greatestFiniteMagnitude
+            for _ in 0..<3 {
+                let start = Date.timeIntervalSinceReferenceDate
+                let result = try BlockMarkdownCodec.importMarkdown(
+                    source,
+                    idSource: .fixed(Self.ids(count: 1, start: 974)),
+                    checkedTaskCompletedAt: .distantPast
+                )
+                best = min(best, Date.timeIntervalSinceReferenceDate - start)
+                #expect(result.diagnostics == [])
+                #expect(result.document.blocks[0].inlineContent == .plain(source))
+            }
+            return best
+        }
+
+        _ = try importDuration(size: 1_000)
+        let small = try importDuration(size: 2_000)
+        _ = try importDuration(size: 4_000)
+        let large = try importDuration(size: 8_000)
+
+        #expect(large < small * 8)
+    }
+
     @Test func manifestedMismatchReportsThePhysicalLineContainingItsManifest() throws {
         let source = "A\(ContinuationToken.soft)\nB\(SpanManifestToken.span(marks: "b"))"
         let result = try BlockMarkdownCodec.importMarkdown(
