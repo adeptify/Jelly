@@ -62,6 +62,7 @@ private struct NormalizedDocumentBlock: Codable {
     let spans: [NormalizedInlineSpan]
     let completedAt: Date?
     let indentLevel: Int
+    let codeInfoString: String?
 
     init(block: DocumentBlock) {
         id = block.id.rawValue
@@ -69,6 +70,7 @@ private struct NormalizedDocumentBlock: Codable {
         spans = block.inlineContent.spans.map(NormalizedInlineSpan.init)
         completedAt = block.taskState?.completedAt
         indentLevel = block.indentLevel
+        codeInfoString = block.codeInfoString
     }
 }
 

@@ -71,19 +71,59 @@ public struct DocumentBlock: Identifiable, Codable, Equatable, Sendable {
     public var inlineContent: InlineContent
     public var taskState: TaskBlockState?
     public var indentLevel: Int
+    public var codeInfoString: String?
 
     public init(
         id: BlockID,
         kind: BlockKind,
         inlineContent: InlineContent,
         taskState: TaskBlockState?,
-        indentLevel: Int
+        indentLevel: Int,
+        codeInfoString: String? = nil
     ) {
         self.id = id
         self.kind = kind
         self.inlineContent = inlineContent
         self.taskState = taskState
         self.indentLevel = indentLevel
+        self.codeInfoString = Self.canonicalCodeInfoString(codeInfoString)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case inlineContent
+        case taskState
+        case indentLevel
+        case codeInfoString
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(BlockID.self, forKey: .id)
+        kind = try container.decode(BlockKind.self, forKey: .kind)
+        inlineContent = try container.decode(InlineContent.self, forKey: .inlineContent)
+        taskState = try container.decodeIfPresent(TaskBlockState.self, forKey: .taskState)
+        indentLevel = try container.decode(Int.self, forKey: .indentLevel)
+        codeInfoString = Self.canonicalCodeInfoString(
+            try container.decodeIfPresent(String.self, forKey: .codeInfoString)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(inlineContent, forKey: .inlineContent)
+        try container.encodeIfPresent(taskState, forKey: .taskState)
+        try container.encode(indentLevel, forKey: .indentLevel)
+        try container.encodeIfPresent(codeInfoString, forKey: .codeInfoString)
+    }
+
+    static func canonicalCodeInfoString(_ rawValue: String?) -> String? {
+        guard let rawValue else { return nil }
+        let trimmed = rawValue.trimmingCharacters(in: CharacterSet(charactersIn: " \t"))
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     public static func task(

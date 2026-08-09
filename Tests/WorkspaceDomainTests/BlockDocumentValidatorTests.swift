@@ -93,4 +93,72 @@ struct BlockDocumentValidatorTests {
         #expect(task.indentLevel == 2)
         #expect(task.taskState?.completedAt == .distantPast)
     }
+
+    @Test func codeInfoStringKeepsLegacyDecodingAndRejectsInvalidShapes() throws {
+        let code = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000214")!)
+        let paragraph = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000215")!)
+        let legacyJSON = """
+        {
+          "id": { "rawValue": "00000000-0000-0000-0000-000000000214" },
+          "kind": "code",
+          "inlineContent": { "spans": [{ "text": "print(1)", "marks": [] }] },
+          "taskState": null,
+          "indentLevel": 0
+        }
+        """
+        let legacy = try JSONDecoder().decode(DocumentBlock.self, from: Data(legacyJSON.utf8))
+
+        #expect(legacy.codeInfoString == nil)
+        #expect(DocumentBlock(
+            id: code,
+            kind: .code,
+            inlineContent: .plain("print(1)"),
+            taskState: nil,
+            indentLevel: 0,
+            codeInfoString: " \tswift linenums=1\t "
+        ).codeInfoString == "swift linenums=1")
+
+        var invalidCode = DocumentBlock(
+            id: code,
+            kind: .code,
+            inlineContent: .plain("print(1)"),
+            taskState: nil,
+            indentLevel: 0,
+            codeInfoString: "swift"
+        )
+        invalidCode.codeInfoString = "swift\n"
+        #expect(throws: BlockDocumentValidationError.invalidCodeInfo(code)) {
+            try BlockDocumentValidator.validate(.init(blocks: [invalidCode]))
+        }
+        #expect(throws: BlockDocumentValidationError.unexpectedCodeInfo(paragraph)) {
+            try BlockDocumentValidator.validate(.init(blocks: [
+                .init(
+                    id: paragraph,
+                    kind: .paragraph,
+                    inlineContent: .plain("正文"),
+                    taskState: nil,
+                    indentLevel: 0,
+                    codeInfoString: "swift"
+                )
+            ]))
+        }
+    }
+
+    @Test(arguments: ["swift\r", "swift\n", "swift\u{0000}"])
+    func validatorRejectsControlCharactersInCodeInfoString(_ invalidInfoString: String) throws {
+        let code = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000216")!)
+        var block = DocumentBlock(
+            id: code,
+            kind: .code,
+            inlineContent: .plain("print(1)"),
+            taskState: nil,
+            indentLevel: 0,
+            codeInfoString: "swift"
+        )
+        block.codeInfoString = invalidInfoString
+
+        #expect(throws: BlockDocumentValidationError.invalidCodeInfo(code)) {
+            try BlockDocumentValidator.validate(.init(blocks: [block]))
+        }
+    }
 }

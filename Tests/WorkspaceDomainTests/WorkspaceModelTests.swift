@@ -138,6 +138,40 @@ struct WorkspaceModelTests {
         #expect(try WorkspaceChecksum.normalizedNoteSnapshotData(original) == WorkspaceChecksum.normalizedNoteSnapshotData(revised))
     }
 
+    @Test func codeInfoStringRoundTripsAndParticipatesInChecksum() throws {
+        let noteID = NoteID(UUID(uuidString: "00000000-0000-0000-0000-000000000128")!)
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000129")!
+        let codeID = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000130")!)
+        let note = Note(
+            id: noteID,
+            title: "代码",
+            document: .init(blocks: [
+                .init(
+                    id: codeID,
+                    kind: .code,
+                    inlineContent: .plain("print(1)"),
+                    taskState: nil,
+                    indentLevel: 0,
+                    codeInfoString: "swift linenums=1"
+                )
+            ]),
+            categoryID: categoryID,
+            archivedAt: nil,
+            revision: 1,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        var changed = note
+        changed.document.blocks[0].codeInfoString = "python"
+        let decoded = try JSONDecoder.workspaceDeterministic.decode(
+            Note.self,
+            from: JSONEncoder.workspaceDeterministic.encode(note)
+        )
+
+        #expect(decoded.document.blocks[0].codeInfoString == "swift linenums=1")
+        #expect(try WorkspaceChecksum.noteSnapshotChecksum(note) != WorkspaceChecksum.noteSnapshotChecksum(changed))
+    }
+
     @Test func workspaceRoundTripPreservesEveryBlockInputAndNonemptyRelationStorageShape() throws {
         let now = Date(timeIntervalSince1970: 1_786_220_000)
         let uncategorizedID = UUID(uuidString: "00000000-0000-0000-0000-000000000119")!
@@ -187,7 +221,7 @@ struct WorkspaceModelTests {
                 .init(id: BlockID(), kind: .ordered, inlineContent: .plain("有序"), taskState: nil, indentLevel: 1),
                 .init(id: taskID, kind: .task, inlineContent: .plain("待办"), taskState: .init(completedAt: nil), indentLevel: 2),
                 .init(id: BlockID(), kind: .quote, inlineContent: .plain("引用"), taskState: nil, indentLevel: 0),
-                .init(id: BlockID(), kind: .code, inlineContent: .plain("print(1)"), taskState: nil, indentLevel: 0),
+                .init(id: BlockID(), kind: .code, inlineContent: .plain("print(1)"), taskState: nil, indentLevel: 0, codeInfoString: "swift"),
                 .init(id: BlockID(), kind: .divider, inlineContent: .plain(""), taskState: nil, indentLevel: 0),
                 .init(id: BlockID(), kind: .link, inlineContent: .init(spans: [.init(text: "链接", linkURL: URL(string: "https://example.com")!)]), taskState: nil, indentLevel: 0)
             ]),
@@ -229,6 +263,7 @@ struct WorkspaceModelTests {
 
         #expect(decoded == workspace)
         #expect(decoded.notes[noteID]?.document.blocks.map(\.kind) == [.paragraph, .heading1, .heading2, .heading3, .bullet, .ordered, .task, .quote, .code, .divider, .link])
+        #expect(decoded.notes[noteID]?.document.blocks[8].codeInfoString == "swift")
         #expect(Set(decoded.inspirations.values.map(\.inputKind)) == [.text, .url, .file])
         #expect(decoded.calendarNoteRelations.baselines.count == 2)
         #expect(decoded.calendarNoteRelations.occurrenceOverrides[occurrenceKey]?.primary == .replace(noteID))

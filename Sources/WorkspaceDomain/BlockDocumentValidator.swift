@@ -7,6 +7,8 @@ public enum BlockDocumentValidationError: Error, Equatable, Sendable {
     case orphanedIndent(BlockID, Int)
     case missingTaskState(BlockID)
     case unexpectedTaskState(BlockID)
+    case unexpectedCodeInfo(BlockID)
+    case invalidCodeInfo(BlockID)
     case dividerHasContent(BlockID)
     case invalidLink(BlockID)
 }
@@ -53,6 +55,17 @@ public enum BlockDocumentValidator {
         case .paragraph, .heading1, .heading2, .heading3, .bullet, .ordered, .quote, .code, .divider, .link:
             guard block.taskState == nil else {
                 throw BlockDocumentValidationError.unexpectedTaskState(block.id)
+            }
+        }
+        if block.kind != .code, block.codeInfoString != nil {
+            throw BlockDocumentValidationError.unexpectedCodeInfo(block.id)
+        }
+        if block.kind == .code, let codeInfoString = block.codeInfoString {
+            guard codeInfoString == DocumentBlock.canonicalCodeInfoString(codeInfoString),
+                  !codeInfoString.unicodeScalars.contains(where: { scalar in
+                      scalar.value == 0 || scalar.value == 10 || scalar.value == 13
+                  }) else {
+                throw BlockDocumentValidationError.invalidCodeInfo(block.id)
             }
         }
         if block.kind == .divider, !block.inlineContent.isEmpty {
