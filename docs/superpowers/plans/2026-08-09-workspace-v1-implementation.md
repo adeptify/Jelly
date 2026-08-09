@@ -1353,7 +1353,7 @@ rg -n 'CalendarStore|CalendarRepository|JSONCalendarRepository|InMemoryCalendarR
 ~~~
 
 - [x] **Task 6A GREEN/review/commit:** implement only the 6A persistence prerequisites: multi-record Journal with atomic rebase/bind/unbind and legacy migration, final-candidate draft context, verified noChange, pure restore preview/discard, opaque/absent restore, raw recovery copy, external-source reload and adoption planner. Run WorkspaceDomainTests, CalendarPersistenceTests and full tests. Obtain fresh Sol xhigh scoped review, fix every Critical/Important finding, rerun, and commit 6A before any 6B RED lands.
-- [ ] **Task 6B RED only after the reviewed 6A commit:** create queue/Store/Coordinator/undo/focus/resolver tests for failure-before-publish, two queued commands, pre/post-enqueue cancellation, every continuation exactly once, verified noChange causing no save/revision/undo, all three nonverified noChange mappings, edit-save while calendar mutates, sequential generations while save is suspended, calendar-save while typing continues, every Journal cleanup failure, the complete commitUncertain park/retry terminal matrix including restore rollback artifacts, queued restore of older V3/V2/V1 concurrent with a newer draft, restore failure-before-publish, restart after restore preserving normalized revisions, old receipt late arrival, consistency repair mode, sourceChanged reload/adoption and adoption-save failure nonpublication, opaque/unreadable load, optimistic delta undo/redo, revision overflow and owner-token editor focus routing. Include create→undo→redo→undo, delete→undo→redo→undo, same-ID recreation conflict, unrelated draft survival, same-field late conflict, weak UndoManager deallocation/focus transfer/fallback, and old `.updateItem` completion payload queue order.
+- [x] **Task 6B RED only after the reviewed 6A commit:** create queue/Store/Coordinator/undo/focus/resolver tests for failure-before-publish, two queued commands, pre/post-enqueue cancellation, every continuation exactly once, verified noChange causing no save/revision/undo, all three nonverified noChange mappings, edit-save while calendar mutates, sequential generations while save is suspended, calendar-save while typing continues, every Journal cleanup failure, the complete commitUncertain park/retry terminal matrix including restore rollback artifacts, queued restore of older V3/V2/V1 concurrent with a newer draft, restore failure-before-publish, restart after restore preserving normalized revisions, old receipt late arrival, consistency repair mode, sourceChanged reload/adoption and adoption-save failure nonpublication, opaque/unreadable load, optimistic delta undo/redo, revision overflow and owner-token editor focus routing. Include create→undo→redo→undo, delete→undo→redo→undo, same-ID recreation conflict, unrelated draft survival, same-field late conflict, weak UndoManager deallocation/focus transfer/fallback, and old `.updateItem` completion payload queue order.
 
 ~~~swift
 @Test func queuedDraftReducesAfterCalendarMutationAgainstLatestState() async throws {
@@ -1379,7 +1379,7 @@ rg -n 'CalendarStore|CalendarRepository|JSONCalendarRepository|InMemoryCalendarR
 }
 ~~~
 
-- [ ] Run the Task 6B RED set. These files do not exist during 6A, so SwiftPM can compile and green the 6A test targets independently.
+- [x] Run the Task 6B RED set. These files do not exist during 6A, so SwiftPM can compile and green the 6A test targets independently.
 
 ~~~zsh
 ./Scripts/test.sh --filter WorkspaceDomainTests.WorkspaceUndoReducerTests
@@ -1389,13 +1389,13 @@ rg -n 'CalendarStore|CalendarRepository|JSONCalendarRepository|InMemoryCalendarR
 ./Scripts/test.sh --filter CalendarAppTests.AppDataDirectoryResolverTests
 ~~~
 
-- [ ] Implement WorkspaceTransactionQueue with the fixed typed FIFO/park/retry/continuation matrix. It must never busy-loop, suspend a caller forever, resume twice, or start a later head while one is parked.
-- [ ] Implement WorkspaceStore with state/calendarState projections, typed outcomes/phases, sendWorkspace/sendCalendar, consistency repair mode, external reload/adoption and Store-owned backup/recovery APIs. sendCalendar creates WorkspaceCommand.calendar and follows the same reducer/validator/repository path.
-- [ ] Route restore as inspect without capability → user confirmation → queue head reduce against latest preview → exact prepare → commitRestore. Discard any issued capability on every non-commit path. Successful restore publishes once and clears incompatible undo/redo only after disk replacement; failure keeps state/stacks unchanged. A draft queued after restore reduces against the restored latest state and remains protected/conflicted rather than disappearing.
-- [ ] A Note draft applies only its modifiedFields to the latest Note. Disjoint changes use final-candidate Journal rebase; same-field change becomes typed conflict and remains protected. Sequential generations in the same edit session rebase on the last applied generation, while a newer Journal record prevents an older transaction from touching its receipt. A draft never overwrites the entire latest Note or Workspace because its original snapshot is older.
-- [ ] Implement failure semantics: reducer/validator/repository failure leaves published state, revision and undo stacks unchanged; successful save publishes once and then updates undo/redo metadata.
-- [ ] Implement WorkspaceUndoRecord and pure WorkspaceUndoReducer as the optimistic reversible write-set and revision-ledger contract above. Undo/redo are queued persisted transactions; touched-value conflict, validation, overflow or persistence failure leaves state/stacks byte-for-byte/Equatable unchanged.
-- [ ] Replace global undo routing with owner-token editor focus priority for both undo and redo.
+- [x] Implement WorkspaceTransactionQueue with the fixed typed FIFO/park/retry/continuation matrix. It must never busy-loop, suspend a caller forever, resume twice, or start a later head while one is parked.
+- [x] Implement WorkspaceStore with state/calendarState projections, typed outcomes/phases, sendWorkspace/sendCalendar, consistency repair mode, external reload/adoption and Store-owned backup/recovery APIs. sendCalendar creates WorkspaceCommand.calendar and follows the same reducer/validator/repository path.
+- [x] Route restore as inspect without capability → user confirmation → queue head reduce against latest preview → exact prepare → commitRestore. Discard any issued capability on every non-commit path. Successful restore publishes once and clears incompatible undo/redo only after disk replacement; failure keeps state/stacks unchanged. A draft queued after restore reduces against the restored latest state and remains protected/conflicted rather than disappearing.
+- [x] A Note draft applies only its modifiedFields to the latest Note. Disjoint changes use final-candidate Journal rebase; same-field change becomes typed conflict and remains protected. Sequential generations in the same edit session rebase on the last applied generation, while a newer Journal record prevents an older transaction from touching its receipt. A draft never overwrites the entire latest Note or Workspace because its original snapshot is older.
+- [x] Implement failure semantics: reducer/validator/repository failure leaves published state, revision and undo stacks unchanged; successful save publishes once and then updates undo/redo metadata.
+- [x] Implement WorkspaceUndoRecord and pure WorkspaceUndoReducer as the optimistic reversible write-set and revision-ledger contract above. Undo/redo are queued persisted transactions; touched-value conflict, validation, overflow or persistence failure leaves state/stacks byte-for-byte/Equatable unchanged.
+- [x] Replace global undo routing with owner-token editor focus priority for both undo and redo.
 
 ~~~swift
 @MainActor
@@ -1425,8 +1425,8 @@ func performRedo() {
 }
 ~~~
 
-- [ ] Implement DraftJournalCoordinator ordering with the multi-record atomic rebase/bind contract. Persist before enqueue; bind final candidate before save; record only returned/reconciled receipt; exact-unbind notCommitted/sourceChanged; clear only the exact saved identity/generation/checksum/revision. A parked commit retains the binding. Journal clear failure preserves the saved receipt for restart.
-- [ ] Add AppDataDirectoryResolver and AppDataURLs with the strict override and sidecar-path contract above. Default remains Application Support/PersonalCalendar. Never alter HOME.
+- [x] Implement DraftJournalCoordinator ordering with the multi-record atomic rebase/bind contract. Persist before enqueue; bind final candidate before save; record only returned/reconciled receipt; exact-unbind notCommitted/sourceChanged; clear only the exact saved identity/generation/checksum/revision. A parked commit retains the binding. Journal clear failure preserves the saved receipt for restart.
+- [x] Add AppDataDirectoryResolver and AppDataURLs with the strict override and sidecar-path contract above. Default remains Application Support/PersonalCalendar. Never alter HOME.
 
 ~~~swift
 enum AppDataDirectoryResolver {
@@ -1437,7 +1437,7 @@ enum AppDataDirectoryResolver {
 }
 ~~~
 
-- [ ] **Task 6B GREEN/review/commit:** run WorkspaceDomainTests, CalendarPersistenceTests, focused CalendarApp Store tests and full tests. Obtain fresh Sol xhigh review focused on queue continuation/park/retry, Journal cleanup, failure publication, repair/adoption, sequential generation delta replay, multi-round delta undo revisions and focus ownership; fix every Critical/Important finding, rerun, and commit while WorkspaceStore remains dormant and unconstructed by the App composition root.
+- [x] **Task 6B GREEN/review/commit:** run WorkspaceDomainTests, CalendarPersistenceTests, focused CalendarApp Store tests and full tests. Obtain fresh Sol xhigh review focused on queue continuation/park/retry, Journal cleanup, failure publication, repair/adoption, sequential generation delta replay, multi-round delta undo revisions and focus ownership; fix every Critical/Important finding, rerun, and commit while WorkspaceStore remains dormant and unconstructed by the App composition root.
 - [ ] **Task 6C cutover:** only after the reviewed 6B commit, port every row in the assertion map, replace InMemoryCalendarRepository with InMemoryWorkspaceRepository across TestSupport, and migrate MonthView, WeekView, DayDrawer, editors, drag/drop, progress, categories, backup/restore, AppEnvironment, PersonalCalendarApp and all tests to WorkspaceStore in one consumer cutover. Views read calendarState; CategoryManagerViewModel sends Workspace category commands; BackupCommands calls Store only.
 - [ ] Remove the deprecated Calendar-only BackupService export/validate/restore wrappers after BackupCommands and WorkspaceStore use prepareRestore/queued commitRestore. Port their useful tests to WorkspaceBackupServiceTests before deletion.
 - [ ] Complete and verify every row in the 39-row legacy assertion map with `Scripts/verify-task6-legacy-assertion-map.sh --complete`, run every mapped target, then in the same final cutover delete CalendarStore, CalendarRepository, JSONCalendarRepository, InMemoryCalendarRepository, their old tests and all deprecated wrappers. Run `--complete` again after deletion from the committed inventory. Do not leave aliases, compatibility shims or a second business save path.
