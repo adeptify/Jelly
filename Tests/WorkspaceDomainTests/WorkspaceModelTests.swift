@@ -388,6 +388,64 @@ struct WorkspaceModelTests {
         }
     }
 
+    @Test func contentSnapshotExcludesWorkspaceAndPerNoteRevisions() throws {
+        let original = try validWorkspace()
+        var revised = original
+        revised.revision = 99
+        revised.notes = revised.notes.mapValues { note in
+            var note = note
+            note.revision = 77
+            return note
+        }
+
+        let first = WorkspaceContentSnapshot(state: original)
+        let second = WorkspaceContentSnapshot(state: revised)
+
+        #expect(first == second)
+        let encoded = String(
+            decoding: try JSONEncoder.workspaceDeterministic.encode(first),
+            as: UTF8.self
+        )
+        #expect(encoded.contains("revision") == false)
+    }
+
+    @Test func validatorRejectsNegativeOrFutureNoteRevision() throws {
+        let original = try validWorkspace()
+        let noteID = try #require(original.notes.keys.first)
+        var negative = original
+        negative.notes[noteID]?.revision = -1
+        #expect(throws: WorkspaceValidationError.invalidNoteRevision(noteID)) {
+            try WorkspaceValidator.validate(negative)
+        }
+
+        var future = original
+        future.notes[noteID]?.revision = original.revision + 1
+        #expect(throws: WorkspaceValidationError.invalidNoteRevision(noteID)) {
+            try WorkspaceValidator.validate(future)
+        }
+    }
+
+    @Test func validatorRequiresLinkedTaskAndItemCompletionToMatch() throws {
+        var workspace = try validWorkspace()
+        let noteID = try #require(workspace.notes.keys.first)
+        let blockID = try #require(workspace.notes[noteID]?.document.blocks.first?.id)
+        let itemID = try #require(workspace.calendar.items.keys.first)
+        workspace.calendarNoteRelations.baselines[.item(itemID)] = .init(
+            primaryNoteID: noteID,
+            referenceNoteIDs: []
+        )
+        workspace.taskBlockLinks = [.init(
+            noteID: noteID,
+            blockID: blockID,
+            calendarItemID: itemID
+        )]
+        workspace.calendar.items[itemID]?.completedAt = Date(timeIntervalSince1970: 1_786_220_999)
+
+        #expect(throws: WorkspaceValidationError.taskCompletionMismatch(noteID, blockID, itemID)) {
+            try WorkspaceValidator.validate(workspace)
+        }
+    }
+
     private func validWorkspace() throws -> WorkspaceState {
         let now = Date(timeIntervalSince1970: 1_786_220_000)
         let uncategorizedID = UUID(uuidString: "00000000-0000-0000-0000-000000000113")!

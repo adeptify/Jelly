@@ -3,7 +3,9 @@ import Foundation
 
 public enum WorkspaceValidationError: Error, Equatable, Sendable {
     case invalidCalendar
+    case invalidWorkspaceRevision
     case inconsistentNoteKey(NoteID)
+    case invalidNoteRevision(NoteID)
     case inconsistentInspirationKey(InspirationID)
     case unknownCategory(UUID)
     case invalidNoteDocument(NoteID)
@@ -22,11 +24,15 @@ public enum WorkspaceValidationError: Error, Equatable, Sendable {
     case taskBlockMissingPrimaryNote(NoteID, UUID)
     case duplicateTaskBlock(BlockID)
     case duplicateTaskCalendarItem(UUID)
+    case taskCompletionMismatch(NoteID, BlockID, UUID)
     case danglingLiveInspiration(InspirationID)
 }
 
 public enum WorkspaceValidator {
     public static func validate(_ state: WorkspaceState) throws {
+        guard state.revision >= 0 else {
+            throw WorkspaceValidationError.invalidWorkspaceRevision
+        }
         do {
             try CalendarStateValidator.validate(state.calendar)
         } catch {
@@ -47,6 +53,9 @@ public enum WorkspaceValidator {
             }
             guard state.calendar.categories[note.categoryID] != nil else {
                 throw WorkspaceValidationError.unknownCategory(note.categoryID)
+            }
+            guard note.revision >= 0, note.revision <= state.revision else {
+                throw WorkspaceValidationError.invalidNoteRevision(note.id)
             }
             do {
                 try BlockDocumentValidator.validate(note.document)
@@ -127,7 +136,7 @@ public enum WorkspaceValidator {
                 throw WorkspaceValidationError.danglingCalendarItem(link.calendarItemID)
             }
             guard let note = state.notes[link.noteID],
-                  note.document.blocks.contains(where: { $0.id == link.blockID && $0.kind == .task })
+                  let block = note.document.blocks.first(where: { $0.id == link.blockID && $0.kind == .task })
             else {
                 throw WorkspaceValidationError.taskBlockMissingTask(link.noteID, link.blockID)
             }
@@ -140,6 +149,13 @@ public enum WorkspaceValidator {
             let owner = CalendarNoteOwnerID.item(link.calendarItemID)
             guard state.calendarNoteRelations.baselines[owner]?.primaryNoteID == link.noteID else {
                 throw WorkspaceValidationError.taskBlockMissingPrimaryNote(link.noteID, link.calendarItemID)
+            }
+            guard state.calendar.items[link.calendarItemID]?.completedAt == block.taskState?.completedAt else {
+                throw WorkspaceValidationError.taskCompletionMismatch(
+                    link.noteID,
+                    link.blockID,
+                    link.calendarItemID
+                )
             }
         }
     }

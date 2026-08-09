@@ -1,0 +1,325 @@
+import CalendarDomain
+import Foundation
+
+extension WorkspaceReducer {
+    static func createNote(_ note: Note, in candidate: inout WorkspaceState) throws {
+        guard candidate.notes[note.id] == nil else {
+            throw WorkspaceReducerError.duplicateNote(note.id)
+        }
+        try validateProposedNote(note, in: candidate)
+        candidate.notes[note.id] = note
+    }
+
+    static func setNoteArchive(
+        _ id: NoteID,
+        archivedAt: Date?,
+        in candidate: inout WorkspaceState,
+        now: Date
+    ) throws {
+        guard var note = candidate.notes[id] else { throw WorkspaceReducerError.missingNote(id) }
+        guard note.archivedAt != archivedAt else { return }
+        note.archivedAt = archivedAt
+        note.updatedAt = now
+        candidate.notes[id] = note
+    }
+
+    static func updateNote(
+        _ submission: NoteDraftSubmission,
+        in candidate: inout WorkspaceState,
+        now: Date,
+        metadata: inout WorkspaceMutationMetadata
+    ) throws -> WorkspaceCommandControl {
+        guard let current = candidate.notes[submission.noteID] else {
+            throw WorkspaceReducerError.missingNote(submission.noteID)
+        }
+        let base = submission.baseSnapshot
+        let submitted = submission.snapshot
+        guard base.id == submission.noteID,
+              submitted.id == submission.noteID,
+              submission.baseNoteRevision == base.revision,
+              submission.baseNoteSnapshotChecksum == (try WorkspaceChecksum.noteSnapshotChecksum(base)),
+              submission.noteSnapshotChecksum == (try WorkspaceChecksum.noteSnapshotChecksum(submitted)),
+              submission.modifiedFields == derivedFields(base: base, submitted: submitted),
+              submission.baseLinkedTaskBlockLinks.allSatisfy({ link in
+                  link.noteID == base.id
+                      && base.document.blocks.contains(where: { $0.id == link.blockID && $0.kind == .task })
+              })
+        else {
+            throw WorkspaceReducerError.invalidDraftSubmission
+        }
+
+        var conflicts = Set<NoteDraftField>()
+        let title = merge(base.title, submitted.title, current.title, field: .title, conflicts: &conflicts)
+        let document = merge(
+            base.document,
+            submitted.document,
+            current.document,
+            field: .document,
+            conflicts: &conflicts
+        )
+        let categoryID = merge(
+            base.categoryID,
+            submitted.categoryID,
+            current.categoryID,
+            field: .categoryID,
+            conflicts: &conflicts
+        )
+        let archivedAt = merge(
+            base.archivedAt,
+            submitted.archivedAt,
+            current.archivedAt,
+            field: .archivedAt,
+            conflicts: &conflicts
+        )
+
+        let affected = affectedBlockIDs(base: base.document, submitted: submitted.document)
+        let baseProjection = linkProjection(submission.baseLinkedTaskBlockLinks, affected: affected)
+        let currentProjection = linkProjection(
+            Set(candidate.taskBlockLinks.filter { $0.noteID == current.id }),
+            affected: affected
+        )
+        if baseProjection != currentProjection { conflicts.insert(.document) }
+
+        if !conflicts.isEmpty {
+            return .result(.conflict(.noteDraft(.init(
+                noteID: current.id,
+                currentRevision: current.revision,
+                conflictingFields: conflicts,
+                base: base,
+                submitted: submitted,
+                current: current
+            ))))
+        }
+
+        let currentLinks = candidate.taskBlockLinks.filter { $0.noteID == current.id }
+        let submittedDocumentChanged = base.document != submitted.document
+        let dispositionIDs: Set<BlockID> = submittedDocumentChanged
+            ? Set(currentLinks.compactMap { link in
+                let block = submitted.document.blocks.first { $0.id == link.blockID }
+                return block?.kind == .task ? nil : link.blockID
+            })
+            : []
+        guard Set(submission.linkedBlockDeletionDispositions.keys) == dispositionIDs else {
+            throw WorkspaceReducerError.invalidLinkedBlockDispositions
+        }
+
+        for link in currentLinks where !dispositionIDs.contains(link.blockID) {
+            guard let oldBlock = current.document.blocks.first(where: { $0.id == link.blockID }),
+                  let newBlock = document.blocks.first(where: { $0.id == link.blockID && $0.kind == .task })
+            else { continue }
+            if oldBlock.taskState?.completedAt != newBlock.taskState?.completedAt {
+                throw WorkspaceReducerError.linkedTaskCompletionRequiresTaskCommand
+            }
+        }
+
+        for (blockID, disposition) in submission.linkedBlockDeletionDispositions {
+            guard let link = currentLinks.first(where: { $0.blockID == blockID }) else {
+                throw WorkspaceReducerError.invalidLinkedBlockDispositions
+            }
+            candidate.taskBlockLinks.remove(link)
+            if disposition == .deleteCalendarItem {
+                var localMetadata = WorkspaceMutationMetadata()
+                try applyCalendar(
+                    .deleteItem(link.calendarItemID),
+                    to: &candidate,
+                    now: now,
+                    metadata: &localMetadata
+                )
+            }
+        }
+
+        var merged = current
+        merged.title = title
+        merged.document = document
+        merged.categoryID = categoryID
+        merged.archivedAt = archivedAt
+        if WorkspaceNoteContent(note: merged) != WorkspaceNoteContent(note: current) {
+            merged.createdAt = current.createdAt
+            merged.updatedAt = now
+        }
+        try validateProposedNote(merged, in: candidate)
+        candidate.notes[current.id] = merged
+        metadata.draftContext = .init(
+            noteID: current.id,
+            draftGeneration: submission.draftGeneration,
+            noteSnapshotChecksum: submission.noteSnapshotChecksum
+        )
+        return .proceed
+    }
+
+    static func scheduleTaskBlock(
+        _ payload: ScheduleTaskBlockPayload,
+        in candidate: inout WorkspaceState,
+        now: Date,
+        metadata: inout WorkspaceMutationMetadata
+    ) throws {
+        guard let note = candidate.notes[payload.noteID],
+              let block = note.document.blocks.first(where: {
+                  $0.id == payload.blockID && $0.kind == .task
+              })
+        else {
+            throw WorkspaceReducerError.taskBlockMissingOrNotTask
+        }
+        guard block.taskState?.completedAt == payload.item.completedAt else {
+            throw WorkspaceReducerError.taskCompletionMismatch
+        }
+        guard !candidate.taskBlockLinks.contains(where: {
+            $0.blockID == payload.blockID || $0.calendarItemID == payload.item.id
+        }) else {
+            throw WorkspaceReducerError.duplicateTaskBlockLink
+        }
+        try applyCalendar(.createItem(payload.item), to: &candidate, now: now, metadata: &metadata)
+        let owner = CalendarNoteOwnerID.item(payload.item.id)
+        if let existing = candidate.calendarNoteRelations.baselines[owner],
+           existing.primaryNoteID != nil || !existing.referenceNoteIDs.isEmpty {
+            throw WorkspaceReducerError.primaryReplacementDispositionRequired
+        }
+        candidate.calendarNoteRelations.baselines[owner] = .init(
+            primaryNoteID: payload.noteID,
+            referenceNoteIDs: []
+        )
+        candidate.taskBlockLinks.insert(.init(
+            noteID: payload.noteID,
+            blockID: payload.blockID,
+            calendarItemID: payload.item.id
+        ))
+    }
+
+    static func setTaskCompletion(
+        _ target: TaskCompletionTarget,
+        value: TaskCompletionValue,
+        in candidate: inout WorkspaceState,
+        now: Date
+    ) throws -> WorkspaceCommandControl {
+        let link: TaskBlockCalendarLink?
+        switch target {
+        case let .calendarItem(id):
+            link = candidate.taskBlockLinks.first { $0.calendarItemID == id }
+        case let .taskBlock(noteID, blockID):
+            link = candidate.taskBlockLinks.first { $0.noteID == noteID && $0.blockID == blockID }
+        }
+        guard let link,
+              var note = candidate.notes[link.noteID],
+              let index = note.document.blocks.firstIndex(where: {
+                  $0.id == link.blockID && $0.kind == .task
+              }),
+              let item = candidate.calendar.items[link.calendarItemID]
+        else {
+            throw WorkspaceReducerError.taskBlockMissingOrNotTask
+        }
+        let blockCompletion = note.document.blocks[index].taskState?.completedAt
+        guard blockCompletion == item.completedAt else {
+            throw WorkspaceReducerError.taskCompletionMismatch
+        }
+        let desired: Date?
+        switch value {
+        case .incomplete:
+            guard item.completedAt != nil else { return .result(.noChange(.identical)) }
+            desired = nil
+        case let .complete(ifTransitioningAt):
+            guard item.completedAt == nil else { return .result(.noChange(.identical)) }
+            desired = ifTransitioningAt
+        }
+        do {
+            candidate.calendar = try CalendarReducer.reduce(
+                candidate.calendar,
+                command: .setTaskCompleted(link.calendarItemID, desired),
+                now: now
+            )
+        } catch let error as ReducerError {
+            throw WorkspaceReducerError.calendarFailure(error)
+        }
+        note.document.blocks[index].taskState?.completedAt = desired
+        note.updatedAt = now
+        candidate.notes[note.id] = note
+        return .proceed
+    }
+
+    static func permanentlyDeleteNote(
+        _ id: NoteID,
+        authorization: PermanentDeleteAuthorization,
+        in candidate: inout WorkspaceState
+    ) throws -> WorkspaceCommandControl {
+        guard candidate.notes[id] != nil else { throw WorkspaceReducerError.missingNote(id) }
+        let subject = PermanentDeleteSubject.note(id)
+        let preview = try PermanentDeletePlanner.preview(subject, in: candidate)
+        guard authorization.subject == subject,
+              authorization.sourceWorkspaceRevision == preview.sourceWorkspaceRevision,
+              authorization.impactChecksum == preview.checksum
+        else {
+            return .result(.noChange(.staleDeleteAuthorization))
+        }
+        for owner in Array(candidate.calendarNoteRelations.baselines.keys) {
+            guard var set = candidate.calendarNoteRelations.baselines[owner] else { continue }
+            if set.primaryNoteID == id { set.primaryNoteID = nil }
+            set.referenceNoteIDs.remove(id)
+            if set.primaryNoteID == nil && set.referenceNoteIDs.isEmpty {
+                candidate.calendarNoteRelations.baselines.removeValue(forKey: owner)
+            } else {
+                candidate.calendarNoteRelations.baselines[owner] = set
+            }
+        }
+        for key in Array(candidate.calendarNoteRelations.occurrenceOverrides.keys) {
+            guard var override = candidate.calendarNoteRelations.occurrenceOverrides[key] else { continue }
+            if case let .replace(noteID) = override.primary, noteID == id { override.primary = .clear }
+            override.addedReferenceNoteIDs.remove(id)
+            override.removedReferenceNoteIDs.remove(id)
+            if override.primary == .inherit,
+               override.addedReferenceNoteIDs.isEmpty,
+               override.removedReferenceNoteIDs.isEmpty {
+                candidate.calendarNoteRelations.occurrenceOverrides.removeValue(forKey: key)
+            } else {
+                candidate.calendarNoteRelations.occurrenceOverrides[key] = override
+            }
+        }
+        candidate.taskBlockLinks = Set(candidate.taskBlockLinks.filter { $0.noteID != id })
+        candidate.inspirationNoteLinks = Set(candidate.inspirationNoteLinks.filter { $0.noteID != id })
+        candidate.notes.removeValue(forKey: id)
+        return .proceed
+    }
+
+    private static func merge<Value: Equatable>(
+        _ base: Value,
+        _ submitted: Value,
+        _ current: Value,
+        field: NoteDraftField,
+        conflicts: inout Set<NoteDraftField>
+    ) -> Value {
+        if submitted == base { return current }
+        if current == base || submitted == current { return submitted }
+        conflicts.insert(field)
+        return current
+    }
+
+    private static func derivedFields(base: Note, submitted: Note) -> Set<NoteDraftField> {
+        var fields = Set<NoteDraftField>()
+        if base.title != submitted.title { fields.insert(.title) }
+        if base.document != submitted.document { fields.insert(.document) }
+        if base.categoryID != submitted.categoryID { fields.insert(.categoryID) }
+        if base.archivedAt != submitted.archivedAt { fields.insert(.archivedAt) }
+        return fields
+    }
+
+    private static func affectedBlockIDs(
+        base: BlockDocument,
+        submitted: BlockDocument
+    ) -> Set<BlockID> {
+        let baseMap = Dictionary(uniqueKeysWithValues: base.blocks.map { ($0.id, $0) })
+        let submittedMap = Dictionary(uniqueKeysWithValues: submitted.blocks.map { ($0.id, $0) })
+        return Set(baseMap.keys).union(submittedMap.keys).filter { id in
+            guard let old = baseMap[id], let new = submittedMap[id] else { return true }
+            return old.kind != new.kind
+                || old.inlineContent != new.inlineContent
+                || old.taskState != new.taskState
+        }
+    }
+
+    private static func linkProjection(
+        _ links: Set<TaskBlockCalendarLink>,
+        affected: Set<BlockID>
+    ) -> [BlockID: UUID] {
+        Dictionary(uniqueKeysWithValues: links.compactMap { link in
+            affected.contains(link.blockID) ? (link.blockID, link.calendarItemID) : nil
+        })
+    }
+}

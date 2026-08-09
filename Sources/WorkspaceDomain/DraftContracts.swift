@@ -7,7 +7,7 @@ public enum NoteDraftField: String, Codable, Hashable, Sendable {
     case archivedAt
 }
 
-public enum LinkedTaskBlockDeletionDisposition: String, Codable, Sendable {
+public enum LinkedTaskBlockDeletionDisposition: String, Codable, Equatable, Sendable {
     case keepCalendarItem
     case deleteCalendarItem
 }
@@ -17,6 +17,8 @@ public struct NoteDraftSubmission: Equatable, Sendable {
     public let editSessionID: UUID
     public let baseNoteRevision: Int64?
     public let baseNoteSnapshotChecksum: String?
+    public let baseSnapshot: Note
+    public let baseLinkedTaskBlockLinks: Set<TaskBlockCalendarLink>
     public let draftGeneration: UInt64
     public let snapshot: Note
     public let noteSnapshotChecksum: String
@@ -28,6 +30,8 @@ public struct NoteDraftSubmission: Equatable, Sendable {
         editSessionID: UUID,
         baseNoteRevision: Int64?,
         baseNoteSnapshotChecksum: String?,
+        baseSnapshot: Note,
+        baseLinkedTaskBlockLinks: Set<TaskBlockCalendarLink>,
         draftGeneration: UInt64,
         snapshot: Note,
         noteSnapshotChecksum: String,
@@ -38,6 +42,8 @@ public struct NoteDraftSubmission: Equatable, Sendable {
         self.editSessionID = editSessionID
         self.baseNoteRevision = baseNoteRevision
         self.baseNoteSnapshotChecksum = baseNoteSnapshotChecksum
+        self.baseSnapshot = baseSnapshot
+        self.baseLinkedTaskBlockLinks = baseLinkedTaskBlockLinks
         self.draftGeneration = draftGeneration
         self.snapshot = snapshot
         self.noteSnapshotChecksum = noteSnapshotChecksum

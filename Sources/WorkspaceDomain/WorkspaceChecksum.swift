@@ -2,6 +2,14 @@ import CryptoKit
 import Foundation
 
 public enum WorkspaceChecksum {
+    static func sha256Hex(_ string: String) -> String {
+        sha256Hex(Data(string.utf8))
+    }
+
+    static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     public static func normalizedNoteSnapshotData(_ note: Note) throws -> Data {
         let encoder = JSONEncoder.workspaceDeterministic
         return try encoder.encode(NormalizedNoteSnapshot(note: note))
@@ -9,7 +17,46 @@ public enum WorkspaceChecksum {
 
     public static func noteSnapshotChecksum(_ note: Note) throws -> String {
         let data = try normalizedNoteSnapshotData(note)
-        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return sha256Hex(data)
+    }
+
+    public static func inspirationSourceChecksum(_ inspiration: Inspiration) -> String {
+        var data = Data("inspiration-source-v1".utf8)
+        appendLengthPrefixed(Data(inspiration.id.rawValue.uuidString.utf8), to: &data)
+        appendLengthPrefixed(Data(inspiration.inputKind.rawValue.utf8), to: &data)
+        switch inspiration.inputKind {
+        case .text:
+            appendLengthPrefixed(Data((inspiration.rawText ?? "").utf8), to: &data)
+        case .url:
+            appendLengthPrefixed(Data((inspiration.rawURL?.absoluteString ?? "").utf8), to: &data)
+        case .file:
+            if let file = inspiration.rawFile {
+                appendLengthPrefixed(file.bookmarkData, to: &data)
+                appendLengthPrefixed(Data(file.displayName.utf8), to: &data)
+            } else {
+                appendLengthPrefixed(Data(), to: &data)
+                appendLengthPrefixed(Data(), to: &data)
+            }
+        }
+        return sha256Hex(data)
+    }
+
+    public static func diagnosticsChecksum(_ diagnostics: [BlockMarkdownDiagnostic]) -> String {
+        var data = Data("legacy-diagnostics-v1".utf8)
+        var count = UInt64(diagnostics.count).bigEndian
+        withUnsafeBytes(of: &count) { data.append(contentsOf: $0) }
+        for diagnostic in diagnostics {
+            var line = UInt64(diagnostic.lineNumber).bigEndian
+            withUnsafeBytes(of: &line) { data.append(contentsOf: $0) }
+            appendLengthPrefixed(Data(diagnostic.message.utf8), to: &data)
+        }
+        return sha256Hex(data)
+    }
+
+    private static func appendLengthPrefixed(_ value: Data, to data: inout Data) {
+        var length = UInt64(value.count).bigEndian
+        withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
+        data.append(value)
     }
 }
 
