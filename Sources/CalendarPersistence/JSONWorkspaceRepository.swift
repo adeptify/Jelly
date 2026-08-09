@@ -277,13 +277,15 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
                 case .confirmedAbsent:
                     currentSource = .absent
                 case let .bytes(rawData):
-                    if let result = try? WorkspaceDocumentCodec.decode(rawData) {
+                    if let result = try? WorkspaceDocumentCodec.decode(rawData),
+                       (try? WorkspaceValidator.validate(result.state)) != nil {
                         currentSource = .valid(rawData: rawData, result: result)
                     } else {
                         currentSource = .opaqueInvalid(rawData: rawData, identity: identity(for: rawData))
                     }
                 }
 
+                loadedSource = .bound(currentSource)
                 pendingRestores[prepared.capabilityID] = nil
                 let rollback = try writeRollbackUnlocked(for: currentSource, to: issued.rollbackURL)
                 if case let .valid(rawData, result) = currentSource,

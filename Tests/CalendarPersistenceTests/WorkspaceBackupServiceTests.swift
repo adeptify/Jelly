@@ -306,15 +306,21 @@ struct WorkspaceBackupServiceTests {
         }
     }
 
-    @Test func rollbackWriteAndReadbackFailuresNeverReplaceMainAndConsumeCapability() async throws {
+    @Test func rollbackWriteAndReadbackFailuresRebindCommitTimePeerWithoutReplacingMain() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
         let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
-        var restored = current
-        restored.revision = 2
-        restored.notes[restored.notes.keys.first!]!.revision = 2
+        var peer = current
+        peer.revision = 2
+        peer.notes[peer.notes.keys.first!]!.revision = 2
+        peer.notes[peer.notes.keys.first!]!.title = "commit-time peer B"
+        var restored = peer
+        restored.revision = 3
+        restored.notes[restored.notes.keys.first!]!.revision = 3
+        restored.notes[restored.notes.keys.first!]!.title = "restore C"
         let source = directory.file("restore.json")
         try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let peerData = try WorkspaceDocumentCodec.encode(peer)
         for (name, writer) in [
             ("write", AnyExclusiveWriter(WorkspacePersistenceAlwaysFailingExclusiveWriter())),
             ("readback", AnyExclusiveWriter(WorkspacePersistenceCorruptingExclusiveWriter())),
@@ -328,10 +334,20 @@ struct WorkspaceBackupServiceTests {
                 try await BackupService().inspectRestoreSource(source),
                 rollbackDirectoryURL: directory.url
             )
+            try peerData.write(to: main)
             await #expect(throws: WorkspacePersistenceError.rollbackWriteFailed) {
                 _ = try await repository.commitRestore(prepared, state: restored)
             }
-            #expect(try Data(contentsOf: main) == initialData)
+            #expect(try Data(contentsOf: main) == peerData)
+            let loadedData: Data?
+            do {
+                loadedData = try await repository.currentDocumentData()
+            } catch {
+                Issue.record("rollback \(name) did not rebind commit-time peer B: \(error)")
+                loadedData = nil
+            }
+            #expect(loadedData == peerData)
+            #expect(try await repository.reconcilePendingCommit() == .notCommitted(.init()))
             await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
                 _ = try await repository.commitRestore(prepared, state: restored)
             }
@@ -373,9 +389,12 @@ struct WorkspaceBackupServiceTests {
         #expect(try Data(contentsOf: prepared.rollbackURL) == v2)
     }
 
-    @Test func snapshotAndManifestFailuresAfterRollbackConsumeCapabilityWithoutFreezingTheValidBinding() async throws {
+    @Test func snapshotAndManifestFailuresRebindTheValidatedCommitTimePeerBeforeCAS() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
+        let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        let initialData = try WorkspaceDocumentCodec.encode(initial)
+        let v1 = WorkspacePersistenceFixtures.v1CalendarDocument()
         let v2 = try WorkspacePersistenceFixtures.v2CalendarDocument()
         let restored = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
         let source = directory.file("sidecar-restore.json")
@@ -386,7 +405,8 @@ struct WorkspaceBackupServiceTests {
             let main = directory.file("\(failure.rawValue)-main.json")
             let snapshots = directory.file("\(failure.rawValue)-snapshots")
             let manifest = directory.file("\(failure.rawValue)-manifest.json")
-            try v2.write(to: main)
+            let peerData = failure.usesV1Peer ? v1 : v2
+            try initialData.write(to: main)
             let writer: any AtomicFileWriting
             switch failure {
             case .snapshotLock:
@@ -410,13 +430,14 @@ struct WorkspaceBackupServiceTests {
             }
             let repository = JSONWorkspaceRepository(
                 documentURL: main,
-                seed: { .empty(calendar: WorkspacePersistenceFixtures.calendarState) },
+                seed: { initial },
                 snapshotDirectoryURL: snapshots,
                 recoveryManifestURL: manifest,
                 atomicWriter: writer
             )
             _ = try await repository.load()
             let prepared = try await repository.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+            try peerData.write(to: main)
             let manifestLock = manifest.deletingLastPathComponent()
                 .appendingPathComponent(".\(manifest.lastPathComponent).jelly.lock")
             if failure == .manifestLock {
@@ -435,8 +456,8 @@ struct WorkspaceBackupServiceTests {
             }
 
             #expect((observed as? WorkspacePersistenceError) == failure.expectedError)
-            #expect(try Data(contentsOf: prepared.rollbackURL) == v2)
-            #expect(try Data(contentsOf: main) == v2)
+            #expect(try Data(contentsOf: prepared.rollbackURL) == peerData)
+            #expect(try Data(contentsOf: main) == peerData)
             let loadedData: Data?
             do {
                 loadedData = try await repository.currentDocumentData()
@@ -444,7 +465,7 @@ struct WorkspaceBackupServiceTests {
                 Issue.record("\(failure.rawValue) unexpectedly froze the valid binding: \(error)")
                 loadedData = nil
             }
-            #expect(loadedData == v2)
+            #expect(loadedData == peerData)
             #expect(try await repository.reconcilePendingCommit() == .notCommitted(.init()))
             await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
                 _ = try await repository.commitRestore(prepared, state: restored)
@@ -457,10 +478,16 @@ struct WorkspaceBackupServiceTests {
         defer { directory.remove() }
         let source = directory.file("restore.json")
         let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
-        var restored = current
-        restored.revision = 2
-        restored.notes[restored.notes.keys.first!]!.revision = 2
+        var peer = current
+        peer.revision = 2
+        peer.notes[peer.notes.keys.first!]!.revision = 2
+        peer.notes[peer.notes.keys.first!]!.title = "commit-time peer B"
+        var restored = peer
+        restored.revision = 3
+        restored.notes[restored.notes.keys.first!]!.revision = 3
+        restored.notes[restored.notes.keys.first!]!.title = "restore C"
         let currentData = try WorkspaceDocumentCodec.encode(current)
+        let peerData = try WorkspaceDocumentCodec.encode(peer)
         try WorkspaceDocumentCodec.encode(restored).write(to: source)
         let preview = try await BackupService().inspectRestoreSource(source)
 
@@ -489,11 +516,21 @@ struct WorkspaceBackupServiceTests {
         )
         _ = try await failed.load()
         let failedPrepared = try await failed.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+        try peerData.write(to: failedMain)
         await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
             _ = try await failed.commitRestore(failedPrepared, state: restored)
         }
-        #expect(try Data(contentsOf: failedPrepared.rollbackURL) == currentData)
-        #expect(try Data(contentsOf: failedMain) == currentData)
+        #expect(try Data(contentsOf: failedPrepared.rollbackURL) == peerData)
+        #expect(try Data(contentsOf: failedMain) == peerData)
+        let loadedData: Data?
+        do {
+            loadedData = try await failed.currentDocumentData()
+        } catch {
+            Issue.record("definite CAS failure did not rebind commit-time peer B: \(error)")
+            loadedData = nil
+        }
+        #expect(loadedData == peerData)
+        #expect(try await failed.reconcilePendingCommit() == .notCommitted(.init()))
         await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
             _ = try await failed.commitRestore(failedPrepared, state: restored)
         }
@@ -582,6 +619,15 @@ private enum SidecarFailure: String, CaseIterable {
             return .invalidSnapshot
         case .manifestReadback:
             return .invalidManifest
+        }
+    }
+
+    var usesV1Peer: Bool {
+        switch self {
+        case .snapshotLock, .snapshotReadback, .manifestWrite:
+            return true
+        case .snapshotWrite, .manifestLock, .manifestReadback:
+            return false
         }
     }
 }
