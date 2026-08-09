@@ -437,11 +437,56 @@ git commit -m "feat(notes): 增加结构化 Block Markdown 编解码"
 
 **Consumes:** Existing recurrence split/delete algorithm and Task 1 Note IDs.
 
-- [ ] Write RED tests for only-this move/resize retaining a stable key, only-this primary/reference override, first-instance split, split with retained history, future delete with and without retained history, entire-series delete, dayDelta remap, skipped occurrence preserved but not clickable, undo, modified occurrence, completion remap, and a relation override that has no matching recurrence exception/completion.
+**Pre-implementation Gate contract — outcome and wrapper semantics:** the selected `boundary` is always `OccurrenceKey.originalDate`, and `>= boundary` is future-inclusive. Modified displayed dates/times never choose the partition. Split `dayDelta` is civil-day arithmetic from selected `originalDate` to `patch.displayedStartDate`; key remap is `old.originalDate.addingDays(dayDelta)` and never reads `Calendar.current`, a clock or creation timezone. `SeriesMutationEngine.apply` delegates to `applyWithOutcome(...).graph`, and `CalendarReducer.reduce` delegates to `reduceWithOutcome(...).state`; neither wrapper keeps a second switch. Only `.thisAndFuture` split/delete can return an outcome. `.onlyThis` and non-series commands return nil. Split uses the exact command-injected `newSeriesID`; same/existing ID throws `duplicateSeriesID`, while delete/only-this ignore that otherwise-unused parameter and never report it as an outcome.
+
+`historicalOwnerRetained` is returned by the same close/remove helper that mutates the old owner: split with prior real occurrences is true; first-real-occurrence split is false; delete-future with prior real occurrences is true; first-real-occurrence delete is false. The latter is the existing representation of entire-series delete: mutate the first real occurrence with `.thisAndFuture + .delete`; do not add a third scope. First-real-occurrence is computed from actual recurrence projection, not `boundary == ruleStartDate`. A bounded rule with no real occurrence throws without graph/outcome.
+
+**Resolver and logical-instance contract:**
+
+~~~swift
+public struct ResolvedCalendarNoteRelation: Equatable, Sendable {
+    public let noteSet: CalendarNoteSet
+    public let isClickable: Bool
+}
+
+public enum CalendarNoteRelationResolver {
+    public static func resolve(
+        _ target: CalendarTargetID,
+        calendar: CalendarState,
+        relations: CalendarNoteRelationGraph
+    ) throws -> ResolvedCalendarNoteRelation
+}
+~~~
+
+An occurrence key is a logical instance only when it is inside inclusive rule/end bounds and is either a natural recurrence weekday or has a `.modified` / `.skipped` exception. Completion alone does not create identity. A skipped instance may retain an override but resolves `isClickable == false`; a nonweekday relation-only key without an exception is invalid. Resolver errors and migration errors are `Equatable, Sendable`.
+
+**Raw override and legacy Markdown contract:** effective references are `(baselineRefs - removed) ∪ added - effectivePrimary`. `.replace(x)` may promote an inherited baseline reference and removes it from effective references. Raw `addedReferenceNoteIDs` containing the effective primary is rejected only when it is an explicit added-primary overlap; added/removed intersection is always rejected. Item legacy text reads `CalendarItem.notes`; series reads `WeeklySeries.notes`; a modified occurrence reads its `OccurrenceOverride.notes`, otherwise occurrence scope inherits series notes. Trimmed whitespace/newlines determine nonempty. Reference-only relations may coexist with legacy text. Skipped occurrences still validate endpoints/raw storage but skip effective-primary/legacy conflict so retained undo data cannot make skip invalid.
+
+**Migration contract:**
+
+~~~swift
+public static func apply(
+    _ outcome: SeriesFutureMutationOutcome,
+    resultingGraph: RecurrenceGraph,
+    to relations: CalendarNoteRelationGraph
+) throws -> CalendarNoteRelationGraph
+~~~
+
+Migration rejects outcome/resulting-graph mismatch and destination baseline/override collisions; it never overwrites. Split reads the old baseline first, copies it only when present, then maps every relation override at/after the inclusive original-date boundary by civil `dayDelta`. It retains destination keys only when the resulting series considers them logical instances under the resolver rule; `.modified` and `.skipped` exception keys remain valid, while completion-only and invalid relation-only weekday keys do not. `historicalOwnerRetained == false` removes the old baseline and every old override only after the copy/mapping candidate validates. Delete-future removes future overrides; false also removes the old baseline and all remaining old overrides. Input relations remain unchanged on every error.
+
+Task 3 does not implement undo APIs. It proves only-this skip preserves its relation override, resolver makes it non-clickable and the input relation graph is not destroyed. `WorkspaceReducer.restoreContent` coverage belongs to Task 4; persistent undo/redo and monotonic revisions belong to Task 6.
+
+- [ ] Write RED tests for only-this move/resize retaining a stable key and nil outcome, only-this primary/reference override, first-actual-instance split, split with retained history, future delete with and without retained history, first-actual-instance `.thisAndFuture + .delete` as entire-series delete, positive/negative/cross-month/DST civil dayDelta remap, skipped occurrence preserved but not clickable, modified occurrence, completion remap, and a relation override that has no matching recurrence exception/completion. Include no-occurrence bounded rules, exact injected ID, same/existing ID collisions, modified displayed dates crossing the boundary without changing their original-date partition, wrapper equality, outcome/resulting-graph mismatch, destination baseline collision and destination override collision; every migration error leaves the input relation graph byte-for-byte/Equatable unchanged.
+
+- [ ] Write resolver/validator RED for item/series/occurrence inherit-replace-clear; natural, modified, skipped, completion-only and invalid nonweekday keys; raw added/removed and explicit-added-primary overlap; `.replace` promoting an inherited reference; item/series/modified-occurrence legacy Markdown; inherited series primary with occurrence notes; skipped primary retention; reference-only coexistence; explicit empty baseline copied versus absent baseline not synthesized; and stale old-future keys rejected after split.
 
 ~~~swift
 @Test func relationOverrideMigratesWithoutRecurrenceState() throws {
-    let migrated = try SeriesRelationMigration.apply(outcome, to: relations)
+    let migrated = try SeriesRelationMigration.apply(
+        outcome,
+        resultingGraph: result.graph,
+        to: relations
+    )
     #expect(migrated.occurrenceOverrides[newKey]?.primary == .replace(noteID))
     #expect(migrated.occurrenceOverrides[oldKey] == nil)
 }
@@ -470,7 +515,7 @@ public struct CalendarReduction: Equatable, Sendable {
 }
 ~~~
 
-- [ ] Build SeriesFutureMutationOutcome in the same code path that closes or removes the historical series. The outcome uses the confirmed exact cases below; SeriesMutationResult.graph supplies the new series validity range used when the relationship layer maps its own keys.
+- [ ] Build SeriesFutureMutationOutcome in the same code path that closes or removes the historical series. The close/remove helper returns `historicalOwnerRetained`; the outcome uses the confirmed exact cases below and `SeriesMutationResult.graph` is passed explicitly to relationship migration.
 
 ~~~swift
 public enum SeriesFutureMutationOutcome: Equatable, Sendable {
@@ -516,10 +561,10 @@ public struct CalendarNoteRelationGraph: Codable, Equatable, Sendable {
 }
 ~~~
 
-- [ ] Implement effective resolution: item reads item baseline; occurrence inherits series baseline, then applies primary inherit/replace/clear and reference subtraction/addition, finally removing the effective primary from references.
-- [ ] Extend WorkspaceValidator to reject baselines/overrides for deleted owners, duplicate logical instances under old/new keys, effective primary/reference overlap, and any effective primary that coexists with nonempty legacy Markdown in that exact scope.
-- [ ] Implement SeriesRelationMigration using SeriesFutureMutationOutcome plus the returned graph. Split visits every relation override at/after boundary, maps originalDate by dayDelta, retains only instances valid in the new series and copies the baseline. Delete future removes future overrides. Old baseline retention follows historicalOwnerRetained.
-- [ ] Preserve only-this overrides on the stable OccurrenceKey; keep skipped-instance overrides for undo while excluding them from clickable projections; entire-series delete removes its baseline and all overrides without deleting any Note. When a command both splits and changes a relation, migrate first and apply the requested relation exactly once to the selected new target.
+- [ ] Implement `CalendarNoteRelationResolver`: item reads item baseline; occurrence validates logical identity, inherits series baseline, applies primary inherit/replace/clear and reference subtraction/addition, removes the effective primary from references, and reports skipped clickability.
+- [ ] Extend WorkspaceValidator to reject baselines/overrides for deleted owners, invalid relation-only keys, duplicate logical instances under old/new keys, raw added/removed or explicit-added-primary overlap, and effective primary with nonempty legacy Markdown under the scope rules above. Skipped overrides retain endpoint/raw validation but skip effective-primary/legacy conflict.
+- [ ] Implement `SeriesRelationMigration` using outcome plus explicit resulting graph. Split visits every relation override at/after boundary, maps originalDate by civil dayDelta, retains only logical instances in the new series and copies an existing baseline entry—including an explicitly empty `CalendarNoteSet`—before old-owner cleanup; it does not synthesize a baseline when the old key is absent. Delete future removes future overrides. Collision/mismatch errors are atomic and old baseline retention follows `historicalOwnerRetained`.
+- [ ] Preserve only-this overrides on the stable OccurrenceKey; keep skipped-instance overrides for future undo while excluding them from clickable projections; first-occurrence delete removes its baseline and all overrides without deleting any Note. Task 4, not this task, migrates first and applies a requested relation exactly once to the selected new target.
 - [ ] Run GREEN plus all recurrence tests.
 
 ~~~zsh
@@ -528,6 +573,7 @@ public struct CalendarNoteRelationGraph: Codable, Equatable, Sendable {
 ./Scripts/test.sh --filter WorkspaceDomainTests.CalendarNoteRelationResolverTests
 ./Scripts/test.sh --filter WorkspaceDomainTests.SeriesRelationMigrationTests
 ./Scripts/test.sh --filter CalendarDomainTests
+./Scripts/test.sh --filter WorkspaceDomainTests
 git diff --check
 ~~~
 
@@ -561,6 +607,8 @@ git commit -m "feat(workspace): 串联重复事项与笔记关系迁移"
 **Produces:** Pure, deterministic, cross-object transactions for calendar, notes, relations, task links, inspiration links, categories, delete/archive and undo content restoration.
 
 **Consumes:** CalendarReducer.reduceWithOutcome, BlockMarkdownCodec, relation migration and WorkspaceValidator.
+
+For every calendar/relationship transaction the reducer order is fixed: validate the input Workspace; copy a candidate; call `CalendarReducer.reduceWithOutcome`; call `SeriesRelationMigration.apply(outcome, resultingGraph:)`; apply the requested relationship exactly once; compare business content and return noChange when equal; otherwise allocate Note/Workspace revisions; run the final `WorkspaceValidator` over that exact revision-bearing candidate; then return. An optional pre-revision candidate check may fail early, but never replaces the final validation. `occurrenceThisAndFuture` performs the injected-ID empty `SeriesPatch()` split, migrates relations, and applies the relation once to `.series(outcome.newSeriesID)`. Any calendar, collision, migration or validator failure returns the exact input Workspace with no revision/undo/save side effect.
 
 - [ ] Write RED tests proving every successful state-changing command is all-or-nothing and increments Workspace revision exactly once. Cancellation, idempotent completion, stale metadata and any other no-op return noChange and cause no revision, save or undo record.
 
