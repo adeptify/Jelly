@@ -162,6 +162,161 @@ struct JSONWorkspaceRepositoryTests {
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: main.path) }
         #expect(try await repository.reloadCurrentSourceAfterExternalChange() == .unreadableUnknown)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: main.path)
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try await repository.currentDocumentData()
+        }
+        #expect(try await repository.reloadCurrentSourceAfterExternalChange() == .valid(loaded))
         #expect(try await repository.currentDocumentData() == data)
+    }
+
+    @Test func firstUnreadableSourceIsBoundSeparatelyFromAbsentUntilExplicitReload() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let source = directory.file("restore.json")
+        let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = initial
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        let initialData = try WorkspaceDocumentCodec.encode(initial)
+        try initialData.write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let preview = try await BackupService().inspectRestoreSource(source)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: main.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: main.path) }
+        let repository = JSONWorkspaceRepository(documentURL: main, seed: { initial })
+
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) { _ = try await repository.load() }
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) { _ = try await repository.save(restored) }
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try await repository.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+        }
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: main.path)
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) { _ = try await repository.load() }
+        #expect(try await repository.reloadCurrentSourceAfterExternalChange() == .valid(
+            try WorkspaceDocumentCodec.decode(initialData)
+        ))
+        _ = try await repository.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+        #expect(try Data(contentsOf: main) == initialData)
+    }
+
+    @Test func transientUnreadableValidSourceBlocksSaveAndCommitUntilExplicitReload() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let source = directory.file("restore.json")
+        let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = initial
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        restored.notes[restored.notes.keys.first!]!.title = "restored"
+        let initialData = try WorkspaceDocumentCodec.encode(initial)
+        try initialData.write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let repository = JSONWorkspaceRepository(documentURL: main, seed: { initial })
+        _ = try await repository.load()
+        let prepared = try await repository.prepareRestore(
+            try await BackupService().inspectRestoreSource(source),
+            rollbackDirectoryURL: directory.url
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: main.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: main.path) }
+
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+        #expect(FileManager.default.fileExists(atPath: prepared.rollbackURL.path) == false)
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) { _ = try await repository.save(restored) }
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: main.path)
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) { _ = try await repository.load() }
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+        _ = try await repository.reloadCurrentSourceAfterExternalChange()
+        let outcome = try await repository.commitRestore(prepared, state: restored)
+        guard case let .file(rollbackURL, _) = outcome.rollback else {
+            Issue.record("A readable valid source must produce an exact rollback")
+            return
+        }
+        #expect(try Data(contentsOf: rollbackURL) == initialData)
+    }
+
+    @Test func transientUnreadableOpaqueAndAbsentBindingsCannotRestoreUntilReload() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let source = directory.file("restore.json")
+        let restored = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let preview = try await BackupService().inspectRestoreSource(source)
+
+        let opaqueMain = directory.file("opaque.json")
+        let opaqueBytes = Data("opaque-primary".utf8)
+        try opaqueBytes.write(to: opaqueMain)
+        let opaque = JSONWorkspaceRepository(documentURL: opaqueMain, seed: { restored })
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) { _ = try await opaque.load() }
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: opaqueMain.path)
+        #expect(try await opaque.reloadCurrentSourceAfterExternalChange() == .unreadableUnknown)
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try await opaque.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: opaqueMain.path)
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try await opaque.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+        }
+        #expect(try await opaque.reloadCurrentSourceAfterExternalChange() == .opaqueInvalid(
+            .init(sha256: WorkspacePersistenceFixtures.sha256(opaqueBytes), byteCount: opaqueBytes.count)
+        ))
+        _ = try await opaque.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+
+        let absentParent = directory.file("absent-parent")
+        try FileManager.default.createDirectory(at: absentParent, withIntermediateDirectories: false)
+        let absentMain = absentParent.appendingPathComponent("main.json")
+        let absent = JSONWorkspaceRepository(documentURL: absentMain, seed: { restored })
+        _ = try await absent.load()
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: absentParent.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: absentParent.path) }
+        #expect(try await absent.reloadCurrentSourceAfterExternalChange() == .unreadableUnknown)
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try await absent.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: absentParent.path)
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try await absent.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+        }
+        #expect(try await absent.reloadCurrentSourceAfterExternalChange() == .absent)
+        _ = try await absent.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+    }
+
+    @Test func restoreLockAcquisitionFailureFreezesKnownBindingAndRetainsCapabilityUntilReload() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("main.json")
+        let source = directory.file("restore.json")
+        let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = current
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        try WorkspaceDocumentCodec.encode(current).write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let repository = JSONWorkspaceRepository(documentURL: main, seed: { current })
+        _ = try await repository.load()
+        let prepared = try await repository.prepareRestore(
+            try await BackupService().inspectRestoreSource(source),
+            rollbackDirectoryURL: directory.url
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: directory.url.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.url.path) }
+
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.url.path)
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+        _ = try await repository.reloadCurrentSourceAfterExternalChange()
+        _ = try await repository.commitRestore(prepared, state: restored)
     }
 }

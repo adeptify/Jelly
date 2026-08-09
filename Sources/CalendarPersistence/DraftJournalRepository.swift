@@ -11,24 +11,28 @@ public actor DraftJournalRepository {
     }
 
     public func current() throws -> DraftJournalEnvelope? {
-        try readValidatedAndMigrateLegacyIfNeeded()
+        try withJournalLock {
+            try readValidatedAndMigrateLegacyIfNeededUnlocked()
+        }
     }
 
     public func persist(_ entry: DraftJournalEntry) throws {
         guard isValid(entry) else { throw WorkspacePersistenceError.invalidJournal }
-        var envelope = try readValidatedAndMigrateLegacyIfNeeded() ?? emptyEnvelope()
-        let identity = DraftJournalIdentity(noteID: entry.noteID, editSessionID: entry.editSessionID)
-        if let index = envelope.records.firstIndex(where: { $0.identity == identity }),
-           envelope.records[index].entry.draftGeneration > entry.draftGeneration {
-            return
+        try withJournalLock {
+            var envelope = try readValidatedAndMigrateLegacyIfNeededUnlocked() ?? emptyEnvelope()
+            let identity = DraftJournalIdentity(noteID: entry.noteID, editSessionID: entry.editSessionID)
+            if let index = envelope.records.firstIndex(where: { $0.identity == identity }),
+               envelope.records[index].entry.draftGeneration > entry.draftGeneration {
+                return
+            }
+            let record = try makeRecord(entry: entry, pendingReceipt: nil, savedReceipt: nil)
+            if let index = envelope.records.firstIndex(where: { $0.identity == identity }) {
+                envelope.records[index] = record
+            } else {
+                envelope.records.append(record)
+            }
+            try writeUnlocked(envelope)
         }
-        let record = try makeRecord(entry: entry, pendingReceipt: nil, savedReceipt: nil)
-        if let index = envelope.records.firstIndex(where: { $0.identity == identity }) {
-            envelope.records[index] = record
-        } else {
-            envelope.records.append(record)
-        }
-        try write(envelope)
     }
 
     public func rebaseAndBind(
@@ -36,118 +40,128 @@ public actor DraftJournalRepository {
         finalCandidateNote: Note,
         receipt: PersistedDraftReceipt
     ) throws -> DraftJournalBindingResult {
-        var envelope = try requireEnvelope()
-        guard receipt.noteID == expected.identity.noteID,
-              receipt.editSessionID == expected.identity.editSessionID,
-              receipt.draftGeneration == expected.draftGeneration,
-              finalCandidateNote.id == expected.identity.noteID,
-              let index = envelope.records.firstIndex(where: { $0.identity == expected.identity })
-        else { throw WorkspacePersistenceError.invalidJournal }
-        let current = envelope.records[index]
-        if current.entry.draftGeneration > expected.draftGeneration {
-            return .supersededByNewerDraft
+        try withJournalLock {
+            var envelope = try requireEnvelopeUnlocked()
+            guard receipt.noteID == expected.identity.noteID,
+                  receipt.editSessionID == expected.identity.editSessionID,
+                  receipt.draftGeneration == expected.draftGeneration,
+                  finalCandidateNote.id == expected.identity.noteID,
+                  let index = envelope.records.firstIndex(where: { $0.identity == expected.identity })
+            else { throw WorkspacePersistenceError.invalidJournal }
+            let current = envelope.records[index]
+            if current.entry.draftGeneration > expected.draftGeneration {
+                return .supersededByNewerDraft
+            }
+            guard current.entry.draftGeneration == expected.draftGeneration,
+                  current.pendingReceipt == nil,
+                  current.savedReceipt == nil,
+                  receipt.persistedNoteRevision == finalCandidateNote.revision
+            else { throw WorkspacePersistenceError.invalidJournal }
+            let checksum = try WorkspaceChecksum.noteSnapshotChecksum(finalCandidateNote)
+            guard receipt.noteSnapshotChecksum == checksum else { throw WorkspacePersistenceError.invalidJournal }
+            let unsigned = DraftJournalEntry(
+                noteID: current.entry.noteID,
+                editSessionID: current.entry.editSessionID,
+                baseWorkspaceRevision: current.entry.baseWorkspaceRevision,
+                baseNoteRevision: current.entry.baseNoteRevision,
+                draftGeneration: current.entry.draftGeneration,
+                noteSnapshot: finalCandidateNote,
+                updatedAt: current.entry.updatedAt,
+                noteSnapshotChecksum: checksum,
+                journalChecksum: ""
+            )
+            let rebound = DraftJournalEntry(
+                noteID: unsigned.noteID,
+                editSessionID: unsigned.editSessionID,
+                baseWorkspaceRevision: unsigned.baseWorkspaceRevision,
+                baseNoteRevision: unsigned.baseNoteRevision,
+                draftGeneration: unsigned.draftGeneration,
+                noteSnapshot: unsigned.noteSnapshot,
+                updatedAt: unsigned.updatedAt,
+                noteSnapshotChecksum: unsigned.noteSnapshotChecksum,
+                journalChecksum: try DraftJournal.entryChecksum(for: unsigned)
+            )
+            envelope.records[index] = try makeRecord(entry: rebound, pendingReceipt: receipt, savedReceipt: nil)
+            try writeUnlocked(envelope)
+            return .bound
         }
-        guard current.entry.draftGeneration == expected.draftGeneration,
-              current.pendingReceipt == nil,
-              current.savedReceipt == nil,
-              receipt.persistedNoteRevision == finalCandidateNote.revision
-        else { throw WorkspacePersistenceError.invalidJournal }
-        let checksum = try WorkspaceChecksum.noteSnapshotChecksum(finalCandidateNote)
-        guard receipt.noteSnapshotChecksum == checksum else { throw WorkspacePersistenceError.invalidJournal }
-        let unsigned = DraftJournalEntry(
-            noteID: current.entry.noteID,
-            editSessionID: current.entry.editSessionID,
-            baseWorkspaceRevision: current.entry.baseWorkspaceRevision,
-            baseNoteRevision: current.entry.baseNoteRevision,
-            draftGeneration: current.entry.draftGeneration,
-            noteSnapshot: finalCandidateNote,
-            updatedAt: current.entry.updatedAt,
-            noteSnapshotChecksum: checksum,
-            journalChecksum: ""
-        )
-        let rebound = DraftJournalEntry(
-            noteID: unsigned.noteID,
-            editSessionID: unsigned.editSessionID,
-            baseWorkspaceRevision: unsigned.baseWorkspaceRevision,
-            baseNoteRevision: unsigned.baseNoteRevision,
-            draftGeneration: unsigned.draftGeneration,
-            noteSnapshot: unsigned.noteSnapshot,
-            updatedAt: unsigned.updatedAt,
-            noteSnapshotChecksum: unsigned.noteSnapshotChecksum,
-            journalChecksum: try DraftJournal.entryChecksum(for: unsigned)
-        )
-        envelope.records[index] = try makeRecord(entry: rebound, pendingReceipt: receipt, savedReceipt: nil)
-        try write(envelope)
-        return .bound
     }
 
     @discardableResult
     public func record(_ receipt: PersistedDraftReceipt) throws -> Bool {
-        var envelope = try requireEnvelope()
-        let identity = DraftJournalIdentity(noteID: receipt.noteID, editSessionID: receipt.editSessionID)
-        guard let index = envelope.records.firstIndex(where: { $0.identity == identity }),
-              envelope.records[index].pendingReceipt == receipt,
-              envelope.records[index].savedReceipt == nil
-        else { return false }
-        envelope.records[index] = try makeRecord(
-            entry: envelope.records[index].entry,
-            pendingReceipt: nil,
-            savedReceipt: receipt
-        )
-        try write(envelope)
-        return true
+        try withJournalLock {
+            var envelope = try requireEnvelopeUnlocked()
+            let identity = DraftJournalIdentity(noteID: receipt.noteID, editSessionID: receipt.editSessionID)
+            guard let index = envelope.records.firstIndex(where: { $0.identity == identity }),
+                  envelope.records[index].pendingReceipt == receipt,
+                  envelope.records[index].savedReceipt == nil
+            else { return false }
+            envelope.records[index] = try makeRecord(
+                entry: envelope.records[index].entry,
+                pendingReceipt: nil,
+                savedReceipt: receipt
+            )
+            try writeUnlocked(envelope)
+            return true
+        }
     }
 
     @discardableResult
     public func unbindPending(_ receipt: PersistedDraftReceipt) throws -> Bool {
-        var envelope = try requireEnvelope()
-        let identity = DraftJournalIdentity(noteID: receipt.noteID, editSessionID: receipt.editSessionID)
-        guard let index = envelope.records.firstIndex(where: { $0.identity == identity }),
-              envelope.records[index].pendingReceipt == receipt,
-              envelope.records[index].savedReceipt == nil
-        else { return false }
-        envelope.records[index] = try makeRecord(
-            entry: envelope.records[index].entry,
-            pendingReceipt: nil,
-            savedReceipt: nil
-        )
-        try write(envelope)
-        return true
+        try withJournalLock {
+            var envelope = try requireEnvelopeUnlocked()
+            let identity = DraftJournalIdentity(noteID: receipt.noteID, editSessionID: receipt.editSessionID)
+            guard let index = envelope.records.firstIndex(where: { $0.identity == identity }),
+                  envelope.records[index].pendingReceipt == receipt,
+                  envelope.records[index].savedReceipt == nil
+            else { return false }
+            envelope.records[index] = try makeRecord(
+                entry: envelope.records[index].entry,
+                pendingReceipt: nil,
+                savedReceipt: nil
+            )
+            try writeUnlocked(envelope)
+            return true
+        }
     }
 
     @discardableResult
     public func acknowledgeAlreadyPersisted(_ receipt: PersistedDraftReceipt) throws -> Bool {
-        var envelope = try requireEnvelope()
-        let identity = DraftJournalIdentity(noteID: receipt.noteID, editSessionID: receipt.editSessionID)
-        guard let index = envelope.records.firstIndex(where: { $0.identity == identity }),
-              envelope.records[index].pendingReceipt == nil,
-              envelope.records[index].savedReceipt == nil,
-              isCompatible(receipt, with: envelope.records[index].entry)
-        else { return false }
-        envelope.records[index] = try makeRecord(
-            entry: envelope.records[index].entry,
-            pendingReceipt: nil,
-            savedReceipt: receipt
-        )
-        try write(envelope)
-        return true
+        try withJournalLock {
+            var envelope = try requireEnvelopeUnlocked()
+            let identity = DraftJournalIdentity(noteID: receipt.noteID, editSessionID: receipt.editSessionID)
+            guard let index = envelope.records.firstIndex(where: { $0.identity == identity }),
+                  envelope.records[index].pendingReceipt == nil,
+                  envelope.records[index].savedReceipt == nil,
+                  isCompatible(receipt, with: envelope.records[index].entry)
+            else { return false }
+            envelope.records[index] = try makeRecord(
+                entry: envelope.records[index].entry,
+                pendingReceipt: nil,
+                savedReceipt: receipt
+            )
+            try writeUnlocked(envelope)
+            return true
+        }
     }
 
     @discardableResult
     public func clear(_ receipt: PersistedDraftReceipt) throws -> Bool {
-        var envelope = try requireEnvelope()
-        let identity = DraftJournalIdentity(noteID: receipt.noteID, editSessionID: receipt.editSessionID)
-        guard let index = envelope.records.firstIndex(where: { $0.identity == identity }),
-              envelope.records[index].savedReceipt == receipt,
-              envelope.records[index].pendingReceipt == nil
-        else { return false }
-        envelope.records.remove(at: index)
-        try write(envelope)
-        return true
+        try withJournalLock {
+            var envelope = try requireEnvelopeUnlocked()
+            let identity = DraftJournalIdentity(noteID: receipt.noteID, editSessionID: receipt.editSessionID)
+            guard let index = envelope.records.firstIndex(where: { $0.identity == identity }),
+                  envelope.records[index].savedReceipt == receipt,
+                  envelope.records[index].pendingReceipt == nil
+            else { return false }
+            envelope.records.remove(at: index)
+            try writeUnlocked(envelope)
+            return true
+        }
     }
 
-    private func requireEnvelope() throws -> DraftJournalEnvelope {
-        guard let envelope = try readValidatedAndMigrateLegacyIfNeeded() else {
+    private func requireEnvelopeUnlocked() throws -> DraftJournalEnvelope {
+        guard let envelope = try readValidatedAndMigrateLegacyIfNeededUnlocked() else {
             throw WorkspacePersistenceError.invalidJournal
         }
         return envelope
@@ -161,7 +175,7 @@ public actor DraftJournalRepository {
         )
     }
 
-    private func readValidatedAndMigrateLegacyIfNeeded() throws -> DraftJournalEnvelope? {
+    private func readValidatedAndMigrateLegacyIfNeededUnlocked() throws -> DraftJournalEnvelope? {
         switch noFollowFileProbe(at: fileURL) {
         case .confirmedAbsent:
             return nil
@@ -171,7 +185,7 @@ public actor DraftJournalRepository {
             if let envelope = try? decodeEnvelope(rawData) { return envelope }
             let legacy = try decodeLegacy(rawData)
             let migrated = try legacy.map(migratedEnvelope(from:)) ?? emptyEnvelope()
-            try write(migrated)
+            try writeUnlocked(migrated)
             return migrated
         }
     }
@@ -262,7 +276,7 @@ public actor DraftJournalRepository {
         )
     }
 
-    private func write(_ envelope: DraftJournalEnvelope) throws {
+    private func writeUnlocked(_ envelope: DraftJournalEnvelope) throws {
         let records = DraftJournal.canonicalRecords(envelope.records)
         let normalized = DraftJournalEnvelope(
             schemaVersion: DraftJournalEnvelope.currentSchemaVersion,
@@ -280,6 +294,20 @@ public actor DraftJournalRepository {
             )
         } catch {
             throw WorkspacePersistenceError.atomicWriteFailed
+        }
+    }
+
+    private func withJournalLock<Result>(_ body: () throws -> Result) throws -> Result {
+        do {
+            try FileManager.default.createDirectory(
+                at: fileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            return try withJellyAdvisoryLock(for: fileURL, body)
+        } catch let error as WorkspacePersistenceError {
+            throw error
+        } catch {
+            throw WorkspacePersistenceError.invalidJournal
         }
     }
 

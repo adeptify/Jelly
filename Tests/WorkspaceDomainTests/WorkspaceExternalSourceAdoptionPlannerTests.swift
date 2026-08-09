@@ -73,6 +73,39 @@ struct WorkspaceExternalSourceAdoptionPlannerTests {
         }
     }
 
+    @Test func changedNoteRevisionOverflowIsTypedEvenWhenWorkspaceRevisionCanAdvance() throws {
+        var current = try Task4Fixture.workspace()
+        current.revision = 10
+        current.notes[Task4Fixture.noteID]?.revision = .max
+        var external = current
+        external.notes[Task4Fixture.noteID]?.title = "changed at note ceiling"
+
+        #expect(throws: WorkspaceExternalSourceAdoptionError.revisionOverflow) {
+            try WorkspaceExternalSourceAdoptionPlanner.plan(
+                current: current,
+                external: external,
+                sessionNoteHighWatermarks: [:]
+            )
+        }
+    }
+
+    @Test func sessionNoteHighWatermarkOverflowIsTypedIndependentlyOfSourceRevision() throws {
+        var current = try Task4Fixture.workspace()
+        current.revision = 10
+        current.notes[Task4Fixture.noteID]?.revision = 2
+        var external = current
+        external.notes[Task4Fixture.noteID]?.revision = 3
+        external.notes[Task4Fixture.noteID]?.title = "changed after session ceiling"
+
+        #expect(throws: WorkspaceExternalSourceAdoptionError.revisionOverflow) {
+            try WorkspaceExternalSourceAdoptionPlanner.plan(
+                current: current,
+                external: external,
+                sessionNoteHighWatermarks: [Task4Fixture.noteID: .max]
+            )
+        }
+    }
+
     @Test func repairableExternalIssuesRemainVisibleAndRequireNormalization() throws {
         let current = try Task4Fixture.workspace()
         var external = current

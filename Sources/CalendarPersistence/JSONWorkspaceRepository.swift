@@ -2,14 +2,20 @@ import Foundation
 import WorkspaceDomain
 
 public actor JSONWorkspaceRepository: WorkspaceRepository {
-    private enum LoadedSource: Sendable {
+    private enum SourceBinding: Sendable {
         case absent
         case valid(rawData: Data, result: WorkspaceLoadResult)
         case opaqueInvalid(rawData: Data, identity: WorkspaceRawSourceIdentity)
     }
 
+    private enum LoadedSource: Sendable {
+        case unresolved
+        case bound(SourceBinding)
+        case unreadable(lastKnown: SourceBinding?)
+    }
+
     private struct PendingWorkspaceCommit: Sendable {
-        let previousSource: LoadedSource
+        let previousSource: SourceBinding
         let candidateRawData: Data
         let operation: WorkspaceCommittedOperation
         let artifacts: WorkspacePendingCommitArtifacts
@@ -22,7 +28,7 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
     private let atomicWriter: any AtomicFileWriting
     private let rollbackWriter: any ExclusiveFileWriting
     private let mainFileWriter: any MainFileCompareAndReplaceWriting
-    private var loadedSource: LoadedSource = .absent
+    private var loadedSource: LoadedSource = .unresolved
     private var pendingRestores: [UUID: PreparedWorkspaceRestore] = [:]
     private var pendingCommit: PendingWorkspaceCommit?
 
@@ -51,36 +57,19 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
     public func load() throws -> WorkspaceLoadResult {
         try rejectIfCommitUncertain()
         switch loadedSource {
-        case let .valid(_, result):
-            return result
-        case .opaqueInvalid:
+        case .unreadable:
             throw WorkspacePersistenceError.invalidDocument
-        case .absent:
-            switch noFollowFileProbe(at: documentURL) {
-            case .confirmedAbsent:
-                let state = seed()
-                do {
-                    try WorkspaceValidator.validate(state)
-                } catch {
-                    throw WorkspacePersistenceError.invalidWorkspace
-                }
-                return WorkspaceLoadResult(
-                    state: state,
-                    provenance: .init(sourceSchema: 0, sourceBytesSHA256: "", sourceByteCount: 0),
-                    consistencyIssues: []
-                )
-            case .unreadableUnknown:
-                throw WorkspacePersistenceError.invalidDocument
-            case let .bytes(rawData):
-                do {
-                    let result = try WorkspaceDocumentCodec.decode(rawData)
-                    loadedSource = .valid(rawData: rawData, result: result)
-                    return result
-                } catch {
-                    loadedSource = .opaqueInvalid(rawData: rawData, identity: identity(for: rawData))
-                    throw error
-                }
-            }
+        case let .bound(.valid(_, result)):
+            try rejectAndFreezeIfCurrentSourceIsUnreadable()
+            return result
+        case .bound(.opaqueInvalid):
+            try rejectAndFreezeIfCurrentSourceIsUnreadable()
+            throw WorkspacePersistenceError.invalidDocument
+        case .bound(.absent):
+            try rejectAndFreezeIfCurrentSourceIsUnreadable()
+            return try seededLoadResult()
+        case .unresolved:
+            return try bindForInitialLoad()
         }
     }
 
@@ -89,6 +78,7 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         draft: PersistableDraftContext? = nil
     ) throws -> WorkspaceSaveReceipt {
         try rejectIfCommitUncertain()
+        let source = try requireReadableSourceBinding()
         do {
             try WorkspaceValidator.validate(state)
         } catch {
@@ -99,7 +89,8 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         try persist(
             candidate: try WorkspaceDocumentCodec.encode(state),
             operation: .save(receipt),
-            artifacts: .init()
+            artifacts: .init(),
+            source: source
         )
         return receipt
     }
@@ -108,39 +99,50 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         _ context: PersistableDraftContext
     ) throws -> WorkspaceDraftPersistenceVerification {
         try rejectIfCommitUncertain()
-        guard case let .valid(rawData, _) = loadedSource else { return .notPersisted }
-        return try withJellyAdvisoryLock(for: documentURL) {
-            switch noFollowFileProbe(at: documentURL) {
-            case .unreadableUnknown:
-                return .unreadableUnknown
-            case .confirmedAbsent:
-                return .sourceChanged
-            case let .bytes(current):
-                guard current == rawData else { return .sourceChanged }
-                let loaded: WorkspaceLoadResult
-                do {
-                    loaded = try WorkspaceDocumentCodec.decode(current)
-                } catch {
-                    return .notPersisted
+        if case .unreadable = loadedSource { return .unreadableUnknown }
+        guard case let .bound(.valid(rawData, _)) = loadedSource else { return .notPersisted }
+        let previous = lastKnownSourceBinding()
+        do {
+            return try withJellyAdvisoryLock(for: documentURL) {
+                switch noFollowFileProbe(at: documentURL) {
+                case .unreadableUnknown:
+                    loadedSource = .unreadable(lastKnown: previous)
+                    return .unreadableUnknown
+                case .confirmedAbsent:
+                    return .sourceChanged
+                case let .bytes(current):
+                    guard current == rawData else { return .sourceChanged }
+                    let loaded: WorkspaceLoadResult
+                    do {
+                        loaded = try WorkspaceDocumentCodec.decode(current)
+                    } catch {
+                        return .notPersisted
+                    }
+                    guard let note = loaded.state.notes[context.noteID],
+                          note.revision == context.persistedNoteRevision,
+                          try WorkspaceChecksum.noteSnapshotChecksum(note) == context.noteSnapshotChecksum
+                    else { return .notPersisted }
+                    return .verified(PersistedDraftReceipt(
+                        noteID: context.noteID,
+                        editSessionID: context.editSessionID,
+                        draftGeneration: context.draftGeneration,
+                        noteSnapshotChecksum: context.noteSnapshotChecksum,
+                        persistedNoteRevision: context.persistedNoteRevision
+                    ))
                 }
-                guard let note = loaded.state.notes[context.noteID],
-                      note.revision == context.persistedNoteRevision,
-                      try WorkspaceChecksum.noteSnapshotChecksum(note) == context.noteSnapshotChecksum
-                else { return .notPersisted }
-                return .verified(PersistedDraftReceipt(
-                    noteID: context.noteID,
-                    editSessionID: context.editSessionID,
-                    draftGeneration: context.draftGeneration,
-                    noteSnapshotChecksum: context.noteSnapshotChecksum,
-                    persistedNoteRevision: context.persistedNoteRevision
-                ))
             }
+        } catch {
+            loadedSource = .unreadable(lastKnown: previous)
+            return .unreadableUnknown
         }
     }
 
     public func currentDocumentData() throws -> Data {
         try rejectIfCommitUncertain()
-        guard case let .valid(rawData, _) = loadedSource else {
+        if case .unreadable = loadedSource {
+            throw WorkspacePersistenceError.invalidDocument
+        }
+        guard case let .bound(.valid(rawData, _)) = loadedSource else {
             throw WorkspacePersistenceError.missingDocument
         }
         switch noFollowFileProbe(at: documentURL) {
@@ -156,30 +158,37 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
 
     public func reloadCurrentSourceAfterExternalChange() throws -> WorkspaceReloadedSource {
         try rejectIfCommitUncertain()
-        return try withJellyAdvisoryLock(for: documentURL) {
-            switch noFollowFileProbe(at: documentURL) {
-            case .confirmedAbsent:
-                loadedSource = .absent
-                return .absent
-            case .unreadableUnknown:
-                return .unreadableUnknown
-            case let .bytes(rawData):
-                do {
-                    let result = try WorkspaceDocumentCodec.decode(rawData)
-                    loadedSource = .valid(rawData: rawData, result: result)
-                    return .valid(result)
-                } catch {
-                    let rawIdentity = identity(for: rawData)
-                    loadedSource = .opaqueInvalid(rawData: rawData, identity: rawIdentity)
-                    return .opaqueInvalid(rawIdentity)
+        let previous = lastKnownSourceBinding()
+        do {
+            return try withJellyAdvisoryLock(for: documentURL) {
+                switch noFollowFileProbe(at: documentURL) {
+                case .confirmedAbsent:
+                    loadedSource = .bound(.absent)
+                    return .absent
+                case .unreadableUnknown:
+                    loadedSource = .unreadable(lastKnown: previous)
+                    return .unreadableUnknown
+                case let .bytes(rawData):
+                    do {
+                        let result = try WorkspaceDocumentCodec.decode(rawData)
+                        loadedSource = .bound(.valid(rawData: rawData, result: result))
+                        return .valid(result)
+                    } catch {
+                        let rawIdentity = identity(for: rawData)
+                        loadedSource = .bound(.opaqueInvalid(rawData: rawData, identity: rawIdentity))
+                        return .opaqueInvalid(rawIdentity)
+                    }
                 }
             }
+        } catch {
+            loadedSource = .unreadable(lastKnown: previous)
+            return .unreadableUnknown
         }
     }
 
     public func currentRawRecoveryData() throws -> WorkspaceRawRecoveryArtifact {
         try rejectIfCommitUncertain()
-        guard case let .opaqueInvalid(rawData, rawIdentity) = loadedSource else {
+        guard case let .bound(.opaqueInvalid(rawData, rawIdentity)) = loadedSource else {
             throw WorkspacePersistenceError.invalidDocument
         }
         return WorkspaceRawRecoveryArtifact(rawData: rawData, identity: rawIdentity)
@@ -190,22 +199,29 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         rollbackDirectoryURL: URL
     ) throws -> PreparedWorkspaceRestore {
         try rejectIfCommitUncertain()
-        guard preview.sourceIdentity == identity(for: preview.rawSourceData),
-              preview.loadResult.provenance.sourceBytesSHA256 == preview.sourceIdentity.sha256,
-              preview.loadResult.provenance.sourceByteCount == preview.sourceIdentity.byteCount,
-              WorkspaceContentSnapshot(state: preview.loadResult.state)
-                == WorkspaceContentSnapshot(state: try WorkspaceDocumentCodec.decode(preview.rawSourceData).state),
-              preview.sourceNoteRevisions == preview.loadResult.state.notes.mapValues(\.revision),
-              preview.loadResult.consistencyIssues.isEmpty
+        _ = try requireReadableSourceBinding()
+        let decoded = try WorkspaceDocumentCodec.decode(preview.rawSourceData)
+        let sourceIdentity = identity(for: preview.rawSourceData)
+        let sourceNoteRevisions = decoded.state.notes.mapValues(\.revision)
+        guard preview.sourceIdentity == sourceIdentity,
+              preview.loadResult == decoded,
+              preview.sourceNoteRevisions == sourceNoteRevisions
         else { throw WorkspacePersistenceError.restoreBindingMismatch }
         do {
-            try WorkspaceValidator.validate(preview.loadResult.state)
+            try WorkspaceValidator.validate(decoded.state)
         } catch {
             throw WorkspacePersistenceError.invalidWorkspace
         }
+        let verifiedPreview = WorkspaceRestorePreview(
+            sourceURL: preview.sourceURL,
+            rawSourceData: preview.rawSourceData,
+            sourceIdentity: sourceIdentity,
+            loadResult: decoded,
+            sourceNoteRevisions: sourceNoteRevisions
+        )
         let capabilityID = UUID()
         let prepared = PreparedWorkspaceRestore(
-            preview: preview,
+            preview: verifiedPreview,
             rollbackURL: rollbackDirectoryURL.appendingPathComponent("workspace-rollback-\(UUID().uuidString).json"),
             capabilityID: capabilityID
         )
@@ -224,6 +240,16 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         state: WorkspaceState
     ) throws -> WorkspaceRestoreOutcome {
         try rejectIfCommitUncertain()
+        guard case .unreadable = loadedSource else {
+            return try commitReadableRestore(prepared, state: state)
+        }
+        throw WorkspacePersistenceError.invalidDocument
+    }
+
+    private func commitReadableRestore(
+        _ prepared: PreparedWorkspaceRestore,
+        state: WorkspaceState
+    ) throws -> WorkspaceRestoreOutcome {
         guard let issued = pendingRestores[prepared.capabilityID], issued == prepared else {
             throw WorkspacePersistenceError.invalidRestoreCapability
         }
@@ -237,35 +263,75 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         } catch {
             throw WorkspacePersistenceError.invalidWorkspace
         }
-
-        let rollback: WorkspaceRollbackArtifact
         do {
-            rollback = try writeRollbackForCurrentSource(to: issued.rollbackURL)
-            if case let .valid(rawData, result) = loadedSource,
-               result.provenance.sourceSchema < WorkspaceDocument.currentSchemaVersion {
-                try registerMigrationSnapshot(rawData: rawData, provenance: result.provenance)
+            return try withJellyAdvisoryLock(for: documentURL) {
+                let currentSource: SourceBinding
+                switch noFollowFileProbe(at: documentURL) {
+                case .unreadableUnknown:
+                    loadedSource = .unreadable(lastKnown: lastKnownSourceBinding())
+                    throw WorkspacePersistenceError.invalidDocument
+                case .confirmedAbsent:
+                    currentSource = .absent
+                case let .bytes(rawData):
+                    if let result = try? WorkspaceDocumentCodec.decode(rawData) {
+                        currentSource = .valid(rawData: rawData, result: result)
+                    } else {
+                        currentSource = .opaqueInvalid(rawData: rawData, identity: identity(for: rawData))
+                    }
+                }
+
+                pendingRestores[prepared.capabilityID] = nil
+                let rollback = try writeRollbackUnlocked(for: currentSource, to: issued.rollbackURL)
+                if case let .valid(rawData, result) = currentSource,
+                   result.provenance.sourceSchema < WorkspaceDocument.currentSchemaVersion {
+                    try registerMigrationSnapshot(rawData: rawData, provenance: result.provenance)
+                }
+
+                let receipt = WorkspaceSaveReceipt(workspaceRevision: state.revision, persistedDraft: nil)
+                let outcome = WorkspaceRestoreOutcome(receipt: receipt, rollback: rollback)
+                let candidate = try WorkspaceDocumentCodec.encode(state)
+                let artifacts = WorkspacePendingCommitArtifacts(rollback: rollback)
+                beginPendingCommit(
+                    previousSource: currentSource,
+                    candidate: candidate,
+                    operation: .restore(outcome),
+                    artifacts: artifacts,
+                    restoreCapabilityID: prepared.capabilityID
+                )
+                let writeResult: MainFileCompareAndReplaceResult
+                do {
+                    switch currentSource {
+                    case .absent:
+                        writeResult = try createIfAbsentUnlocked(candidate: candidate)
+                    case let .valid(_, result):
+                        writeResult = try replaceIfSHA256MatchesUnlocked(
+                            expectedSHA256: result.provenance.sourceBytesSHA256,
+                            candidate: candidate
+                        )
+                    case let .opaqueInvalid(_, identity):
+                        writeResult = try replaceIfSHA256MatchesUnlocked(
+                            expectedSHA256: identity.sha256,
+                            candidate: candidate
+                        )
+                    }
+                } catch {
+                    pendingCommit = nil
+                    throw error
+                }
+                try finishMainReplacement(writeResult, candidate: candidate)
+                return outcome
             }
         } catch {
-            pendingRestores[prepared.capabilityID] = nil
-            throw error
-        }
-
-        let receipt = WorkspaceSaveReceipt(workspaceRevision: state.revision, persistedDraft: nil)
-        let outcome = WorkspaceRestoreOutcome(receipt: receipt, rollback: rollback)
-        do {
-            try persist(
-                candidate: try WorkspaceDocumentCodec.encode(state),
-                operation: .restore(outcome),
-                artifacts: .init(rollback: rollback),
-                restoreCapabilityID: prepared.capabilityID
-            )
-        } catch {
-            if (error as? WorkspacePersistenceError) != .commitUncertain {
+            if isAdvisoryLockFailure(error) {
+                loadedSource = .unreadable(lastKnown: lastKnownSourceBinding())
+                throw WorkspacePersistenceError.invalidDocument
+            }
+            if (error as? WorkspacePersistenceError) != .commitUncertain,
+               (error as? WorkspacePersistenceError) != .invalidDocument {
                 pendingRestores[prepared.capabilityID] = nil
             }
             throw error
         }
-        return outcome
     }
 
     public func reconcilePendingCommit() throws -> WorkspaceCommitReconciliation {
@@ -295,7 +361,7 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
                     return .committed(pending.operation)
                 }
                 if matchesPreviousSource(current, pending.previousSource) {
-                    loadedSource = pending.previousSource
+                    loadedSource = .bound(pending.previousSource)
                     completePendingRestoreCapability(pending.restoreCapabilityID)
                     pendingCommit = nil
                     return .notCommitted(pending.artifacts)
@@ -313,9 +379,10 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         candidate: Data,
         operation: WorkspaceCommittedOperation,
         artifacts: WorkspacePendingCommitArtifacts,
+        source: SourceBinding,
         restoreCapabilityID: UUID? = nil
     ) throws {
-        switch loadedSource {
+        switch source {
         case let .opaqueInvalid(rawData, rawIdentity):
             guard case .restore = operation else {
                 throw WorkspacePersistenceError.invalidDocument
@@ -393,7 +460,7 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
     }
 
     private func beginPendingCommit(
-        previousSource: LoadedSource,
+        previousSource: SourceBinding,
         candidate: Data,
         operation: WorkspaceCommittedOperation,
         artifacts: WorkspacePendingCommitArtifacts,
@@ -440,10 +507,10 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         guard result.provenance.sourceSchema == WorkspaceDocument.currentSchemaVersion else {
             throw WorkspacePersistenceError.atomicWriteFailed
         }
-        loadedSource = .valid(rawData: verifiedRawData, result: result)
+        loadedSource = .bound(.valid(rawData: verifiedRawData, result: result))
     }
 
-    private func matchesPreviousSource(_ current: Data?, _ source: LoadedSource) -> Bool {
+    private func matchesPreviousSource(_ current: Data?, _ source: SourceBinding) -> Bool {
         switch source {
         case .absent:
             current == nil
@@ -452,8 +519,11 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         }
     }
 
-    private func writeRollbackForCurrentSource(to url: URL) throws -> WorkspaceRollbackArtifact {
-        switch loadedSource {
+    private func writeRollbackUnlocked(
+        for source: SourceBinding,
+        to url: URL
+    ) throws -> WorkspaceRollbackArtifact {
+        switch source {
         case .absent:
             return .nonePreviousSourceAbsent
         case let .valid(rawData, _), let .opaqueInvalid(rawData, _):
@@ -479,12 +549,35 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         }
     }
 
+    private func createIfAbsentUnlocked(candidate: Data) throws -> MainFileCompareAndReplaceResult {
+        do {
+            return try mainFileWriter.createIfAbsentUnlocked(candidate: candidate, at: documentURL)
+        } catch {
+            throw WorkspacePersistenceError.atomicWriteFailed
+        }
+    }
+
     private func replaceIfSHA256Matches(
         expectedSHA256: String,
         candidate: Data
     ) throws -> MainFileCompareAndReplaceResult {
         do {
             return try mainFileWriter.replaceIfSHA256Matches(
+                expectedSHA256: expectedSHA256,
+                candidate: candidate,
+                at: documentURL
+            )
+        } catch {
+            throw WorkspacePersistenceError.atomicWriteFailed
+        }
+    }
+
+    private func replaceIfSHA256MatchesUnlocked(
+        expectedSHA256: String,
+        candidate: Data
+    ) throws -> MainFileCompareAndReplaceResult {
+        do {
+            return try mainFileWriter.replaceIfSHA256MatchesUnlocked(
                 expectedSHA256: expectedSHA256,
                 candidate: candidate,
                 at: documentURL
@@ -510,6 +603,122 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         } catch {
             throw WorkspacePersistenceError.rollbackWriteFailed
         }
+    }
+
+    private func bindForInitialLoad() throws -> WorkspaceLoadResult {
+        do {
+            return try withJellyAdvisoryLock(for: documentURL) {
+                switch noFollowFileProbe(at: documentURL) {
+                case .confirmedAbsent:
+                    loadedSource = .bound(.absent)
+                    return try seededLoadResult()
+                case .unreadableUnknown:
+                    loadedSource = .unreadable(lastKnown: nil)
+                    throw WorkspacePersistenceError.invalidDocument
+                case let .bytes(rawData):
+                    do {
+                        let result = try WorkspaceDocumentCodec.decode(rawData)
+                        loadedSource = .bound(.valid(rawData: rawData, result: result))
+                        return result
+                    } catch {
+                        loadedSource = .bound(.opaqueInvalid(
+                            rawData: rawData,
+                            identity: identity(for: rawData)
+                        ))
+                        throw error
+                    }
+                }
+            }
+        } catch let error as WorkspacePersistenceError {
+            throw error
+        } catch {
+            loadedSource = .unreadable(lastKnown: nil)
+            throw WorkspacePersistenceError.invalidDocument
+        }
+    }
+
+    private func seededLoadResult() throws -> WorkspaceLoadResult {
+        let state = seed()
+        do {
+            try WorkspaceValidator.validate(state)
+        } catch {
+            throw WorkspacePersistenceError.invalidWorkspace
+        }
+        return WorkspaceLoadResult(
+            state: state,
+            provenance: .init(sourceSchema: 0, sourceBytesSHA256: "", sourceByteCount: 0),
+            consistencyIssues: []
+        )
+    }
+
+    private func requireReadableSourceBinding() throws -> SourceBinding {
+        switch loadedSource {
+        case .unreadable:
+            throw WorkspacePersistenceError.invalidDocument
+        case let .bound(source):
+            try rejectAndFreezeIfCurrentSourceIsUnreadable()
+            return source
+        case .unresolved:
+            return try bindCurrentSourceForMutation()
+        }
+    }
+
+    private func bindCurrentSourceForMutation() throws -> SourceBinding {
+        do {
+            return try withJellyAdvisoryLock(for: documentURL) {
+                let source: SourceBinding
+                switch noFollowFileProbe(at: documentURL) {
+                case .confirmedAbsent:
+                    source = .absent
+                case .unreadableUnknown:
+                    loadedSource = .unreadable(lastKnown: nil)
+                    throw WorkspacePersistenceError.invalidDocument
+                case let .bytes(rawData):
+                    if let result = try? WorkspaceDocumentCodec.decode(rawData) {
+                        source = .valid(rawData: rawData, result: result)
+                    } else {
+                        source = .opaqueInvalid(rawData: rawData, identity: identity(for: rawData))
+                    }
+                }
+                loadedSource = .bound(source)
+                return source
+            }
+        } catch let error as WorkspacePersistenceError {
+            throw error
+        } catch {
+            loadedSource = .unreadable(lastKnown: nil)
+            throw WorkspacePersistenceError.invalidDocument
+        }
+    }
+
+    private func rejectAndFreezeIfCurrentSourceIsUnreadable() throws {
+        let previous = lastKnownSourceBinding()
+        do {
+            try withJellyAdvisoryLock(for: documentURL) {
+                if case .unreadableUnknown = noFollowFileProbe(at: documentURL) {
+                    loadedSource = .unreadable(lastKnown: previous)
+                    throw WorkspacePersistenceError.invalidDocument
+                }
+            }
+        } catch let error as WorkspacePersistenceError {
+            throw error
+        } catch {
+            loadedSource = .unreadable(lastKnown: previous)
+            throw WorkspacePersistenceError.invalidDocument
+        }
+    }
+
+    private func lastKnownSourceBinding() -> SourceBinding? {
+        switch loadedSource {
+        case let .bound(source): source
+        case let .unreadable(lastKnown): lastKnown
+        case .unresolved: nil
+        }
+    }
+
+    private func isAdvisoryLockFailure(_ error: Error) -> Bool {
+        let cocoa = error as NSError
+        return cocoa.domain == NSCocoaErrorDomain && cocoa.code == CocoaError.fileLocking.rawValue
     }
 
     private func receipt(

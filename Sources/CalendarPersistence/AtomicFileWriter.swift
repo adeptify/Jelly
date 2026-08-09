@@ -54,6 +54,14 @@ public protocol MainFileCompareAndReplaceWriting: Sendable {
         candidate: Data,
         at destination: URL
     ) throws -> MainFileCompareAndReplaceResult
+    /// The caller must already hold Jelly's advisory lock for `destination`.
+    func createIfAbsentUnlocked(candidate: Data, at destination: URL) throws -> MainFileCompareAndReplaceResult
+    /// The caller must already hold Jelly's advisory lock for `destination`.
+    func replaceIfSHA256MatchesUnlocked(
+        expectedSHA256: String,
+        candidate: Data,
+        at destination: URL
+    ) throws -> MainFileCompareAndReplaceResult
 }
 
 public protocol ExclusiveFileWriting: Sendable {
@@ -88,25 +96,7 @@ public struct FoundationMainFileCompareAndReplaceWriter: MainFileCompareAndRepla
 
     public func createIfAbsent(candidate: Data, at destination: URL) throws -> MainFileCompareAndReplaceResult {
         try withSharedJellyLock(for: destination) {
-            switch noFollowFileProbe(at: destination) {
-            case .confirmedAbsent:
-                break
-            case .bytes:
-                return .sourceChanged
-            case .unreadableUnknown:
-                return .commitUncertain
-            }
-            do {
-                try writer.replaceAtomically(data: candidate, at: destination)
-            } catch {
-                return try classifyDestinationAfterWriterFailure(
-                    candidate: candidate,
-                    previous: nil,
-                    at: destination,
-                    originalError: error
-                )
-            }
-            return verifiedReplacement(candidate: candidate, at: destination)
+            try createIfAbsentUnlocked(candidate: candidate, at: destination)
         }
     }
 
@@ -116,28 +106,65 @@ public struct FoundationMainFileCompareAndReplaceWriter: MainFileCompareAndRepla
         at destination: URL
     ) throws -> MainFileCompareAndReplaceResult {
         try withSharedJellyLock(for: destination) {
-            let previous: Data
-            switch noFollowFileProbe(at: destination) {
-            case let .bytes(data):
-                previous = data
-            case .confirmedAbsent:
-                return .sourceChanged
-            case .unreadableUnknown:
-                return .commitUncertain
-            }
-            guard persistenceSHA256(previous) == expectedSHA256 else { return .sourceChanged }
-            do {
-                try writer.replaceAtomically(data: candidate, at: destination)
-            } catch {
-                return try classifyDestinationAfterWriterFailure(
-                    candidate: candidate,
-                    previous: previous,
-                    at: destination,
-                    originalError: error
-                )
-            }
-            return verifiedReplacement(candidate: candidate, at: destination)
+            try replaceIfSHA256MatchesUnlocked(
+                expectedSHA256: expectedSHA256,
+                candidate: candidate,
+                at: destination
+            )
         }
+    }
+
+    public func createIfAbsentUnlocked(
+        candidate: Data,
+        at destination: URL
+    ) throws -> MainFileCompareAndReplaceResult {
+        switch noFollowFileProbe(at: destination) {
+        case .confirmedAbsent:
+            break
+        case .bytes:
+            return .sourceChanged
+        case .unreadableUnknown:
+            return .commitUncertain
+        }
+        do {
+            try writer.replaceAtomically(data: candidate, at: destination)
+        } catch {
+            return try classifyDestinationAfterWriterFailure(
+                candidate: candidate,
+                previous: nil,
+                at: destination,
+                originalError: error
+            )
+        }
+        return verifiedReplacement(candidate: candidate, at: destination)
+    }
+
+    public func replaceIfSHA256MatchesUnlocked(
+        expectedSHA256: String,
+        candidate: Data,
+        at destination: URL
+    ) throws -> MainFileCompareAndReplaceResult {
+        let previous: Data
+        switch noFollowFileProbe(at: destination) {
+        case let .bytes(data):
+            previous = data
+        case .confirmedAbsent:
+            return .sourceChanged
+        case .unreadableUnknown:
+            return .commitUncertain
+        }
+        guard persistenceSHA256(previous) == expectedSHA256 else { return .sourceChanged }
+        do {
+            try writer.replaceAtomically(data: candidate, at: destination)
+        } catch {
+            return try classifyDestinationAfterWriterFailure(
+                candidate: candidate,
+                previous: previous,
+                at: destination,
+                originalError: error
+            )
+        }
+        return verifiedReplacement(candidate: candidate, at: destination)
     }
 
     private func classifyDestinationAfterWriterFailure(
