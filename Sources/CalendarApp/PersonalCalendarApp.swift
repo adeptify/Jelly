@@ -19,7 +19,7 @@ struct PersonalCalendarApp: App {
     private var appearancePreferenceRaw = CalendarAppearancePreference.light.rawValue
 
     init() {
-        _environment = State(initialValue: .live())
+        _environment = State(initialValue: .liveOrTerminate())
     }
 
     private var appearancePreference: CalendarAppearancePreference {
@@ -29,7 +29,7 @@ struct PersonalCalendarApp: App {
     var body: some Scene {
         Window("Jelly", id: "main-calendar") {
             MonthView(store: environment.store)
-                .frame(minWidth: 980, minHeight: 680)
+                .frame(minWidth: 1044, minHeight: 680)
                 .preferredColorScheme(appearancePreference.preferredColorScheme)
                 .task { await environment.store.load() }
                 .onAppear { CalendarAppearancePreference.applyToApplication(appearancePreference) }
@@ -42,7 +42,7 @@ struct PersonalCalendarApp: App {
         .commands {
             CalendarUndoCommands(store: environment.store)
             if CalendarAppCommandPolicy.installsBackupCommands(in: .mainCalendar) {
-                BackupCommands(store: environment.store, backupService: environment.backupService)
+                BackupCommands(store: environment.store, rollbackDirectory: environment.dataURLs.rollbackDirectory)
             }
         }
 

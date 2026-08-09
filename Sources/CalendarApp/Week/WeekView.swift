@@ -36,7 +36,7 @@ enum WeekTimeGridMetrics {
 }
 
 struct WeekView: View {
-    let store: CalendarStore
+    let store: WorkspaceStore
     @ObservedObject var model: WeekViewModel
     let categories: [CalendarCategory]
     @Binding var hiddenCategoryIDs: Set<UUID>
@@ -81,9 +81,9 @@ struct WeekView: View {
         }
         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
         .background(theme.canvas)
-        .onChange(of: store.state) { _, _ in
+        .onChange(of: store.calendarState) { _, _ in
             model.update(
-                state: store.state,
+                state: store.calendarState,
                 hiddenCategoryIDs: hiddenCategoryIDs,
                 today: model.today
             )
@@ -94,7 +94,7 @@ struct WeekView: View {
             createSelection = nil
         }
         .onChange(of: hiddenCategoryIDs) { _, ids in
-            model.update(state: store.state, hiddenCategoryIDs: ids, today: model.today)
+            model.update(state: store.calendarState, hiddenCategoryIDs: ids, today: model.today)
         }
     }
 

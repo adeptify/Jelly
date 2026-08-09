@@ -2,7 +2,7 @@ import CalendarDomain
 import SwiftUI
 
 enum MonthEmptyStateHintPolicy {
-    static func shouldShow(phase: StorePhase, state: CalendarState) -> Bool {
+    static func shouldShow(phase: WorkspaceStorePhase, state: CalendarState) -> Bool {
         phase == .ready && state.items.isEmpty && state.recurrence.series.isEmpty
     }
 }
@@ -220,7 +220,7 @@ private final class MainActorNextLayoutDeferrer: WeekStreamAutoScrollDeferrer {
 }
 
 struct MonthView: View {
-    let store: CalendarStore
+    let store: WorkspaceStore
     private let todayRefreshPolicy: MonthViewTodayRefreshPolicy
     private let todayRefreshController: MonthViewTodayRefreshController
     @Environment(\.scenePhase) private var scenePhase
@@ -266,7 +266,7 @@ struct MonthView: View {
     }
 
     init(
-        store: CalendarStore,
+        store: WorkspaceStore,
         todayRefreshPolicy: MonthViewTodayRefreshPolicy = .live
     ) {
         self.store = store
@@ -275,7 +275,7 @@ struct MonthView: View {
         let initialWeekStream = MonthViewInitialWeekStream(today: todayRefreshPolicy.today)
         _model = StateObject(wrappedValue: MonthViewModel(
             centeredOn: initialWeekStream.today,
-            state: store.state,
+            state: store.calendarState,
             hiddenCategoryIDs: [],
             today: initialWeekStream.today
         ))
@@ -298,7 +298,7 @@ struct MonthView: View {
         _weekModel = StateObject(wrappedValue: WeekViewModel(
             weekStart: initialWeekStream.focusWeek,
             today: todayRefreshPolicy.today,
-            state: store.state,
+            state: store.calendarState,
             hiddenCategoryIDs: []
         ))
     }
@@ -311,11 +311,10 @@ struct MonthView: View {
         dialogsAndOverlays
             .alert("日历提示", isPresented: alertPresented) {
                 Button("知道了", role: .cancel) {
-                    store.dismissErrors()
                     actionError = nil
                 }
             } message: {
-                Text(store.loadError ?? store.mutationError ?? actionError ?? "")
+                Text(actionError ?? "")
             }
     }
 
@@ -368,7 +367,7 @@ struct MonthView: View {
         {
             ItemDragPreviewChip.make(
                 entry: entry,
-                category: store.state.categories[entry.categoryID]
+                category: store.calendarState.categories[entry.categoryID]
             )
             // Lift slightly above the cursor so the target date stays readable.
             // No animation — follow the pointer 1:1 for a solid “holding the card” feel.
@@ -400,10 +399,10 @@ struct MonthView: View {
             .onChange(of: scenePhase) { _, newPhase in
                 refreshToday(for: .scenePhaseChanged(newPhase))
             }
-            .onChange(of: store.state) { _, _ in
+            .onChange(of: store.calendarState) { _, _ in
                 refreshProjection()
                 weekModel.update(
-                    state: store.state,
+                    state: store.calendarState,
                     hiddenCategoryIDs: hiddenCategoryIDs,
                     today: model.today
                 )
@@ -411,7 +410,7 @@ struct MonthView: View {
             .onChange(of: hiddenCategoryIDs) { _, _ in
                 refreshProjection()
                 weekModel.update(
-                    state: store.state,
+                    state: store.calendarState,
                     hiddenCategoryIDs: hiddenCategoryIDs,
                     today: model.today
                 )
@@ -419,7 +418,7 @@ struct MonthView: View {
             .onChange(of: primaryViewModeRaw) { _, raw in
                 if raw == CalendarPrimaryViewMode.week.rawValue {
                     weekModel.update(
-                        state: store.state,
+                        state: store.calendarState,
                         hiddenCategoryIDs: hiddenCategoryIDs,
                         today: model.today
                     )
@@ -502,7 +501,7 @@ struct MonthView: View {
             DayDrawerView(
                 date: date,
                 store: store,
-                categories: store.state.categories,
+                categories: store.calendarState.categories,
                 hiddenCategoryIDs: hiddenCategoryIDs,
                 onClose: {
                     withAnimation(motionPolicy.overlayAnimation) {
@@ -588,11 +587,11 @@ struct MonthView: View {
 
     @ViewBuilder
     private var undoBannerOverlay: some View {
-        if let undoNotice = store.undoNotice {
+        if store.canUndo {
             HStack(spacing: 10) {
-                Text(undoNotice)
+                Text("上一步操作可撤销")
                 Button("撤销") { undo() }
-                    .disabled(!store.canUndo || store.isMutating)
+                    .disabled(!store.canUndo || store.phase != .ready)
             }
             .font(.system(size: 12, weight: .medium))
             .padding(.horizontal, 12)
@@ -613,7 +612,7 @@ struct MonthView: View {
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(theme.primaryText)
                 if primaryViewMode == .month,
-                   MonthEmptyStateHintPolicy.shouldShow(phase: store.phase, state: store.state) {
+                   MonthEmptyStateHintPolicy.shouldShow(phase: store.phase, state: store.calendarState) {
                     Text("点击日期开始创建")
                         .font(.system(size: 11))
                         .foregroundStyle(theme.secondaryText)
@@ -913,16 +912,10 @@ struct MonthView: View {
     private var alertPresented: Binding<Bool> {
         Binding(
             get: {
-                recurringDropPresentation.isErrorPresented
-                    || store.loadError != nil
-                    || (
-                        store.mutationError != nil
-                            && recurringDropPresentation.state != .resolving
-                    )
+                recurringDropPresentation.isErrorPresented || actionError != nil
             },
             set: { isPresented in
                 guard !isPresented else { return }
-                store.dismissErrors()
                 _ = recurringDropPresentation.acknowledgeError(
                     hasPendingDrop: dropCoordinator.pendingRecurringDrop != nil
                 )
@@ -955,7 +948,7 @@ struct MonthView: View {
     }
 
     private var orderedCategories: [CalendarCategory] {
-        store.state.categories.values.sorted {
+        store.calendarState.categories.values.sorted {
             $0.sortIndex == $1.sortIndex ? $0.name < $1.name : $0.sortIndex < $1.sortIndex
         }
     }
@@ -981,7 +974,7 @@ struct MonthView: View {
         case .item:
             if let config = ItemActions.editorConfiguration(
                 for: item,
-                seriesLookup: { store.state.recurrence.series[$0] },
+                seriesLookup: { store.calendarState.recurrence.series[$0] },
                 scope: .onlyThis
             ) {
                 withAnimation(motionPolicy.overlayAnimation) {
@@ -998,7 +991,7 @@ struct MonthView: View {
         recurringEditItem = nil
         if let config = ItemActions.editorConfiguration(
             for: item,
-            seriesLookup: { store.state.recurrence.series[$0] },
+            seriesLookup: { store.calendarState.recurrence.series[$0] },
             scope: scope
         ) {
             withAnimation(motionPolicy.overlayAnimation) {
@@ -1021,9 +1014,9 @@ struct MonthView: View {
         guard store.phase == .ready else { return }
         Task {
             do {
-                try await store.send(command, undoLabel: undoLabel)
+                _ = try await store.sendCalendar(command, undoLabel: undoLabel)
             } catch {
-                actionError = store.mutationError ?? "操作失败，请重试"
+                actionError = "操作失败，请重试"
             }
         }
     }
@@ -1031,7 +1024,7 @@ struct MonthView: View {
     private func sendCompletion(_ command: CalendarCommand) {
         guard store.phase == .ready else { return }
         Task {
-            try? await store.send(command, undoLabel: "已更新完成状态")
+            try? await store.sendCalendar(command, undoLabel: "已更新完成状态")
         }
     }
 
@@ -1091,7 +1084,7 @@ struct MonthView: View {
 
     private func refreshProjection(today: CalendarDate) {
         model.update(
-            state: store.state,
+            state: store.calendarState,
             hiddenCategoryIDs: hiddenCategoryIDs,
             today: today
         )
@@ -1138,7 +1131,7 @@ struct MonthView: View {
                                 layout: layout,
                                 today: model.today,
                                 selectedDate: model.selectedDate,
-                                categories: store.state.categories,
+                                categories: store.calendarState.categories,
                                 dropCoordinator: dropCoordinator,
                                 onAction: handle,
                                 onCompletion: sendCompletion,

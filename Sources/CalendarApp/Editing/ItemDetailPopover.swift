@@ -3,7 +3,7 @@ import SwiftUI
 
 struct ItemDetailPopover: View {
     let item: ProjectedItem
-    let store: CalendarStore
+    let store: WorkspaceStore
     let categories: [CalendarCategory]
     let onClose: () -> Void
     @State private var pendingAction: DetailAction?
@@ -121,7 +121,7 @@ struct ItemDetailPopover: View {
     private func apply(scope: SeriesScope) {
         guard let action = pendingAction,
               case let .occurrence(occurrence) = item,
-              let series = store.state.recurrence.series[occurrence.key.seriesID]
+              let series = store.calendarState.recurrence.series[occurrence.key.seriesID]
         else {
             localError = "找不到重复事项"
             pendingAction = nil
@@ -164,10 +164,10 @@ struct ItemDetailPopover: View {
         }
         Task {
             do {
-                try await store.send(command, undoLabel: "已删除事项")
+                _ = try await store.sendCalendar(command, undoLabel: "已删除事项")
                 onClose()
             } catch {
-                localError = store.mutationError ?? "删除失败，请重试"
+                localError = "删除失败，请重试"
             }
         }
     }
@@ -232,7 +232,7 @@ struct ItemEditForm: View {
     nonisolated static let preferredWidth: CGFloat = 360
 
     let configuration: ItemEditorConfiguration
-    let store: CalendarStore
+    let store: WorkspaceStore
     let categories: [CalendarCategory]
     let onCancel: () -> Void
     let onSaved: () -> Void
@@ -254,7 +254,7 @@ struct ItemEditForm: View {
 
     init(
         configuration: ItemEditorConfiguration,
-        store: CalendarStore,
+        store: WorkspaceStore,
         categories: [CalendarCategory],
         onCancel: @escaping () -> Void,
         onSaved: @escaping () -> Void
@@ -644,10 +644,10 @@ struct ItemEditForm: View {
         }
         Task {
             do {
-                try await store.send(command, undoLabel: "已删除事项")
+                _ = try await store.sendCalendar(command, undoLabel: "已删除事项")
                 onSaved()
             } catch {
-                localError = store.mutationError ?? "删除失败，请重试"
+                localError = "删除失败，请重试"
             }
         }
     }
@@ -674,10 +674,10 @@ struct ItemEditForm: View {
         }
         Task {
             do {
-                try await store.send(command, undoLabel: "已更新事项")
+                _ = try await store.sendCalendar(command, undoLabel: "已更新事项")
                 onSaved()
             } catch {
-                localError = store.mutationError ?? "保存失败，请重试"
+                localError = "保存失败，请重试"
             }
         }
     }

@@ -2,17 +2,25 @@ import CalendarDomain
 import CalendarPersistence
 import Foundation
 import Testing
+import WorkspaceDomain
 @testable import CalendarApp
 
 @MainActor
 func makeReadyStore(
     initialState: CalendarState
-) async throws -> (CalendarStore, InMemoryCalendarRepository) {
-    let repository = InMemoryCalendarRepository(initialState: initialState)
-    let store = CalendarStore(initialState: initialState, repository: repository)
+) async throws -> (WorkspaceStore, InMemoryWorkspaceRepository) {
+    let repository = InMemoryWorkspaceRepository(initialState: initialState)
+    let store = WorkspaceStore(initialState: .empty(calendar: initialState), repository: repository)
     await store.load()
     try #require(store.phase == .ready)
     return (store, repository)
+}
+
+@MainActor
+extension WorkspaceStore {
+    convenience init(initialState: CalendarState, repository: any WorkspaceRepository) {
+        self.init(initialState: .empty(calendar: initialState), repository: repository)
+    }
 }
 
 func makeEmptyState() -> CalendarState {
@@ -97,81 +105,89 @@ func makeBackupFile(for state: CalendarState) throws -> URL {
         .appendingPathComponent("CalendarAppTests-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let source = directory.appendingPathComponent("backup.json")
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.sortedKeys]
-    encoder.dateEncodingStrategy = .millisecondsSince1970
-    try encoder.encode(CalendarDocument(state: state)).write(to: source)
+    try WorkspaceDocumentCodec.encode(.empty(calendar: state)).write(to: source)
     return source
 }
 
-actor InMemoryCalendarRepository: CalendarRepository {
-    private(set) var persistedState: CalendarState
+actor InMemoryWorkspaceRepository: WorkspaceRepository {
+    private var workspace: WorkspaceState
     private(set) var saveCount = 0
-    private var rawDocument: Data
     private var failSave = false
     private var suspendLoad = false
     private var suspendSave = false
-    private var suspendSnapshot = false
     private var loadStarted = false
     private var saveStarted = false
-    private var snapshotStarted = false
     private var loadStartWaiters: [CheckedContinuation<Void, Never>] = []
     private var saveStartWaiters: [CheckedContinuation<Void, Never>] = []
-    private var snapshotStartWaiters: [CheckedContinuation<Void, Never>] = []
     private var loadContinuations: [CheckedContinuation<Void, Never>] = []
     private var saveContinuations: [CheckedContinuation<Void, Never>] = []
-    private var snapshotContinuations: [CheckedContinuation<Void, Never>] = []
 
     init(initialState: CalendarState) {
-        persistedState = initialState
-        rawDocument = Self.encodedDocument(initialState)
+        workspace = .empty(calendar: initialState)
     }
 
-    func load() async throws -> CalendarState {
+    var persistedState: CalendarState { workspace.calendar }
+
+    func load() async throws -> WorkspaceLoadResult {
         if suspendLoad {
             signalLoadStarted()
             await waitForLoadResume()
         }
-        return try Self.decodedState(rawDocument)
+        return loadResult()
     }
 
-    func save(_ state: CalendarState) async throws {
+    func save(_ state: WorkspaceState, draft: PersistableDraftContext?) async throws -> WorkspaceSaveReceipt {
         if suspendSave {
             signalSaveStarted()
             await waitForSaveResume()
         }
         if failSave {
             failSave = false
-            throw BackupError.atomicWriteFailed
+            throw WorkspacePersistenceError.atomicWriteFailed
         }
-        persistedState = state
-        rawDocument = Self.encodedDocument(state)
+        workspace = state
         saveCount += 1
-    }
-
-    func currentDocumentData() async throws -> Data {
-        if suspendSnapshot {
-            signalSnapshotStarted()
-            await waitForSnapshotResume()
-        }
-        return rawDocument
-    }
-
-    func snapshotCurrentDocument(to destination: URL) async throws {
-        let data = try await currentDocumentData()
-        try FileManager.default.createDirectory(
-            at: destination.deletingLastPathComponent(), withIntermediateDirectories: true
+        return .init(
+            workspaceRevision: state.revision,
+            persistedDraft: draft.map {
+                .init(
+                    noteID: $0.noteID,
+                    editSessionID: $0.editSessionID,
+                    draftGeneration: $0.draftGeneration,
+                    noteSnapshotChecksum: $0.noteSnapshotChecksum,
+                    persistedNoteRevision: $0.persistedNoteRevision
+                )
+            }
         )
-        try data.write(to: destination)
     }
+
+    func verifyPersistedDraft(_ context: PersistableDraftContext) async throws -> WorkspaceDraftPersistenceVerification {
+        .notPersisted
+    }
+
+    func prepareRestore(_ preview: WorkspaceRestorePreview, rollbackDirectoryURL: URL) async throws -> PreparedWorkspaceRestore {
+        throw WorkspacePersistenceError.invalidRestoreCapability
+    }
+
+    func discardPreparedRestore(_ prepared: PreparedWorkspaceRestore) async -> Bool { false }
+
+    func commitRestore(_ prepared: PreparedWorkspaceRestore, state: WorkspaceState) async throws -> WorkspaceRestoreOutcome {
+        throw WorkspacePersistenceError.invalidRestoreCapability
+    }
+
+    func currentDocumentData() async throws -> Data { try WorkspaceDocumentCodec.encode(workspace) }
+
+    func reloadCurrentSourceAfterExternalChange() async throws -> WorkspaceReloadedSource { .valid(loadResult()) }
+
+    func currentRawRecoveryData() async throws -> WorkspaceRawRecoveryArtifact {
+        throw WorkspacePersistenceError.invalidDocument
+    }
+
+    func reconcilePendingCommit() async throws -> WorkspaceCommitReconciliation { .stillPending(.init()) }
 
     func failNextSave() { failSave = true }
-    func replaceRawDocument(with data: Data) { rawDocument = data }
-    func rawDocumentData() -> Data { rawDocument }
-
     func suspendNextLoad() { suspendLoad = true }
     func suspendNextSave() { suspendSave = true }
-    func suspendNextSnapshot() { suspendSnapshot = true }
 
     func waitForLoadToStart() async {
         guard !loadStarted else { return }
@@ -181,11 +197,6 @@ actor InMemoryCalendarRepository: CalendarRepository {
     func waitForSaveToStart() async {
         guard !saveStarted else { return }
         await withCheckedContinuation { saveStartWaiters.append($0) }
-    }
-
-    func waitForSnapshotToStart() async {
-        guard !snapshotStarted else { return }
-        await withCheckedContinuation { snapshotStartWaiters.append($0) }
     }
 
     func resumeLoad() {
@@ -202,11 +213,12 @@ actor InMemoryCalendarRepository: CalendarRepository {
         waiting.forEach { $0.resume() }
     }
 
-    func resumeSnapshot() {
-        suspendSnapshot = false
-        let waiting = snapshotContinuations
-        snapshotContinuations.removeAll()
-        waiting.forEach { $0.resume() }
+    private func loadResult() -> WorkspaceLoadResult {
+        .init(
+            state: workspace,
+            provenance: .init(sourceSchema: 3, sourceBytesSHA256: "test", sourceByteCount: 0),
+            consistencyIssues: []
+        )
     }
 
     private func signalLoadStarted() {
@@ -223,39 +235,11 @@ actor InMemoryCalendarRepository: CalendarRepository {
         waiting.forEach { $0.resume() }
     }
 
-    private func signalSnapshotStarted() {
-        snapshotStarted = true
-        let waiting = snapshotStartWaiters
-        snapshotStartWaiters.removeAll()
-        waiting.forEach { $0.resume() }
-    }
-
     private func waitForLoadResume() async {
         await withCheckedContinuation { loadContinuations.append($0) }
     }
 
     private func waitForSaveResume() async {
         await withCheckedContinuation { saveContinuations.append($0) }
-    }
-
-    private func waitForSnapshotResume() async {
-        await withCheckedContinuation { snapshotContinuations.append($0) }
-    }
-
-    private static func encodedDocument(_ state: CalendarState) -> Data {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        encoder.dateEncodingStrategy = .millisecondsSince1970
-        return try! encoder.encode(CalendarDocument(state: state))
-    }
-
-    private static func decodedState(_ data: Data) throws -> CalendarState {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .millisecondsSince1970
-        do {
-            return try decoder.decode(CalendarDocument.self, from: data).state
-        } catch {
-            throw BackupError.invalidDocument
-        }
     }
 }

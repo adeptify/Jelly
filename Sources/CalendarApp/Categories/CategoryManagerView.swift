@@ -4,7 +4,7 @@ import SwiftUI
 
 /// Category manager — same visual language as the item editor (compact, warm, non-system).
 struct CategoryManagerView: View {
-    let store: CalendarStore
+    let store: WorkspaceStore
     @StateObject private var model: CategoryManagerViewModel
     @State private var editingCategoryID: UUID?
     @State private var localError: String?
@@ -21,7 +21,7 @@ struct CategoryManagerView: View {
         colorScheme == .dark ? .dark : .light
     }
 
-    init(store: CalendarStore) {
+    init(store: WorkspaceStore) {
         self.store = store
         _model = StateObject(wrappedValue: CategoryManagerViewModel(store: store))
     }
@@ -42,23 +42,20 @@ struct CategoryManagerView: View {
         .tint(theme.controlAccent)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .confirmationDialog(
-            "删除分类并迁移事项",
+            "删除分类",
             isPresented: deleteDialogPresented,
             presenting: model.categoryToDelete
         ) { category in
-            ForEach(migrationTargets(for: category)) { target in
-                Button(migrationLabel(for: target)) {
-                    confirmDelete(category, migrateTo: target.id)
-                }
+            Button("删除并转入未分类", role: .destructive) {
+                confirmDelete(category)
             }
             Button("取消", role: .cancel) {
                 model.categoryToDelete = nil
-                model.migrationTargetID = nil
             }
         } message: { category in
-            Text("“\(category.name)”中的事项和重复事项会被一并迁移。请选择迁移目标。")
+            Text("“\(category.name)”中的日历事项、笔记和灵感会一并转入“未分类”。")
         }
-        .onChange(of: store.state) { _, state in
+        .onChange(of: store.calendarState) { _, state in
             if let editingCategoryID {
                 if let category = state.categories[editingCategoryID] {
                     model.synchronizeDraftFromStore(category)
@@ -159,7 +156,7 @@ struct CategoryManagerView: View {
                     .lineLimit(1)
                     .foregroundStyle(theme.primaryText)
                 Spacer(minLength: 0)
-                if category.id == store.state.uncategorizedID {
+                if category.id == store.calendarState.uncategorizedID {
                     Image(systemName: "lock.fill")
                         .font(.system(size: 9))
                         .foregroundStyle(theme.secondaryText.opacity(0.55))
@@ -542,15 +539,15 @@ struct CategoryManagerView: View {
     }
 
     private var editingCategory: CalendarCategory? {
-        editingCategoryID.flatMap { store.state.categories[$0] }
+        editingCategoryID.flatMap { store.calendarState.categories[$0] }
     }
 
     private var isProtectedCategory: Bool {
-        editingCategoryID == store.state.uncategorizedID
+        editingCategoryID == store.calendarState.uncategorizedID
     }
 
     private var orderedCategories: [CalendarCategory] {
-        store.state.categories.values.sorted {
+        store.calendarState.categories.values.sorted {
             $0.sortIndex == $1.sortIndex ? $0.name < $1.name : $0.sortIndex < $1.sortIndex
         }
     }
@@ -560,7 +557,7 @@ struct CategoryManagerView: View {
         let name = model.draftName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return .emptyName }
         let nameKey = name.lowercased()
-        guard !store.state.categories.values.contains(where: {
+        guard !store.calendarState.categories.values.contains(where: {
             $0.id != editingCategoryID
                 && $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == nameKey
         }) else {
@@ -586,7 +583,6 @@ struct CategoryManagerView: View {
             set: {
                 if !$0 {
                     model.categoryToDelete = nil
-                    model.migrationTargetID = nil
                 }
             }
         )
@@ -627,31 +623,21 @@ struct CategoryManagerView: View {
     }
 
     private func beginDelete() {
-        guard let category = editingCategory, category.id != store.state.uncategorizedID else { return }
+        guard let category = editingCategory, category.id != store.calendarState.uncategorizedID else { return }
         model.categoryToDelete = category
-        model.migrationTargetID = nil
     }
 
-    private func confirmDelete(_ category: CalendarCategory, migrateTo targetID: UUID) {
+    private func confirmDelete(_ category: CalendarCategory) {
         model.categoryToDelete = nil
-        model.migrationTargetID = nil
         localError = nil
         Task {
             do {
-                try await model.deleteConfirmed(category: category, migrationTargetID: targetID)
+                try await model.deleteConfirmed(category: category)
                 startCreating()
             } catch {
                 localError = message(for: error)
             }
         }
-    }
-
-    private func migrationTargets(for category: CalendarCategory) -> [CalendarCategory] {
-        orderedCategories.filter { $0.id != category.id }
-    }
-
-    private func migrationLabel(for target: CalendarCategory) -> String {
-        target.id == store.state.uncategorizedID ? "转入未分类" : "转入“\(target.name)”"
     }
 
     private func message(for error: Error) -> String {
@@ -666,12 +652,8 @@ struct CategoryManagerView: View {
             return "这个颜色在浅色或深色下文字不够清晰，请换一个颜色。"
         case .protectedCategory:
             return "“未分类”是系统分类，不能修改或删除。"
-        case .migrationRequired:
-            return "删除前请选择迁移目标。"
-        case .invalidMigrationTarget:
-            return "请选择其他有效分类作为迁移目标。"
         case nil:
-            return store.mutationError ?? "保存分类失败，请重试。"
+            return "保存分类失败，请重试。"
         }
     }
 

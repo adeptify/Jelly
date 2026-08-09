@@ -237,9 +237,9 @@ struct DayCellInteractionTests {
             state.items[item.id] = item
         }
 
-        let store = CalendarStore(
+        let store = WorkspaceStore(
             initialState: state,
-            repository: InMemoryCalendarRepository(initialState: state)
+            repository: InMemoryWorkspaceRepository(initialState: state)
         )
         let rangeRecorder = RangeGestureRecorder()
         let itemRecorder = ItemGestureRecorder()

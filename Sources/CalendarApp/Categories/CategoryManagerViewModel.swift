@@ -1,6 +1,7 @@
 import CalendarDomain
 import Combine
 import Foundation
+import WorkspaceDomain
 
 enum CalendarAppearance: Hashable, Sendable {
     case light
@@ -57,8 +58,6 @@ enum CategoryManagerError: Error, Equatable {
     case invalidColor
     case insufficientContrast
     case protectedCategory
-    case migrationRequired
-    case invalidMigrationTarget
 }
 
 enum CategoryColorValidator {
@@ -129,7 +128,7 @@ enum CategoryColorValidator {
 final class CategoryManagerViewModel: ObservableObject {
     static let defaultPalette = CategoryPalette.families[0].colors
 
-    private let store: CalendarStore
+    private let store: WorkspaceStore
     private let previewPalette: CategoryPreviewPalette
     private var editingBaseline: CategoryDraft?
 
@@ -137,10 +136,9 @@ final class CategoryManagerViewModel: ObservableObject {
     @Published var draftColorHex = "#4F7FFF"
     @Published private(set) var selectedFamilyID: CategoryColorFamilyID = .basic
     @Published var categoryToDelete: CalendarCategory?
-    @Published var migrationTargetID: UUID?
 
     init(
-        store: CalendarStore,
+        store: WorkspaceStore,
         previewPalette: CategoryPreviewPalette = .production
     ) {
         self.store = store
@@ -154,7 +152,7 @@ final class CategoryManagerViewModel: ObservableObject {
             id: UUID(),
             name: draftName.trimmingCharacters(in: .whitespacesAndNewlines),
             colorHex: draftColorHex,
-            sortIndex: store.state.categories.count,
+            sortIndex: store.calendarState.categories.count,
             createdAt: now,
             updatedAt: now
         )
@@ -163,7 +161,7 @@ final class CategoryManagerViewModel: ObservableObject {
     }
 
     func update(_ category: CalendarCategory) async throws {
-        guard category.id != store.state.uncategorizedID else {
+        guard category.id != store.calendarState.uncategorizedID else {
             throw CategoryManagerError.protectedCategory
         }
         try validateDraft(excluding: category.id)
@@ -171,7 +169,7 @@ final class CategoryManagerViewModel: ObservableObject {
         updated.name = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.colorHex = draftColorHex
         try await send(.updateCategory(updated), undoLabel: "已更新分类")
-        if let authoritative = store.state.categories[category.id] {
+        if let authoritative = store.calendarState.categories[category.id] {
             beginEditing(authoritative)
         }
     }
@@ -182,35 +180,23 @@ final class CategoryManagerViewModel: ObservableObject {
 
     func deleteConfirmed() async throws {
         guard let category = categoryToDelete else {
-            throw CategoryManagerError.migrationRequired
+            return
         }
-        guard category.id != store.state.uncategorizedID else {
+        guard category.id != store.calendarState.uncategorizedID else {
             throw CategoryManagerError.protectedCategory
         }
-        guard let migrationTargetID else {
-            throw CategoryManagerError.migrationRequired
-        }
-        try await deleteConfirmed(category: category, migrationTargetID: migrationTargetID)
+        try await deleteConfirmed(category: category)
     }
 
-    func deleteConfirmed(
-        category: CalendarCategory,
-        migrationTargetID: UUID
-    ) async throws {
-        guard category.id != store.state.uncategorizedID else {
+    func deleteConfirmed(category: CalendarCategory) async throws {
+        guard category.id != store.calendarState.uncategorizedID else {
             throw CategoryManagerError.protectedCategory
         }
-        guard migrationTargetID != category.id,
-              store.state.categories[migrationTargetID] != nil
-        else {
-            throw CategoryManagerError.invalidMigrationTarget
-        }
         try await send(
-            .deleteCategory(category.id, migrateTo: migrationTargetID),
-            undoLabel: "已删除分类并迁移事项"
+            .deleteCategory(category.id),
+            undoLabel: "已删除分类并转入未分类"
         )
         categoryToDelete = nil
-        self.migrationTargetID = nil
     }
 
     func beginEditing(_ category: CalendarCategory) {
@@ -249,7 +235,7 @@ final class CategoryManagerViewModel: ObservableObject {
             throw CategoryManagerError.emptyName
         }
         let normalizedName = trimmedName.lowercased()
-        guard !store.state.categories.values.contains(where: {
+        guard !store.calendarState.categories.values.contains(where: {
             $0.id != categoryID
                 && $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedName
         }) else {
@@ -268,21 +254,20 @@ final class CategoryManagerViewModel: ObservableObject {
         return draftName != editingBaseline.name || draftColorHex != editingBaseline.colorHex
     }
 
-    private func send(_ command: CalendarCommand, undoLabel: String) async throws {
+    private func send(_ command: WorkspaceCommand, undoLabel: String) async throws {
         do {
-            try await store.send(command, undoLabel: undoLabel)
-        } catch let error as ReducerError {
-            switch error {
+            _ = try await store.sendWorkspace(command, undoLabel: undoLabel)
+        } catch let error as WorkspaceReducerError {
+            guard case let .calendarFailure(calendarError) = error else { throw error }
+            switch calendarError {
             case .duplicateCategoryName:
                 throw CategoryManagerError.duplicateName
             case .invalidCategoryColor:
                 throw CategoryManagerError.invalidColor
             case .protectedCategory:
                 throw CategoryManagerError.protectedCategory
-            case .invalidMigrationTarget:
-                throw CategoryManagerError.invalidMigrationTarget
             default:
-                throw error
+                throw calendarError
             }
         }
     }

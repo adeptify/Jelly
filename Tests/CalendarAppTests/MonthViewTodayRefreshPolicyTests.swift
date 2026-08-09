@@ -87,9 +87,9 @@ struct MonthViewTodayRefreshPolicyTests {
         #expect(initialModel.weekStarts[52] == initialWeekStream.focusWeek)
         #expect(WeekStreamWindowRevision(weekStarts: initialModel.weekStarts)
             == initialWeekStream.windowRevision)
-        let store = CalendarStore(
+        let store = WorkspaceStore(
             initialState: state,
-            repository: InMemoryCalendarRepository(initialState: state)
+            repository: InMemoryWorkspaceRepository(initialState: state)
         )
         let host = NSHostingView(rootView: MonthView(
             store: store,

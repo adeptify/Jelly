@@ -129,6 +129,39 @@ struct WorkspaceUndoReducerTests {
         #expect(application.candidate.calendar.items[itemID]?.completedAt == Date(timeIntervalSinceReferenceDate: 123))
     }
 
+    @Test func scheduleUndoRestoresTheOriginalTimestampWhileKeepingALaterCompletion() throws {
+        let category = UUID()
+        let itemID = UUID()
+        let firstDate = try #require(CalendarDate(year: 2026, month: 8, day: 10))
+        let secondDate = try #require(CalendarDate(year: 2026, month: 8, day: 11))
+        let firstUpdate = Date(timeIntervalSinceReferenceDate: 10)
+        let forwardUpdate = Date(timeIntervalSinceReferenceDate: 20)
+        let laterUpdate = Date(timeIntervalSinceReferenceDate: 30)
+        var before = WorkspaceState.empty(calendar: .empty(uncategorizedID: category, now: .distantPast))
+        before.calendar.items[itemID] = try CalendarItem(
+            id: itemID, kind: .task, title: "task", categoryID: category,
+            schedule: .init(startDate: firstDate, endDate: firstDate, startTime: nil, endTime: nil),
+            completedAt: nil, createdAt: .distantPast, updatedAt: firstUpdate
+        )
+        var afterSchedule = before
+        afterSchedule.revision = 1
+        afterSchedule.calendar.items[itemID]?.schedule = try .init(
+            startDate: secondDate, endDate: secondDate, startTime: nil, endTime: nil
+        )
+        afterSchedule.calendar.items[itemID]?.updatedAt = forwardUpdate
+        let record = try #require(WorkspaceUndoReducer.record(before: before, after: afterSchedule, label: "reschedule"))
+        var laterCompletion = afterSchedule
+        laterCompletion.revision = 2
+        laterCompletion.calendar.items[itemID]?.completedAt = Date(timeIntervalSinceReferenceDate: 40)
+        laterCompletion.calendar.items[itemID]?.updatedAt = laterUpdate
+
+        let application = try WorkspaceUndoReducer.apply(record, direction: .undo, to: laterCompletion, noteRevisionHighWatermarks: [:])
+
+        #expect(application.candidate.calendar.items[itemID]?.schedule.startDate == firstDate)
+        #expect(application.candidate.calendar.items[itemID]?.completedAt == Date(timeIntervalSinceReferenceDate: 40))
+        #expect(application.candidate.calendar.items[itemID]?.updatedAt == firstUpdate)
+    }
+
     @Test func categoryNameUndoPreservesALaterColorChange() throws {
         let uncategorized = UUID()
         let category = UUID()

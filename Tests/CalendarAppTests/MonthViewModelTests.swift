@@ -71,10 +71,10 @@ struct MonthViewModelTests {
         let empty = makeEmptyState()
 
         for phase in [
-            StorePhase.notLoaded,
+            WorkspaceStorePhase.notLoaded,
             .loading,
             .mutating,
-            .restoring,
+            .parkedCommitUncertain(UUID()),
             .loadFailed
         ] {
             #expect(MonthEmptyStateHintPolicy.shouldShow(phase: phase, state: empty) == false)

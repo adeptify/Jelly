@@ -22,7 +22,10 @@ private struct CalendarCategoryFieldWrite: Equatable, Sendable {
     let name: ValueChange<String>?
     let colorHex: ValueChange<String>?
     let sortIndex: ValueChange<Int>?
-    var isEmpty: Bool { name == nil && colorHex == nil && sortIndex == nil }
+    /// Timestamps are restored with the calendar mutation, but do not make an
+    /// otherwise independent later edit conflict with undo.
+    let updatedAt: ValueChange<Date>?
+    var isEmpty: Bool { name == nil && colorHex == nil && sortIndex == nil && updatedAt == nil }
 }
 
 private enum CalendarCategoryWrite: Equatable, Sendable {
@@ -44,9 +47,10 @@ private struct WeeklySeriesFieldWrite: Equatable, Sendable {
     let isPinned: ValueChange<Bool>?
     let notes: ValueChange<String>?
     let creationTimeZoneIdentifier: ValueChange<String>?
+    let updatedAt: ValueChange<Date>?
 
     var isEmpty: Bool {
-        kind == nil && title == nil && categoryID == nil && ruleStartDate == nil && recurrenceEndDate == nil && weekdays == nil && durationDays == nil && startTime == nil && endTime == nil && priority == nil && isPinned == nil && notes == nil && creationTimeZoneIdentifier == nil
+        kind == nil && title == nil && categoryID == nil && ruleStartDate == nil && recurrenceEndDate == nil && weekdays == nil && durationDays == nil && startTime == nil && endTime == nil && priority == nil && isPinned == nil && notes == nil && creationTimeZoneIdentifier == nil && updatedAt == nil
     }
 }
 
@@ -65,9 +69,10 @@ private struct CalendarItemFieldWrite: Equatable, Sendable {
     let isPinned: ValueChange<Bool>?
     let notes: ValueChange<String>?
     let completedAt: ValueChange<Date?>?
+    let updatedAt: ValueChange<Date>?
 
     var isEmpty: Bool {
-        kind == nil && title == nil && categoryID == nil && schedule == nil && creationTimeZoneIdentifier == nil && priority == nil && isPinned == nil && notes == nil && completedAt == nil
+        kind == nil && title == nil && categoryID == nil && schedule == nil && creationTimeZoneIdentifier == nil && priority == nil && isPinned == nil && notes == nil && completedAt == nil && updatedAt == nil
     }
 }
 
@@ -218,7 +223,8 @@ private func makeItemChanges(_ before: [UUID: CalendarItem], _ after: [UUID: Cal
             priority: old.priority == new.priority ? nil : .init(before: old.priority, after: new.priority),
             isPinned: old.isPinned == new.isPinned ? nil : .init(before: old.isPinned, after: new.isPinned),
             notes: old.notes == new.notes ? nil : .init(before: old.notes, after: new.notes),
-            completedAt: old.completedAt == new.completedAt ? nil : .init(before: old.completedAt, after: new.completedAt)
+            completedAt: old.completedAt == new.completedAt ? nil : .init(before: old.completedAt, after: new.completedAt),
+            updatedAt: old.updatedAt == new.updatedAt ? nil : .init(before: old.updatedAt, after: new.updatedAt)
         )
         return fields.isEmpty ? nil : (id, .update(fields))
     })
@@ -232,7 +238,8 @@ private func makeCategoryChanges(_ before: [UUID: CalendarCategory], _ after: [U
         let fields = CalendarCategoryFieldWrite(
             name: old.name == new.name ? nil : .init(before: old.name, after: new.name),
             colorHex: old.colorHex == new.colorHex ? nil : .init(before: old.colorHex, after: new.colorHex),
-            sortIndex: old.sortIndex == new.sortIndex ? nil : .init(before: old.sortIndex, after: new.sortIndex)
+            sortIndex: old.sortIndex == new.sortIndex ? nil : .init(before: old.sortIndex, after: new.sortIndex),
+            updatedAt: old.updatedAt == new.updatedAt ? nil : .init(before: old.updatedAt, after: new.updatedAt)
         )
         return fields.isEmpty ? nil : (id, .update(fields))
     })
@@ -256,7 +263,8 @@ private func makeSeriesChanges(_ before: [UUID: WeeklySeries], _ after: [UUID: W
             priority: old.priority == new.priority ? nil : .init(before: old.priority, after: new.priority),
             isPinned: old.isPinned == new.isPinned ? nil : .init(before: old.isPinned, after: new.isPinned),
             notes: old.notes == new.notes ? nil : .init(before: old.notes, after: new.notes),
-            creationTimeZoneIdentifier: old.creationTimeZoneIdentifier == new.creationTimeZoneIdentifier ? nil : .init(before: old.creationTimeZoneIdentifier, after: new.creationTimeZoneIdentifier)
+            creationTimeZoneIdentifier: old.creationTimeZoneIdentifier == new.creationTimeZoneIdentifier ? nil : .init(before: old.creationTimeZoneIdentifier, after: new.creationTimeZoneIdentifier),
+            updatedAt: old.updatedAt == new.updatedAt ? nil : .init(before: old.updatedAt, after: new.updatedAt)
         )
         return fields.isEmpty ? nil : (id, .update(fields))
     })
@@ -403,6 +411,7 @@ public enum WorkspaceUndoReducer {
                 try applyItem(fields.isPinned, value: &next.isPinned, undo: undo)
                 try applyItem(fields.notes, value: &next.notes, undo: undo)
                 try applyItem(fields.completedAt, value: &next.completedAt, undo: undo)
+                restoreTimestamp(fields.updatedAt, value: &next.updatedAt, undo: undo)
                 items[id] = next
             case let .structural(change):
                 let expected = undo ? change.after : change.before
@@ -421,6 +430,7 @@ public enum WorkspaceUndoReducer {
                 try applyField(fields.name, value: &next.name, undo: undo)
                 try applyField(fields.colorHex, value: &next.colorHex, undo: undo)
                 try applyField(fields.sortIndex, value: &next.sortIndex, undo: undo)
+                restoreTimestamp(fields.updatedAt, value: &next.updatedAt, undo: undo)
                 categories[id] = next
             case let .structural(change):
                 let expected = undo ? change.after : change.before
@@ -449,6 +459,7 @@ public enum WorkspaceUndoReducer {
                 try applyField(fields.isPinned, value: &next.isPinned, undo: undo)
                 try applyField(fields.notes, value: &next.notes, undo: undo)
                 try applyField(fields.creationTimeZoneIdentifier, value: &next.creationTimeZoneIdentifier, undo: undo)
+                restoreTimestamp(fields.updatedAt, value: &next.updatedAt, undo: undo)
                 series[id] = next
             case let .structural(change):
                 let expected = undo ? change.after : change.before
@@ -553,6 +564,11 @@ public enum WorkspaceUndoReducer {
 
     private static func applyField<Value: Equatable>(_ change: ValueChange<Value>?, value: inout Value, undo: Bool) throws {
         try applyNote(change, value: &value, undo: undo)
+    }
+
+    private static func restoreTimestamp(_ change: ValueChange<Date>?, value: inout Date, undo: Bool) {
+        guard let change, let replacement = undo ? change.before : change.after else { return }
+        value = replacement
     }
 
     private static func applyLinks<Link: Hashable & Sendable>(added: Set<Link>, removed: Set<Link>, to links: inout Set<Link>, undo: Bool) throws {

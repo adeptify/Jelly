@@ -3,7 +3,7 @@ import SwiftUI
 
 struct DayDrawerView: View {
     let date: CalendarDate
-    let store: CalendarStore
+    let store: WorkspaceStore
     let categories: [UUID: CalendarCategory]
     let hiddenCategoryIDs: Set<UUID>
     let onClose: () -> Void
@@ -14,7 +14,7 @@ struct DayDrawerView: View {
 
     init(
         date: CalendarDate,
-        store: CalendarStore,
+        store: WorkspaceStore,
         categories: [UUID: CalendarCategory],
         hiddenCategoryIDs: Set<UUID>,
         onClose: @escaping () -> Void,
@@ -32,7 +32,7 @@ struct DayDrawerView: View {
         self.onDelete = onDelete
         _model = StateObject(wrappedValue: DayDrawerViewModel(
             date: date,
-            state: store.state,
+            state: store.calendarState,
             hiddenCategoryIDs: hiddenCategoryIDs
         ))
     }
@@ -81,21 +81,21 @@ struct DayDrawerView: View {
         .overlay(alignment: .leading) {
             Rectangle().fill(.separator).frame(width: 1)
         }
-        .onChange(of: store.state) { _, state in
+        .onChange(of: store.calendarState) { _, state in
             model.refresh(state: state, hiddenCategoryIDs: hiddenCategoryIDs)
         }
         .onChange(of: date) { _, date in
-            model.retarget(date: date, state: store.state, hiddenCategoryIDs: hiddenCategoryIDs)
+            model.retarget(date: date, state: store.calendarState, hiddenCategoryIDs: hiddenCategoryIDs)
         }
         .onChange(of: hiddenCategoryIDs) { _, hidden in
-            model.refresh(state: store.state, hiddenCategoryIDs: hidden)
+            model.refresh(state: store.calendarState, hiddenCategoryIDs: hidden)
         }
     }
 
     private func sendCompletion(_ command: CalendarCommand) {
         guard store.phase == .ready else { return }
         Task {
-            try? await store.send(command, undoLabel: "已更新完成状态")
+            try? await store.sendCalendar(command, undoLabel: "已更新完成状态")
         }
     }
 }

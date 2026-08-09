@@ -2,6 +2,10 @@ import CalendarDomain
 import Combine
 import Foundation
 
+enum CalendarDropCoordinatorError: Error, Equatable, Sendable {
+    case persistenceNotCommitted
+}
+
 struct PendingRecurringDrop: Equatable {
     let key: OccurrenceKey
     let destination: CalendarDate
@@ -48,7 +52,7 @@ struct RecentMutationIDCache {
 @MainActor
 final class CalendarDropCoordinator: ObservableObject {
     private static let recentMutationIDCapacity = 256
-    private let store: CalendarStore
+    private let store: WorkspaceStore
     @Published var pendingRecurringDrop: PendingRecurringDrop?
     @Published private(set) var pendingCalendarMutation: PendingCalendarMutation?
     @Published private(set) var dropTargetDate: CalendarDate?
@@ -59,7 +63,7 @@ final class CalendarDropCoordinator: ObservableObject {
         capacity: recentMutationIDCapacity
     )
 
-    init(store: CalendarStore) {
+    init(store: WorkspaceStore) {
         self.store = store
     }
 
@@ -74,8 +78,8 @@ final class CalendarDropCoordinator: ObservableObject {
     func accept(_ payload: CalendarTransferPayload, on date: CalendarDate) async throws {
         switch payload {
         case let .item(id):
-            try store.requireReadyForMutation()
-            guard let item = store.state.items[id] else {
+            guard store.phase == .ready else { throw WorkspaceStoreError.frozen }
+            guard let item = store.calendarState.items[id] else {
                 throw ReducerError.missingItem
             }
             try await accept(.init(
@@ -88,7 +92,7 @@ final class CalendarDropCoordinator: ObservableObject {
             ))
 
         case let .occurrence(key):
-            try store.requireReadyForMutation()
+            guard store.phase == .ready else { throw WorkspaceStoreError.frozen }
             let occurrence = try occurrence(for: key)
             try await accept(.init(
                 source: .occurrence(occurrence),
@@ -105,7 +109,7 @@ final class CalendarDropCoordinator: ObservableObject {
         guard !committedMutationIDs.contains(mutation.id),
               !submittingMutationIDs.contains(mutation.id)
         else { return }
-        try store.requireReadyForMutation()
+        guard store.phase == .ready else { throw WorkspaceStoreError.frozen }
 
         switch mutation.source {
         case let .item(item):
@@ -126,7 +130,8 @@ final class CalendarDropCoordinator: ObservableObject {
                 command = .updateItem(updated)
             }
             do {
-                try await store.send(command, undoLabel: mutation.undoLabel)
+                let outcome = try await store.sendCalendar(command, undoLabel: mutation.undoLabel)
+                try requirePersistedCalendarOutcome(outcome)
                 submittingMutationIDs.remove(mutation.id)
                 committedMutationIDs.insert(mutation.id)
             } catch {
@@ -170,7 +175,7 @@ final class CalendarDropCoordinator: ObservableObject {
         activeResolution = nil
 
         do {
-            try await store.send(
+            let outcome = try await store.sendCalendar(
                 .mutateSeries(
                     resolution.pendingDrop.key,
                     scope: resolution.scope,
@@ -179,6 +184,7 @@ final class CalendarDropCoordinator: ObservableObject {
                 ),
                 undoLabel: resolution.pendingMutation.recurringUndoLabel
             )
+            try requirePersistedCalendarOutcome(outcome)
             pendingRecurringDrop = nil
             pendingCalendarMutation = nil
             committedMutationIDs.insert(resolution.pendingMutation.id)
@@ -200,12 +206,22 @@ final class CalendarDropCoordinator: ObservableObject {
         pendingCalendarMutation = nil
     }
 
+    private func requirePersistedCalendarOutcome(_ outcome: WorkspaceTransactionOutcome) throws {
+        switch outcome {
+        case .committed, .noChange:
+            return
+        case .conflict, .draftSuperseded, .commitPending, .notCommitted,
+             .externalSourceChanged, .persistenceBlocked, .restored:
+            throw CalendarDropCoordinatorError.persistenceNotCommitted
+        }
+    }
+
     private func occurrence(for key: OccurrenceKey) throws -> CalendarOccurrence {
-        guard let series = store.state.recurrence.series[key.seriesID] else {
+        guard let series = store.calendarState.recurrence.series[key.seriesID] else {
             throw ReducerError.missingSeries
         }
         let override: OccurrenceOverride?
-        switch store.state.recurrence.exceptions[key] {
+        switch store.calendarState.recurrence.exceptions[key] {
         case .skipped:
             throw SeriesMutationError.unknownOccurrence
         case let .modified(value):
@@ -234,7 +250,7 @@ final class CalendarDropCoordinator: ObservableObject {
             priority: override?.priority ?? series.priority,
             isPinned: override?.isPinned ?? series.isPinned,
             creationTimeZoneIdentifier: series.creationTimeZoneIdentifier,
-            completedAt: store.state.recurrence.completions[key]?.completedAt,
+            completedAt: store.calendarState.recurrence.completions[key]?.completedAt,
             createdAt: series.createdAt
         )
     }

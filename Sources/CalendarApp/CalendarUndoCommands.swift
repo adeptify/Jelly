@@ -2,17 +2,17 @@ import SwiftUI
 
 @MainActor
 enum CalendarUndoCommandRouter {
-    static func isDisabled(for store: CalendarStore) -> Bool {
-        !store.canUndo || store.isMutating
+    static func isDisabled(for store: WorkspaceStore) -> Bool {
+        !store.canUndo || store.phase != .ready
     }
 
-    static func undo(store: CalendarStore) async throws {
-        try await store.undo()
+    static func undo(store: WorkspaceStore) async throws {
+        _ = try await store.undo()
     }
 }
 
 struct CalendarUndoCommands: Commands {
-    let store: CalendarStore
+    let store: WorkspaceStore
 
     var body: some Commands {
         CommandGroup(replacing: .undoRedo) {

@@ -40,8 +40,8 @@ struct CalendarDropCoordinatorTests {
             updatedAt: .distantPast
         )
         original.items[item.id] = item
-        let repository = InMemoryCalendarRepository(initialState: original)
-        let store = CalendarStore(initialState: original, repository: repository)
+        let repository = InMemoryWorkspaceRepository(initialState: original)
+        let store = WorkspaceStore(initialState: original, repository: repository)
         await store.load()
         let coordinator = CalendarDropCoordinator(store: store)
         let pending = PendingCalendarMutation(
@@ -53,11 +53,11 @@ struct CalendarDropCoordinatorTests {
 
         try await coordinator.accept(pending)
 
-        #expect(store.state.items[item.id]?.schedule == pending.previewSchedule)
+        #expect(store.calendarState.items[item.id]?.schedule == pending.previewSchedule)
         #expect(await repository.saveCount == 1)
         #expect(store.canUndo)
-        try await store.undo()
-        #expect(store.state == original)
+        _ = try await store.undo()
+        #expect(store.calendarState == original)
         #expect(await repository.saveCount == 2)
         #expect(!store.canUndo)
     }
@@ -75,8 +75,8 @@ struct CalendarDropCoordinatorTests {
             updatedAt: .distantPast
         )
         original.items[item.id] = item
-        let repository = InMemoryCalendarRepository(initialState: original)
-        let store = CalendarStore(initialState: original, repository: repository)
+        let repository = InMemoryWorkspaceRepository(initialState: original)
+        let store = WorkspaceStore(initialState: original, repository: repository)
         await store.load()
         let coordinator = CalendarDropCoordinator(store: store)
         let pending = PendingCalendarMutation(
@@ -95,7 +95,7 @@ struct CalendarDropCoordinatorTests {
         try await coordinator.accept(pending)
 
         #expect(await repository.saveCount == 1)
-        #expect(store.state.items[item.id]?.schedule == pending.previewSchedule)
+        #expect(store.calendarState.items[item.id]?.schedule == pending.previewSchedule)
         #expect(store.canUndo)
     }
 
@@ -112,17 +112,17 @@ struct CalendarDropCoordinatorTests {
         ))
 
         #expect(await repository.saveCount == 0)
-        #expect(store.state == harness.originalState)
+        #expect(store.calendarState == harness.originalState)
         try await coordinator.resolve(scope: .onlyThis)
 
         guard case let .some(.modified(override)) =
-            store.state.recurrence.exceptions[harness.boundaryOccurrence.key]
+            store.calendarState.recurrence.exceptions[harness.boundaryOccurrence.key]
         else {
             Issue.record("Expected stable-key boundary override")
             return
         }
         #expect(override.displayedSchedule == preview)
-        #expect(store.state.recurrence.series[harness.series.id] == harness.series)
+        #expect(store.calendarState.recurrence.series[harness.series.id] == harness.series)
         #expect(await repository.saveCount == 1)
     }
 
@@ -140,13 +140,13 @@ struct CalendarDropCoordinatorTests {
         try await coordinator.resolve(scope: .onlyThis)
 
         guard case let .some(.modified(override)) =
-            store.state.recurrence.exceptions[harness.boundaryOccurrence.key]
+            store.calendarState.recurrence.exceptions[harness.boundaryOccurrence.key]
         else {
             Issue.record("Expected stable-key trailing override")
             return
         }
         #expect(override.displayedSchedule == preview)
-        #expect(store.state.recurrence.series[harness.series.id] == harness.series)
+        #expect(store.calendarState.recurrence.series[harness.series.id] == harness.series)
         #expect(await repository.saveCount == 1)
     }
 
@@ -164,7 +164,7 @@ struct CalendarDropCoordinatorTests {
 
         try await coordinator.resolve(scope: .thisAndFuture)
 
-        let future = try #require(store.state.recurrence.series[newSeriesID])
+        let future = try #require(store.calendarState.recurrence.series[newSeriesID])
         #expect(future.ruleStartDate == date(11))
         #expect(future.recurrenceEndDate == CalendarDate(year: 2026, month: 9, day: 1)!)
         #expect(future.weekdays == [.tuesday, .thursday])
@@ -174,7 +174,7 @@ struct CalendarDropCoordinatorTests {
             originalDate: harness.futureExceptionKey.originalDate.addingDays(1)
         )
         guard case let .some(.modified(override)) =
-            store.state.recurrence.exceptions[shiftedExceptionKey]
+            store.calendarState.recurrence.exceptions[shiftedExceptionKey]
         else {
             Issue.record("Expected shifted future exception")
             return
@@ -185,7 +185,7 @@ struct CalendarDropCoordinatorTests {
             seriesID: newSeriesID,
             originalDate: harness.futureCompletionKey.originalDate.addingDays(1)
         )
-        #expect(store.state.recurrence.completions[shiftedCompletionKey]?.completedAt == harness.completedAt)
+        #expect(store.calendarState.recurrence.completions[shiftedCompletionKey]?.completedAt == harness.completedAt)
         #expect(await repository.saveCount == 1)
         #expect(store.canUndo)
     }
@@ -203,7 +203,7 @@ struct CalendarDropCoordinatorTests {
 
         try await coordinator.resolve(scope: .thisAndFuture)
 
-        let future = try #require(store.state.recurrence.series[newSeriesID])
+        let future = try #require(store.calendarState.recurrence.series[newSeriesID])
         #expect(future.ruleStartDate == date(10))
         #expect(future.recurrenceEndDate == date(31))
         #expect(future.weekdays == harness.series.weekdays)
@@ -213,7 +213,7 @@ struct CalendarDropCoordinatorTests {
             originalDate: harness.futureExceptionKey.originalDate
         )
         guard case let .some(.modified(override)) =
-            store.state.recurrence.exceptions[migratedExceptionKey]
+            store.calendarState.recurrence.exceptions[migratedExceptionKey]
         else {
             Issue.record("Expected unshifted future exception")
             return
@@ -224,7 +224,7 @@ struct CalendarDropCoordinatorTests {
             seriesID: newSeriesID,
             originalDate: harness.futureCompletionKey.originalDate
         )
-        #expect(store.state.recurrence.completions[migratedCompletionKey]?.completedAt == harness.completedAt)
+        #expect(store.calendarState.recurrence.completions[migratedCompletionKey]?.completedAt == harness.completedAt)
         #expect(await repository.saveCount == 1)
     }
 
@@ -242,11 +242,11 @@ struct CalendarDropCoordinatorTests {
         do {
             try await coordinator.resolve(scope: .thisAndFuture)
             Issue.record("A failed range mutation must throw")
-        } catch let error as StoreError {
-            #expect(error == .persistenceFailed)
+        } catch let error as CalendarDropCoordinatorError {
+            #expect(error == .persistenceNotCommitted)
         }
 
-        #expect(store.state == harness.originalState)
+        #expect(store.calendarState == harness.originalState)
         #expect(await repository.persistedState == harness.originalState)
         #expect(await repository.saveCount == 0)
         #expect(!store.canUndo)
@@ -270,7 +270,7 @@ struct CalendarDropCoordinatorTests {
 
         coordinator.cancel()
 
-        #expect(store.state == harness.originalState)
+        #expect(store.calendarState == harness.originalState)
         #expect(await repository.persistedState == harness.originalState)
         #expect(await repository.saveCount == 0)
         #expect(!store.canUndo)
@@ -303,8 +303,8 @@ struct CalendarDropCoordinatorTests {
             updatedAt: Date(timeIntervalSince1970: 0)
         )
         original.items[item.id] = item
-        let repository = InMemoryCalendarRepository(initialState: original)
-        let store = CalendarStore(initialState: original, repository: repository)
+        let repository = InMemoryWorkspaceRepository(initialState: original)
+        let store = WorkspaceStore(initialState: original, repository: repository)
         await store.load()
         let coordinator = CalendarDropCoordinator(store: store)
 
@@ -313,16 +313,16 @@ struct CalendarDropCoordinatorTests {
             on: .init(year: 2026, month: 8, day: 8)!
         )
 
-        #expect(store.state.items[item.id]?.schedule.startDate == CalendarDate(year: 2026, month: 8, day: 8)!)
-        #expect(store.state.items[item.id]?.schedule.startTime == originalRange.start)
-        #expect(store.state.items[item.id]?.schedule.endTime == originalRange.end)
-        #expect(store.state.items[item.id]?.creationTimeZoneIdentifier == "Asia/Shanghai")
+        #expect(store.calendarState.items[item.id]?.schedule.startDate == CalendarDate(year: 2026, month: 8, day: 8)!)
+        #expect(store.calendarState.items[item.id]?.schedule.startTime == originalRange.start)
+        #expect(store.calendarState.items[item.id]?.schedule.endTime == originalRange.end)
+        #expect(store.calendarState.items[item.id]?.creationTimeZoneIdentifier == "Asia/Shanghai")
         #expect(store.canUndo)
         #expect(await repository.saveCount == 1)
 
-        try await store.undo()
+        _ = try await store.undo()
 
-        #expect(store.state == original)
+        #expect(store.calendarState == original)
         #expect(await repository.persistedState == original)
         #expect(await repository.saveCount == 2)
         #expect(store.canUndo == false)
@@ -330,8 +330,8 @@ struct CalendarDropCoordinatorTests {
 
     @Test func recurringDropWaitsForScopeAndShiftsFuturePattern() async throws {
         let harness = try makeMondayWednesdayDropHarness()
-        let repository = InMemoryCalendarRepository(initialState: harness.originalState)
-        let store = CalendarStore(
+        let repository = InMemoryWorkspaceRepository(initialState: harness.originalState)
+        let store = WorkspaceStore(
             initialState: harness.originalState,
             repository: repository
         )
@@ -344,19 +344,19 @@ struct CalendarDropCoordinatorTests {
         )
 
         let pending = try #require(coordinator.pendingRecurringDrop)
-        #expect(store.state == harness.originalState)
+        #expect(store.calendarState == harness.originalState)
         #expect(await repository.saveCount == 0)
 
         try await coordinator.resolve(scope: .thisAndFuture)
 
-        let future = try #require(store.state.recurrence.series[pending.newSeriesID])
+        let future = try #require(store.calendarState.recurrence.series[pending.newSeriesID])
         #expect(future.weekdays == [.tuesday, .thursday])
         let shiftedExceptionKey = OccurrenceKey(
             seriesID: pending.newSeriesID,
             originalDate: harness.futureExceptionKey.originalDate.addingDays(1)
         )
         guard case .some(.modified(let shiftedOverride)) =
-            store.state.recurrence.exceptions[shiftedExceptionKey]
+            store.calendarState.recurrence.exceptions[shiftedExceptionKey]
         else {
             Issue.record("Expected shifted modified exception")
             return
@@ -366,20 +366,20 @@ struct CalendarDropCoordinatorTests {
             seriesID: pending.newSeriesID,
             originalDate: harness.futureCompletionKey.originalDate.addingDays(1)
         )
-        #expect(store.state.recurrence.completions[shiftedCompletionKey]?.key == shiftedCompletionKey)
-        #expect(store.state.recurrence.completions[shiftedCompletionKey]?.completedAt == harness.futureCompletedAt)
-        #expect(store.state.recurrence.exceptions[harness.futureExceptionKey] == nil)
-        #expect(store.state.recurrence.completions[harness.futureCompletionKey] == nil)
-        #expect(store.state.recurrence.exceptions[harness.pastExceptionKey] ==
+        #expect(store.calendarState.recurrence.completions[shiftedCompletionKey]?.key == shiftedCompletionKey)
+        #expect(store.calendarState.recurrence.completions[shiftedCompletionKey]?.completedAt == harness.futureCompletedAt)
+        #expect(store.calendarState.recurrence.exceptions[harness.futureExceptionKey] == nil)
+        #expect(store.calendarState.recurrence.completions[harness.futureCompletionKey] == nil)
+        #expect(store.calendarState.recurrence.exceptions[harness.pastExceptionKey] ==
             harness.originalState.recurrence.exceptions[harness.pastExceptionKey])
-        #expect(store.state.recurrence.completions[harness.pastCompletionKey] ==
+        #expect(store.calendarState.recurrence.completions[harness.pastCompletionKey] ==
             harness.originalState.recurrence.completions[harness.pastCompletionKey])
         #expect(coordinator.pendingRecurringDrop == nil)
         #expect(await repository.saveCount == 1)
 
-        try await store.undo()
+        _ = try await store.undo()
 
-        #expect(store.state == harness.originalState)
+        #expect(store.calendarState == harness.originalState)
         #expect(await repository.persistedState == harness.originalState)
         #expect(await repository.saveCount == 2)
         #expect(store.canUndo == false)
@@ -396,8 +396,8 @@ struct CalendarDropCoordinatorTests {
             kind: .task,
             categoryID: originalState.uncategorizedID
         ))
-        let repository = InMemoryCalendarRepository(initialState: originalState)
-        let store = CalendarStore(initialState: originalState, repository: repository)
+        let repository = InMemoryWorkspaceRepository(initialState: originalState)
+        let store = WorkspaceStore(initialState: originalState, repository: repository)
         await store.load()
         let coordinator = CalendarDropCoordinator(store: store)
 
@@ -410,34 +410,34 @@ struct CalendarDropCoordinatorTests {
             originalDate: selectedDestination
         )
         guard case let .some(.modified(boundaryOverride)) =
-            store.state.recurrence.exceptions[shiftedBoundaryKey]
+            store.calendarState.recurrence.exceptions[shiftedBoundaryKey]
         else {
             Issue.record("Expected the dragged boundary override in the new series")
             return
         }
         #expect(boundaryOverride.displayedSchedule.startDate == selectedDestination)
-        #expect(await repository.persistedState == store.state)
+        #expect(await repository.persistedState == store.calendarState)
         #expect(store.canUndo)
 
-        try await store.undo()
+        _ = try await store.undo()
 
-        #expect(store.state == originalState)
+        #expect(store.calendarState == originalState)
         #expect(await repository.persistedState == originalState)
         #expect(store.canUndo == false)
     }
 
     @Test func recurringDropOnlyThisCreatesOneMovedException() async throws {
         let harness = try makeMondayWednesdayDropHarness()
-        let repository = InMemoryCalendarRepository(initialState: harness.originalState)
-        let store = CalendarStore(initialState: harness.originalState, repository: repository)
+        let repository = InMemoryWorkspaceRepository(initialState: harness.originalState)
+        let store = WorkspaceStore(initialState: harness.originalState, repository: repository)
         await store.load()
         let coordinator = CalendarDropCoordinator(store: store)
 
         try await coordinator.accept(.occurrence(harness.boundaryMonday), on: harness.destinationTuesday)
         try await coordinator.resolve(scope: .onlyThis)
 
-        #expect(store.state.recurrence.series[harness.boundaryMonday.seriesID]?.weekdays == [.monday, .wednesday])
-        #expect(store.state.recurrence.exceptions[harness.boundaryMonday] == .modified(.init(
+        #expect(store.calendarState.recurrence.series[harness.boundaryMonday.seriesID]?.weekdays == [.monday, .wednesday])
+        #expect(store.calendarState.recurrence.exceptions[harness.boundaryMonday] == .modified(.init(
             displayedSchedule: singleDaySchedule(harness.destinationTuesday),
             title: "重复专注",
             kind: .task,
@@ -445,16 +445,16 @@ struct CalendarDropCoordinatorTests {
         )))
         #expect(await repository.saveCount == 1)
 
-        try await store.undo()
-        #expect(store.state == harness.originalState)
+        _ = try await store.undo()
+        #expect(store.calendarState == harness.originalState)
         #expect(await repository.persistedState == harness.originalState)
         #expect(store.canUndo == false)
     }
 
     @Test func cancellingRecurringDropLeavesStoreAndRepositoryUntouched() async throws {
         let harness = try makeMondayWednesdayDropHarness()
-        let repository = InMemoryCalendarRepository(initialState: harness.originalState)
-        let store = CalendarStore(initialState: harness.originalState, repository: repository)
+        let repository = InMemoryWorkspaceRepository(initialState: harness.originalState)
+        let store = WorkspaceStore(initialState: harness.originalState, repository: repository)
         await store.load()
         let coordinator = CalendarDropCoordinator(store: store)
 
@@ -462,15 +462,15 @@ struct CalendarDropCoordinatorTests {
         coordinator.cancel()
 
         #expect(coordinator.pendingRecurringDrop == nil)
-        #expect(store.state == harness.originalState)
+        #expect(store.calendarState == harness.originalState)
         #expect(await repository.persistedState == harness.originalState)
         #expect(await repository.saveCount == 0)
     }
 
     @Test func concurrentRecurringResolutionsSubmitExactlyOneMutation() async throws {
         let harness = try makeMondayWednesdayDropHarness()
-        let repository = InMemoryCalendarRepository(initialState: harness.originalState)
-        let store = CalendarStore(initialState: harness.originalState, repository: repository)
+        let repository = InMemoryWorkspaceRepository(initialState: harness.originalState)
+        let store = WorkspaceStore(initialState: harness.originalState, repository: repository)
         await store.load()
         let coordinator = CalendarDropCoordinator(store: store)
         try await coordinator.accept(.occurrence(harness.boundaryMonday), on: harness.destinationTuesday)
@@ -496,8 +496,8 @@ struct CalendarDropCoordinatorTests {
 
     @Test func failedRecurringResolutionKeepsPendingDropForRetry() async throws {
         let harness = try makeMondayWednesdayDropHarness()
-        let repository = InMemoryCalendarRepository(initialState: harness.originalState)
-        let store = CalendarStore(initialState: harness.originalState, repository: repository)
+        let repository = InMemoryWorkspaceRepository(initialState: harness.originalState)
+        let store = WorkspaceStore(initialState: harness.originalState, repository: repository)
         await store.load()
         let coordinator = CalendarDropCoordinator(store: store)
         try await coordinator.accept(.occurrence(harness.boundaryMonday), on: harness.destinationTuesday)
@@ -506,13 +506,13 @@ struct CalendarDropCoordinatorTests {
         do {
             try await coordinator.resolve(scope: .thisAndFuture)
             Issue.record("A failed save must reject the recurring move.")
-        } catch let error as StoreError {
-            #expect(error == .persistenceFailed)
+        } catch let error as CalendarDropCoordinatorError {
+            #expect(error == .persistenceNotCommitted)
         }
 
         #expect(coordinator.pendingRecurringDrop?.key == harness.boundaryMonday)
         #expect(coordinator.pendingRecurringDrop?.destination == harness.destinationTuesday)
-        #expect(store.mutationError != nil)
+        #expect(store.phase == .ready)
         #expect(await repository.saveCount == 0)
 
         try await coordinator.resolve(scope: .thisAndFuture)
@@ -523,8 +523,8 @@ struct CalendarDropCoordinatorTests {
 
     @Test func dismissedConfirmationCancelsPendingDropAndAllowsTheNextRecurringDrop() async throws {
         let harness = try makeMondayWednesdayDropHarness()
-        let repository = InMemoryCalendarRepository(initialState: harness.originalState)
-        let store = CalendarStore(initialState: harness.originalState, repository: repository)
+        let repository = InMemoryWorkspaceRepository(initialState: harness.originalState)
+        let store = WorkspaceStore(initialState: harness.originalState, repository: repository)
         await store.load()
         let coordinator = CalendarDropCoordinator(store: store)
         var presentation = RecurringDropPresentationController()
@@ -542,7 +542,7 @@ struct CalendarDropCoordinatorTests {
 
         #expect(coordinator.pendingRecurringDrop == nil)
         #expect(presentation.state == .hidden)
-        #expect(store.state == harness.originalState)
+        #expect(store.calendarState == harness.originalState)
         #expect(await repository.saveCount == 0)
 
         let nextDestination = harness.destinationTuesday.addingDays(1)
@@ -553,8 +553,8 @@ struct CalendarDropCoordinatorTests {
 
     @Test func failedRecurringDropClosesConfirmationBeforeErrorAndReopensForRetry() async throws {
         let harness = try makeMondayWednesdayDropHarness()
-        let repository = InMemoryCalendarRepository(initialState: harness.originalState)
-        let store = CalendarStore(initialState: harness.originalState, repository: repository)
+        let repository = InMemoryWorkspaceRepository(initialState: harness.originalState)
+        let store = WorkspaceStore(initialState: harness.originalState, repository: repository)
         await store.load()
         let coordinator = CalendarDropCoordinator(store: store)
         var presentation = RecurringDropPresentationController()
@@ -568,15 +568,14 @@ struct CalendarDropCoordinatorTests {
         do {
             try await coordinator.submit(firstResolution)
             Issue.record("A failed save must reject the recurring move.")
-        } catch let error as StoreError {
-            #expect(error == .persistenceFailed)
+        } catch let error as CalendarDropCoordinatorError {
+            #expect(error == .persistenceNotCommitted)
         }
         presentation.resolutionFailed()
 
         #expect(!presentation.isConfirmationPresented)
         #expect(presentation.isErrorPresented)
         #expect(coordinator.pendingRecurringDrop?.key == harness.boundaryMonday)
-        store.dismissErrors()
         let errorAcknowledged = presentation.acknowledgeError(
             hasPendingDrop: coordinator.pendingRecurringDrop != nil
         )
@@ -598,26 +597,26 @@ struct CalendarDropCoordinatorTests {
 
     @Test func sharedUndoCommandUsesStoreAvailabilityAndSnapshot() async throws {
         let original = makeEmptyState()
-        let repository = InMemoryCalendarRepository(initialState: original)
-        let store = CalendarStore(initialState: original, repository: repository)
+        let repository = InMemoryWorkspaceRepository(initialState: original)
+        let store = WorkspaceStore(initialState: original, repository: repository)
         await store.load()
         let item = try makeItem(categoryID: original.uncategorizedID)
 
         #expect(CalendarUndoCommandRouter.isDisabled(for: store))
-        try await store.send(.createItem(item), undoLabel: "添加事项")
+        _ = try await store.sendCalendar(.createItem(item), undoLabel: "添加事项")
         #expect(CalendarUndoCommandRouter.isDisabled(for: store) == false)
 
         try await CalendarUndoCommandRouter.undo(store: store)
 
-        #expect(store.state == original)
+        #expect(store.calendarState == original)
         #expect(await repository.persistedState == original)
         #expect(CalendarUndoCommandRouter.isDisabled(for: store))
     }
 
     @Test func hoverTargetShowsFeedbackWithoutMutation() async throws {
         let original = makeEmptyState()
-        let repository = InMemoryCalendarRepository(initialState: original)
-        let store = CalendarStore(initialState: original, repository: repository)
+        let repository = InMemoryWorkspaceRepository(initialState: original)
+        let store = WorkspaceStore(initialState: original, repository: repository)
         await store.load()
         let coordinator = CalendarDropCoordinator(store: store)
         let target = CalendarDate(year: 2026, month: 8, day: 11)!
@@ -625,12 +624,12 @@ struct CalendarDropCoordinatorTests {
         coordinator.setTargeted(true, date: target)
         coordinator.setTargeted(true, date: target)
         #expect(coordinator.dropTargetDate == target)
-        #expect(store.state == original)
+        #expect(store.calendarState == original)
         #expect(await repository.saveCount == 0)
 
         coordinator.setTargeted(false, date: target)
         #expect(coordinator.dropTargetDate == nil)
-        #expect(store.state == original)
+        #expect(store.calendarState == original)
         #expect(await repository.saveCount == 0)
     }
 }
@@ -701,9 +700,9 @@ private func makeRangeMutationHarness() throws -> RangeMutationHarness {
 @MainActor
 private func makeCoordinator(
     state: CalendarState
-) async -> (CalendarStore, InMemoryCalendarRepository, CalendarDropCoordinator) {
-    let repository = InMemoryCalendarRepository(initialState: state)
-    let store = CalendarStore(initialState: state, repository: repository)
+) async -> (WorkspaceStore, InMemoryWorkspaceRepository, CalendarDropCoordinator) {
+    let repository = InMemoryWorkspaceRepository(initialState: state)
+    let store = WorkspaceStore(initialState: state, repository: repository)
     await store.load()
     return (store, repository, CalendarDropCoordinator(store: store))
 }

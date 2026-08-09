@@ -152,7 +152,7 @@ struct QuickCreateOverlayPresentation: Equatable {
 struct QuickCreatePopover: View {
     nonisolated static let preferredWidth: CGFloat = 380
 
-    let store: CalendarStore
+    let store: WorkspaceStore
     let categories: [CalendarCategory]
     let onClose: () -> Void
     private let availableWidth: CGFloat
@@ -171,7 +171,7 @@ struct QuickCreatePopover: View {
     init(
         presentation: QuickCreatePresentation,
         categories: [CalendarCategory],
-        store: CalendarStore,
+        store: WorkspaceStore,
         availableWidth: CGFloat = QuickCreatePopover.preferredWidth,
         maximumContentHeight: CGFloat? = nil,
         onClose: @escaping () -> Void
@@ -181,7 +181,7 @@ struct QuickCreatePopover: View {
         self.onClose = onClose
         self.availableWidth = availableWidth
         self.maximumContentHeight = maximumContentHeight
-        let categoryID = categories.first?.id ?? store.state.uncategorizedID
+        let categoryID = categories.first?.id ?? store.calendarState.uncategorizedID
         let draft = presentation.initialDraft(categoryID: categoryID)
         _model = StateObject(wrappedValue: ItemEditorViewModel(mode: .create, draft: draft))
         _categoryOption = State(initialValue: categoryID.uuidString)
@@ -525,10 +525,10 @@ struct QuickCreatePopover: View {
         }
         Task { @MainActor in
             do {
-                try await store.send(command, undoLabel: "已创建事项")
+                _ = try await store.sendCalendar(command, undoLabel: "已创建事项")
                 onClose()
             } catch {
-                localError = store.mutationError ?? "保存失败，请重试"
+                localError = "保存失败，请重试"
             }
         }
     }

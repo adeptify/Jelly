@@ -3,7 +3,7 @@ import SwiftUI
 
 /// Sheet UI for week/month progress summary. AI text is mocked until prologue is wired.
 struct ProgressSummaryView: View {
-    let store: CalendarStore
+    let store: WorkspaceStore
     let period: ProgressSummaryPeriod
     let today: CalendarDate
     let hiddenCategoryIDs: Set<UUID>
@@ -222,7 +222,7 @@ struct ProgressSummaryView: View {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(480))
             let stats = ProgressSummaryEngine.stats(
-                state: store.state,
+                state: store.calendarState,
                 period: period,
                 today: today,
                 hiddenCategoryIDs: hiddenCategoryIDs

@@ -22,7 +22,7 @@ struct CategoryManagerViewModelTests {
         await #expect(throws: CategoryManagerError.duplicateName) {
             try await vm.create()
         }
-        #expect(store.state == state)
+        #expect(store.calendarState == state)
     }
 
     @Test func colorHexAcceptsOnlyASCIIHashRRGGBBAndNormalizesUppercase() throws {
@@ -110,12 +110,12 @@ struct CategoryManagerViewModelTests {
         vm.draftName = "预设"
         vm.selectPreset("#8FB8F4")
         try await vm.create()
-        #expect(store.state.categories.values.contains { $0.name == "预设" && $0.colorHex == "#8FB8F4" })
+        #expect(store.calendarState.categories.values.contains { $0.name == "预设" && $0.colorHex == "#8FB8F4" })
 
         vm.draftName = "自定义"
         vm.draftColorHex = "#123456"
         try await vm.create()
-        #expect(store.state.categories.values.contains { $0.name == "自定义" && $0.colorHex == "#123456" })
+        #expect(store.calendarState.categories.values.contains { $0.name == "自定义" && $0.colorHex == "#123456" })
     }
 
     @Test func uncategorizedIsProtectedButCanUseTheSharedReorderAction() async throws {
@@ -132,17 +132,16 @@ struct CategoryManagerViewModelTests {
             try await vm.update(uncategorized)
         }
         vm.categoryToDelete = uncategorized
-        vm.migrationTargetID = work.id
         await #expect(throws: CategoryManagerError.protectedCategory) {
             try await vm.deleteConfirmed()
         }
 
         try await vm.reorder([work.id, uncategorized.id])
-        #expect(store.state.categories[work.id]?.sortIndex == 0)
-        #expect(store.state.categories[uncategorized.id]?.sortIndex == 1)
+        #expect(store.calendarState.categories[work.id]?.sortIndex == 0)
+        #expect(store.calendarState.categories[uncategorized.id]?.sortIndex == 1)
     }
 
-    @Test func deleteRequiresExplicitMigrationChoice() async throws {
+    @Test func deleteUsesTheWorkspaceUncategorizedPolicyWithoutAMigrationChoice() async throws {
         let uncategorizedID = UUID(uuidString: "00000000-0000-0000-0000-000000000701")!
         var state = CalendarState.empty(
             uncategorizedID: uncategorizedID,
@@ -157,16 +156,14 @@ struct CategoryManagerViewModelTests {
             updatedAt: Date(timeIntervalSince1970: 0)
         )
         state.categories[work.id] = work
-        let repository = InMemoryCalendarRepository(initialState: state)
-        let store = CalendarStore(initialState: state, repository: repository)
+        let repository = InMemoryWorkspaceRepository(initialState: state)
+        let store = WorkspaceStore(initialState: state, repository: repository)
         await store.load()
         let vm = CategoryManagerViewModel(store: store)
         vm.categoryToDelete = work
-        vm.migrationTargetID = nil
-        await #expect(throws: CategoryManagerError.migrationRequired) {
-            try await vm.deleteConfirmed()
-        }
-        #expect(store.state == state)
+        try await vm.deleteConfirmed()
+        #expect(store.calendarState.categories[work.id] == nil)
+        #expect(store.calendarState.categories[uncategorizedID] != nil)
     }
 
     @Test func deleteToUncategorizedAtomicallyMigratesAllReferencesAndUndoRestoresEverything() async throws {
@@ -175,47 +172,43 @@ struct CategoryManagerViewModelTests {
         let (store, repository) = try await makeReadyStore(initialState: original)
         let vm = CategoryManagerViewModel(store: store)
         vm.categoryToDelete = original.categories[fixture.deletedCategoryID]!
-        vm.migrationTargetID = original.uncategorizedID
 
         try await vm.deleteConfirmed()
 
-        #expect(store.state.categories[fixture.deletedCategoryID] == nil)
-        #expect(store.state.items.values.allSatisfy { $0.categoryID != fixture.deletedCategoryID })
-        #expect(store.state.recurrence.series.values.allSatisfy { $0.categoryID != fixture.deletedCategoryID })
-        #expect(store.state.recurrence.exceptions.values.allSatisfy { exception in
+        #expect(store.calendarState.categories[fixture.deletedCategoryID] == nil)
+        #expect(store.calendarState.items.values.allSatisfy { $0.categoryID != fixture.deletedCategoryID })
+        #expect(store.calendarState.recurrence.series.values.allSatisfy { $0.categoryID != fixture.deletedCategoryID })
+        #expect(store.calendarState.recurrence.exceptions.values.allSatisfy { exception in
             if case let .modified(override) = exception {
                 return override.categoryID != fixture.deletedCategoryID
             }
             return true
         })
-        #expect(store.state.items.values.allSatisfy { $0.categoryID == original.uncategorizedID })
-        #expect(await repository.persistedState == store.state)
+        #expect(store.calendarState.items.values.allSatisfy { $0.categoryID == original.uncategorizedID })
+        #expect(await repository.persistedState == store.calendarState)
 
-        try await store.undo()
-        #expect(store.state == original)
+        _ = try await store.undo()
+        #expect(store.calendarState == original)
         #expect(await repository.persistedState == original)
     }
 
-    @Test func capturedDeleteChoiceSurvivesDialogDismissal() async throws {
+    @Test func capturedDeleteConfirmationUsesTheWorkspaceUncategorizedPolicy() async throws {
         let fixture = try makeCategoryReferenceFixture()
         let (store, _) = try await makeReadyStore(initialState: fixture.state)
         let vm = CategoryManagerViewModel(store: store)
         let category = fixture.state.categories[fixture.deletedCategoryID]!
-        let migrationTargetID = fixture.targetCategoryID
 
         vm.categoryToDelete = category
-        vm.migrationTargetID = migrationTargetID
         vm.categoryToDelete = nil
-        vm.migrationTargetID = nil
 
-        try await vm.deleteConfirmed(category: category, migrationTargetID: migrationTargetID)
+        try await vm.deleteConfirmed(category: category)
 
-        #expect(store.state.categories[category.id] == nil)
-        #expect(store.state.items.values.allSatisfy { $0.categoryID == migrationTargetID })
-        #expect(store.state.recurrence.series.values.allSatisfy { $0.categoryID == migrationTargetID })
-        #expect(store.state.recurrence.exceptions.values.allSatisfy { exception in
+        #expect(store.calendarState.categories[category.id] == nil)
+        #expect(store.calendarState.items.values.allSatisfy { $0.categoryID == fixture.state.uncategorizedID })
+        #expect(store.calendarState.recurrence.series.values.allSatisfy { $0.categoryID == fixture.state.uncategorizedID })
+        #expect(store.calendarState.recurrence.exceptions.values.allSatisfy { exception in
             if case let .modified(override) = exception {
-                return override.categoryID == migrationTargetID
+                return override.categoryID == fixture.state.uncategorizedID
             }
             return true
         })
@@ -245,7 +238,7 @@ struct CategoryManagerViewModelTests {
         await #expect(throws: CategoryManagerError.insufficientContrast) {
             try await vm.create()
         }
-        #expect(store.state == state)
+        #expect(store.calendarState == state)
         #expect(await repository.saveCount == 0)
     }
 
@@ -259,8 +252,8 @@ struct CategoryManagerViewModelTests {
         vm.beginEditing(work)
         vm.draftColorHex = "#7A67D8"
         try await vm.update(work)
-        try await store.undo()
-        let restored = try #require(store.state.categories[work.id])
+        _ = try await store.undo()
+        let restored = try #require(store.calendarState.categories[work.id])
 
         vm.synchronizeDraftFromStore(restored)
 
@@ -279,8 +272,8 @@ struct CategoryManagerViewModelTests {
         vm.draftName = "本地未保存名称"
         var external = work
         external.colorHex = "#53A66F"
-        try await store.send(.updateCategory(external), undoLabel: "外部更新")
-        let authoritative = try #require(store.state.categories[work.id])
+        _ = try await store.sendWorkspace(.updateCategory(external), undoLabel: "外部更新")
+        let authoritative = try #require(store.calendarState.categories[work.id])
 
         vm.synchronizeDraftFromStore(authoritative)
 

@@ -243,9 +243,9 @@ struct ItemEditorViewModelTests {
 
         let (store, repository) = try await makeReadyStore(initialState: original)
         #expect(await repository.saveCount == 0)
-        try await store.send(command, undoLabel: "已创建事项")
+        _ = try await store.sendCalendar(command, undoLabel: "已创建事项")
 
-        let finalSeries = try #require(store.state.recurrence.series[series.id])
+        let finalSeries = try #require(store.calendarState.recurrence.series[series.id])
         #expect(finalSeries.durationDays == 3)
         #expect(finalSeries.recurrenceEndDate == recurrenceEndDate)
         #expect(finalSeries.startTime == draft.startTime)
@@ -256,12 +256,12 @@ struct ItemEditorViewModelTests {
         #expect(persistedSeries.recurrenceEndDate == recurrenceEndDate)
         #expect(persistedSeries.startTime == draft.startTime)
         #expect(persistedSeries.endTime == draft.endTime)
-        #expect(persisted == store.state)
+        #expect(persisted == store.calendarState)
         #expect(await repository.saveCount == 1)
         #expect(store.canUndo)
 
-        try await store.undo()
-        #expect(store.state == original)
+        _ = try await store.undo()
+        #expect(store.calendarState == original)
         #expect(await repository.persistedState == original)
         #expect(await repository.saveCount == 2)
         #expect(store.canUndo == false)
@@ -320,9 +320,9 @@ struct ItemEditorViewModelTests {
             timeZoneIdentifier: "Asia/Shanghai"
         )
         let (store, repository) = try await makeReadyStore(initialState: original)
-        try await store.send(command, undoLabel: "已更新事项")
+        _ = try await store.sendCalendar(command, undoLabel: "已更新事项")
 
-        guard case let .modified(override) = store.state.recurrence.exceptions[key] else {
+        guard case let .modified(override) = store.calendarState.recurrence.exceptions[key] else {
             Issue.record("Expected one modified occurrence override")
             return
         }
@@ -333,13 +333,13 @@ struct ItemEditorViewModelTests {
             endTime: MinuteOfDay(hour: 2, minute: 0)!
         )
         #expect(override.displayedSchedule == expectedSchedule)
-        #expect(store.state.recurrence.series[series.id] == series)
-        #expect(store.state.recurrence.exceptions.count == 1)
-        #expect(await repository.persistedState == store.state)
+        #expect(store.calendarState.recurrence.series[series.id] == series)
+        #expect(store.calendarState.recurrence.exceptions.count == 1)
+        #expect(await repository.persistedState == store.calendarState)
         #expect(store.canUndo)
 
-        try await store.undo()
-        #expect(store.state == original)
+        _ = try await store.undo()
+        #expect(store.calendarState == original)
         #expect(await repository.persistedState == original)
         #expect(store.canUndo == false)
     }
@@ -396,20 +396,20 @@ struct ItemEditorViewModelTests {
             timeZoneIdentifier: "Asia/Shanghai"
         )
         let (store, repository) = try await makeReadyStore(initialState: original)
-        try await store.send(command, undoLabel: "已更新事项")
+        _ = try await store.sendCalendar(command, undoLabel: "已更新事项")
 
-        let future = try #require(store.state.recurrence.series[newSeriesID])
+        let future = try #require(store.calendarState.recurrence.series[newSeriesID])
         #expect(future.ruleStartDate == CalendarDate(year: 2026, month: 8, day: 11)!)
         #expect(future.recurrenceEndDate == CalendarDate(year: 2026, month: 8, day: 11)!)
         #expect(future.weekdays == [.tuesday])
         #expect(future.durationDays == 3)
         #expect(future.startTime == MinuteOfDay(hour: 22, minute: 0)!)
         #expect(future.endTime == MinuteOfDay(hour: 2, minute: 0)!)
-        #expect(await repository.persistedState == store.state)
+        #expect(await repository.persistedState == store.calendarState)
         #expect(store.canUndo)
 
-        try await store.undo()
-        #expect(store.state == original)
+        _ = try await store.undo()
+        #expect(store.calendarState == original)
         #expect(await repository.persistedState == original)
         #expect(store.canUndo == false)
     }
@@ -632,15 +632,15 @@ struct ItemEditorViewModelTests {
         #expect(patch.weekdays == [.tuesday, .thursday])
 
         let (store, repository) = try await makeReadyStore(initialState: original)
-        try await store.send(command, undoLabel: "已更新事项")
+        _ = try await store.sendCalendar(command, undoLabel: "已更新事项")
 
-        #expect(store.state.recurrence.series[newSeriesID]?.weekdays == [.tuesday, .thursday])
-        #expect(await repository.persistedState == store.state)
+        #expect(store.calendarState.recurrence.series[newSeriesID]?.weekdays == [.tuesday, .thursday])
+        #expect(await repository.persistedState == store.calendarState)
         #expect(store.canUndo)
 
-        try await store.undo()
+        _ = try await store.undo()
 
-        #expect(store.state == original)
+        #expect(store.calendarState == original)
         #expect(await repository.persistedState == original)
         #expect(store.canUndo == false)
     }
@@ -710,10 +710,10 @@ struct ItemEditorViewModelTests {
         }
         #expect(id == item.id)
         let (store, _) = try await makeReadyStore(initialState: state)
-        try await store.send(command, undoLabel: "已删除事项")
-        #expect(store.state.items[item.id] == nil)
-        try await store.undo()
-        #expect(store.state == state)
+        _ = try await store.sendCalendar(command, undoLabel: "已删除事项")
+        #expect(store.calendarState.items[item.id] == nil)
+        _ = try await store.undo()
+        #expect(store.calendarState == state)
     }
 
     @Test func deletingOccurrenceUsesChosenScope() throws {
@@ -800,16 +800,16 @@ struct ItemEditorViewModelTests {
         state.recurrence.series[series.id] = series
         let (store, repository) = try await makeReadyStore(initialState: state)
         let complete = CalendarCommand.setOccurrenceCompleted(key, Date(timeIntervalSince1970: 3))
-        try await store.send(complete, undoLabel: "已完成事项")
-        try await store.undo()
-        #expect(store.state == state)
+        _ = try await store.sendCalendar(complete, undoLabel: "已完成事项")
+        _ = try await store.undo()
+        #expect(store.calendarState == state)
         #expect(await repository.persistedState == state)
 
-        try await store.send(complete, undoLabel: "已完成事项")
-        let completedState = store.state
-        try await store.send(.setOccurrenceCompleted(key, nil), undoLabel: "已取消完成事项")
-        try await store.undo()
-        #expect(store.state == completedState)
+        _ = try await store.sendCalendar(complete, undoLabel: "已完成事项")
+        let completedState = store.calendarState
+        _ = try await store.sendCalendar(.setOccurrenceCompleted(key, nil), undoLabel: "已取消完成事项")
+        _ = try await store.undo()
+        #expect(store.calendarState == completedState)
         #expect(await repository.persistedState == completedState)
     }
 
