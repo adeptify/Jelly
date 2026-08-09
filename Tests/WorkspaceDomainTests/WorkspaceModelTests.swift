@@ -100,10 +100,140 @@ struct WorkspaceModelTests {
         revised.updatedAt = Date(timeIntervalSince1970: 1_786_222_000)
         var changed = original
         changed.title = "改后的标题"
+        var changedDocument = original
+        changedDocument.document.blocks[0].inlineContent = .plain("另一段")
+        var changedCategory = original
+        changedCategory.categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000117")!
+        var changedArchivedAt = original
+        changedArchivedAt.archivedAt = Date(timeIntervalSince1970: 1_786_223_000)
+        var changedCreatedAt = original
+        changedCreatedAt.createdAt = Date(timeIntervalSince1970: 1_786_224_000)
+        let changedID = Note(
+            id: NoteID(UUID(uuidString: "00000000-0000-0000-0000-000000000118")!),
+            title: original.title,
+            document: original.document,
+            categoryID: original.categoryID,
+            archivedAt: original.archivedAt,
+            revision: original.revision,
+            createdAt: original.createdAt,
+            updatedAt: original.updatedAt
+        )
+        var reorderedMarks = original
+        reorderedMarks.document.blocks[0].inlineContent.spans[0].marks = [.bold, .italic]
+        let compactEncoder = JSONEncoder()
+        let prettyEncoder = JSONEncoder()
+        prettyEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let compactDecoded = try JSONDecoder().decode(Note.self, from: compactEncoder.encode(original))
+        let prettyDecoded = try JSONDecoder().decode(Note.self, from: prettyEncoder.encode(original))
 
         #expect(try WorkspaceChecksum.noteSnapshotChecksum(original) == WorkspaceChecksum.noteSnapshotChecksum(revised))
+        #expect(try WorkspaceChecksum.noteSnapshotChecksum(original) == WorkspaceChecksum.noteSnapshotChecksum(changedCreatedAt))
         #expect(try WorkspaceChecksum.noteSnapshotChecksum(original) != WorkspaceChecksum.noteSnapshotChecksum(changed))
+        #expect(try WorkspaceChecksum.noteSnapshotChecksum(original) != WorkspaceChecksum.noteSnapshotChecksum(changedDocument))
+        #expect(try WorkspaceChecksum.noteSnapshotChecksum(original) != WorkspaceChecksum.noteSnapshotChecksum(changedCategory))
+        #expect(try WorkspaceChecksum.noteSnapshotChecksum(original) != WorkspaceChecksum.noteSnapshotChecksum(changedArchivedAt))
+        #expect(try WorkspaceChecksum.noteSnapshotChecksum(original) != WorkspaceChecksum.noteSnapshotChecksum(changedID))
+        #expect(try WorkspaceChecksum.noteSnapshotChecksum(original) == WorkspaceChecksum.noteSnapshotChecksum(reorderedMarks))
+        #expect(try WorkspaceChecksum.noteSnapshotChecksum(compactDecoded) == WorkspaceChecksum.noteSnapshotChecksum(prettyDecoded))
         #expect(try WorkspaceChecksum.normalizedNoteSnapshotData(original) == WorkspaceChecksum.normalizedNoteSnapshotData(revised))
+    }
+
+    @Test func workspaceRoundTripPreservesEveryBlockInputAndNonemptyRelationStorageShape() throws {
+        let now = Date(timeIntervalSince1970: 1_786_220_000)
+        let uncategorizedID = UUID(uuidString: "00000000-0000-0000-0000-000000000119")!
+        let itemID = UUID(uuidString: "00000000-0000-0000-0000-000000000120")!
+        let seriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000121")!
+        let date = CalendarDate(year: 2026, month: 8, day: 9)!
+        let noteID = NoteID(UUID(uuidString: "00000000-0000-0000-0000-000000000122")!)
+        let referenceNoteID = NoteID(UUID(uuidString: "00000000-0000-0000-0000-000000000123")!)
+        let taskID = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000124")!)
+        let textInspirationID = InspirationID(UUID(uuidString: "00000000-0000-0000-0000-000000000125")!)
+        let urlInspirationID = InspirationID(UUID(uuidString: "00000000-0000-0000-0000-000000000126")!)
+        let fileInspirationID = InspirationID(UUID(uuidString: "00000000-0000-0000-0000-000000000127")!)
+        var calendar = CalendarState.empty(uncategorizedID: uncategorizedID, now: now)
+        calendar.items[itemID] = try CalendarItem(
+            id: itemID,
+            kind: .task,
+            title: "关联事项",
+            categoryID: uncategorizedID,
+            schedule: try CalendarSchedule(startDate: date, endDate: date, startTime: nil, endTime: nil),
+            completedAt: nil,
+            createdAt: now,
+            updatedAt: now
+        )
+        calendar.recurrence.series[seriesID] = try WeeklySeries(
+            id: seriesID,
+            kind: .task,
+            title: "关联系列",
+            categoryID: uncategorizedID,
+            ruleStartDate: date,
+            recurrenceEndDate: nil,
+            weekdays: [.sunday],
+            durationDays: 1,
+            startTime: nil,
+            endTime: nil,
+            createdAt: now,
+            updatedAt: now
+        )
+        let note = Note(
+            id: noteID,
+            title: "完整 Block 笔记",
+            document: .init(blocks: [
+                .init(id: BlockID(), kind: .paragraph, inlineContent: .plain("正文"), taskState: nil, indentLevel: 0),
+                .init(id: BlockID(), kind: .heading1, inlineContent: .plain("一级"), taskState: nil, indentLevel: 0),
+                .init(id: BlockID(), kind: .heading2, inlineContent: .plain("二级"), taskState: nil, indentLevel: 0),
+                .init(id: BlockID(), kind: .heading3, inlineContent: .plain("三级"), taskState: nil, indentLevel: 0),
+                .init(id: BlockID(), kind: .bullet, inlineContent: .plain("无序"), taskState: nil, indentLevel: 0),
+                .init(id: BlockID(), kind: .ordered, inlineContent: .plain("有序"), taskState: nil, indentLevel: 1),
+                .init(id: taskID, kind: .task, inlineContent: .plain("待办"), taskState: .init(completedAt: nil), indentLevel: 2),
+                .init(id: BlockID(), kind: .quote, inlineContent: .plain("引用"), taskState: nil, indentLevel: 0),
+                .init(id: BlockID(), kind: .code, inlineContent: .plain("print(1)"), taskState: nil, indentLevel: 0),
+                .init(id: BlockID(), kind: .divider, inlineContent: .plain(""), taskState: nil, indentLevel: 0),
+                .init(id: BlockID(), kind: .link, inlineContent: .init(spans: [.init(text: "链接", linkURL: URL(string: "https://example.com")!)]), taskState: nil, indentLevel: 0)
+            ]),
+            categoryID: uncategorizedID,
+            archivedAt: nil,
+            revision: 0,
+            createdAt: now,
+            updatedAt: now
+        )
+        let reference = Note.empty(id: referenceNoteID, categoryID: uncategorizedID, now: now)
+        let occurrenceKey = OccurrenceKey(seriesID: seriesID, originalDate: date)
+        let workspace = WorkspaceState(
+            revision: 4,
+            calendar: calendar,
+            notes: [noteID: note, referenceNoteID: reference],
+            inspirations: [
+                textInspirationID: .text(id: textInspirationID, rawText: "原始文字", categoryID: uncategorizedID, now: now),
+                urlInspirationID: .init(id: urlInspirationID, inputKind: .url, rawText: nil, rawURL: URL(string: "https://example.com/read")!, rawFile: nil, resolvedSourceKind: .article, resolvedMetadata: nil, categoryID: uncategorizedID, lifecycle: .active, createdAt: now, updatedAt: now),
+                fileInspirationID: .init(id: fileInspirationID, inputKind: .file, rawText: nil, rawURL: nil, rawFile: .init(bookmarkData: Data([1]), displayName: "材料.pdf"), resolvedSourceKind: .document, resolvedMetadata: nil, categoryID: uncategorizedID, lifecycle: .active, createdAt: now, updatedAt: now)
+            ],
+            calendarNoteRelations: .init(
+                baselines: [
+                    .item(itemID): .init(primaryNoteID: noteID, referenceNoteIDs: [referenceNoteID]),
+                    .series(seriesID): .init(primaryNoteID: referenceNoteID, referenceNoteIDs: [])
+                ],
+                occurrenceOverrides: [
+                    occurrenceKey: .init(key: occurrenceKey, primary: .replace(noteID), addedReferenceNoteIDs: [referenceNoteID], removedReferenceNoteIDs: [])
+                ]
+            ),
+            taskBlockLinks: [.init(noteID: noteID, blockID: taskID, calendarItemID: itemID)],
+            inspirationNoteLinks: [.init(source: .live(textInspirationID), noteID: noteID, createdAt: now)]
+        )
+
+        try WorkspaceValidator.validate(workspace)
+        let decoded = try JSONDecoder.workspaceDeterministic.decode(
+            WorkspaceState.self,
+            from: JSONEncoder.workspaceDeterministic.encode(workspace)
+        )
+
+        #expect(decoded == workspace)
+        #expect(decoded.notes[noteID]?.document.blocks.map(\.kind) == [.paragraph, .heading1, .heading2, .heading3, .bullet, .ordered, .task, .quote, .code, .divider, .link])
+        #expect(Set(decoded.inspirations.values.map(\.inputKind)) == [.text, .url, .file])
+        #expect(decoded.calendarNoteRelations.baselines.count == 2)
+        #expect(decoded.calendarNoteRelations.occurrenceOverrides[occurrenceKey]?.primary == .replace(noteID))
+        #expect(decoded.taskBlockLinks.count == 1)
+        #expect(decoded.inspirationNoteLinks.count == 1)
     }
 
     @Test func workspaceValidatorAcceptsLiveAndDeletedInspirationLinksWithoutCopyingSourceContent() throws {
@@ -186,6 +316,39 @@ struct WorkspaceModelTests {
         invalid.taskBlockLinks = [.init(noteID: noteID, blockID: blockID, calendarItemID: itemID)]
 
         #expect(throws: WorkspaceValidationError.taskBlockMissingPrimaryNote(noteID, itemID)) {
+            try WorkspaceValidator.validate(invalid)
+        }
+    }
+
+    @Test func workspaceValidatorRejectsOccurrencePrimaryDuplicatedAsAddedReference() throws {
+        let workspace = try validWorkspace()
+        let noteID = try #require(workspace.notes.keys.first)
+        let seriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000128")!
+        let date = CalendarDate(year: 2026, month: 8, day: 9)!
+        let key = OccurrenceKey(seriesID: seriesID, originalDate: date)
+        var invalid = workspace
+        invalid.calendar.recurrence.series[seriesID] = try WeeklySeries(
+            id: seriesID,
+            kind: .task,
+            title: "冲突系列",
+            categoryID: invalid.calendar.uncategorizedID,
+            ruleStartDate: date,
+            recurrenceEndDate: nil,
+            weekdays: [.sunday],
+            durationDays: 1,
+            startTime: nil,
+            endTime: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        invalid.calendarNoteRelations.occurrenceOverrides[key] = .init(
+            key: key,
+            primary: .replace(noteID),
+            addedReferenceNoteIDs: [noteID],
+            removedReferenceNoteIDs: []
+        )
+
+        #expect(throws: WorkspaceValidationError.occurrencePrimaryAlsoReference(key, noteID)) {
             try WorkspaceValidator.validate(invalid)
         }
     }

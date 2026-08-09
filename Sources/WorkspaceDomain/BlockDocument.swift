@@ -99,7 +99,7 @@ public struct DocumentBlock: Identifiable, Codable, Equatable, Sendable {
             taskState: .init(completedAt: completedAt),
             indentLevel: indentLevel
         )
-        try BlockDocumentValidator.validate(.init(blocks: [block]))
+        try BlockDocumentValidator.validateBlockLocal(block)
         return block
     }
 }

@@ -13,6 +13,7 @@ public enum WorkspaceValidationError: Error, Equatable, Sendable {
     case inconsistentOccurrenceOverrideKey(OccurrenceKey)
     case danglingNote(NoteID)
     case primaryAlsoReference(CalendarNoteOwnerID, NoteID)
+    case occurrencePrimaryAlsoReference(OccurrenceKey, NoteID)
     case overlappingOccurrenceReferences(OccurrenceKey, NoteID)
     case danglingCalendarItem(UUID)
     case taskBlockMissingTask(NoteID, BlockID)
@@ -84,6 +85,9 @@ public enum WorkspaceValidator {
             }
             if case let .replace(noteID) = override.primary {
                 try require(noteID, in: state.notes)
+                if override.addedReferenceNoteIDs.contains(noteID) {
+                    throw WorkspaceValidationError.occurrencePrimaryAlsoReference(key, noteID)
+                }
             }
             for noteID in override.addedReferenceNoteIDs {
                 try require(noteID, in: state.notes)

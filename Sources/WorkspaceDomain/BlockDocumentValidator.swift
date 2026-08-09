@@ -24,30 +24,9 @@ public enum BlockDocumentValidator {
             guard identifiers.insert(block.id).inserted else {
                 throw BlockDocumentValidationError.duplicateBlockID(block.id)
             }
-            guard (0...3).contains(block.indentLevel) else {
-                throw BlockDocumentValidationError.invalidIndent(block.id, block.indentLevel)
-            }
+            try validateBlockLocal(block)
             guard block.kind.supportsIndentation || block.indentLevel == 0 else {
                 throw BlockDocumentValidationError.invalidIndent(block.id, block.indentLevel)
-            }
-
-            switch block.kind {
-            case .task:
-                guard block.taskState != nil else {
-                    throw BlockDocumentValidationError.missingTaskState(block.id)
-                }
-            case .paragraph, .heading1, .heading2, .heading3, .bullet, .ordered, .quote, .code, .divider, .link:
-                guard block.taskState == nil else {
-                    throw BlockDocumentValidationError.unexpectedTaskState(block.id)
-                }
-            }
-
-            if block.kind == .divider, !block.inlineContent.isEmpty {
-                throw BlockDocumentValidationError.dividerHasContent(block.id)
-            }
-            if block.kind == .link,
-               !block.inlineContent.spans.contains(where: hasValidLinkURL) {
-                throw BlockDocumentValidationError.invalidLink(block.id)
             }
 
             guard block.kind.supportsIndentation else {
@@ -59,6 +38,29 @@ public enum BlockDocumentValidator {
             }
             activeIndentLevels = Set(activeIndentLevels.filter { $0 <= block.indentLevel })
             activeIndentLevels.insert(block.indentLevel)
+        }
+    }
+
+    static func validateBlockLocal(_ block: DocumentBlock) throws {
+        guard (0...3).contains(block.indentLevel) else {
+            throw BlockDocumentValidationError.invalidIndent(block.id, block.indentLevel)
+        }
+        switch block.kind {
+        case .task:
+            guard block.taskState != nil else {
+                throw BlockDocumentValidationError.missingTaskState(block.id)
+            }
+        case .paragraph, .heading1, .heading2, .heading3, .bullet, .ordered, .quote, .code, .divider, .link:
+            guard block.taskState == nil else {
+                throw BlockDocumentValidationError.unexpectedTaskState(block.id)
+            }
+        }
+        if block.kind == .divider, !block.inlineContent.isEmpty {
+            throw BlockDocumentValidationError.dividerHasContent(block.id)
+        }
+        if block.kind == .link,
+           !block.inlineContent.spans.contains(where: hasValidLinkURL) {
+            throw BlockDocumentValidationError.invalidLink(block.id)
         }
     }
 

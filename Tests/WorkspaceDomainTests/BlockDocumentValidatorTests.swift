@@ -11,6 +11,7 @@ struct BlockDocumentValidatorTests {
         let unexpectedTaskState = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000204")!)
         let divider = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000205")!)
         let link = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000206")!)
+        let nonList = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000210")!)
 
         #expect(throws: BlockDocumentValidationError.unsupportedSchema(2)) {
             try BlockDocumentValidator.validate(.init(schemaVersion: 2, blocks: []))
@@ -51,6 +52,11 @@ struct BlockDocumentValidatorTests {
                 .init(id: link, kind: .link, inlineContent: .plain("没有 URL"), taskState: nil, indentLevel: 0)
             ]))
         }
+        #expect(throws: BlockDocumentValidationError.invalidIndent(nonList, 1)) {
+            try BlockDocumentValidator.validate(.init(blocks: [
+                .init(id: nonList, kind: .quote, inlineContent: .plain("引用不能缩进"), taskState: nil, indentLevel: 1)
+            ]))
+        }
     }
 
     @Test func validatorAcceptsContinuousNestedListsAndTaskTimestamp() throws {
@@ -66,5 +72,25 @@ struct BlockDocumentValidatorTests {
 
         try BlockDocumentValidator.validate(document)
         #expect(document.blocks[2].taskState?.completedAt == completedAt)
+    }
+
+    @Test func taskFactoryAllowsNestedIndentBeforeItsParentDocumentIsAssembled() throws {
+        let parent = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000211")!)
+        let child = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000212")!)
+        let task = try DocumentBlock.task(
+            id: BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000213")!),
+            text: "嵌套待办",
+            indentLevel: 2,
+            completedAt: .distantPast
+        )
+        let document = BlockDocument(blocks: [
+            .init(id: parent, kind: .bullet, inlineContent: .plain("父级"), taskState: nil, indentLevel: 0),
+            .init(id: child, kind: .ordered, inlineContent: .plain("子级"), taskState: nil, indentLevel: 1),
+            task
+        ])
+
+        try BlockDocumentValidator.validate(document)
+        #expect(task.indentLevel == 2)
+        #expect(task.taskState?.completedAt == .distantPast)
     }
 }
