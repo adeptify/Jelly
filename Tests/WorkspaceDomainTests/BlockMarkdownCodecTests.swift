@@ -2,6 +2,12 @@ import Foundation
 import Testing
 import WorkspaceDomain
 
+private enum ContinuationToken {
+    static let soft = "<!--jelly:continue-soft:v1-->"
+    static let hard = "<!--jelly:continue-hard:v1-->"
+    static let reservedPrefix = "<!--jelly:continue-"
+}
+
 @Suite("BlockMarkdownCodecTests")
 struct BlockMarkdownCodecTests {
     @Test(arguments: BlockMarkdownFixture.all)
@@ -176,7 +182,7 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown == "\\# 不是标题\n\n正文\n\\---")
+        #expect(markdown == "\\# 不是标题\n\n正文\(ContinuationToken.soft)\n---")
         #expect(reimported == document)
     }
 
@@ -198,7 +204,7 @@ struct BlockMarkdownCodecTests {
         #expect(reimported == document)
     }
 
-    @Test func exportUsesBackslashHardBreakAndNeverLeavesTrailingWhitespace() throws {
+    @Test func exportUsesContinuationTokensAndNeverLeavesTrailingWhitespace() throws {
         let document = BlockDocument(blocks: [
             .init(
                 id: Self.ids(count: 1, start: 530)[0],
@@ -215,7 +221,7 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown == "a\\\nb")
+        #expect(markdown == "a\(ContinuationToken.hard)\nb")
         #expect(!markdown.components(separatedBy: "\n").contains { line in
             line.hasSuffix(" ") || line.hasSuffix("\t")
         })
@@ -275,7 +281,7 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown == "> a\\\n> b")
+        #expect(markdown == "> a\(ContinuationToken.hard)\n> b")
         #expect(reimported == document)
     }
 
@@ -317,8 +323,143 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown == "[A ](https://example.com/labels)\n\n[*** A\nB ***](https://example.com/labels)")
+        #expect(markdown == "[A ](https://example.com/labels)\n\n[*** A\(ContinuationToken.soft)\nB ***](https://example.com/labels)")
         #expect(reimported == document)
+    }
+
+    @Test(arguments: ContinuationParityFixture.all)
+    func continuationTokenParityDistinguishesActiveAndLiteralTokens(_ fixture: ContinuationParityFixture) throws {
+        let result = try BlockMarkdownCodec.importMarkdown(
+            fixture.markdown,
+            idSource: .fixed(Self.ids(count: 1, start: 700)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(result.diagnostics == [])
+        #expect(result.document.blocks == [
+            .init(
+                id: Self.ids(count: 1, start: 700)[0],
+                kind: .paragraph,
+                inlineContent: .plain(fixture.expectedText),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+    }
+
+    @Test(arguments: LiteralContinuationExportFixture.all)
+    func exportEscapesLiteralContinuationTokensWithoutChangingTheirModelText(_ fixture: LiteralContinuationExportFixture) throws {
+        let document = BlockDocument(blocks: [
+            .init(
+                id: Self.ids(count: 1, start: 710)[0],
+                kind: .paragraph,
+                inlineContent: .plain(fixture.modelText),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+        let reimported = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(Self.ids(count: 1, start: 710)),
+            checkedTaskCompletedAt: .distantPast
+        ).document
+
+        #expect(markdown == fixture.canonicalMarkdown)
+        #expect(reimported == document)
+    }
+
+    @Test func malformedContinuationPrefixesRemainVerbatimAndAreDiagnosed() throws {
+        let malformed = "A<!--jelly:continue-soft:v1--> \nB\nC\(ContinuationToken.reservedPrefix)x-->"
+        let result = try BlockMarkdownCodec.importMarkdown(
+            malformed,
+            idSource: .fixed(Self.ids(count: 1, start: 720)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(result.document.blocks[0].inlineContent == .plain(malformed))
+        #expect(result.diagnostics.map(\.lineNumber) == [1, 3])
+
+        let mixed = try BlockMarkdownCodec.importMarkdown(
+            "A\(ContinuationToken.reservedPrefix)x-->\(ContinuationToken.soft)",
+            idSource: .fixed(Self.ids(count: 1, start: 721)),
+            checkedTaskCompletedAt: .distantPast
+        )
+        #expect(mixed.document.blocks[0].inlineContent == .plain("A\(ContinuationToken.reservedPrefix)x-->\n"))
+        #expect(mixed.diagnostics.map(\.lineNumber) == [1])
+    }
+
+    @Test(arguments: UnmarkedBoundaryFixture.all)
+    func unmarkedBoundariesDoNotGuessContinuationFromTheNextLine(_ fixture: UnmarkedBoundaryFixture) throws {
+        let result = try BlockMarkdownCodec.importMarkdown(
+            fixture.markdown,
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(result.document.blocks.map(\.kind) == [fixture.leadingKind, fixture.followingKind])
+    }
+
+    @Test func noMarkerHeadingThenParagraphAndMultilineLinkRemainSeparateBlocks() throws {
+        let paragraphResult = try BlockMarkdownCodec.importMarkdown(
+            "# 标题\n正文",
+            idSource: .fixed(Self.ids(count: 2, start: 730)),
+            checkedTaskCompletedAt: .distantPast
+        )
+        let linkResult = try BlockMarkdownCodec.importMarkdown(
+            "# 标题\n[A\nB](https://example.com/multiline)",
+            idSource: .fixed(Self.ids(count: 2, start: 732)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(paragraphResult.document.blocks.map(\.kind) == [.heading1, .paragraph])
+        #expect(paragraphResult.document.blocks.map(\.inlineContent) == [.plain("标题"), .plain("正文")])
+        #expect(linkResult.document.blocks.map(\.kind) == [.heading1, .link])
+        guard linkResult.document.blocks.count == 2 else { return }
+        #expect(linkResult.document.blocks[1].inlineContent.spans == [.init(text: "A\nB", linkURL: URL(string: "https://example.com/multiline")!)])
+    }
+
+    @Test func markedContinuationConsumesBlankAndEveryBlockMarkerAsCurrentContent() throws {
+        let markers = [
+            "# heading", "## heading", "### heading", "- bullet", "1. ordered", "- [x] task",
+            "> quote", "```swift", "---", "[link](https://example.com/link)", "| unsupported |"
+        ]
+        for marker in markers {
+            let result = try BlockMarkdownCodec.importMarkdown(
+                "# first\(ContinuationToken.soft)\n\(marker)",
+                checkedTaskCompletedAt: .distantPast
+            )
+            #expect(result.document.blocks.count == 1)
+            #expect(result.document.blocks[0].kind == .heading1)
+            #expect(result.diagnostics == [])
+        }
+
+        let blankResult = try BlockMarkdownCodec.importMarkdown(
+            "# first\(ContinuationToken.soft)\n\(ContinuationToken.soft)\nlast",
+            idSource: .fixed(Self.ids(count: 1, start: 740)),
+            checkedTaskCompletedAt: .distantPast
+        )
+        #expect(blankResult.document.blocks == [
+            .init(
+                id: Self.ids(count: 1, start: 740)[0],
+                kind: .heading1,
+                inlineContent: .plain("first\n\nlast"),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+    }
+
+    @Test func unmarkedListAndTaskSiblingChildParentTransitionsKeepAllIndentLevels() throws {
+        let result = try BlockMarkdownCodec.importMarkdown(
+            "- root\n    - [ ] child task\n        1. grandchild\n            - [x] deep task\n            - deep sibling\n        1. parent sibling\n    - [ ] root child sibling\n- root sibling",
+            idSource: .fixed(Self.ids(count: 8, start: 750)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(result.diagnostics == [])
+        #expect(result.document.blocks.map(\.kind) == [.bullet, .task, .ordered, .task, .bullet, .ordered, .task, .bullet])
+        #expect(result.document.blocks.map(\.indentLevel) == [0, 1, 2, 3, 3, 2, 1, 0])
+        #expect(result.document.blocks.map(\.taskState?.completedAt) == [nil, nil, nil, .distantPast, nil, nil, nil, nil])
     }
 
     @Test func backtickFenceInfoIsDiagnosedAndPreservedAsParagraph() throws {
@@ -372,12 +513,94 @@ struct BlockMarkdownCodecTests {
     }
 }
 
+struct ContinuationParityFixture: Sendable {
+    let name: String
+    let markdown: String
+    let expectedText: String
+
+    static let all: [ContinuationParityFixture] = [
+        .init(name: "zero backslashes activates token", markdown: "A\(ContinuationToken.soft)\nB", expectedText: "A\nB"),
+        .init(name: "one backslash keeps token literal", markdown: "A\\\(ContinuationToken.soft)\nB", expectedText: "A\(ContinuationToken.soft)\nB"),
+        .init(name: "two backslashes activates token", markdown: "A" + String(repeating: "\\", count: 2) + ContinuationToken.soft + "\nB", expectedText: "A\\\nB"),
+        .init(name: "three backslashes keeps token literal", markdown: "A" + String(repeating: "\\", count: 3) + ContinuationToken.soft + "\nB", expectedText: "A\\\(ContinuationToken.soft)\nB")
+    ]
+}
+
+struct LiteralContinuationExportFixture: Sendable {
+    let name: String
+    let modelText: String
+    let canonicalMarkdown: String
+
+    static let all: [LiteralContinuationExportFixture] = [
+        .init(name: "literal token", modelText: "A\(ContinuationToken.soft)", canonicalMarkdown: "A\\\(ContinuationToken.soft)"),
+        .init(name: "literal token after one backslash", modelText: "A\\\(ContinuationToken.soft)", canonicalMarkdown: "A" + String(repeating: "\\", count: 3) + ContinuationToken.soft),
+        .init(name: "hard break after literal backslash", modelText: "A\\\nB", canonicalMarkdown: "A" + String(repeating: "\\", count: 2) + ContinuationToken.soft + "\nB")
+    ]
+}
+
+struct UnmarkedBoundaryFixture: Sendable {
+    let name: String
+    let markdown: String
+    let leadingKind: BlockKind
+    let followingKind: BlockKind
+
+    private struct Leading {
+        let name: String
+        let markdown: String
+        let kind: BlockKind
+    }
+
+    private struct Following {
+        let name: String
+        let markdown: String
+        let kind: BlockKind
+    }
+
+    static let all: [UnmarkedBoundaryFixture] = {
+        let leading = [
+            Leading(name: "heading 1", markdown: "# first", kind: .heading1),
+            Leading(name: "heading 2", markdown: "## first", kind: .heading2),
+            Leading(name: "heading 3", markdown: "### first", kind: .heading3),
+            Leading(name: "bullet", markdown: "- first", kind: .bullet),
+            Leading(name: "ordered", markdown: "1. first", kind: .ordered),
+            Leading(name: "task", markdown: "- [ ] first", kind: .task),
+            Leading(name: "link", markdown: "[first](https://example.com/first)", kind: .link)
+        ]
+        let following = [
+            Following(name: "bare paragraph", markdown: "正文", kind: .paragraph),
+            Following(name: "heading 1", markdown: "# next", kind: .heading1),
+            Following(name: "heading 2", markdown: "## next", kind: .heading2),
+            Following(name: "heading 3", markdown: "### next", kind: .heading3),
+            Following(name: "bullet", markdown: "- next", kind: .bullet),
+            Following(name: "ordered", markdown: "1. next", kind: .ordered),
+            Following(name: "task", markdown: "- [ ] next", kind: .task),
+            Following(name: "quote", markdown: "> next", kind: .quote),
+            Following(name: "code", markdown: "```swift\nlet value = 1\n```", kind: .code),
+            Following(name: "divider", markdown: "---", kind: .divider),
+            Following(name: "single line link", markdown: "[next](https://example.com/next)", kind: .link),
+            Following(name: "multiline link", markdown: "[next\nlabel](https://example.com/next)", kind: .link),
+            Following(name: "unsupported raw text", markdown: "| raw |", kind: .paragraph),
+            Following(name: "blank then paragraph", markdown: "\n正文", kind: .paragraph)
+        ]
+        return leading.flatMap { leading in
+            following.map { following in
+                .init(
+                    name: "\(leading.name) then \(following.name)",
+                    markdown: "\(leading.markdown)\n\(following.markdown)",
+                    leadingKind: leading.kind,
+                    followingKind: following.kind
+                )
+            }
+        }
+    }()
+}
+
 struct MultilineProseFixture: Sendable {
     let name: String
     let document: BlockDocument
     let canonicalMarkdown: String
 
-    private static let content = InlineContent.plain("a\nb  \nc")
+    private static let content = InlineContent.plain("a\nb  \nc\n")
     private static let linkURL = URL(string: "https://example.com/multiline")!
 
     private static func id(_ value: Int) -> BlockID {
@@ -389,47 +612,47 @@ struct MultilineProseFixture: Sendable {
         .init(
             name: "paragraph",
             document: .init(blocks: [.init(id: id(600), kind: .paragraph, inlineContent: content, taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "a\nb\\\nc"
+            canonicalMarkdown: "a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)"
         ),
         .init(
             name: "heading 1",
             document: .init(blocks: [.init(id: id(601), kind: .heading1, inlineContent: content, taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "# a\nb\\\nc"
+            canonicalMarkdown: "# a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)"
         ),
         .init(
             name: "heading 2",
             document: .init(blocks: [.init(id: id(602), kind: .heading2, inlineContent: content, taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "## a\nb\\\nc"
+            canonicalMarkdown: "## a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)"
         ),
         .init(
             name: "heading 3",
             document: .init(blocks: [.init(id: id(603), kind: .heading3, inlineContent: content, taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "### a\nb\\\nc"
+            canonicalMarkdown: "### a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)"
         ),
         .init(
             name: "bullet",
             document: .init(blocks: [.init(id: id(604), kind: .bullet, inlineContent: content, taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "- a\nb\\\nc"
+            canonicalMarkdown: "- a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)"
         ),
         .init(
             name: "ordered",
             document: .init(blocks: [.init(id: id(605), kind: .ordered, inlineContent: content, taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "1. a\nb\\\nc"
+            canonicalMarkdown: "1. a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)"
         ),
         .init(
             name: "task",
             document: .init(blocks: [.init(id: id(606), kind: .task, inlineContent: content, taskState: .init(completedAt: .distantPast), indentLevel: 0)]),
-            canonicalMarkdown: "- [x] a\nb\\\nc"
+            canonicalMarkdown: "- [x] a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc\(ContinuationToken.soft)"
         ),
         .init(
             name: "quote",
             document: .init(blocks: [.init(id: id(607), kind: .quote, inlineContent: content, taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "> a\n> b\\\n> c"
+            canonicalMarkdown: "> a\(ContinuationToken.soft)\n> b\(ContinuationToken.hard)\n> c\(ContinuationToken.soft)"
         ),
         .init(
             name: "link",
-            document: .init(blocks: [.init(id: id(608), kind: .link, inlineContent: .init(spans: [.init(text: "a\nb  \nc", linkURL: linkURL)]), taskState: nil, indentLevel: 0)]),
-            canonicalMarkdown: "[a\nb\\\nc](https://example.com/multiline)"
+            document: .init(blocks: [.init(id: id(608), kind: .link, inlineContent: .init(spans: [.init(text: "a\nb  \nc\n", linkURL: linkURL)]), taskState: nil, indentLevel: 0)]),
+            canonicalMarkdown: "[a\(ContinuationToken.soft)\nb\(ContinuationToken.hard)\nc](https://example.com/multiline)\(ContinuationToken.soft)"
         )
     ]
 }
@@ -448,7 +671,7 @@ struct BlockMarkdownFixture: Sendable {
         fixture(
             name: "inline prose with Chinese soft break and inline link",
             markdown: "原始 **加粗**、*斜体*、`代码` 与 [链接](https://example.com/a)\n第二行",
-            canonicalMarkdown: "原始 **加粗**、*斜体*、`代码` 与 [链接](https://example.com/a)\n第二行",
+            canonicalMarkdown: "原始 **加粗**、*斜体*、`代码` 与 [链接](https://example.com/a)\(ContinuationToken.soft)\n第二行",
             blocks: [
                 .init(
                     kind: .paragraph,
@@ -493,7 +716,7 @@ struct BlockMarkdownFixture: Sendable {
         fixture(
             name: "quote with soft break",
             markdown: "> 第一行\n> 第二行",
-            canonicalMarkdown: "> 第一行\n> 第二行",
+            canonicalMarkdown: "> 第一行\(ContinuationToken.soft)\n> 第二行",
             blocks: [
                 .init(kind: .quote, content: .plain("第一行\n第二行"), taskState: nil, indent: 0, codeInfoString: nil)
             ]

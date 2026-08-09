@@ -131,23 +131,25 @@ public enum BlockMarkdownCodec {
             }
 
             if line.hasPrefix(">") {
-                var quoteLines: [String] = []
-                while index < lines.count, lines[index].hasPrefix(">") {
-                    let quoteLine = lines[index]
-                    quoteLines.append(quoteLine.hasPrefix("> ") ? String(quoteLine.dropFirst(2)) : String(quoteLine.dropFirst()))
-                    index += 1
-                }
+                let quote = consumeQuote(
+                    in: lines,
+                    startingAt: index,
+                    diagnostics: &diagnostics
+                )
                 activeListIndentLevels.removeAll()
-                try appendBlock(kind: .quote, inlineContent: parseInlineMarkdown(quoteLines.joined(separator: "\n")))
+                try appendBlock(kind: .quote, inlineContent: parseInlineMarkdown(quote.text))
+                index = quote.nextIndex
                 continue
             }
 
             if let heading = heading(in: line) {
                 activeListIndentLevels.removeAll()
-                let continuation = inlineContinuation(
+                let continuation = consumeExplicitContinuation(
                     startingWith: heading.text,
                     in: lines,
-                    after: index + 1
+                    after: index + 1,
+                    lineNumber: index + 1,
+                    diagnostics: &diagnostics
                 )
                 try appendBlock(kind: heading.kind, inlineContent: parseInlineMarkdown(continuation.text))
                 index = continuation.nextIndex
@@ -178,10 +180,12 @@ public enum BlockMarkdownCodec {
                 } else {
                     taskState = nil
                 }
-                let continuation = inlineContinuation(
+                let continuation = consumeExplicitContinuation(
                     startingWith: list.text,
                     in: lines,
-                    after: index + 1
+                    after: index + 1,
+                    lineNumber: index + 1,
+                    diagnostics: &diagnostics
                 )
                 try appendBlock(
                     kind: list.kind,
@@ -195,26 +199,28 @@ public enum BlockMarkdownCodec {
                 continue
             }
 
-            if let standaloneLink = standaloneLink(in: lines, at: index) {
+            if let standaloneLink = standaloneLink(in: lines, at: index, diagnostics: &diagnostics) {
                 activeListIndentLevels.removeAll()
+                var content = inlineLinkContent(label: standaloneLink.link.label, url: standaloneLink.link.url)
+                if let terminalBoundary = standaloneLink.terminalBoundary {
+                    append(terminalBoundary.modelText, to: &content)
+                }
                 try appendBlock(
                     kind: .link,
-                    inlineContent: inlineLinkContent(label: standaloneLink.link.label, url: standaloneLink.link.url)
+                    inlineContent: content
                 )
                 index = standaloneLink.nextIndex
                 continue
             }
 
-            var paragraphLines = [line]
-            index += 1
-            while index < lines.count,
-                  !lines[index].isEmpty,
-                  !isBlockStart(lines[index]) {
-                paragraphLines.append(lines[index])
-                index += 1
-            }
+            let paragraph = consumeParagraph(
+                in: lines,
+                startingAt: index,
+                diagnostics: &diagnostics
+            )
             activeListIndentLevels.removeAll()
-            try appendBlock(kind: .paragraph, inlineContent: parseInlineMarkdown(paragraphLines.joined(separator: "\n")))
+            try appendBlock(kind: .paragraph, inlineContent: parseInlineMarkdown(paragraph.text))
+            index = paragraph.nextIndex
         }
 
         let document = BlockDocument(blocks: blocks)
@@ -252,18 +258,13 @@ public enum BlockMarkdownCodec {
                 let checkbox = block.taskState?.completedAt == nil ? "[ ]" : "[x]"
                 rendered = "\(listIndent(block.indentLevel))- \(checkbox) \(exportMultilineBlockContent(block.inlineContent))"
             case .quote:
-                rendered = block.inlineContent.spans.isEmpty
-                    ? ">"
-                    : exportInline(block.inlineContent)
-                        .components(separatedBy: "\n")
-                        .map { "> \($0)" }
-                        .joined(separator: "\n")
+                rendered = exportQuote(block.inlineContent)
             case .code:
                 rendered = exportCode(block)
             case .divider:
                 rendered = "---"
             case .link:
-                rendered = exportMultilineBlockContent(block.inlineContent)
+                rendered = exportLink(block.inlineContent)
             }
             if block.kind != .code {
                 rendered = canonicalizeProseTrailingWhitespace(rendered)
@@ -331,6 +332,33 @@ private struct ListItem {
 private struct StandaloneLink {
     let label: String
     let url: URL
+}
+
+private enum ContinuationBoundary: CaseIterable {
+    case soft
+    case hard
+
+    static let reservedPrefix = "<!--jelly:continue-"
+
+    var token: String {
+        switch self {
+        case .soft: "<!--jelly:continue-soft:v1-->"
+        case .hard: "<!--jelly:continue-hard:v1-->"
+        }
+    }
+
+    var modelText: String {
+        switch self {
+        case .soft: "\n"
+        case .hard: "  \n"
+        }
+    }
+}
+
+private struct ScannedStandaloneLink {
+    let link: StandaloneLink
+    let terminalBoundary: ContinuationBoundary?
+    let nextIndex: Int
 }
 
 private func fenceOpening(in line: String) -> FenceOpening? {
@@ -435,17 +463,30 @@ private func standaloneLink(in line: String) -> StandaloneLink? {
     return .init(label: link.label, url: link.url)
 }
 
-private func standaloneLink(in lines: [String], at index: Int) -> (link: StandaloneLink, nextIndex: Int)? {
+private func standaloneLink(
+    in lines: [String],
+    at index: Int,
+    diagnostics: inout [BlockMarkdownDiagnostic]
+) -> ScannedStandaloneLink? {
     var candidate = lines[index]
     var nextIndex = index + 1
 
     while true {
-        if let link = standaloneLink(in: candidate) {
-            return (link, nextIndex)
+        let terminalBoundary = trailingContinuationBoundary(in: candidate)
+        let candidateWithoutBoundary = terminalBoundary.map { removeTrailingContinuationBoundary($0, from: candidate) } ?? candidate
+        if let link = standaloneLink(in: candidateWithoutBoundary) {
+            let decodedLabel = decodeContinuationBoundaries(
+                in: link.label,
+                firstLineNumber: index + 1,
+                diagnostics: &diagnostics
+            )
+            return .init(
+                link: .init(label: decodedLabel, url: link.url),
+                terminalBoundary: terminalBoundary,
+                nextIndex: nextIndex
+            )
         }
-        guard nextIndex < lines.count,
-              !lines[nextIndex].isEmpty,
-              !isBlockStart(lines[nextIndex]) else {
+        guard hasUnclosedStandaloneLinkLabel(in: candidate), nextIndex < lines.count else {
             return nil
         }
         candidate += "\n" + lines[nextIndex]
@@ -453,20 +494,190 @@ private func standaloneLink(in lines: [String], at index: Int) -> (link: Standal
     }
 }
 
-private func inlineContinuation(
+private func hasUnclosedStandaloneLinkLabel(in candidate: String) -> Bool {
+    let characters = Array(candidate)
+    return characters.first == "[" && unescapedDelimiterIndex("]", in: characters, startingAt: 1) == nil
+}
+
+private func consumeExplicitContinuation(
     startingWith firstLine: String,
     in lines: [String],
-    after index: Int
+    after index: Int,
+    lineNumber: Int,
+    diagnostics: inout [BlockMarkdownDiagnostic]
 ) -> (text: String, nextIndex: Int) {
-    var continuationLines = [firstLine]
+    var text = ""
+    var currentLine = firstLine
+    var currentLineNumber = lineNumber
     var nextIndex = index
-    while nextIndex < lines.count,
-          !lines[nextIndex].isEmpty,
-          !isBlockStart(lines[nextIndex]) {
-        continuationLines.append(lines[nextIndex])
+
+    while true {
+        appendMalformedContinuationDiagnostic(
+            for: currentLine,
+            lineNumber: currentLineNumber,
+            diagnostics: &diagnostics
+        )
+        guard let boundary = trailingContinuationBoundary(in: currentLine) else {
+            return (text + currentLine, nextIndex)
+        }
+        text += removeTrailingContinuationBoundary(boundary, from: currentLine) + boundary.modelText
+        guard nextIndex < lines.count else {
+            return (text, nextIndex)
+        }
+        currentLine = lines[nextIndex]
+        currentLineNumber = nextIndex + 1
         nextIndex += 1
     }
-    return (continuationLines.joined(separator: "\n"), nextIndex)
+}
+
+private func consumeParagraph(
+    in lines: [String],
+    startingAt index: Int,
+    diagnostics: inout [BlockMarkdownDiagnostic]
+) -> (text: String, nextIndex: Int) {
+    var text = ""
+    var currentIndex = index
+
+    while currentIndex < lines.count {
+        let line = lines[currentIndex]
+        appendMalformedContinuationDiagnostic(for: line, lineNumber: currentIndex + 1, diagnostics: &diagnostics)
+        if let boundary = trailingContinuationBoundary(in: line) {
+            text += removeTrailingContinuationBoundary(boundary, from: line) + boundary.modelText
+            currentIndex += 1
+            continue
+        }
+
+        text += line
+        currentIndex += 1
+        guard currentIndex < lines.count,
+              !lines[currentIndex].isEmpty,
+              !isBlockStart(lines[currentIndex]),
+              !couldStartMultilineStandaloneLink(in: lines, at: currentIndex) else {
+            return (text, currentIndex)
+        }
+        text += "\n"
+    }
+    return (text, currentIndex)
+}
+
+private func consumeQuote(
+    in lines: [String],
+    startingAt index: Int,
+    diagnostics: inout [BlockMarkdownDiagnostic]
+) -> (text: String, nextIndex: Int) {
+    var text = ""
+    var currentLine = quoteContent(in: lines[index])
+    var currentLineNumber = index + 1
+    var nextIndex = index + 1
+
+    while true {
+        appendMalformedContinuationDiagnostic(
+            for: currentLine,
+            lineNumber: currentLineNumber,
+            diagnostics: &diagnostics
+        )
+        if let boundary = trailingContinuationBoundary(in: currentLine) {
+            text += removeTrailingContinuationBoundary(boundary, from: currentLine) + boundary.modelText
+            guard nextIndex < lines.count else {
+                return (text, nextIndex)
+            }
+            currentLine = lines[nextIndex].hasPrefix(">")
+                ? quoteContent(in: lines[nextIndex])
+                : lines[nextIndex]
+            currentLineNumber = nextIndex + 1
+            nextIndex += 1
+            continue
+        }
+
+        text += currentLine
+        guard nextIndex < lines.count, lines[nextIndex].hasPrefix(">") else {
+            return (text, nextIndex)
+        }
+        text += "\n"
+        currentLine = quoteContent(in: lines[nextIndex])
+        currentLineNumber = nextIndex + 1
+        nextIndex += 1
+    }
+}
+
+private func quoteContent(in line: String) -> String {
+    guard line.hasPrefix(">") else { return line }
+    return line.hasPrefix("> ") ? String(line.dropFirst(2)) : String(line.dropFirst())
+}
+
+private func couldStartMultilineStandaloneLink(in lines: [String], at index: Int) -> Bool {
+    var ignoredDiagnostics: [BlockMarkdownDiagnostic] = []
+    return standaloneLink(in: lines, at: index, diagnostics: &ignoredDiagnostics) != nil
+}
+
+private func decodeContinuationBoundaries(
+    in text: String,
+    firstLineNumber: Int,
+    diagnostics: inout [BlockMarkdownDiagnostic]
+) -> String {
+    let lines = text.components(separatedBy: "\n")
+    var decoded = ""
+    for (offset, line) in lines.enumerated() {
+        appendMalformedContinuationDiagnostic(
+            for: line,
+            lineNumber: firstLineNumber + offset,
+            diagnostics: &diagnostics
+        )
+        if let boundary = trailingContinuationBoundary(in: line) {
+            decoded += removeTrailingContinuationBoundary(boundary, from: line) + boundary.modelText
+        } else {
+            decoded += line
+            if offset < lines.count - 1 {
+                decoded += "\n"
+            }
+        }
+    }
+    return decoded
+}
+
+private func trailingContinuationBoundary(in line: String) -> ContinuationBoundary? {
+    for boundary in ContinuationBoundary.allCases where line.hasSuffix(boundary.token) {
+        let tokenStart = line.index(line.endIndex, offsetBy: -boundary.token.count)
+        let precedingBackslashes = line[..<tokenStart].reversed().prefix { $0 == "\\" }.count
+        if precedingBackslashes.isMultiple(of: 2) {
+            return boundary
+        }
+    }
+    return nil
+}
+
+private func removeTrailingContinuationBoundary(_ boundary: ContinuationBoundary, from line: String) -> String {
+    String(line.dropLast(boundary.token.count))
+}
+
+private func appendMalformedContinuationDiagnostic(
+    for line: String,
+    lineNumber: Int,
+    diagnostics: inout [BlockMarkdownDiagnostic]
+) {
+    let activeBoundary = trailingContinuationBoundary(in: line)
+    let activeTokenStart = activeBoundary.map { line.index(line.endIndex, offsetBy: -$0.token.count) }
+    var searchRange = line.startIndex..<line.endIndex
+
+    while let prefixRange = line.range(of: ContinuationBoundary.reservedPrefix, range: searchRange) {
+        let precedingBackslashes = line[..<prefixRange.lowerBound].reversed().prefix { $0 == "\\" }.count
+        let isActiveToken = prefixRange.lowerBound == activeTokenStart
+        if precedingBackslashes.isMultiple(of: 2), !isActiveToken {
+            diagnostics.append(.init(lineNumber: lineNumber, message: "无效的续接标记已保留为正文"))
+            return
+        }
+        guard prefixRange.upperBound < line.endIndex else { return }
+        searchRange = prefixRange.upperBound..<line.endIndex
+    }
+}
+
+private func append(_ text: String, to content: inout InlineContent) {
+    guard !text.isEmpty else { return }
+    if content.spans.isEmpty {
+        content.spans = [.init(text: text)]
+    } else {
+        content.spans[content.spans.count - 1].text += text
+    }
 }
 
 private func isBlockStart(_ line: String) -> Bool {
@@ -572,14 +783,10 @@ private func parseInlineMarkdown(_ markdown: String) -> InlineContent {
     let lines = markdown.components(separatedBy: "\n")
     let normalizedLines = lines.enumerated().map { offset, line -> String in
         let isHardBreak = offset < lines.count - 1 && hasOddTrailingBackslash(line)
-        let withoutTrailingWhitespace = line.trimmingTrailingWhitespace()
         if isHardBreak {
-            return String(line.dropLast()).trimmingTrailingWhitespace() + "  "
+            return String(line.dropLast()) + "  "
         }
-        if offset < lines.count - 1, line.trailingWhitespaceCount >= 2 {
-            return withoutTrailingWhitespace + "  "
-        }
-        return withoutTrailingWhitespace
+        return line
     }
     return parseInline(normalizedLines.joined(separator: "\n"))
 }
@@ -652,20 +859,56 @@ private func exportInline(_ content: InlineContent) -> String {
 }
 
 private func exportParagraph(_ content: InlineContent) -> String {
-    let canonical = canonicalizeProseTrailingWhitespace(exportInline(content))
-    return canonical
+    exportInline(content)
         .components(separatedBy: "\n")
-        .map(escapeBlockStart)
+        .enumerated()
+        .map { offset, line in offset == 0 ? escapeBlockStart(line) : line }
         .joined(separator: "\n")
 }
 
 private func exportMultilineBlockContent(_ content: InlineContent) -> String {
-    let canonical = canonicalizeProseTrailingWhitespace(exportInline(content))
-    return canonical
+    exportInline(content)
+}
+
+private func exportLink(_ content: InlineContent) -> String {
+    guard let terminalBoundary = terminalContinuationBoundary(in: content) else {
+        return exportMultilineBlockContent(content)
+    }
+    return exportMultilineBlockContent(removingTerminalContinuationBoundary(terminalBoundary, from: content)) + terminalBoundary.token
+}
+
+private func exportQuote(_ content: InlineContent) -> String {
+    guard !content.spans.isEmpty else { return ">" }
+    let terminalBoundary = terminalContinuationBoundary(in: content)
+    let contentWithoutTerminalBoundary = terminalBoundary.map {
+        removingTerminalContinuationBoundary($0, from: content)
+    } ?? content
+    let quoted = exportInline(contentWithoutTerminalBoundary)
         .components(separatedBy: "\n")
-        .enumerated()
-        .map { offset, line in offset == 0 ? line : escapeBlockStart(line) }
+        .map { "> \($0)" }
         .joined(separator: "\n")
+    return terminalBoundary.map { quoted + $0.token } ?? quoted
+}
+
+private func terminalContinuationBoundary(in content: InlineContent) -> ContinuationBoundary? {
+    guard let lastSpan = content.spans.last, lastSpan.text.hasSuffix("\n") else {
+        return nil
+    }
+    let textBeforeNewline = String(lastSpan.text.dropLast())
+    return textBeforeNewline.trailingWhitespaceCount >= 2 ? .hard : .soft
+}
+
+private func removingTerminalContinuationBoundary(
+    _ boundary: ContinuationBoundary,
+    from content: InlineContent
+) -> InlineContent {
+    var result = content
+    guard !result.spans.isEmpty else { return result }
+    result.spans[result.spans.count - 1].text.removeLast()
+    if boundary == .hard {
+        result.spans[result.spans.count - 1].text = result.spans[result.spans.count - 1].text.trimmingTrailingWhitespace()
+    }
+    return result
 }
 
 private func inlineLinkContent(label: String, url: URL) -> InlineContent {
@@ -696,22 +939,31 @@ private func inlinePlainText(_ content: InlineContent) -> String {
 }
 
 private func escapePlainText(_ text: String) -> String {
-    String(text.flatMap { character -> [Character] in
+    let escapedMarkdown = String(text.flatMap { character -> [Character] in
         if "\\*[]()`".contains(character) {
             return ["\\", character]
         }
         return [character]
     })
+    return ContinuationBoundary.allCases.reduce(escapedMarkdown) { partialResult, boundary in
+        partialResult.replacingOccurrences(of: boundary.token, with: "\\" + boundary.token)
+    }
 }
 
 private func canonicalizeProseTrailingWhitespace(_ text: String) -> String {
-    let lines = text.components(separatedBy: "\n")
+    var lines = text.components(separatedBy: "\n")
+    let endsWithNewline = lines.last == ""
+    if endsWithNewline {
+        lines.removeLast()
+    }
     return lines.enumerated().map { offset, line in
         let trimmed = line.trimmingTrailingWhitespace()
-        if offset < lines.count - 1, line.trailingWhitespaceCount >= 2 {
-            return trimmed + "\\"
+        let hasContinuation = offset < lines.count - 1 || endsWithNewline
+        guard hasContinuation else { return trimmed }
+        if line.trailingWhitespaceCount >= 2 {
+            return trimmed + ContinuationBoundary.hard.token
         }
-        return trimmed
+        return trimmed + ContinuationBoundary.soft.token
     }.joined(separator: "\n")
 }
 
@@ -720,7 +972,7 @@ private func escapeBlockStart(_ line: String) -> String {
 }
 
 private func isEscapableMarkdownCharacter(_ character: Character) -> Bool {
-    character == " " || character.isNumber || "\\*[]()`#->|~".contains(character)
+    character == " " || character.isNumber || "\\*[]()`#->|~<".contains(character)
 }
 
 private func hasOddTrailingBackslash(_ line: String) -> Bool {
