@@ -21,6 +21,31 @@ public enum SeriesScope: Equatable, Sendable {
     case thisAndFuture
 }
 
+public enum SeriesFutureMutationOutcome: Equatable, Sendable {
+    case split(
+        oldSeriesID: UUID,
+        newSeriesID: UUID,
+        boundary: CalendarDate,
+        dayDelta: Int,
+        historicalOwnerRetained: Bool
+    )
+    case deleteFuture(
+        seriesID: UUID,
+        boundary: CalendarDate,
+        historicalOwnerRetained: Bool
+    )
+}
+
+public struct SeriesMutationResult: Equatable, Sendable {
+    public let graph: RecurrenceGraph
+    public let futureOutcome: SeriesFutureMutationOutcome?
+
+    public init(graph: RecurrenceGraph, futureOutcome: SeriesFutureMutationOutcome?) {
+        self.graph = graph
+        self.futureOutcome = futureOutcome
+    }
+}
+
 public enum OptionalPatch<Value: Sendable>: Sendable {
     case unchanged
     case set(Value)
@@ -92,6 +117,24 @@ public enum SeriesMutationEngine {
         newSeriesID: UUID,
         now: Date
     ) throws -> RecurrenceGraph {
+        try applyWithOutcome(
+            edit: edit,
+            to: key,
+            scope: scope,
+            in: graph,
+            newSeriesID: newSeriesID,
+            now: now
+        ).graph
+    }
+
+    public static func applyWithOutcome(
+        edit: SeriesEdit,
+        to key: OccurrenceKey,
+        scope: SeriesScope,
+        in graph: RecurrenceGraph,
+        newSeriesID: UUID,
+        now: Date
+    ) throws -> SeriesMutationResult {
         guard let series = graph.series[key.seriesID] else {
             throw SeriesMutationError.unknownSeries
         }
@@ -101,16 +144,45 @@ public enum SeriesMutationEngine {
 
         switch scope {
         case .onlyThis:
-            return try applyOnlyThis(edit: edit, to: key, series: series, graph: graph)
-        case .thisAndFuture:
-            return try applyThisAndFuture(
-                edit: edit,
-                to: key,
-                series: series,
-                graph: graph,
-                newSeriesID: newSeriesID,
-                now: now
+            return .init(
+                graph: try applyOnlyThis(edit: edit, to: key, series: series, graph: graph),
+                futureOutcome: nil
             )
+        case .thisAndFuture:
+            switch edit {
+            case .delete:
+                let future = applyFutureDelete(to: key, series: series, graph: graph, now: now)
+                return .init(
+                    graph: future.graph,
+                    futureOutcome: .deleteFuture(
+                        seriesID: series.id,
+                        boundary: key.originalDate,
+                        historicalOwnerRetained: future.historicalOwnerRetained
+                    )
+                )
+            case let .patch(patch):
+                guard newSeriesID != series.id, graph.series[newSeriesID] == nil else {
+                    throw SeriesMutationError.duplicateSeriesID
+                }
+                let future = try applyFuturePatch(
+                    patch,
+                    to: key,
+                    series: series,
+                    graph: graph,
+                    newSeriesID: newSeriesID,
+                    now: now
+                )
+                return .init(
+                    graph: future.graph,
+                    futureOutcome: .split(
+                        oldSeriesID: series.id,
+                        newSeriesID: newSeriesID,
+                        boundary: key.originalDate,
+                        dayDelta: future.dayDelta,
+                        historicalOwnerRetained: future.historicalOwnerRetained
+                    )
+                )
+            }
         }
     }
 
@@ -127,7 +199,6 @@ public enum SeriesMutationEngine {
             result.exceptions[key] = .skipped
             result.completions.removeValue(forKey: key)
             return result
-
         case let .patch(patch):
             guard patch.weekdays == nil, isUnchanged(patch.recurrenceEndDate) else {
                 throw SeriesMutationError.invalidOnlyThisRulePatch
@@ -141,48 +212,22 @@ public enum SeriesMutationEngine {
         }
     }
 
-    private static func applyThisAndFuture(
-        edit: SeriesEdit,
-        to key: OccurrenceKey,
-        series: WeeklySeries,
-        graph: RecurrenceGraph,
-        newSeriesID: UUID,
-        now: Date
-    ) throws -> RecurrenceGraph {
-        switch edit {
-        case .delete:
-            return applyFutureDelete(to: key, series: series, graph: graph, now: now)
-        case let .patch(patch):
-            guard newSeriesID != series.id, graph.series[newSeriesID] == nil else {
-                throw SeriesMutationError.duplicateSeriesID
-            }
-            return try applyFuturePatch(
-                patch,
-                to: key,
-                series: series,
-                graph: graph,
-                newSeriesID: newSeriesID,
-                now: now
-            )
-        }
-    }
-
     private static func applyFutureDelete(
         to key: OccurrenceKey,
         series: WeeklySeries,
         graph: RecurrenceGraph,
         now: Date
-    ) -> RecurrenceGraph {
+    ) -> (graph: RecurrenceGraph, historicalOwnerRetained: Bool) {
         var result = graph
         removeFutureState(for: series.id, from: key.originalDate, in: &result)
-        closeOrRemoveHistoricalSeries(
+        let historicalOwnerRetained = closeOrRemoveHistoricalSeries(
             series,
             at: key.originalDate,
             graph: graph,
             result: &result,
             now: now
         )
-        return result
+        return (result, historicalOwnerRetained)
     }
 
     private static func applyFuturePatch(
@@ -192,7 +237,7 @@ public enum SeriesMutationEngine {
         graph: RecurrenceGraph,
         newSeriesID: UUID,
         now: Date
-    ) throws -> RecurrenceGraph {
+    ) throws -> (graph: RecurrenceGraph, historicalOwnerRetained: Bool, dayDelta: Int) {
         let dayDelta = patch.displayedStartDate.map { key.originalDate.days(until: $0) } ?? 0
         let future = try makeFutureSeries(
             from: series,
@@ -205,7 +250,7 @@ public enum SeriesMutationEngine {
 
         var result = graph
         removeFutureState(for: series.id, from: key.originalDate, in: &result)
-        closeOrRemoveHistoricalSeries(
+        let historicalOwnerRetained = closeOrRemoveHistoricalSeries(
             series,
             at: key.originalDate,
             graph: graph,
@@ -231,7 +276,7 @@ public enum SeriesMutationEngine {
             graph: graph,
             result: &result
         )
-        return result
+        return (result, historicalOwnerRetained, dayDelta)
     }
 
     private static func makeFutureSeries(
@@ -295,14 +340,14 @@ public enum SeriesMutationEngine {
         graph: RecurrenceGraph,
         result: inout RecurrenceGraph,
         now: Date
-    ) {
+    ) -> Bool {
         guard hasHistoricalInstanceOrException(
             of: series,
             before: boundary,
             exceptions: graph.exceptions
         ) else {
             result.series.removeValue(forKey: series.id)
-            return
+            return false
         }
 
         var historical = series
@@ -314,6 +359,7 @@ public enum SeriesMutationEngine {
         }
         historical.updatedAt = now
         result.series[series.id] = historical
+        return true
     }
 
     private static func migrateFutureExceptions(

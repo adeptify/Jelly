@@ -1013,6 +1013,238 @@ struct SeriesMutationEngineTests {
         #expect(before == RecurrenceGraph(series: [series.id: series], exceptions: [:], completions: [:]))
     }
 
+    @Test func onlyThisOutcomeIsNilAndApplyWrapperReturnsItsGraph() throws {
+        let series = try makeMondayWednesdaySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000401")!
+        )
+        let key = OccurrenceKey(seriesID: series.id, originalDate: series.ruleStartDate)
+        let graph = RecurrenceGraph(series: [series.id: series], exceptions: [:], completions: [:])
+
+        let outcomeResult = try SeriesMutationEngine.applyWithOutcome(
+            edit: .patch(.init(displayedStartDate: key.originalDate.addingDays(1))),
+            to: key,
+            scope: .onlyThis,
+            in: graph,
+            newSeriesID: series.id,
+            now: .distantPast
+        )
+        let wrapperResult = try SeriesMutationEngine.apply(
+            edit: .patch(.init(displayedStartDate: key.originalDate.addingDays(1))),
+            to: key,
+            scope: .onlyThis,
+            in: graph,
+            newSeriesID: series.id,
+            now: .distantPast
+        )
+
+        #expect(outcomeResult.futureOutcome == nil)
+        #expect(wrapperResult == outcomeResult.graph)
+        #expect(outcomeResult.graph.exceptions[key] != nil)
+    }
+
+    @Test func splitOutcomeUsesOriginalDateBoundaryAndExactInjectedID() throws {
+        let series = try makeMondayWednesdaySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000402")!
+        )
+        let boundary = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: CalendarDate(year: 2026, month: 8, day: 10)!
+        )
+        let existingMovedOverride = makeOverride(
+            for: series,
+            on: CalendarDate(year: 2026, month: 8, day: 20)!
+        )
+        let graph = RecurrenceGraph(
+            series: [series.id: series],
+            exceptions: [boundary: .modified(existingMovedOverride)],
+            completions: [:]
+        )
+        let newSeriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000403")!
+
+        let result = try SeriesMutationEngine.applyWithOutcome(
+            edit: .patch(.init(displayedStartDate: CalendarDate(year: 2026, month: 8, day: 9)!)),
+            to: boundary,
+            scope: .thisAndFuture,
+            in: graph,
+            newSeriesID: newSeriesID,
+            now: .distantPast
+        )
+
+        #expect(result.futureOutcome == .split(
+            oldSeriesID: series.id,
+            newSeriesID: newSeriesID,
+            boundary: boundary.originalDate,
+            dayDelta: -1,
+            historicalOwnerRetained: true
+        ))
+        #expect(result.graph.series[newSeriesID] != nil)
+        #expect(result.graph.series[series.id]?.recurrenceEndDate == boundary.originalDate.previousDay)
+    }
+
+    @Test func firstActualOccurrenceSplitDoesNotRetainHistoricalOwner() throws {
+        let series = try WeeklySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000404")!,
+            kind: .task,
+            title: "首个实际事项",
+            categoryID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            ruleStartDate: CalendarDate(year: 2026, month: 8, day: 4)!,
+            recurrenceEndDate: nil,
+            weekdays: [.monday],
+            durationDays: 1,
+            startTime: nil,
+            endTime: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let boundary = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: CalendarDate(year: 2026, month: 8, day: 10)!
+        )
+        let newSeriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000405")!
+
+        let result = try SeriesMutationEngine.applyWithOutcome(
+            edit: .patch(.init(title: "新的未来")),
+            to: boundary,
+            scope: .thisAndFuture,
+            in: .init(series: [series.id: series], exceptions: [:], completions: [:]),
+            newSeriesID: newSeriesID,
+            now: .distantPast
+        )
+
+        #expect(result.futureOutcome == .split(
+            oldSeriesID: series.id,
+            newSeriesID: newSeriesID,
+            boundary: boundary.originalDate,
+            dayDelta: 0,
+            historicalOwnerRetained: false
+        ))
+        #expect(result.graph.series[series.id] == nil)
+    }
+
+    @Test func futureDeleteOutcomeRetainsHistoryOnlyWhenRealOccurrencePrecedesBoundary() throws {
+        let retained = try makeMondayWednesdaySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000406")!
+        )
+        let retainedBoundary = OccurrenceKey(
+            seriesID: retained.id,
+            originalDate: CalendarDate(year: 2026, month: 8, day: 10)!
+        )
+        let retainedResult = try SeriesMutationEngine.applyWithOutcome(
+            edit: .delete,
+            to: retainedBoundary,
+            scope: .thisAndFuture,
+            in: .init(series: [retained.id: retained], exceptions: [:], completions: [:]),
+            newSeriesID: retained.id,
+            now: .distantPast
+        )
+        #expect(retainedResult.futureOutcome == .deleteFuture(
+            seriesID: retained.id,
+            boundary: retainedBoundary.originalDate,
+            historicalOwnerRetained: true
+        ))
+
+        let first = try WeeklySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000407")!,
+            kind: .task,
+            title: "首个实际事项",
+            categoryID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            ruleStartDate: CalendarDate(year: 2026, month: 8, day: 4)!,
+            recurrenceEndDate: nil,
+            weekdays: [.monday],
+            durationDays: 1,
+            startTime: nil,
+            endTime: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let firstBoundary = OccurrenceKey(
+            seriesID: first.id,
+            originalDate: CalendarDate(year: 2026, month: 8, day: 10)!
+        )
+        let firstResult = try SeriesMutationEngine.applyWithOutcome(
+            edit: .delete,
+            to: firstBoundary,
+            scope: .thisAndFuture,
+            in: .init(series: [first.id: first], exceptions: [:], completions: [:]),
+            newSeriesID: first.id,
+            now: .distantPast
+        )
+        #expect(firstResult.futureOutcome == .deleteFuture(
+            seriesID: first.id,
+            boundary: firstBoundary.originalDate,
+            historicalOwnerRetained: false
+        ))
+        #expect(firstResult.graph.series[first.id] == nil)
+    }
+
+    @Test func splitRejectsSameAndExistingInjectedSeriesIDsWithoutMutatingGraph() throws {
+        let series = try makeMondayWednesdaySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000408")!
+        )
+        let existing = try makeMondayWednesdaySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000409")!
+        )
+        let key = OccurrenceKey(seriesID: series.id, originalDate: series.ruleStartDate)
+        let graph = RecurrenceGraph(
+            series: [series.id: series, existing.id: existing],
+            exceptions: [:],
+            completions: [:]
+        )
+
+        #expect(throws: SeriesMutationError.duplicateSeriesID) {
+            try SeriesMutationEngine.applyWithOutcome(
+                edit: .patch(.init()), to: key, scope: .thisAndFuture,
+                in: graph, newSeriesID: series.id, now: .distantPast
+            )
+        }
+        #expect(throws: SeriesMutationError.duplicateSeriesID) {
+            try SeriesMutationEngine.applyWithOutcome(
+                edit: .patch(.init()), to: key, scope: .thisAndFuture,
+                in: graph, newSeriesID: existing.id, now: .distantPast
+            )
+        }
+        #expect(graph.series.count == 2)
+    }
+
+    @Test func splitDayDeltaUsesCivilDatesAcrossMonthAndDSTBoundaries() throws {
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let series = try WeeklySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000410")!,
+            kind: .task,
+            title: "民用日期",
+            categoryID: categoryID,
+            ruleStartDate: CalendarDate(year: 2026, month: 3, day: 1)!,
+            recurrenceEndDate: nil,
+            weekdays: [.sunday],
+            durationDays: 1,
+            startTime: nil,
+            endTime: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let boundary = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: CalendarDate(year: 2026, month: 3, day: 8)!
+        )
+        let newID = UUID(uuidString: "00000000-0000-0000-0000-000000000411")!
+        let result = try SeriesMutationEngine.applyWithOutcome(
+            edit: .patch(.init(displayedStartDate: CalendarDate(year: 2026, month: 2, day: 28)!)),
+            to: boundary,
+            scope: .thisAndFuture,
+            in: .init(series: [series.id: series], exceptions: [:], completions: [:]),
+            newSeriesID: newID,
+            now: .distantPast
+        )
+
+        #expect(result.futureOutcome == .split(
+            oldSeriesID: series.id,
+            newSeriesID: newID,
+            boundary: boundary.originalDate,
+            dayDelta: -8,
+            historicalOwnerRetained: true
+        ))
+    }
+
     private func makeMondayWednesdaySeries(id: UUID) throws -> WeeklySeries {
         try WeeklySeries(
             id: id,

@@ -15,6 +15,8 @@ public enum WorkspaceValidationError: Error, Equatable, Sendable {
     case primaryAlsoReference(CalendarNoteOwnerID, NoteID)
     case occurrencePrimaryAlsoReference(OccurrenceKey, NoteID)
     case overlappingOccurrenceReferences(OccurrenceKey, NoteID)
+    case primaryConflictsWithLegacyMarkdown(CalendarNoteOwnerID)
+    case occurrencePrimaryConflictsWithLegacyMarkdown(OccurrenceKey)
     case danglingCalendarItem(UUID)
     case taskBlockMissingTask(NoteID, BlockID)
     case taskBlockMissingPrimaryNote(NoteID, UUID)
@@ -74,13 +76,16 @@ public enum WorkspaceValidator {
                 throw WorkspaceValidationError.danglingCalendarOwner(owner)
             }
             try validate(noteSet, for: owner, in: state.notes)
+            if noteSet.primaryNoteID != nil, hasLegacyMarkdown(for: owner, in: state.calendar) {
+                throw WorkspaceValidationError.primaryConflictsWithLegacyMarkdown(owner)
+            }
         }
 
         for (key, override) in state.calendarNoteRelations.occurrenceOverrides {
             guard key == override.key else {
                 throw WorkspaceValidationError.inconsistentOccurrenceOverrideKey(key)
             }
-            guard state.calendar.recurrence.series[key.seriesID] != nil else {
+            guard CalendarNoteRelationResolver.isLogicalInstance(key, in: state.calendar.recurrence) else {
                 throw WorkspaceValidationError.danglingOccurrenceOverride(key)
             }
             if case let .replace(noteID) = override.primary {
@@ -97,6 +102,18 @@ public enum WorkspaceValidator {
             }
             if let overlap = override.addedReferenceNoteIDs.intersection(override.removedReferenceNoteIDs).first {
                 throw WorkspaceValidationError.overlappingOccurrenceReferences(key, overlap)
+            }
+            guard !CalendarNoteRelationResolver.isSkipped(key, in: state.calendar.recurrence) else {
+                continue
+            }
+            let resolved = try CalendarNoteRelationResolver.resolve(
+                .occurrence(key),
+                calendar: state.calendar,
+                relations: state.calendarNoteRelations
+            )
+            if resolved.noteSet.primaryNoteID != nil,
+               hasLegacyMarkdown(for: key, in: state.calendar) {
+                throw WorkspaceValidationError.occurrencePrimaryConflictsWithLegacyMarkdown(key)
             }
         }
     }
@@ -166,6 +183,35 @@ public enum WorkspaceValidator {
         case let .series(id):
             calendar.recurrence.series[id] != nil
         }
+    }
+
+    private static func hasLegacyMarkdown(
+        for owner: CalendarNoteOwnerID,
+        in calendar: CalendarState
+    ) -> Bool {
+        switch owner {
+        case let .item(id):
+            calendar.items[id].map { hasLegacyMarkdown($0.notes) } ?? false
+        case let .series(id):
+            calendar.recurrence.series[id].map { hasLegacyMarkdown($0.notes) } ?? false
+        }
+    }
+
+    private static func hasLegacyMarkdown(
+        for key: OccurrenceKey,
+        in calendar: CalendarState
+    ) -> Bool {
+        guard let series = calendar.recurrence.series[key.seriesID] else {
+            return false
+        }
+        if case let .modified(override) = calendar.recurrence.exceptions[key] {
+            return hasLegacyMarkdown(override.notes)
+        }
+        return hasLegacyMarkdown(series.notes)
+    }
+
+    private static func hasLegacyMarkdown(_ markdown: String) -> Bool {
+        !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private static func hasValidRawInput(_ inspiration: Inspiration) -> Bool {

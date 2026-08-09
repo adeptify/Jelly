@@ -1,13 +1,32 @@
 import Foundation
 
+public struct CalendarReduction: Equatable, Sendable {
+    public let state: CalendarState
+    public let seriesOutcome: SeriesFutureMutationOutcome?
+
+    public init(state: CalendarState, seriesOutcome: SeriesFutureMutationOutcome?) {
+        self.state = state
+        self.seriesOutcome = seriesOutcome
+    }
+}
+
 public enum CalendarReducer {
     public static func reduce(
         _ state: CalendarState,
         command: CalendarCommand,
         now: Date
     ) throws -> CalendarState {
+        try reduceWithOutcome(state, command: command, now: now).state
+    }
+
+    public static func reduceWithOutcome(
+        _ state: CalendarState,
+        command: CalendarCommand,
+        now: Date
+    ) throws -> CalendarReduction {
         try CalendarStateValidator.validate(state)
         var result = state
+        var seriesOutcome: SeriesFutureMutationOutcome?
 
         switch command {
         case let .createItem(item):
@@ -95,7 +114,7 @@ public enum CalendarReducer {
             if case let .patch(patch) = edit, let categoryID = patch.categoryID {
                 try requireKnownCategory(categoryID, in: result)
             }
-            result.recurrence = try SeriesMutationEngine.apply(
+            let mutation = try SeriesMutationEngine.applyWithOutcome(
                 edit: edit,
                 to: key,
                 scope: scope,
@@ -103,6 +122,8 @@ public enum CalendarReducer {
                 newSeriesID: newSeriesID,
                 now: now
             )
+            result.recurrence = mutation.graph
+            seriesOutcome = mutation.futureOutcome
 
         case let .createCategory(category):
             guard result.categories[category.id] == nil else {
@@ -186,7 +207,7 @@ public enum CalendarReducer {
         }
 
         try CalendarStateValidator.validate(result)
-        return result
+        return .init(state: result, seriesOutcome: seriesOutcome)
     }
 
     private static func requireKnownCategory(_ id: UUID, in state: CalendarState) throws {

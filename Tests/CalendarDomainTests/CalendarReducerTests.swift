@@ -595,6 +595,51 @@ struct CalendarReducerTests {
         #expect(result.categories[accented.id]?.name == "résumé")
     }
 
+    @Test func reduceWithOutcomeThreadsSeriesResultAndLegacyWrapperReturnsState() throws {
+        let state = try makeRecurringTaskState()
+        let series = try #require(state.recurrence.series.values.first)
+        let key = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: CalendarDate(year: 2026, month: 8, day: 10)!
+        )
+        let newSeriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000370")!
+        let command = CalendarCommand.mutateSeries(
+            key,
+            scope: .thisAndFuture,
+            edit: .patch(.init(displayedStartDate: key.originalDate.addingDays(1))),
+            newSeriesID: newSeriesID
+        )
+
+        let reduction = try CalendarReducer.reduceWithOutcome(state, command: command, now: .distantPast)
+        let wrapper = try CalendarReducer.reduce(state, command: command, now: .distantPast)
+
+        #expect(reduction.state == wrapper)
+        #expect(reduction.seriesOutcome == .split(
+            oldSeriesID: series.id,
+            newSeriesID: newSeriesID,
+            boundary: key.originalDate,
+            dayDelta: 1,
+            historicalOwnerRetained: true
+        ))
+    }
+
+    @Test func reduceWithOutcomeLeavesNonSeriesCommandsWithoutSeriesOutcome() throws {
+        let state = try makeRecurringTaskState()
+        let reduction = try CalendarReducer.reduceWithOutcome(
+            state,
+            command: .setOccurrenceCompleted(
+                .init(
+                    seriesID: try #require(state.recurrence.series.keys.first),
+                    originalDate: CalendarDate(year: 2026, month: 8, day: 3)!
+                ),
+                Date(timeIntervalSince1970: 1)
+            ),
+            now: .distantPast
+        )
+
+        #expect(reduction.seriesOutcome == nil)
+    }
+
     private func makeRecurringTaskState(endDate: CalendarDate? = nil) throws -> CalendarState {
         let uncategorizedID = UUID(uuidString: "00000000-0000-0000-0000-000000000350")!
         let state = CalendarState.empty(uncategorizedID: uncategorizedID, now: .init(timeIntervalSince1970: 0))
