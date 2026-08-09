@@ -144,8 +144,13 @@ public enum BlockMarkdownCodec {
 
             if let heading = heading(in: line) {
                 activeListIndentLevels.removeAll()
-                try appendBlock(kind: heading.kind, inlineContent: parseInlineMarkdown(heading.text))
-                index += 1
+                let continuation = inlineContinuation(
+                    startingWith: heading.text,
+                    in: lines,
+                    after: index + 1
+                )
+                try appendBlock(kind: heading.kind, inlineContent: parseInlineMarkdown(continuation.text))
+                index = continuation.nextIndex
                 continue
             }
 
@@ -173,25 +178,30 @@ public enum BlockMarkdownCodec {
                 } else {
                     taskState = nil
                 }
+                let continuation = inlineContinuation(
+                    startingWith: list.text,
+                    in: lines,
+                    after: index + 1
+                )
                 try appendBlock(
                     kind: list.kind,
-                    inlineContent: parseInlineMarkdown(list.text),
+                    inlineContent: parseInlineMarkdown(continuation.text),
                     taskState: taskState,
                     indentLevel: list.indentLevel
                 )
                 activeListIndentLevels = Set(activeListIndentLevels.filter { $0 <= list.indentLevel })
                 activeListIndentLevels.insert(list.indentLevel)
-                index += 1
+                index = continuation.nextIndex
                 continue
             }
 
-            if let standaloneLink = standaloneLink(in: line) {
+            if let standaloneLink = standaloneLink(in: lines, at: index) {
                 activeListIndentLevels.removeAll()
                 try appendBlock(
                     kind: .link,
-                    inlineContent: inlineLinkContent(label: standaloneLink.label, url: standaloneLink.url)
+                    inlineContent: inlineLinkContent(label: standaloneLink.link.label, url: standaloneLink.link.url)
                 )
-                index += 1
+                index = standaloneLink.nextIndex
                 continue
             }
 
@@ -226,21 +236,21 @@ public enum BlockMarkdownCodec {
             case .paragraph:
                 rendered = exportParagraph(block.inlineContent)
             case .heading1:
-                rendered = "# \(exportInline(block.inlineContent))"
+                rendered = "# \(exportMultilineBlockContent(block.inlineContent))"
             case .heading2:
-                rendered = "## \(exportInline(block.inlineContent))"
+                rendered = "## \(exportMultilineBlockContent(block.inlineContent))"
             case .heading3:
-                rendered = "### \(exportInline(block.inlineContent))"
+                rendered = "### \(exportMultilineBlockContent(block.inlineContent))"
             case .bullet:
-                rendered = "\(listIndent(block.indentLevel))- \(exportInline(block.inlineContent))"
+                rendered = "\(listIndent(block.indentLevel))- \(exportMultilineBlockContent(block.inlineContent))"
             case .ordered:
                 let next = (orderedCounters[block.indentLevel] ?? 0) + 1
                 orderedCounters[block.indentLevel] = next
                 orderedCounters = orderedCounters.filter { $0.key <= block.indentLevel }
-                rendered = "\(listIndent(block.indentLevel))\(next). \(exportInline(block.inlineContent))"
+                rendered = "\(listIndent(block.indentLevel))\(next). \(exportMultilineBlockContent(block.inlineContent))"
             case .task:
                 let checkbox = block.taskState?.completedAt == nil ? "[ ]" : "[x]"
-                rendered = "\(listIndent(block.indentLevel))- \(checkbox) \(exportInline(block.inlineContent))"
+                rendered = "\(listIndent(block.indentLevel))- \(checkbox) \(exportMultilineBlockContent(block.inlineContent))"
             case .quote:
                 rendered = block.inlineContent.spans.isEmpty
                     ? ">"
@@ -253,7 +263,7 @@ public enum BlockMarkdownCodec {
             case .divider:
                 rendered = "---"
             case .link:
-                rendered = exportInline(block.inlineContent)
+                rendered = exportMultilineBlockContent(block.inlineContent)
             }
             if block.kind != .code {
                 rendered = canonicalizeProseTrailingWhitespace(rendered)
@@ -425,6 +435,40 @@ private func standaloneLink(in line: String) -> StandaloneLink? {
     return .init(label: link.label, url: link.url)
 }
 
+private func standaloneLink(in lines: [String], at index: Int) -> (link: StandaloneLink, nextIndex: Int)? {
+    var candidate = lines[index]
+    var nextIndex = index + 1
+
+    while true {
+        if let link = standaloneLink(in: candidate) {
+            return (link, nextIndex)
+        }
+        guard nextIndex < lines.count,
+              !lines[nextIndex].isEmpty,
+              !isBlockStart(lines[nextIndex]) else {
+            return nil
+        }
+        candidate += "\n" + lines[nextIndex]
+        nextIndex += 1
+    }
+}
+
+private func inlineContinuation(
+    startingWith firstLine: String,
+    in lines: [String],
+    after index: Int
+) -> (text: String, nextIndex: Int) {
+    var continuationLines = [firstLine]
+    var nextIndex = index
+    while nextIndex < lines.count,
+          !lines[nextIndex].isEmpty,
+          !isBlockStart(lines[nextIndex]) {
+        continuationLines.append(lines[nextIndex])
+        nextIndex += 1
+    }
+    return (continuationLines.joined(separator: "\n"), nextIndex)
+}
+
 private func isBlockStart(_ line: String) -> Bool {
     fenceOpening(in: line) != nil ||
         line.hasPrefix("|") ||
@@ -540,6 +584,15 @@ private func parseInlineMarkdown(_ markdown: String) -> InlineContent {
     return parseInline(normalizedLines.joined(separator: "\n"))
 }
 
+private func parseInlineLinkLabel(_ label: String) -> InlineContent {
+    let lines = label.components(separatedBy: "\n")
+    let normalizedLines = lines.enumerated().map { offset, line -> String in
+        guard offset < lines.count - 1, hasOddTrailingBackslash(line) else { return line }
+        return String(line.dropLast()) + "  "
+    }
+    return parseInline(normalizedLines.joined(separator: "\n"))
+}
+
 private func inlineLink(in characters: [Character], at index: Int) -> (label: String, url: URL, endIndex: Int)? {
     guard let closingLabel = unescapedDelimiterIndex("]", in: characters, startingAt: index + 1),
           closingLabel + 1 < characters.count,
@@ -606,8 +659,17 @@ private func exportParagraph(_ content: InlineContent) -> String {
         .joined(separator: "\n")
 }
 
+private func exportMultilineBlockContent(_ content: InlineContent) -> String {
+    let canonical = canonicalizeProseTrailingWhitespace(exportInline(content))
+    return canonical
+        .components(separatedBy: "\n")
+        .enumerated()
+        .map { offset, line in offset == 0 ? line : escapeBlockStart(line) }
+        .joined(separator: "\n")
+}
+
 private func inlineLinkContent(label: String, url: URL) -> InlineContent {
-    var content = parseInlineMarkdown(label)
+    var content = parseInlineLinkLabel(label)
     if content.spans.isEmpty {
         content.spans = [.init(text: "", linkURL: url)]
     } else {

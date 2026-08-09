@@ -279,6 +279,48 @@ struct BlockMarkdownCodecTests {
         #expect(reimported == document)
     }
 
+    @Test(arguments: MultilineProseFixture.all)
+    func everySupportedProseKindRoundTripsSoftAndHardLineBreaks(_ fixture: MultilineProseFixture) throws {
+        let markdown = try BlockMarkdownCodec.exportMarkdown(fixture.document)
+        let reimported = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed([fixture.document.blocks[0].id, BlockID(), BlockID()]),
+            checkedTaskCompletedAt: .distantPast
+        ).document
+
+        #expect(markdown == fixture.canonicalMarkdown)
+        #expect(reimported == fixture.document)
+    }
+
+    @Test func linkLabelsPreserveBoundaryWhitespaceAndMultilineCombinedMarks() throws {
+        let url = URL(string: "https://example.com/labels")!
+        let document = BlockDocument(blocks: [
+            .init(
+                id: Self.ids(count: 1, start: 620)[0],
+                kind: .link,
+                inlineContent: .init(spans: [.init(text: "A ", linkURL: url)]),
+                taskState: nil,
+                indentLevel: 0
+            ),
+            .init(
+                id: Self.ids(count: 1, start: 621)[0],
+                kind: .link,
+                inlineContent: .init(spans: [.init(text: " A\nB ", marks: [.bold, .italic], linkURL: url)]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+        let reimported = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(Self.ids(count: 2, start: 620)),
+            checkedTaskCompletedAt: .distantPast
+        ).document
+
+        #expect(markdown == "[A ](https://example.com/labels)\n\n[*** A\nB ***](https://example.com/labels)")
+        #expect(reimported == document)
+    }
+
     @Test func backtickFenceInfoIsDiagnosedAndPreservedAsParagraph() throws {
         let source = "```swift`dialect\nlet value = 1\n```"
         let result = try BlockMarkdownCodec.importMarkdown(
@@ -328,6 +370,68 @@ struct BlockMarkdownCodecTests {
             return BlockID(UUID(uuidString: string)!)
         }
     }
+}
+
+struct MultilineProseFixture: Sendable {
+    let name: String
+    let document: BlockDocument
+    let canonicalMarkdown: String
+
+    private static let content = InlineContent.plain("a\nb  \nc")
+    private static let linkURL = URL(string: "https://example.com/multiline")!
+
+    private static func id(_ value: Int) -> BlockID {
+        let string = String(format: "00000000-0000-0000-0000-%012d", value)
+        return BlockID(UUID(uuidString: string)!)
+    }
+
+    static let all: [MultilineProseFixture] = [
+        .init(
+            name: "paragraph",
+            document: .init(blocks: [.init(id: id(600), kind: .paragraph, inlineContent: content, taskState: nil, indentLevel: 0)]),
+            canonicalMarkdown: "a\nb\\\nc"
+        ),
+        .init(
+            name: "heading 1",
+            document: .init(blocks: [.init(id: id(601), kind: .heading1, inlineContent: content, taskState: nil, indentLevel: 0)]),
+            canonicalMarkdown: "# a\nb\\\nc"
+        ),
+        .init(
+            name: "heading 2",
+            document: .init(blocks: [.init(id: id(602), kind: .heading2, inlineContent: content, taskState: nil, indentLevel: 0)]),
+            canonicalMarkdown: "## a\nb\\\nc"
+        ),
+        .init(
+            name: "heading 3",
+            document: .init(blocks: [.init(id: id(603), kind: .heading3, inlineContent: content, taskState: nil, indentLevel: 0)]),
+            canonicalMarkdown: "### a\nb\\\nc"
+        ),
+        .init(
+            name: "bullet",
+            document: .init(blocks: [.init(id: id(604), kind: .bullet, inlineContent: content, taskState: nil, indentLevel: 0)]),
+            canonicalMarkdown: "- a\nb\\\nc"
+        ),
+        .init(
+            name: "ordered",
+            document: .init(blocks: [.init(id: id(605), kind: .ordered, inlineContent: content, taskState: nil, indentLevel: 0)]),
+            canonicalMarkdown: "1. a\nb\\\nc"
+        ),
+        .init(
+            name: "task",
+            document: .init(blocks: [.init(id: id(606), kind: .task, inlineContent: content, taskState: .init(completedAt: .distantPast), indentLevel: 0)]),
+            canonicalMarkdown: "- [x] a\nb\\\nc"
+        ),
+        .init(
+            name: "quote",
+            document: .init(blocks: [.init(id: id(607), kind: .quote, inlineContent: content, taskState: nil, indentLevel: 0)]),
+            canonicalMarkdown: "> a\n> b\\\n> c"
+        ),
+        .init(
+            name: "link",
+            document: .init(blocks: [.init(id: id(608), kind: .link, inlineContent: .init(spans: [.init(text: "a\nb  \nc", linkURL: linkURL)]), taskState: nil, indentLevel: 0)]),
+            canonicalMarkdown: "[a\nb\\\nc](https://example.com/multiline)"
+        )
+    ]
 }
 
 struct BlockMarkdownFixture: Sendable {
