@@ -12,6 +12,33 @@ public enum LinkedTaskBlockDeletionDisposition: String, Codable, Equatable, Send
     case deleteCalendarItem
 }
 
+/// Namespaces a journal generation so a Task 5 legacy record can never collide
+/// with a live editor session that happens to use the same UUID bytes.
+public enum DraftJournalSessionID: Hashable, Codable, Sendable {
+    case editor(UUID)
+    case legacyTask5
+}
+
+public struct DraftJournalIdentity: Hashable, Codable, Sendable {
+    public let noteID: NoteID
+    public let editSessionID: DraftJournalSessionID
+
+    public init(noteID: NoteID, editSessionID: DraftJournalSessionID) {
+        self.noteID = noteID
+        self.editSessionID = editSessionID
+    }
+}
+
+public struct DraftJournalIdentityAndGeneration: Hashable, Codable, Sendable {
+    public let identity: DraftJournalIdentity
+    public let draftGeneration: UInt64
+
+    public init(identity: DraftJournalIdentity, draftGeneration: UInt64) {
+        self.identity = identity
+        self.draftGeneration = draftGeneration
+    }
+}
+
 public struct NoteDraftSubmission: Equatable, Sendable {
     public let noteID: NoteID
     public let editSessionID: UUID
@@ -54,18 +81,29 @@ public struct NoteDraftSubmission: Equatable, Sendable {
 
 public struct PersistableDraftContext: Equatable, Sendable {
     public let noteID: NoteID
+    public let editSessionID: DraftJournalSessionID
     public let draftGeneration: UInt64
     public let noteSnapshotChecksum: String
+    public let persistedNoteRevision: Int64
 
-    public init(noteID: NoteID, draftGeneration: UInt64, noteSnapshotChecksum: String) {
+    public init(
+        noteID: NoteID,
+        editSessionID: DraftJournalSessionID,
+        draftGeneration: UInt64,
+        noteSnapshotChecksum: String,
+        persistedNoteRevision: Int64
+    ) {
         self.noteID = noteID
+        self.editSessionID = editSessionID
         self.draftGeneration = draftGeneration
         self.noteSnapshotChecksum = noteSnapshotChecksum
+        self.persistedNoteRevision = persistedNoteRevision
     }
 }
 
 public struct DraftJournalEntry: Codable, Equatable, Sendable {
     public let noteID: NoteID
+    public let editSessionID: DraftJournalSessionID
     public let baseWorkspaceRevision: Int64
     public let baseNoteRevision: Int64
     public let draftGeneration: UInt64
@@ -76,6 +114,7 @@ public struct DraftJournalEntry: Codable, Equatable, Sendable {
 
     public init(
         noteID: NoteID,
+        editSessionID: DraftJournalSessionID,
         baseWorkspaceRevision: Int64,
         baseNoteRevision: Int64,
         draftGeneration: UInt64,
@@ -85,6 +124,7 @@ public struct DraftJournalEntry: Codable, Equatable, Sendable {
         journalChecksum: String
     ) {
         self.noteID = noteID
+        self.editSessionID = editSessionID
         self.baseWorkspaceRevision = baseWorkspaceRevision
         self.baseNoteRevision = baseNoteRevision
         self.draftGeneration = draftGeneration
@@ -97,17 +137,20 @@ public struct DraftJournalEntry: Codable, Equatable, Sendable {
 
 public struct PersistedDraftReceipt: Codable, Equatable, Sendable {
     public let noteID: NoteID
+    public let editSessionID: DraftJournalSessionID
     public let draftGeneration: UInt64
     public let noteSnapshotChecksum: String
     public let persistedNoteRevision: Int64
 
     public init(
         noteID: NoteID,
+        editSessionID: DraftJournalSessionID,
         draftGeneration: UInt64,
         noteSnapshotChecksum: String,
         persistedNoteRevision: Int64
     ) {
         self.noteID = noteID
+        self.editSessionID = editSessionID
         self.draftGeneration = draftGeneration
         self.noteSnapshotChecksum = noteSnapshotChecksum
         self.persistedNoteRevision = persistedNoteRevision

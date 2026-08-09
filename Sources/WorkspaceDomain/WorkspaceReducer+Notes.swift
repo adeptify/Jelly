@@ -145,8 +145,10 @@ extension WorkspaceReducer {
         candidate.notes[current.id] = merged
         metadata.draftContext = .init(
             noteID: current.id,
+            editSessionID: .editor(submission.editSessionID),
             draftGeneration: submission.draftGeneration,
-            noteSnapshotChecksum: submission.noteSnapshotChecksum
+            noteSnapshotChecksum: submission.noteSnapshotChecksum,
+            persistedNoteRevision: current.revision
         )
         return .proceed
     }

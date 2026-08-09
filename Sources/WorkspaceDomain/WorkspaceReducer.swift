@@ -41,6 +41,16 @@ public enum WorkspaceReducer {
         }
 
         let changedNoteIDs = try allocateRevisions(from: state, to: &candidate)
+        if let draft = metadata.draftContext,
+           let finalNote = candidate.notes[draft.noteID] {
+            metadata.draftContext = .init(
+                noteID: finalNote.id,
+                editSessionID: draft.editSessionID,
+                draftGeneration: draft.draftGeneration,
+                noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(finalNote),
+                persistedNoteRevision: finalNote.revision
+            )
+        }
         do {
             try WorkspaceValidator.validate(candidate)
         } catch {

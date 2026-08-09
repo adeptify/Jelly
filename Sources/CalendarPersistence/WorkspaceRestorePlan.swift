@@ -1,13 +1,25 @@
 import Foundation
 import WorkspaceDomain
 
-public struct WorkspaceRestoreRequest: Equatable, Sendable {
+public struct WorkspaceRestorePreview: Equatable, Sendable {
     public let sourceURL: URL
-    public let rollbackDirectoryURL: URL
+    public let rawSourceData: Data
+    public let sourceIdentity: WorkspaceRawSourceIdentity
+    public let loadResult: WorkspaceLoadResult
+    public let sourceNoteRevisions: [NoteID: Int64]
 
-    public init(sourceURL: URL, rollbackDirectoryURL: URL) {
+    public init(
+        sourceURL: URL,
+        rawSourceData: Data,
+        sourceIdentity: WorkspaceRawSourceIdentity,
+        loadResult: WorkspaceLoadResult,
+        sourceNoteRevisions: [NoteID: Int64]
+    ) {
         self.sourceURL = sourceURL
-        self.rollbackDirectoryURL = rollbackDirectoryURL
+        self.rawSourceData = rawSourceData
+        self.sourceIdentity = sourceIdentity
+        self.loadResult = loadResult
+        self.sourceNoteRevisions = sourceNoteRevisions
     }
 }
 
@@ -21,19 +33,15 @@ public struct PreparedWorkspaceRestore: Equatable, Sendable {
     let rollbackURL: URL
 
     init(
-        rawSourceData: Data,
-        provenance: WorkspaceLoadProvenance,
-        content: WorkspaceContentSnapshot,
-        sourceRevisionHighWatermark: Int64,
-        sourceNoteRevisions: [NoteID: Int64],
+        preview: WorkspaceRestorePreview,
         rollbackURL: URL,
         capabilityID: UUID
     ) {
-        self.rawSourceData = rawSourceData
-        self.provenance = provenance
-        self.content = content
-        self.sourceRevisionHighWatermark = sourceRevisionHighWatermark
-        self.sourceNoteRevisions = sourceNoteRevisions
+        rawSourceData = preview.rawSourceData
+        provenance = preview.loadResult.provenance
+        content = WorkspaceContentSnapshot(state: preview.loadResult.state)
+        sourceRevisionHighWatermark = preview.loadResult.state.revision
+        sourceNoteRevisions = preview.sourceNoteRevisions
         self.rollbackURL = rollbackURL
         self.capabilityID = capabilityID
     }

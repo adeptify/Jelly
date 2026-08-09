@@ -47,6 +47,30 @@ public actor BackupService {
         return try CalendarDocumentCodec.decode(data)
     }
 
+    public func inspectRestoreSource(_ sourceURL: URL) async throws -> WorkspaceRestorePreview {
+        let rawSourceData: Data
+        do {
+            rawSourceData = try dataReadingNoFollow(at: sourceURL)
+        } catch {
+            throw WorkspacePersistenceError.invalidDocument
+        }
+        let loadResult = try WorkspaceDocumentCodec.decode(rawSourceData)
+        let sourceNoteRevisions = loadResult.state.notes.mapValues(\.revision)
+        guard Set(sourceNoteRevisions.keys) == Set(loadResult.state.notes.keys) else {
+            throw WorkspacePersistenceError.restoreBindingMismatch
+        }
+        return WorkspaceRestorePreview(
+            sourceURL: sourceURL,
+            rawSourceData: rawSourceData,
+            sourceIdentity: .init(
+                sha256: persistenceSHA256(rawSourceData),
+                byteCount: rawSourceData.count
+            ),
+            loadResult: loadResult,
+            sourceNoteRevisions: sourceNoteRevisions
+        )
+    }
+
     public func restore(
         from source: URL,
         repository: any CalendarRepository,

@@ -39,10 +39,77 @@ public struct WorkspaceSaveReceipt: Equatable, Sendable {
     }
 }
 
+public enum WorkspaceCommittedOperation: Equatable, Sendable {
+    case save(WorkspaceSaveReceipt)
+    case restore(WorkspaceRestoreOutcome)
+}
+
+public struct WorkspaceRawSourceIdentity: Equatable, Codable, Sendable {
+    public let sha256: String
+    public let byteCount: Int
+
+    public init(sha256: String, byteCount: Int) {
+        self.sha256 = sha256
+        self.byteCount = byteCount
+    }
+}
+
+public enum WorkspaceRollbackArtifact: Equatable, Sendable {
+    case file(URL, WorkspaceRawSourceIdentity)
+    case nonePreviousSourceAbsent
+}
+
+public struct WorkspaceRestoreOutcome: Equatable, Sendable {
+    public let receipt: WorkspaceSaveReceipt
+    public let rollback: WorkspaceRollbackArtifact
+
+    public init(receipt: WorkspaceSaveReceipt, rollback: WorkspaceRollbackArtifact) {
+        self.receipt = receipt
+        self.rollback = rollback
+    }
+}
+
+public struct WorkspacePendingCommitArtifacts: Equatable, Sendable {
+    public let rollback: WorkspaceRollbackArtifact?
+
+    public init(rollback: WorkspaceRollbackArtifact? = nil) {
+        self.rollback = rollback
+    }
+}
+
 public enum WorkspaceCommitReconciliation: Equatable, Sendable {
-    case committed(WorkspaceSaveReceipt)
-    case notCommitted
+    case committed(WorkspaceCommittedOperation)
+    case notCommitted(WorkspacePendingCommitArtifacts)
+    case sourceChanged(WorkspacePendingCommitArtifacts)
+    case stillPending(WorkspacePendingCommitArtifacts)
+}
+
+public enum WorkspaceDirectCommitFailure: Error, Equatable, Sendable {
+    case sourceChanged(WorkspacePendingCommitArtifacts)
+}
+
+public enum WorkspaceDraftPersistenceVerification: Equatable, Sendable {
+    case verified(PersistedDraftReceipt)
+    case notPersisted
     case sourceChanged
+    case unreadableUnknown
+}
+
+public enum WorkspaceReloadedSource: Equatable, Sendable {
+    case absent
+    case valid(WorkspaceLoadResult)
+    case opaqueInvalid(WorkspaceRawSourceIdentity)
+    case unreadableUnknown
+}
+
+public struct WorkspaceRawRecoveryArtifact: Equatable, Sendable {
+    public let rawData: Data
+    public let identity: WorkspaceRawSourceIdentity
+
+    public init(rawData: Data, identity: WorkspaceRawSourceIdentity) {
+        self.rawData = rawData
+        self.identity = identity
+    }
 }
 
 public enum WorkspacePersistenceError: Error, Equatable, Sendable {
@@ -51,7 +118,6 @@ public enum WorkspacePersistenceError: Error, Equatable, Sendable {
     case invalidWorkspace
     case atomicWriteFailed
     case commitUncertain
-    case sourceChanged
     case missingDocument
     case invalidManifest
     case invalidSnapshot

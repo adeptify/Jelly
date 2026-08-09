@@ -25,124 +25,143 @@ struct JSONWorkspaceRepositoryTests {
         #expect(try await JSONWorkspaceRepository(documentURL: main, seed: { first }).load().state == second)
     }
 
-    @Test func concurrentSaveAndRestoreSerializeWithoutWritingAnUnpreparedCandidate() async throws {
+    @Test func inspectRestoreSourceIsPureAndPrepareIssuesTheSingleUseCapability() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
         let main = directory.file("calendar-v1.json")
         let source = directory.file("restore.json")
-        let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
-        var changed = initial
-        changed.revision = 2
-        changed.notes[changed.notes.keys.first!]!.revision = 2
-        changed.notes[changed.notes.keys.first!]!.title = "保存候选"
-        var restored = initial
-        restored.revision = 3
-        restored.notes[restored.notes.keys.first!]!.revision = 3
+        let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = current
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
         restored.notes[restored.notes.keys.first!]!.title = "恢复候选"
-        try WorkspaceDocumentCodec.encode(initial).write(to: main)
+        let currentData = try WorkspaceDocumentCodec.encode(current)
+        try currentData.write(to: main)
         try WorkspaceDocumentCodec.encode(restored).write(to: source)
-        let repository = JSONWorkspaceRepository(documentURL: main, seed: { initial })
+        let repository = JSONWorkspaceRepository(documentURL: main, seed: { current })
         _ = try await repository.load()
-        let prepared = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
 
-        let allowedRevisions = Set([changed.revision, restored.revision])
-        async let save: WorkspaceSaveReceipt = repository.save(changed)
-        async let restore: WorkspaceSaveReceipt = repository.commitRestore(prepared, state: restored)
-        _ = try await (save, restore)
-
-        let final = try WorkspaceDocumentCodec.decode(try await repository.currentDocumentData()).state
-        #expect(allowedRevisions.contains(final.revision))
+        let preview = try await BackupService().inspectRestoreSource(source)
+        #expect(try Data(contentsOf: main) == currentData)
+        let prepared = try await repository.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+        #expect(prepared.content == WorkspaceContentSnapshot(state: restored))
+        #expect(await repository.discardPreparedRestore(prepared))
+        await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
     }
 
-    @Test func secondSaveCannotEnterCASUntilTheFirstLoadedSourceReadbackFinishes() async throws {
+    @Test func restoreValidPrimaryReturnsVerifiedRollbackArtifact() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
         let main = directory.file("calendar-v1.json")
-        let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
-        var first = initial
-        first.revision = 2
-        first.notes[first.notes.keys.first!]!.revision = 2
-        first.notes[first.notes.keys.first!]!.title = "first queued save"
-        var second = first
-        second.revision = 3
-        second.notes[second.notes.keys.first!]!.revision = 3
-        second.notes[second.notes.keys.first!]!.title = "second queued save"
-        let secondForSave = second
-        let expectedSecondData = try WorkspaceDocumentCodec.encode(second)
-        try WorkspaceDocumentCodec.encode(initial).write(to: main)
-        let writer = WorkspacePersistenceSaveStageWriter()
-        let repository = JSONWorkspaceRepository(
-            documentURL: main,
-            seed: { initial },
-            mainFileWriter: writer
-        )
+        let source = directory.file("restore.json")
+        let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = current
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        restored.notes[restored.notes.keys.first!]!.title = "恢复完成"
+        let currentData = try WorkspaceDocumentCodec.encode(current)
+        try currentData.write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let repository = JSONWorkspaceRepository(documentURL: main, seed: { current })
         _ = try await repository.load()
 
-        let firstSave = Task { try await repository.save(first) }
-        #expect(writer.waitForFirstReplace(timeout: 1))
-        let secondSave = Task { try await repository.save(secondForSave) }
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(writer.replaceCallCount == 1)
+        let preview = try await BackupService().inspectRestoreSource(source)
+        let prepared = try await repository.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+        let outcome = try await repository.commitRestore(prepared, state: restored)
 
-        writer.releaseFirstReplace()
-        _ = try await firstSave.value
-        _ = try await secondSave.value
-
-        #expect(writer.replaceCallCount == 2)
-        #expect(try Data(contentsOf: main) == expectedSecondData)
-    }
-}
-
-final class WorkspacePersistenceSaveStageWriter: MainFileCompareAndReplaceWriting, @unchecked Sendable {
-    private let condition = NSCondition()
-    private var calls = 0
-    private var firstReplaceEntered = false
-    private var firstReplaceReleased = false
-
-    var replaceCallCount: Int {
-        condition.lock()
-        defer { condition.unlock() }
-        return calls
-    }
-
-    func createIfAbsent(candidate: Data, at destination: URL) throws -> MainFileCompareAndReplaceResult {
-        try FoundationMainFileCompareAndReplaceWriter().createIfAbsent(candidate: candidate, at: destination)
-    }
-
-    func replaceIfSHA256Matches(
-        expectedSHA256: String,
-        candidate: Data,
-        at destination: URL
-    ) throws -> MainFileCompareAndReplaceResult {
-        condition.lock()
-        calls += 1
-        if calls == 1 {
-            firstReplaceEntered = true
-            condition.broadcast()
-            while !firstReplaceReleased { condition.wait() }
+        #expect(outcome.receipt == WorkspaceSaveReceipt(workspaceRevision: 2, persistedDraft: nil))
+        guard case let .file(rollbackURL, identity) = outcome.rollback else {
+            Issue.record("A present primary must create a rollback file")
+            return
         }
-        condition.unlock()
-        return try FoundationMainFileCompareAndReplaceWriter().replaceIfSHA256Matches(
-            expectedSHA256: expectedSHA256,
-            candidate: candidate,
-            at: destination
-        )
+        #expect(try Data(contentsOf: rollbackURL) == currentData)
+        #expect(identity == .init(sha256: WorkspacePersistenceFixtures.sha256(currentData), byteCount: currentData.count))
+        #expect(try await repository.load().state == restored)
     }
 
-    func waitForFirstReplace(timeout: TimeInterval) -> Bool {
-        condition.lock()
-        defer { condition.unlock() }
-        let deadline = Date().addingTimeInterval(timeout)
-        while !firstReplaceEntered {
-            guard condition.wait(until: deadline) else { return false }
+    @Test func absentPrimaryRestoreCreatesWithoutFabricatingRollbackFile() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let source = directory.file("restore.json")
+        let restored = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let repository = JSONWorkspaceRepository(documentURL: main, seed: { restored })
+        _ = try await repository.load()
+
+        let preview = try await BackupService().inspectRestoreSource(source)
+        let prepared = try await repository.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+        let outcome = try await repository.commitRestore(prepared, state: restored)
+
+        #expect(outcome.rollback == .nonePreviousSourceAbsent)
+        #expect(try await repository.load().state == restored)
+    }
+
+    @Test func opaquePrimaryIsRetainedForRawRecoveryAndCanBeRestoredWithRollback() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let source = directory.file("restore.json")
+        let opaque = Data("opaque-invalid-primary".utf8)
+        let restored = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        try opaque.write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let repository = JSONWorkspaceRepository(documentURL: main, seed: { restored })
+
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) { _ = try await repository.load() }
+        #expect(try await repository.currentRawRecoveryData() == WorkspaceRawRecoveryArtifact(
+            rawData: opaque,
+            identity: .init(sha256: WorkspacePersistenceFixtures.sha256(opaque), byteCount: opaque.count)
+        ))
+        let preview = try await BackupService().inspectRestoreSource(source)
+        let prepared = try await repository.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+        let outcome = try await repository.commitRestore(prepared, state: restored)
+        guard case let .file(rollbackURL, _) = outcome.rollback else {
+            Issue.record("An opaque present primary still needs raw rollback evidence")
+            return
         }
-        return true
+        #expect(try Data(contentsOf: rollbackURL) == opaque)
+        #expect(try await repository.load().state == restored)
     }
 
-    func releaseFirstReplace() {
-        condition.lock()
-        firstReplaceReleased = true
-        condition.broadcast()
-        condition.unlock()
+    @Test func reloadCurrentSourceRebindsValidOpaqueAndAbsentWithoutTreatingOpaqueAsBackup() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let state = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        let validData = try WorkspaceDocumentCodec.encode(state)
+        try validData.write(to: main)
+        let repository = JSONWorkspaceRepository(documentURL: main, seed: { state })
+
+        let valid = try await repository.reloadCurrentSourceAfterExternalChange()
+        #expect(valid == .valid(try WorkspaceDocumentCodec.decode(validData)))
+        let opaque = Data("not-a-workspace-document".utf8)
+        try opaque.write(to: main)
+        #expect(try await repository.reloadCurrentSourceAfterExternalChange() == .opaqueInvalid(
+            .init(sha256: WorkspacePersistenceFixtures.sha256(opaque), byteCount: opaque.count)
+        ))
+        #expect(try await repository.currentRawRecoveryData().rawData == opaque)
+        try FileManager.default.removeItem(at: main)
+        #expect(try await repository.reloadCurrentSourceAfterExternalChange() == .absent)
+    }
+
+    @Test func unreadableReloadFailsClosedWithoutReplacingTheLastKnownBinding() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let state = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        let data = try WorkspaceDocumentCodec.encode(state)
+        try data.write(to: main)
+        let repository = JSONWorkspaceRepository(documentURL: main, seed: { state })
+        let loaded = try WorkspaceDocumentCodec.decode(data)
+        #expect(try await repository.reloadCurrentSourceAfterExternalChange() == .valid(loaded))
+
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: main.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: main.path) }
+        #expect(try await repository.reloadCurrentSourceAfterExternalChange() == .unreadableUnknown)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: main.path)
+        #expect(try await repository.currentDocumentData() == data)
     }
 }

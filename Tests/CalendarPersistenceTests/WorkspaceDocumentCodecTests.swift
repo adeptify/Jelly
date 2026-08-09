@@ -126,7 +126,7 @@ struct WorkspaceDocumentCodecTests {
         let entry = try WorkspacePersistenceFixtures.multiMarkDraftEntry()
         try await DraftJournalRepository(fileURL: localJournal).persist(entry)
         #expect(try Data(contentsOf: childJournal) == Data(contentsOf: localJournal))
-        #expect(try await DraftJournalRepository(fileURL: childJournal).current()?.entry == entry)
+        #expect(try await DraftJournalRepository(fileURL: childJournal).current()?.records.first?.entry == entry)
     }
 }
 
@@ -215,6 +215,33 @@ enum WorkspacePersistenceFixtures {
             calendarNoteRelations: .empty,
             taskBlockLinks: [],
             inspirationNoteLinks: []
+        )
+    }
+
+    static func multiMarkDraftEntry() throws -> DraftJournalEntry {
+        let note = try #require(workspaceWithMultiMarkNote().notes.values.first)
+        let checksum = try WorkspaceChecksum.noteSnapshotChecksum(note)
+        let unsigned = DraftJournalEntry(
+            noteID: note.id,
+            editSessionID: .editor(UUID(uuidString: "00000000-0000-0000-0000-000000000505")!),
+            baseWorkspaceRevision: 1,
+            baseNoteRevision: 1,
+            draftGeneration: 10,
+            noteSnapshot: note,
+            updatedAt: Date(timeIntervalSince1970: 0),
+            noteSnapshotChecksum: checksum,
+            journalChecksum: ""
+        )
+        return DraftJournalEntry(
+            noteID: unsigned.noteID,
+            editSessionID: unsigned.editSessionID,
+            baseWorkspaceRevision: unsigned.baseWorkspaceRevision,
+            baseNoteRevision: unsigned.baseNoteRevision,
+            draftGeneration: unsigned.draftGeneration,
+            noteSnapshot: unsigned.noteSnapshot,
+            updatedAt: unsigned.updatedAt,
+            noteSnapshotChecksum: unsigned.noteSnapshotChecksum,
+            journalChecksum: try DraftJournal.entryChecksum(for: unsigned)
         )
     }
 

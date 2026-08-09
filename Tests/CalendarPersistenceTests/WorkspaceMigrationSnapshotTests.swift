@@ -117,7 +117,7 @@ struct WorkspaceMigrationSnapshotTests {
         _ = try await repository.load()
         try changed.write(to: main)
 
-        await #expect(throws: WorkspacePersistenceError.sourceChanged) {
+        await #expect(throws: WorkspaceDirectCommitFailure.sourceChanged(.init())) {
             try await repository.save(try WorkspacePersistenceFixtures.workspaceWithOneNote())
         }
         #expect(try Data(contentsOf: main) == changed)

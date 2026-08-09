@@ -1,0 +1,43 @@
+# Task 6 Legacy Assertion Map
+
+| Legacy assertion | Task 6 target |
+| --- | --- |
+| CalendarStoreTests::v1PrimaryToV2StoreProjectionAndUndoRoundTripKeepsOneCrossDayIdentity | UNMAPPED |
+| CalendarStoreTests::v1BackupRestoreMigratesThroughStoreAndCorruptBackupCannotOverwriteIt | UNMAPPED |
+| CalendarStoreTests::failedSaveDoesNotPublishOrRegisterUndo | UNMAPPED |
+| CalendarStoreTests::failedReductionReturnsReadyWithoutSaveOrUndo | UNMAPPED |
+| CalendarStoreTests::successfulSendPersistsBeforePublishing | UNMAPPED |
+| CalendarStoreTests::undoRestoresWholeSnapshotAfterSuccessfulSave | UNMAPPED |
+| CalendarStoreTests::concurrentMutationIsRejected | UNMAPPED |
+| CalendarStoreTests::sendDuringLoadIsRejected | UNMAPPED |
+| CalendarStoreTests::restoreBlocksSendAndUndo | UNMAPPED |
+| CalendarStoreTests::corruptPrimaryCanRestoreValidBackup | UNMAPPED |
+| CalendarStoreTests::invalidSemanticRestoreKeepsMemoryDiskAndRollbackUntouched | UNMAPPED |
+| CalendarStoreTests::failedV1RestoreDoesNotPublishMigratedState | UNMAPPED |
+| CalendarStoreTests::failedV1RestorePrimarySaveDoesNotPublishState | UNMAPPED |
+| CalendarStoreTests::successfulRestorePublishesOnceAndClearsUndo | UNMAPPED |
+| JSONCalendarRepositoryTests::saveThenReopenRoundTripsState | UNMAPPED |
+| JSONCalendarRepositoryTests::schemaOneMigratesSingleDayItemsSeriesOverridesAndCompletionsWithoutChangingIdentity | UNMAPPED |
+| JSONCalendarRepositoryTests::loadingSchemaOneDoesNotRewritePrimaryUntilNormalSave | UNMAPPED |
+| JSONCalendarRepositoryTests::invalidBackupNeverOverwritesCurrentState | UNMAPPED |
+| JSONCalendarRepositoryTests::unknownSchemaDoesNotRewriteFile | UNMAPPED |
+| JSONCalendarRepositoryTests::unsupportedSchemaIsRejectedBeforePayloadDecoding | UNMAPPED |
+| JSONCalendarRepositoryTests::missingFileSeedsExactlyOnce | UNMAPPED |
+| JSONCalendarRepositoryTests::validRestoreWritesRollbackBeforeReplacement | UNMAPPED |
+| JSONCalendarRepositoryTests::malformedV1SpanMigrationDoesNotOverwritePrimaryOrRollback | UNMAPPED |
+| JSONCalendarRepositoryTests::rollbackFailureLeavesOriginalPrimaryAndRollbackBytesUnchanged | UNMAPPED |
+| JSONCalendarRepositoryTests::v1RestorePrimaryAtomicFailureKeepsPrimaryAfterRollbackWasWritten | UNMAPPED |
+| JSONCalendarRepositoryTests::semanticallyInvalidV1MigrationDoesNotOverwritePrimaryOrRollback | UNMAPPED |
+| JSONCalendarRepositoryTests::firstRestoreCreatesMissingRollbackDirectory | UNMAPPED |
+| JSONCalendarRepositoryTests::corruptPrimarySnapshotPreservesRawBytes | UNMAPPED |
+| JSONCalendarRepositoryTests::failedAtomicReplaceKeepsPreviousDocument | UNMAPPED |
+| JSONCalendarRepositoryTests::fractionalDatesRoundTripWithoutChangingSortOrder | UNMAPPED |
+| JSONCalendarRepositoryTests::completeGraphRoundTripsExactly | UNMAPPED |
+| JSONCalendarRepositoryTests::decodableDanglingCategoryBackupIsRejected | UNMAPPED |
+| JSONCalendarRepositoryTests::decodableInvalidRecurrenceBackupIsRejected | UNMAPPED |
+| JSONCalendarRepositoryTests::weeklySeriesDecoderRejectsMissingV2CoreFields | UNMAPPED |
+| JSONCalendarRepositoryTests::weeklySeriesDecoderTreatsEveryV2ScheduleKeyAsV2Shape | UNMAPPED |
+| JSONCalendarRepositoryTests::v2DomainDecodersRejectLegacyAndMixedScheduleRepresentations | UNMAPPED |
+| JSONCalendarRepositoryTests::occurrenceOverrideDecoderRejectsLegacyScheduleFields | UNMAPPED |
+| JSONCalendarRepositoryTests::decodablePartialOrReversedTimeIsRejected | UNMAPPED |
+| JSONCalendarRepositoryTests::decodableConstructorAndIdentityViolationsAreRejected | UNMAPPED |
