@@ -1245,6 +1245,121 @@ struct SeriesMutationEngineTests {
         ))
     }
 
+    @Test func skippedHistoricalDateDoesNotRetainOldOwnerWhenSplittingFuture() throws {
+        let series = try weeklyMondaySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000420")!,
+            recurrenceEndDate: nil
+        )
+        let skipped = OccurrenceKey(seriesID: series.id, originalDate: series.ruleStartDate)
+        let boundary = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: CalendarDate(year: 2026, month: 8, day: 10)!
+        )
+        let newSeriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000421")!
+        let result = try SeriesMutationEngine.applyWithOutcome(
+            edit: .patch(.init(title: "新系列")),
+            to: boundary,
+            scope: .thisAndFuture,
+            in: .init(
+                series: [series.id: series],
+                exceptions: [skipped: .skipped],
+                completions: [:]
+            ),
+            newSeriesID: newSeriesID,
+            now: .distantPast
+        )
+
+        #expect(result.futureOutcome == .split(
+            oldSeriesID: series.id,
+            newSeriesID: newSeriesID,
+            boundary: boundary.originalDate,
+            dayDelta: 0,
+            historicalOwnerRetained: false
+        ))
+        #expect(result.graph.series[series.id] == nil)
+    }
+
+    @Test func skippedHistoricalDateDoesNotRetainOldOwnerWhenDeletingFuture() throws {
+        let series = try weeklyMondaySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000422")!,
+            recurrenceEndDate: nil
+        )
+        let skipped = OccurrenceKey(seriesID: series.id, originalDate: series.ruleStartDate)
+        let boundary = OccurrenceKey(
+            seriesID: series.id,
+            originalDate: CalendarDate(year: 2026, month: 8, day: 10)!
+        )
+        let result = try SeriesMutationEngine.applyWithOutcome(
+            edit: .delete,
+            to: boundary,
+            scope: .thisAndFuture,
+            in: .init(
+                series: [series.id: series],
+                exceptions: [skipped: .skipped],
+                completions: [:]
+            ),
+            newSeriesID: series.id,
+            now: .distantPast
+        )
+
+        #expect(result.futureOutcome == .deleteFuture(
+            seriesID: series.id,
+            boundary: boundary.originalDate,
+            historicalOwnerRetained: false
+        ))
+        #expect(result.graph.series[series.id] == nil)
+    }
+
+    @Test func boundedSeriesWithOnlySkippedNaturalDateCannotMutateOrReturnOutcome() throws {
+        let endDate = CalendarDate(year: 2026, month: 8, day: 3)!
+        let series = try weeklyMondaySeries(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000423")!,
+            recurrenceEndDate: endDate
+        )
+        let key = OccurrenceKey(seriesID: series.id, originalDate: endDate)
+        let graph = RecurrenceGraph(
+            series: [series.id: series],
+            exceptions: [key: .skipped],
+            completions: [:]
+        )
+
+        #expect(throws: SeriesMutationError.unknownOccurrence) {
+            try SeriesMutationEngine.applyWithOutcome(
+                edit: .delete,
+                to: key,
+                scope: .thisAndFuture,
+                in: graph,
+                newSeriesID: series.id,
+                now: .distantPast
+            )
+        }
+        #expect(graph == .init(
+            series: [series.id: series],
+            exceptions: [key: .skipped],
+            completions: [:]
+        ))
+    }
+
+    private func weeklyMondaySeries(
+        id: UUID,
+        recurrenceEndDate: CalendarDate?
+    ) throws -> WeeklySeries {
+        try WeeklySeries(
+            id: id,
+            kind: .task,
+            title: "每周一",
+            categoryID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            ruleStartDate: CalendarDate(year: 2026, month: 8, day: 3)!,
+            recurrenceEndDate: recurrenceEndDate,
+            weekdays: [.monday],
+            durationDays: 1,
+            startTime: nil,
+            endTime: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+    }
+
     private func makeMondayWednesdaySeries(id: UUID) throws -> WeeklySeries {
         try WeeklySeries(
             id: id,

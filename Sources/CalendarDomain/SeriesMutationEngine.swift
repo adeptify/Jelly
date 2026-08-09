@@ -441,8 +441,14 @@ public enum SeriesMutationEngine {
         of series: WeeklySeries,
         exceptions: [OccurrenceKey: OccurrenceExceptionKind]
     ) -> Bool {
-        if exceptions[key] != nil {
+        guard isWithinBounds(key.originalDate, of: series) else {
+            return false
+        }
+        if case .modified = exceptions[key] {
             return true
+        }
+        if case .skipped = exceptions[key] {
+            return false
         }
         return isNaturallyGenerated(key.originalDate, by: series)
     }
@@ -452,12 +458,6 @@ public enum SeriesMutationEngine {
         before boundary: CalendarDate,
         exceptions: [OccurrenceKey: OccurrenceExceptionKind]
     ) -> Bool {
-        if exceptions.keys.contains(where: {
-            $0.seriesID == series.id && $0.originalDate < boundary
-        }) {
-            return true
-        }
-
         let historicalEnd: CalendarDate
         if let endDate = series.recurrenceEndDate, endDate < boundary {
             historicalEnd = endDate
@@ -470,7 +470,11 @@ public enum SeriesMutationEngine {
 
         var date = series.ruleStartDate
         while date <= historicalEnd {
-            if series.weekdays.contains(date.weekday) {
+            if identifiesInstance(
+                OccurrenceKey(seriesID: series.id, originalDate: date),
+                of: series,
+                exceptions: exceptions
+            ) {
                 return true
             }
             date = date.addingDays(1)
