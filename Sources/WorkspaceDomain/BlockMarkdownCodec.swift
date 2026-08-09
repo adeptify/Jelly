@@ -46,6 +46,7 @@ public enum BlockMarkdownCodec {
         var identifierGenerator = IdentifierGenerator(source: idSource)
         var blocks: [DocumentBlock] = []
         var diagnostics: [BlockMarkdownDiagnostic] = []
+        var activeListIndentLevels = Set<Int>()
         var index = 0
 
         func appendBlock(
@@ -68,11 +69,24 @@ public enum BlockMarkdownCodec {
         while index < lines.count {
             let line = lines[index]
             if line.isEmpty {
+                activeListIndentLevels.removeAll()
                 index += 1
                 continue
             }
 
             if let openingFence = fenceOpening(in: line) {
+                if let diagnosticMessage = unsupportedFenceDiagnostic(for: openingFence) {
+                    let closingIndex = closingFenceIndex(in: lines, after: index, openingFence: openingFence)
+                    let lastIndex = closingIndex ?? lines.index(before: lines.endIndex)
+                    diagnostics.append(.init(lineNumber: index + 1, message: diagnosticMessage))
+                    activeListIndentLevels.removeAll()
+                    try appendBlock(
+                        kind: .paragraph,
+                        inlineContent: .plain(lines[index...lastIndex].joined(separator: "\n"))
+                    )
+                    index = lastIndex + 1
+                    continue
+                }
                 var closingIndex = index + 1
                 while closingIndex < lines.count,
                       !isFenceClosing(lines[closingIndex], for: openingFence) {
@@ -83,6 +97,7 @@ public enum BlockMarkdownCodec {
                         lineNumber: index + 1,
                         message: "未闭合的代码围栏已保留为正文"
                     ))
+                    activeListIndentLevels.removeAll()
                     try appendBlock(
                         kind: .paragraph,
                         inlineContent: .plain(lines[index...].joined(separator: "\n"))
@@ -94,6 +109,7 @@ public enum BlockMarkdownCodec {
                     inlineContent: .plain(lines[(index + 1)..<closingIndex].joined(separator: "\n")),
                     codeInfoString: openingFence.infoString
                 )
+                activeListIndentLevels.removeAll()
                 index = closingIndex + 1
                 continue
             }
@@ -109,6 +125,7 @@ public enum BlockMarkdownCodec {
                     lineNumber: firstLine + 1,
                     message: "不支持的 Markdown 表格已保留为正文"
                 ))
+                activeListIndentLevels.removeAll()
                 try appendBlock(kind: .paragraph, inlineContent: .plain(tableLines.joined(separator: "\n")))
                 continue
             }
@@ -120,23 +137,36 @@ public enum BlockMarkdownCodec {
                     quoteLines.append(quoteLine.hasPrefix("> ") ? String(quoteLine.dropFirst(2)) : String(quoteLine.dropFirst()))
                     index += 1
                 }
+                activeListIndentLevels.removeAll()
                 try appendBlock(kind: .quote, inlineContent: parseInline(quoteLines.joined(separator: "\n")))
                 continue
             }
 
             if let heading = heading(in: line) {
+                activeListIndentLevels.removeAll()
                 try appendBlock(kind: heading.kind, inlineContent: parseInline(heading.text))
                 index += 1
                 continue
             }
 
             if line == "---" {
+                activeListIndentLevels.removeAll()
                 try appendBlock(kind: .divider, inlineContent: .plain(""))
                 index += 1
                 continue
             }
 
             if let list = listItem(in: line) {
+                guard list.indentLevel == 0 || activeListIndentLevels.contains(list.indentLevel - 1) else {
+                    diagnostics.append(.init(
+                        lineNumber: index + 1,
+                        message: "孤立的列表缩进已保留为正文"
+                    ))
+                    activeListIndentLevels.removeAll()
+                    try appendBlock(kind: .paragraph, inlineContent: .plain(line))
+                    index += 1
+                    continue
+                }
                 let taskState: TaskBlockState?
                 if list.kind == .task {
                     taskState = .init(completedAt: list.isChecked ? checkedTaskCompletedAt : nil)
@@ -149,14 +179,17 @@ public enum BlockMarkdownCodec {
                     taskState: taskState,
                     indentLevel: list.indentLevel
                 )
+                activeListIndentLevels = Set(activeListIndentLevels.filter { $0 <= list.indentLevel })
+                activeListIndentLevels.insert(list.indentLevel)
                 index += 1
                 continue
             }
 
             if let standaloneLink = standaloneLink(in: line) {
+                activeListIndentLevels.removeAll()
                 try appendBlock(
                     kind: .link,
-                    inlineContent: .init(spans: [.init(text: standaloneLink.label, linkURL: standaloneLink.url)])
+                    inlineContent: inlineLinkContent(label: standaloneLink.label, url: standaloneLink.url)
                 )
                 index += 1
                 continue
@@ -170,10 +203,13 @@ public enum BlockMarkdownCodec {
                 paragraphLines.append(lines[index])
                 index += 1
             }
-            try appendBlock(kind: .paragraph, inlineContent: parseInline(paragraphLines.joined(separator: "\n")))
+            activeListIndentLevels.removeAll()
+            try appendBlock(kind: .paragraph, inlineContent: parseParagraph(paragraphLines))
         }
 
-        return .init(document: .init(blocks: blocks), diagnostics: diagnostics)
+        let document = BlockDocument(blocks: blocks)
+        try BlockDocumentValidator.validate(document)
+        return .init(document: document, diagnostics: diagnostics)
     }
 
     public static func exportMarkdown(_ document: BlockDocument) throws -> String {
@@ -185,10 +221,10 @@ public enum BlockMarkdownCodec {
 
         for block in document.blocks {
             let isList = block.kind == .bullet || block.kind == .ordered || block.kind == .task
-            let rendered: String
+            var rendered: String
             switch block.kind {
             case .paragraph:
-                rendered = exportInline(block.inlineContent)
+                rendered = exportParagraph(block.inlineContent)
             case .heading1:
                 rendered = "# \(exportInline(block.inlineContent))"
             case .heading2:
@@ -218,6 +254,9 @@ public enum BlockMarkdownCodec {
                 rendered = "---"
             case .link:
                 rendered = exportInline(block.inlineContent)
+            }
+            if block.kind != .code {
+                rendered = canonicalizeProseTrailingWhitespace(rendered)
             }
 
             if !renderedBlocks.isEmpty {
@@ -293,6 +332,28 @@ private func fenceOpening(in line: String) -> FenceOpening? {
     guard length >= 3 else { return nil }
     let infoString = DocumentBlock.canonicalCodeInfoString(String(characters.dropFirst(length)))
     return .init(character: character, length: length, infoString: infoString)
+}
+
+private func unsupportedFenceDiagnostic(for openingFence: FenceOpening) -> String? {
+    guard let infoString = openingFence.infoString else { return nil }
+    if infoString.unicodeScalars.contains(where: { $0.value == 0 || $0.value == 10 || $0.value == 13 }) {
+        return "无效的代码围栏信息已保留为正文"
+    }
+    if openingFence.character == "`", infoString.contains("`") {
+        return "不支持的代码围栏信息已保留为正文"
+    }
+    return nil
+}
+
+private func closingFenceIndex(in lines: [String], after index: Int, openingFence: FenceOpening) -> Int? {
+    var closingIndex = index + 1
+    while closingIndex < lines.count {
+        if isFenceClosing(lines[closingIndex], for: openingFence) {
+            return closingIndex
+        }
+        closingIndex += 1
+    }
+    return nil
 }
 
 private func isFenceClosing(_ line: String, for opening: FenceOpening) -> Bool {
@@ -400,16 +461,28 @@ private func parseInline(_ text: String) -> InlineContent {
         spans.append(.init(text: content, marks: marks, linkURL: linkURL))
     }
 
+    func appendLink(_ label: String, url: URL) {
+        appendPlain()
+        spans.append(contentsOf: inlineLinkContent(label: label, url: url).spans)
+    }
+
     while index < characters.count {
         let character = characters[index]
         if character == "\\", index + 1 < characters.count,
-           "\\*[]()`".contains(characters[index + 1]) {
+           characters[index + 1] == "[",
+           let link = inlineLink(in: characters, at: index + 1) {
+            appendLink(link.label, url: link.url)
+            index = link.endIndex
+            continue
+        }
+        if character == "\\", index + 1 < characters.count,
+           isEscapableMarkdownCharacter(characters[index + 1]) {
             plainText.append(characters[index + 1])
             index += 2
             continue
         }
         if character == "[", let link = inlineLink(in: characters, at: index) {
-            appendMarked(link.label, linkURL: link.url)
+            appendLink(link.label, url: link.url)
             index = link.endIndex
             continue
         }
@@ -441,6 +514,21 @@ private func parseInline(_ text: String) -> InlineContent {
     }
     appendPlain()
     return .init(spans: spans)
+}
+
+private func parseParagraph(_ lines: [String]) -> InlineContent {
+    let normalizedLines = lines.enumerated().map { offset, line -> String in
+        let isHardBreak = offset < lines.count - 1 && hasOddTrailingBackslash(line)
+        let withoutTrailingWhitespace = line.trimmingTrailingWhitespace()
+        if isHardBreak {
+            return String(line.dropLast()).trimmingTrailingWhitespace() + "  "
+        }
+        if offset < lines.count - 1, line.trailingWhitespaceCount >= 2 {
+            return withoutTrailingWhitespace + "  "
+        }
+        return withoutTrailingWhitespace
+    }
+    return parseInline(normalizedLines.joined(separator: "\n"))
 }
 
 private func inlineLink(in characters: [Character], at index: Int) -> (label: String, url: URL, endIndex: Int)? {
@@ -483,6 +571,26 @@ private func exportInline(_ content: InlineContent) -> String {
     }.joined()
 }
 
+private func exportParagraph(_ content: InlineContent) -> String {
+    let canonical = canonicalizeProseTrailingWhitespace(exportInline(content))
+    return canonical
+        .components(separatedBy: "\n")
+        .map(escapeBlockStart)
+        .joined(separator: "\n")
+}
+
+private func inlineLinkContent(label: String, url: URL) -> InlineContent {
+    var content = parseInline(label)
+    if content.spans.isEmpty {
+        content.spans = [.init(text: "", linkURL: url)]
+    } else {
+        for index in content.spans.indices {
+            content.spans[index].linkURL = url
+        }
+    }
+    return content
+}
+
 private func exportCode(_ block: DocumentBlock) -> String {
     let infoString = block.codeInfoString ?? ""
     let fenceCharacter: Character = infoString.contains("`") ? "~" : "`"
@@ -505,6 +613,39 @@ private func escapePlainText(_ text: String) -> String {
         }
         return [character]
     })
+}
+
+private func canonicalizeProseTrailingWhitespace(_ text: String) -> String {
+    let lines = text.components(separatedBy: "\n")
+    return lines.enumerated().map { offset, line in
+        let trimmed = line.trimmingTrailingWhitespace()
+        if offset < lines.count - 1, line.trailingWhitespaceCount >= 2 {
+            return trimmed + "\\"
+        }
+        return trimmed
+    }.joined(separator: "\n")
+}
+
+private func escapeBlockStart(_ line: String) -> String {
+    isBlockStart(line) ? "\\" + line : line
+}
+
+private func isEscapableMarkdownCharacter(_ character: Character) -> Bool {
+    character == " " || character.isNumber || "\\*[]()`#->|~".contains(character)
+}
+
+private func hasOddTrailingBackslash(_ line: String) -> Bool {
+    line.reversed().prefix { $0 == "\\" }.count % 2 == 1
+}
+
+private extension String {
+    var trailingWhitespaceCount: Int {
+        reversed().prefix { $0 == " " || $0 == "\t" }.count
+    }
+
+    func trimmingTrailingWhitespace() -> String {
+        String(dropLast(trailingWhitespaceCount))
+    }
 }
 
 private func listIndent(_ level: Int) -> String {

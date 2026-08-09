@@ -142,6 +142,142 @@ struct BlockMarkdownCodecTests {
         #expect(try BlockMarkdownCodec.exportMarkdown(result.document) == "- 一级\n    - 二级\n        - 三级\n            - 四级\n            -     五级")
     }
 
+    @Test func importDegradesOrphanedListToDiagnosedValidatedParagraph() throws {
+        let source = "    - orphan"
+        let result = try BlockMarkdownCodec.importMarkdown(
+            source,
+            idSource: .fixed(Self.ids(count: 1, start: 500)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(result.document.blocks == [
+            .init(
+                id: Self.ids(count: 1, start: 500)[0],
+                kind: .paragraph,
+                inlineContent: .plain(source),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        #expect(result.diagnostics == [.init(lineNumber: 1, message: "孤立的列表缩进已保留为正文")])
+        try BlockDocumentValidator.validate(result.document)
+        #expect(try BlockMarkdownCodec.exportMarkdown(result.document) == "\\    - orphan")
+    }
+
+    @Test func paragraphExportEscapesLeadingBlockSyntaxForKindRoundTrip() throws {
+        let document = BlockDocument(blocks: [
+            .init(id: Self.ids(count: 1, start: 510)[0], kind: .paragraph, inlineContent: .plain("# 不是标题"), taskState: nil, indentLevel: 0),
+            .init(id: Self.ids(count: 1, start: 511)[0], kind: .paragraph, inlineContent: .plain("正文\n---"), taskState: nil, indentLevel: 0)
+        ])
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+        let reimported = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(Self.ids(count: 3, start: 510)),
+            checkedTaskCompletedAt: .distantPast
+        ).document
+
+        #expect(markdown == "\\# 不是标题\n\n正文\n\\---")
+        #expect(reimported == document)
+    }
+
+    @Test func inlineLinkMarksAndParagraphKindSurviveRoundTrip() throws {
+        let url = URL(string: "https://example.com/important")!
+        let content = InlineContent(spans: [.init(text: "重要", marks: [.bold], linkURL: url)])
+        let document = BlockDocument(blocks: [
+            .init(id: Self.ids(count: 1, start: 520)[0], kind: .paragraph, inlineContent: content, taskState: nil, indentLevel: 0),
+            .init(id: Self.ids(count: 1, start: 521)[0], kind: .link, inlineContent: content, taskState: nil, indentLevel: 0)
+        ])
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+        let reimported = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(Self.ids(count: 2, start: 520)),
+            checkedTaskCompletedAt: .distantPast
+        ).document
+
+        #expect(markdown == "\\[**重要**](https://example.com/important)\n\n[**重要**](https://example.com/important)")
+        #expect(reimported == document)
+    }
+
+    @Test func exportUsesBackslashHardBreakAndNeverLeavesTrailingWhitespace() throws {
+        let document = BlockDocument(blocks: [
+            .init(
+                id: Self.ids(count: 1, start: 530)[0],
+                kind: .paragraph,
+                inlineContent: .plain("a  \nb "),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+        let reimported = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(Self.ids(count: 1, start: 530)),
+            checkedTaskCompletedAt: .distantPast
+        ).document
+
+        #expect(markdown == "a\\\nb")
+        #expect(!markdown.components(separatedBy: "\n").contains { line in
+            line.hasSuffix(" ") || line.hasSuffix("\t")
+        })
+        #expect(reimported.blocks[0].inlineContent == .plain("a  \nb"))
+    }
+
+    @Test func exportRemovesTrailingWhitespaceFromEveryNonCodeBlockKind() throws {
+        let document = BlockDocument(blocks: [
+            .init(id: Self.ids(count: 1, start: 535)[0], kind: .heading1, inlineContent: .plain("标题 "), taskState: nil, indentLevel: 0),
+            .init(id: Self.ids(count: 1, start: 536)[0], kind: .bullet, inlineContent: .plain("项目\t"), taskState: nil, indentLevel: 0),
+            .init(id: Self.ids(count: 1, start: 537)[0], kind: .quote, inlineContent: .plain("引用 "), taskState: nil, indentLevel: 0)
+        ])
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+
+        #expect(markdown == "# 标题\n\n- 项目\n\n> 引用")
+        #expect(!markdown.components(separatedBy: "\n").contains { line in
+            line.hasSuffix(" ") || line.hasSuffix("\t")
+        })
+    }
+
+    @Test func backtickFenceInfoIsDiagnosedAndPreservedAsParagraph() throws {
+        let source = "```swift`dialect\nlet value = 1\n```"
+        let result = try BlockMarkdownCodec.importMarkdown(
+            source,
+            idSource: .fixed(Self.ids(count: 1, start: 540)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(result.document.blocks == [
+            .init(
+                id: Self.ids(count: 1, start: 540)[0],
+                kind: .paragraph,
+                inlineContent: .plain(source),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        #expect(result.diagnostics == [.init(lineNumber: 1, message: "不支持的代码围栏信息已保留为正文")])
+        try BlockDocumentValidator.validate(result.document)
+    }
+
+    @Test func importDegradesNULCodeInfoToDiagnosedValidatedParagraph() throws {
+        let source = "```swift\u{0000}\nlet value = 1\n```"
+        let result = try BlockMarkdownCodec.importMarkdown(
+            source,
+            idSource: .fixed(Self.ids(count: 1, start: 550)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(result.document.blocks == [
+            .init(
+                id: Self.ids(count: 1, start: 550)[0],
+                kind: .paragraph,
+                inlineContent: .plain(source),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        #expect(result.diagnostics == [.init(lineNumber: 1, message: "无效的代码围栏信息已保留为正文")])
+        try BlockDocumentValidator.validate(result.document)
+    }
+
     private static func ids(count: Int, start: Int) -> [BlockID] {
         (0..<count).map { offset in
             let value = start + offset
