@@ -360,9 +360,9 @@ Code and divider use canonical domain shapes instead of invisible metadata insid
 
 Delete or fully replace the old inline layer: `ProseInlineExport`, `exportInline`, `exportProseInline`, `exportProseText`, `exportProseCodeText`, `terminalContinuationBoundary`, `removingTerminalContinuationBoundary`, `canonicalizeProseTrailingWhitespace`, `parseInline`, `parseInlineMarkdown`, `parseInlineLinkLabel`, `decodeContinuationBoundaries`, `trailingContinuationBoundary`, `removeTrailingContinuationBoundary`, `appendMalformedContinuationDiagnostic`, `append(_:to:)`, the old `unescapedDelimiterIndex`, and standalone-link token/parity branches. Public codec API, BlockDocument data shape and checksum remain unchanged; only the code/divider validator invariants above are added.
 
-- [ ] Write table-driven round-trip tests for every block kind, 0...3 indentation, checked and unchecked tasks with completedAt intentionally omitted from Markdown export, Chinese text, inline links, fenced code and escaped marker characters. Lock old JSON without `codeInfoString`, `nil`/`swift`/`swift linenums=1`, non-code rejection, whitespace canonicalization, CR/LF/NUL rejection, backtick-bearing info strings, longer delimiter runs, checksum sensitivity and full Markdown → model → Markdown → model info-string preservation. Use a fixed injected completion time for equality fixtures; separately prove multiple `[x]` share it, `[ ]` remains `nil`, and reimporting a different original completion time preserves the boolean state while replacing the timestamp and changing checksum. For continuation boundaries, exercise all prose kinds with soft/hard/chained/EOF breaks, literal token and 0/1/2/3 backslash parity; H1–H3/bullet/ordered/task/link followed without a marker by bare paragraph, every supported block marker, single/multiline link, unsupported raw text and blank+paragraph; and list/task indent 0...3 sibling/child/parent transitions. Explicitly lock `# 标题\n正文` as heading + paragraph and `# 标题\n[A\nB](URL)` as heading + multiline link, while marked continuation lines starting with any block marker remain content. All cases use public import/export plus validator and preserve unsupported raw characters with diagnostics.
+- [x] Write table-driven round-trip tests for every block kind, 0...3 indentation, checked and unchecked tasks with completedAt intentionally omitted from Markdown export, Chinese text, inline links, fenced code and escaped marker characters. Lock old JSON without `codeInfoString`, `nil`/`swift`/`swift linenums=1`, non-code rejection, whitespace canonicalization, CR/LF/NUL rejection, backtick-bearing info strings, longer delimiter runs, checksum sensitivity and full Markdown → model → Markdown → model info-string preservation. Use a fixed injected completion time for equality fixtures; separately prove multiple `[x]` share it, `[ ]` remains `nil`, and reimporting a different original completion time preserves the boolean state while replacing the timestamp and changing checksum. For continuation boundaries, exercise all prose kinds with soft/hard/chained/EOF breaks, literal token and 0/1/2/3 backslash parity; H1–H3/bullet/ordered/task/link followed without a marker by bare paragraph, every supported block marker, single/multiline link, unsupported raw text and blank+paragraph; and list/task indent 0...3 sibling/child/parent transitions. Explicitly lock `# 标题\n正文` as heading + paragraph and `# 标题\n[A\nB](URL)` as heading + multiline link, while marked continuation lines starting with any block marker remain content. All cases use public import/export plus validator and preserve unsupported raw characters with diagnostics.
 
-- [ ] Before Task 2R production edits, add public RED fixtures for code/bold/italic/bold+italic/code+bold+italic with internal and terminal LF, with and without linkURL; inline-code active/literal control after 0/1/2/3 backslashes; span-owned hard/soft across same and split spans; adjacent equal spans, mixed URL/nil spans, zero spans, single and multiple attribute-bearing empty spans; terminal LF followed by empty spans; terminal plain space/tab; multi-span `.link` blocks; literal/malformed manifests; both internal-LF and span-terminal-LF grammar branches; and code/divider rejection of every noncanonical span shape. Assert exact `DocumentBlock` equality, validator success, no physical trailing whitespace/LF, and diagnostics/raw preservation for invalid controls.
+- [x] Before Task 2R production edits, add public RED fixtures for code/bold/italic/bold+italic/code+bold+italic with internal and terminal LF, with and without linkURL; inline-code active/literal control after 0/1/2/3 backslashes; span-owned hard/soft across same and split spans; adjacent equal spans, mixed URL/nil spans, zero spans, single and multiple attribute-bearing empty spans; terminal LF followed by empty spans; terminal plain space/tab; multi-span `.link` blocks; literal/malformed manifests; both internal-LF and span-terminal-LF grammar branches; and code/divider rejection of every noncanonical span shape. Assert exact `DocumentBlock` equality, validator success, no physical trailing whitespace/LF, and diagnostics/raw preservation for invalid controls.
 
 ~~~swift
 @Test(arguments: BlockMarkdownFixture.all)
@@ -377,13 +377,13 @@ func roundTripPreservesSupportedStructure(_ fixture: BlockMarkdownFixture) throw
 }
 ~~~
 
-- [ ] Run RED.
+- [x] Run RED.
 
 ~~~zsh
 ./Scripts/test.sh --filter WorkspaceDomainTests.BlockMarkdownCodecTests
 ~~~
 
-- [ ] Implement a line scanner and inline parser that return a document plus line-numbered diagnostics. Unsupported Markdown becomes paragraph/code text containing every original character; it is never discarded or silently converted into a different supported meaning.
+- [x] Implement a line scanner and inline parser that return a document plus line-numbered diagnostics. Unsupported Markdown becomes paragraph/code text containing every original character; it is never discarded or silently converted into a different supported meaning.
 
 ~~~swift
 public struct BlockMarkdownImportResult: Equatable, Sendable {
@@ -402,9 +402,9 @@ public enum BlockMarkdownCodec {
 }
 ~~~
 
-- [ ] Define canonical export rules: LF newlines, four spaces per indent level, one blank line between prose blocks, no trailing whitespace, deterministic ordered-list numbering, and fenced code language preservation. Import accepts valid nesting, clamps levels deeper than 3 to level 3 and preserves every character.
-- [ ] Add regression fixtures adapted from the existing Markdown tests without importing AppKit or CalendarApp.
-- [ ] Run GREEN and confirm WorkspaceDomain has no AppKit import.
+- [x] Define canonical export rules: LF newlines, four spaces per indent level, one blank line between prose blocks, no trailing whitespace, deterministic ordered-list numbering, and fenced code language preservation. Import accepts valid nesting, clamps levels deeper than 3 to level 3 and preserves every character.
+- [x] Add regression fixtures adapted from the existing Markdown tests without importing AppKit or CalendarApp.
+- [x] Run GREEN and confirm WorkspaceDomain has no AppKit import.
 
 ~~~zsh
 ./Scripts/test.sh --filter WorkspaceDomainTests.BlockMarkdownCodecTests
@@ -412,7 +412,7 @@ public enum BlockMarkdownCodec {
 git diff --check
 ~~~
 
-- [ ] Commit.
+- [x] Commit.
 
 ~~~zsh
 git add Sources/WorkspaceDomain/BlockMarkdownCodec.swift Tests/WorkspaceDomainTests/BlockMarkdownCodecTests.swift
