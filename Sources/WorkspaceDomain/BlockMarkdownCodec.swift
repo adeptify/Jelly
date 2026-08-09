@@ -138,13 +138,13 @@ public enum BlockMarkdownCodec {
                     index += 1
                 }
                 activeListIndentLevels.removeAll()
-                try appendBlock(kind: .quote, inlineContent: parseInline(quoteLines.joined(separator: "\n")))
+                try appendBlock(kind: .quote, inlineContent: parseInlineMarkdown(quoteLines.joined(separator: "\n")))
                 continue
             }
 
             if let heading = heading(in: line) {
                 activeListIndentLevels.removeAll()
-                try appendBlock(kind: heading.kind, inlineContent: parseInline(heading.text))
+                try appendBlock(kind: heading.kind, inlineContent: parseInlineMarkdown(heading.text))
                 index += 1
                 continue
             }
@@ -175,7 +175,7 @@ public enum BlockMarkdownCodec {
                 }
                 try appendBlock(
                     kind: list.kind,
-                    inlineContent: parseInline(list.text),
+                    inlineContent: parseInlineMarkdown(list.text),
                     taskState: taskState,
                     indentLevel: list.indentLevel
                 )
@@ -204,7 +204,7 @@ public enum BlockMarkdownCodec {
                 index += 1
             }
             activeListIndentLevels.removeAll()
-            try appendBlock(kind: .paragraph, inlineContent: parseParagraph(paragraphLines))
+            try appendBlock(kind: .paragraph, inlineContent: parseInlineMarkdown(paragraphLines.joined(separator: "\n")))
         }
 
         let document = BlockDocument(blocks: blocks)
@@ -416,18 +416,13 @@ private func listItem(in line: String) -> ListItem? {
 }
 
 private func standaloneLink(in line: String) -> StandaloneLink? {
-    guard line.first == "[",
-          let closingLabel = line.firstIndex(of: "]"),
-          line.index(after: closingLabel) < line.endIndex,
-          line[line.index(after: closingLabel)] == "(" else {
+    let characters = Array(line)
+    guard characters.first == "[",
+          let link = inlineLink(in: characters, at: 0),
+          link.endIndex == characters.count else {
         return nil
     }
-    let urlStart = line.index(closingLabel, offsetBy: 2)
-    guard line.last == ")", urlStart <= line.index(before: line.endIndex) else { return nil }
-    let label = String(line[line.index(after: line.startIndex)..<closingLabel])
-    let rawURL = String(line[urlStart..<line.index(before: line.endIndex)])
-    guard let url = URL(string: rawURL), isValidLinkURL(url) else { return nil }
-    return .init(label: label, url: url)
+    return .init(label: link.label, url: link.url)
 }
 
 private func isBlockStart(_ line: String) -> Bool {
@@ -464,6 +459,19 @@ private func parseInline(_ text: String) -> InlineContent {
     func appendLink(_ label: String, url: URL) {
         appendPlain()
         spans.append(contentsOf: inlineLinkContent(label: label, url: url).spans)
+    }
+
+    func appendEmphasized(_ content: String, marks: Set<InlineMark>) {
+        appendPlain()
+        let nested = parseInline(content)
+        if nested.spans.isEmpty {
+            spans.append(.init(text: "", marks: marks))
+        } else {
+            for var span in nested.spans {
+                span.marks.formUnion(marks)
+                spans.append(span)
+            }
+        }
     }
 
     while index < characters.count {
@@ -504,7 +512,7 @@ private func parseInline(_ text: String) -> InlineContent {
                 case 2: marks = [.bold]
                 default: marks = [.bold, .italic]
                 }
-                appendMarked(String(characters[(index + markerLength)..<close]), marks: marks)
+                appendEmphasized(String(characters[(index + markerLength)..<close]), marks: marks)
                 index = close + markerLength
                 continue
             }
@@ -516,7 +524,8 @@ private func parseInline(_ text: String) -> InlineContent {
     return .init(spans: spans)
 }
 
-private func parseParagraph(_ lines: [String]) -> InlineContent {
+private func parseInlineMarkdown(_ markdown: String) -> InlineContent {
+    let lines = markdown.components(separatedBy: "\n")
     let normalizedLines = lines.enumerated().map { offset, line -> String in
         let isHardBreak = offset < lines.count - 1 && hasOddTrailingBackslash(line)
         let withoutTrailingWhitespace = line.trimmingTrailingWhitespace()
@@ -532,12 +541,12 @@ private func parseParagraph(_ lines: [String]) -> InlineContent {
 }
 
 private func inlineLink(in characters: [Character], at index: Int) -> (label: String, url: URL, endIndex: Int)? {
-    guard let closingLabel = characters[(index + 1)...].firstIndex(of: "]"),
+    guard let closingLabel = unescapedDelimiterIndex("]", in: characters, startingAt: index + 1),
           closingLabel + 1 < characters.count,
           characters[closingLabel + 1] == "(" else {
         return nil
     }
-    guard let closingURL = characters[(closingLabel + 2)...].firstIndex(of: ")") else {
+    guard let closingURL = unescapedDelimiterIndex(")", in: characters, startingAt: closingLabel + 2) else {
         return nil
     }
     let rawURL = String(characters[(closingLabel + 2)..<closingURL])
@@ -547,6 +556,24 @@ private func inlineLink(in characters: [Character], at index: Int) -> (label: St
         url: url,
         endIndex: closingURL + 1
     )
+}
+
+private func unescapedDelimiterIndex(
+    _ delimiter: Character,
+    in characters: [Character],
+    startingAt index: Int
+) -> Int? {
+    var candidate = index
+    while candidate < characters.count {
+        if characters[candidate] == "\\" {
+            candidate += 2
+        } else if characters[candidate] == delimiter {
+            return candidate
+        } else {
+            candidate += 1
+        }
+    }
+    return nil
 }
 
 private func exportInline(_ content: InlineContent) -> String {
@@ -580,7 +607,7 @@ private func exportParagraph(_ content: InlineContent) -> String {
 }
 
 private func inlineLinkContent(label: String, url: URL) -> InlineContent {
-    var content = parseInline(label)
+    var content = parseInlineMarkdown(label)
     if content.spans.isEmpty {
         content.spans = [.init(text: "", linkURL: url)]
     } else {

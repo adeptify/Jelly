@@ -236,6 +236,49 @@ struct BlockMarkdownCodecTests {
         })
     }
 
+    @Test func escapedInlineLinkDelimitersKeepLinkBlockAndCombinedMarks() throws {
+        let url = URL(string: "https://example.com/escapes")!
+        let document = BlockDocument(blocks: [
+            .init(
+                id: Self.ids(count: 1, start: 560)[0],
+                kind: .link,
+                inlineContent: .init(spans: [.init(text: "A]B)\\C", marks: [.bold, .italic], linkURL: url)]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+        let reimported = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(Self.ids(count: 1, start: 560)),
+            checkedTaskCompletedAt: .distantPast
+        ).document
+
+        #expect(markdown == "[***A\\]B\\)\\\\C***](https://example.com/escapes)")
+        #expect(reimported == document)
+    }
+
+    @Test func quoteHardBreakUsesSharedInlineNormalizationForRoundTrip() throws {
+        let document = BlockDocument(blocks: [
+            .init(
+                id: Self.ids(count: 1, start: 570)[0],
+                kind: .quote,
+                inlineContent: .plain("a  \nb"),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+        let reimported = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(Self.ids(count: 1, start: 570)),
+            checkedTaskCompletedAt: .distantPast
+        ).document
+
+        #expect(markdown == "> a\\\n> b")
+        #expect(reimported == document)
+    }
+
     @Test func backtickFenceInfoIsDiagnosedAndPreservedAsParagraph() throws {
         let source = "```swift`dialect\nlet value = 1\n```"
         let result = try BlockMarkdownCodec.importMarkdown(
