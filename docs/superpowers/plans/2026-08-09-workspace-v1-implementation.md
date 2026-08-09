@@ -330,6 +330,11 @@ git commit -m "feat(workspace): 建立工作空间领域模型与校验"
 
 - Create: Sources/WorkspaceDomain/BlockMarkdownCodec.swift
 - Create: Tests/WorkspaceDomainTests/BlockMarkdownCodecTests.swift
+- Modify: Sources/WorkspaceDomain/BlockDocument.swift
+- Modify: Sources/WorkspaceDomain/BlockDocumentValidator.swift
+- Modify: Sources/WorkspaceDomain/WorkspaceChecksum.swift
+- Modify: Tests/WorkspaceDomainTests/WorkspaceModelTests.swift
+- Modify: Tests/WorkspaceDomainTests/BlockDocumentValidatorTests.swift
 - Read only: Sources/CalendarApp/Editing/MarkdownRichTextCodec.swift
 - Read only: Tests/CalendarAppTests/MarkdownRichTextCodecTests.swift
 
@@ -337,7 +342,9 @@ git commit -m "feat(workspace): 建立工作空间领域模型与校验"
 
 **Consumes:** Task 1 BlockDocument types and validator. The AppKit legacy codec is a fixture source only, never a dependency.
 
-- [ ] Write table-driven round-trip tests for every block kind, 0...3 indentation, checked and unchecked tasks with completedAt intentionally omitted from Markdown export, Chinese text, inline links, fenced code and escaped marker characters.
+**Preflight contract amendment:** `DocumentBlock` persists the complete fenced-code info string as `codeInfoString: String? = nil`; a first-token language is only a derived projection, never the stored truth. Missing legacy JSON decodes to `nil`, and `WorkspaceChecksum` includes this field. Non-code blocks require `nil`. Code blocks accept `nil` or a canonical nonempty string with leading/trailing ASCII space/tab removed; CR, LF and NUL are invalid, while internal spaces, tabs, punctuation and backticks are preserved. When an info string contains a backtick, export uses a tilde fence; otherwise export chooses a backtick or tilde fence longer than every matching delimiter run in the source, so complete info metadata and code text round-trip without loss.
+
+- [ ] Write table-driven round-trip tests for every block kind, 0...3 indentation, checked and unchecked tasks with completedAt intentionally omitted from Markdown export, Chinese text, inline links, fenced code and escaped marker characters. Lock old JSON without `codeInfoString`, `nil`/`swift`/`swift linenums=1`, non-code rejection, whitespace canonicalization, CR/LF/NUL rejection, backtick-bearing info strings, longer delimiter runs, checksum sensitivity and full Markdown → model → Markdown → model info-string preservation.
 
 ~~~swift
 @Test(arguments: BlockMarkdownFixture.all)
