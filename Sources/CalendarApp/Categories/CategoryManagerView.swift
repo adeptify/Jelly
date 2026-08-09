@@ -610,10 +610,15 @@ struct CategoryManagerView: View {
         if validationError != nil { return }
         Task {
             do {
+                let presentation: WorkspaceMutationPresentation
                 if let category = editingCategory {
-                    try await model.update(category)
+                    presentation = try await model.update(category)
                 } else {
-                    try await model.create()
+                    presentation = try await model.create()
+                }
+                guard presentation.allowsDismissal else {
+                    localError = presentation.message
+                    return
                 }
                 attemptedSave = false
             } catch {
@@ -628,11 +633,14 @@ struct CategoryManagerView: View {
     }
 
     private func confirmDelete(_ category: CalendarCategory) {
-        model.categoryToDelete = nil
         localError = nil
         Task {
             do {
-                try await model.deleteConfirmed(category: category)
+                let presentation = try await model.deleteConfirmed(category: category)
+                guard presentation.allowsDismissal else {
+                    localError = presentation.message
+                    return
+                }
                 startCreating()
             } catch {
                 localError = message(for: error)
@@ -653,7 +661,7 @@ struct CategoryManagerView: View {
         case .protectedCategory:
             return "“未分类”是系统分类，不能修改或删除。"
         case nil:
-            return "保存分类失败，请重试。"
+            return WorkspaceMutationOutcomePresenter.message(for: error)
         }
     }
 

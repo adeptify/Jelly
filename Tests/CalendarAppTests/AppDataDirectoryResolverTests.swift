@@ -89,4 +89,23 @@ struct AppDataDirectoryResolverTests {
             _ = try AppDataDirectoryResolver.resolve(environment: ["JELLY_ACCEPTANCE_DATA_DIRECTORY": file.path])
         }
     }
+
+    @Test func rejectsAnUnsearchableDirectoryButAcceptsAnOwnerSearchableDirectory() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-6c-searchable-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: root.path)
+        #expect(throws: AppDataDirectoryResolverError.inaccessibleDirectory) {
+            _ = try AppDataDirectoryResolver.resolve(environment: ["JELLY_ACCEPTANCE_DATA_DIRECTORY": root.path])
+        }
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        let urls = try AppDataDirectoryResolver.resolve(environment: ["JELLY_ACCEPTANCE_DATA_DIRECTORY": root.path])
+        #expect(urls.root == root.standardizedFileURL)
+    }
 }

@@ -253,6 +253,7 @@ struct MonthView: View {
     @State private var recurringEditItem: ProjectedItem?
     @State private var deleteConfirmItem: ProjectedItem?
     @State private var actionError: String?
+    @State private var actionRecoveryAction: WorkspaceRecoveryAction?
     @State private var recurringDropPresentation = RecurringDropPresentationController()
     @State private var requestedCenterRequest: WeekStreamScrollRequest?
     @State private var weekStreamCentering: WeekStreamCenteringCoordinator
@@ -310,8 +311,12 @@ struct MonthView: View {
     var body: some View {
         dialogsAndOverlays
             .alert("日历提示", isPresented: alertPresented) {
+                if actionRecoveryAction != nil {
+                    Button("继续恢复", action: retryActionRecovery)
+                }
                 Button("知道了", role: .cancel) {
                     actionError = nil
+                    actionRecoveryAction = nil
                 }
             } message: {
                 Text(actionError ?? "")
@@ -1011,20 +1016,50 @@ struct MonthView: View {
     }
 
     private func sendItemAction(_ command: CalendarCommand, undoLabel: String) {
-        guard store.phase == .ready else { return }
+        actionError = nil
+        actionRecoveryAction = nil
+        guard store.phase == .ready else {
+            actionError = "日历尚未准备好，当前操作未保存。"
+            return
+        }
         Task {
             do {
-                _ = try await store.sendCalendar(command, undoLabel: undoLabel)
+                receiveActionPresentation(WorkspaceMutationOutcomePresenter.presentation(
+                    for: try await store.sendCalendar(command, undoLabel: undoLabel)
+                ))
             } catch {
-                actionError = "操作失败，请重试"
+                actionError = WorkspaceMutationOutcomePresenter.message(for: error)
             }
         }
     }
 
     private func sendCompletion(_ command: CalendarCommand) {
-        guard store.phase == .ready else { return }
+        actionError = nil
+        actionRecoveryAction = nil
+        guard store.phase == .ready else {
+            actionError = "日历尚未准备好，完成状态没有保存。"
+            return
+        }
         Task {
-            try? await store.sendCalendar(command, undoLabel: "已更新完成状态")
+            do {
+                receiveActionPresentation(WorkspaceMutationOutcomePresenter.presentation(
+                    for: try await store.sendCalendar(command, undoLabel: "已更新完成状态")
+                ))
+            } catch {
+                actionError = WorkspaceMutationOutcomePresenter.message(for: error)
+            }
+        }
+    }
+
+    private func receiveActionPresentation(_ presentation: WorkspaceMutationPresentation) {
+        actionError = presentation.message
+        actionRecoveryAction = presentation.recoveryAction
+    }
+
+    private func retryActionRecovery() {
+        guard let actionRecoveryAction else { return }
+        Task { @MainActor in
+            receiveActionPresentation(await WorkspaceMutationOutcomePresenter.retry(actionRecoveryAction, in: store))
         }
     }
 

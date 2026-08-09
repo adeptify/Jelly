@@ -109,13 +109,28 @@ struct CategoryManagerViewModelTests {
 
         vm.draftName = "预设"
         vm.selectPreset("#8FB8F4")
-        try await vm.create()
+        _ = try await vm.create()
         #expect(store.calendarState.categories.values.contains { $0.name == "预设" && $0.colorHex == "#8FB8F4" })
 
         vm.draftName = "自定义"
         vm.draftColorHex = "#123456"
-        try await vm.create()
+        _ = try await vm.create()
         #expect(store.calendarState.categories.values.contains { $0.name == "自定义" && $0.colorHex == "#123456" })
+    }
+
+    @Test func failedPersistenceKeepsTheCategoryDraftAndReturnsRecoverablePresentation() async throws {
+        let (store, repository) = try await makeReadyStore(initialState: makeEmptyState())
+        let vm = CategoryManagerViewModel(store: store)
+        vm.draftName = "不应丢失的分类"
+        vm.draftColorHex = "#4F7FFF"
+        await repository.failNextSave()
+
+        let presentation = try await vm.create()
+
+        #expect(presentation.allowsDismissal == false)
+        #expect(presentation.message == "没有保存到磁盘，已保留当前输入；请重试。")
+        #expect(vm.draftName == "不应丢失的分类")
+        #expect(store.calendarState.categories.values.contains { $0.name == "不应丢失的分类" } == false)
     }
 
     @Test func uncategorizedIsProtectedButCanUseTheSharedReorderAction() async throws {
@@ -136,7 +151,7 @@ struct CategoryManagerViewModelTests {
             try await vm.deleteConfirmed()
         }
 
-        try await vm.reorder([work.id, uncategorized.id])
+        _ = try await vm.reorder([work.id, uncategorized.id])
         #expect(store.calendarState.categories[work.id]?.sortIndex == 0)
         #expect(store.calendarState.categories[uncategorized.id]?.sortIndex == 1)
     }
@@ -161,7 +176,7 @@ struct CategoryManagerViewModelTests {
         await store.load()
         let vm = CategoryManagerViewModel(store: store)
         vm.categoryToDelete = work
-        try await vm.deleteConfirmed()
+        _ = try await vm.deleteConfirmed()
         #expect(store.calendarState.categories[work.id] == nil)
         #expect(store.calendarState.categories[uncategorizedID] != nil)
     }
@@ -173,7 +188,7 @@ struct CategoryManagerViewModelTests {
         let vm = CategoryManagerViewModel(store: store)
         vm.categoryToDelete = original.categories[fixture.deletedCategoryID]!
 
-        try await vm.deleteConfirmed()
+        _ = try await vm.deleteConfirmed()
 
         #expect(store.calendarState.categories[fixture.deletedCategoryID] == nil)
         #expect(store.calendarState.items.values.allSatisfy { $0.categoryID != fixture.deletedCategoryID })
@@ -201,7 +216,7 @@ struct CategoryManagerViewModelTests {
         vm.categoryToDelete = category
         vm.categoryToDelete = nil
 
-        try await vm.deleteConfirmed(category: category)
+        _ = try await vm.deleteConfirmed(category: category)
 
         #expect(store.calendarState.categories[category.id] == nil)
         #expect(store.calendarState.items.values.allSatisfy { $0.categoryID == fixture.state.uncategorizedID })
@@ -251,7 +266,7 @@ struct CategoryManagerViewModelTests {
 
         vm.beginEditing(work)
         vm.draftColorHex = "#7A67D8"
-        try await vm.update(work)
+        _ = try await vm.update(work)
         _ = try await store.undo()
         let restored = try #require(store.calendarState.categories[work.id])
 

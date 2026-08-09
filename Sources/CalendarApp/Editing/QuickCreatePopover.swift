@@ -163,6 +163,7 @@ struct QuickCreatePopover: View {
     @StateObject private var model: ItemEditorViewModel
     @State private var categoryOption: String
     @State private var localError: String?
+    @State private var recoveryAction: WorkspaceRecoveryAction?
 
     private var theme: CalendarSemanticAppearance {
         CalendarTheme.appearance(for: colorScheme)
@@ -288,9 +289,15 @@ struct QuickCreatePopover: View {
             MarkdownNotesEditor(text: $model.draft.notes, minHeight: 96, maxHeight: 150)
 
             if let message = localError ?? model.validationMessage {
-                Text(message)
-                    .font(EditorFormStyle.caption)
-                    .foregroundStyle(theme.error)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(message)
+                        .font(EditorFormStyle.caption)
+                        .foregroundStyle(theme.error)
+                    if recoveryAction != nil {
+                        Button("继续恢复", action: retryRecovery)
+                            .controlSize(.small)
+                    }
+                }
             }
 
             HStack {
@@ -507,6 +514,7 @@ struct QuickCreatePopover: View {
 
     private func save() {
         localError = nil
+        recoveryAction = nil
         guard store.phase == .ready else {
             localError = "日历尚未准备好，请稍候再试"
             return
@@ -525,11 +533,27 @@ struct QuickCreatePopover: View {
         }
         Task { @MainActor in
             do {
-                _ = try await store.sendCalendar(command, undoLabel: "已创建事项")
-                onClose()
+                apply(WorkspaceMutationOutcomePresenter.presentation(
+                    for: try await store.sendCalendar(command, undoLabel: "已创建事项")
+                ))
             } catch {
-                localError = "保存失败，请重试"
+                localError = WorkspaceMutationOutcomePresenter.message(for: error)
             }
+        }
+    }
+
+    private func apply(_ presentation: WorkspaceMutationPresentation) {
+        localError = presentation.message
+        recoveryAction = presentation.recoveryAction
+        if presentation.allowsDismissal {
+            onClose()
+        }
+    }
+
+    private func retryRecovery() {
+        guard let recoveryAction else { return }
+        Task { @MainActor in
+            apply(await WorkspaceMutationOutcomePresenter.retry(recoveryAction, in: store))
         }
     }
 

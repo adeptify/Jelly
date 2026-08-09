@@ -2470,7 +2470,7 @@ struct WorkspaceStoreTests {
         await store.load()
         let destination = directory.appendingPathComponent("opaque-copy.json")
 
-        try await store.exportRawRecoveryCopy(to: destination)
+        _ = try await store.exportRawRecoveryCopy(to: destination)
 
         #expect(try Data(contentsOf: destination) == raw)
         #expect(store.state == state)

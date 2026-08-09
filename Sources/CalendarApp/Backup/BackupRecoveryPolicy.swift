@@ -1,0 +1,72 @@
+import CalendarPersistence
+import Foundation
+import WorkspaceDomain
+
+/// Backup commands are the durable recovery surface.  The policy deliberately
+/// carries the Store-issued IDs forward rather than recreating an operation
+/// from UI state, so retry always reconciles the exact parked transaction.
+enum BackupRecoveryAction: Equatable {
+    case exportRawRecoveryCopy
+    case retryPendingCommit(UUID)
+    case retryJournalCleanup(DraftJournalIdentity, JournalCleanupStep)
+}
+
+enum BackupRecoveryPolicy {
+    /// Keep the command's enablement identical to `WorkspaceStore.restore`.
+    /// A failure phase must not advertise a restore that the store will reject
+    /// before it can inspect the selected backup.
+    static func allowsRestore(from phase: WorkspaceStorePhase) -> Bool {
+        switch phase {
+        case .ready, .externalSourceChanged, .opaquePrimaryLoadFailed, .needsRelationshipRepair:
+            true
+        case .notLoaded, .loading, .mutating, .parkedCommitUncertain, .parkedJournalCleanup,
+             .loadFailed, .unreadablePrimaryLoadFailed:
+            false
+        }
+    }
+
+    static func actions(for phase: WorkspaceStorePhase) -> [BackupRecoveryAction] {
+        switch phase {
+        case let .parkedCommitUncertain(transactionID):
+            [.retryPendingCommit(transactionID)]
+        case let .parkedJournalCleanup(identity, step):
+            [.retryJournalCleanup(identity, step)]
+        case .opaquePrimaryLoadFailed, .unreadablePrimaryLoadFailed:
+            [.exportRawRecoveryCopy]
+        case .notLoaded, .loading, .ready, .mutating, .needsRelationshipRepair,
+             .externalSourceChanged, .loadFailed:
+            []
+        }
+    }
+
+    static func message(for outcome: PendingCommitRetryOutcome) -> String {
+        switch outcome {
+        case let .committed(operation, journal):
+            let suffix = cleanupSuffix(for: journal)
+            switch operation {
+            case .save: return "此前保存已确认。\(suffix)"
+            case .restore: return "此前恢复已确认。\(suffix)"
+            }
+        case let .notCommitted(_, journal, _):
+            return "已确认此前保存没有写入磁盘，当前输入仍保留。\(cleanupSuffix(for: journal))"
+        case let .sourceChanged(_, journal, _):
+            return "保存期间本地数据发生变化，当前输入未覆盖外部内容。\(cleanupSuffix(for: journal))"
+        case .stillPending:
+            return "保存结果仍未确认；请稍后再次确认。"
+        }
+    }
+
+    static func message(for status: JournalResolutionStatus) -> String {
+        switch status {
+        case .clean:
+            "草稿清理已完成。"
+        case .cleanupPending:
+            "草稿清理仍未完成；请稍后继续清理。"
+        }
+    }
+
+    private static func cleanupSuffix(for status: JournalResolutionStatus) -> String {
+        guard case .cleanupPending = status else { return "" }
+        return " 草稿清理仍未完成，请继续清理。"
+    }
+}

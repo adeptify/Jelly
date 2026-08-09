@@ -10,6 +10,7 @@ struct ItemDetailPopover: View {
     @State private var editorConfiguration: ItemEditorConfiguration?
     @State private var deleteConfirmationShown = false
     @State private var localError: String?
+    @State private var recoveryAction: WorkspaceRecoveryAction?
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: CalendarSemanticAppearance {
@@ -80,7 +81,13 @@ struct ItemDetailPopover: View {
                 )
             }
             if let message = localError {
-                Text(message).font(.footnote).foregroundStyle(theme.error)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(message).font(.footnote).foregroundStyle(theme.error)
+                    if recoveryAction != nil {
+                        Button("继续恢复", action: retryRecovery)
+                            .controlSize(.small)
+                    }
+                }
             }
             Divider()
             HStack {
@@ -107,6 +114,7 @@ struct ItemDetailPopover: View {
 
     private func begin(_ action: DetailAction) {
         localError = nil
+        recoveryAction = nil
         guard isRecurring else {
             if action == .edit {
                 editorConfiguration = .oneOff(item: oneOffItem)
@@ -164,11 +172,27 @@ struct ItemDetailPopover: View {
         }
         Task {
             do {
-                _ = try await store.sendCalendar(command, undoLabel: "已删除事项")
-                onClose()
+                apply(WorkspaceMutationOutcomePresenter.presentation(
+                    for: try await store.sendCalendar(command, undoLabel: "已删除事项")
+                ))
             } catch {
-                localError = "删除失败，请重试"
+                localError = WorkspaceMutationOutcomePresenter.message(for: error)
             }
+        }
+    }
+
+    private func apply(_ presentation: WorkspaceMutationPresentation) {
+        localError = presentation.message
+        recoveryAction = presentation.recoveryAction
+        if presentation.allowsDismissal {
+            onClose()
+        }
+    }
+
+    private func retryRecovery() {
+        guard let recoveryAction else { return }
+        Task { @MainActor in
+            apply(await WorkspaceMutationOutcomePresenter.retry(recoveryAction, in: store))
         }
     }
 
@@ -240,6 +264,7 @@ struct ItemEditForm: View {
     @StateObject private var model: ItemEditorViewModel
     @State private var categoryOption: String
     @State private var localError: String?
+    @State private var recoveryAction: WorkspaceRecoveryAction?
     @State private var deleteConfirmationShown = false
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.openCategoryManager) private var openCategoryManager
@@ -286,10 +311,16 @@ struct ItemEditForm: View {
                 }
                 MarkdownNotesEditor(text: $model.draft.notes)
                 if let message = localError ?? model.validationMessage {
-                    Text(message)
-                        .font(EditorFormStyle.caption)
-                        .foregroundStyle(theme.error)
-                        .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(message)
+                            .font(EditorFormStyle.caption)
+                            .foregroundStyle(theme.error)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if recoveryAction != nil {
+                            Button("继续恢复", action: retryRecovery)
+                                .controlSize(.small)
+                        }
+                    }
                 }
             }
             .padding(.horizontal, 14)
@@ -631,6 +662,7 @@ struct ItemEditForm: View {
 
     private func deleteItem() {
         localError = nil
+        recoveryAction = nil
         guard store.phase == .ready else {
             localError = "日历尚未准备好，请稍候再试"
             return
@@ -644,16 +676,18 @@ struct ItemEditForm: View {
         }
         Task {
             do {
-                _ = try await store.sendCalendar(command, undoLabel: "已删除事项")
-                onSaved()
+                apply(WorkspaceMutationOutcomePresenter.presentation(
+                    for: try await store.sendCalendar(command, undoLabel: "已删除事项")
+                ))
             } catch {
-                localError = "删除失败，请重试"
+                localError = WorkspaceMutationOutcomePresenter.message(for: error)
             }
         }
     }
 
     private func save() {
         localError = nil
+        recoveryAction = nil
         guard store.phase == .ready else {
             localError = "日历尚未准备好，请稍候再试"
             return
@@ -674,11 +708,27 @@ struct ItemEditForm: View {
         }
         Task {
             do {
-                _ = try await store.sendCalendar(command, undoLabel: "已更新事项")
-                onSaved()
+                apply(WorkspaceMutationOutcomePresenter.presentation(
+                    for: try await store.sendCalendar(command, undoLabel: "已更新事项")
+                ))
             } catch {
-                localError = "保存失败，请重试"
+                localError = WorkspaceMutationOutcomePresenter.message(for: error)
             }
+        }
+    }
+
+    private func apply(_ presentation: WorkspaceMutationPresentation) {
+        localError = presentation.message
+        recoveryAction = presentation.recoveryAction
+        if presentation.allowsDismissal {
+            onSaved()
+        }
+    }
+
+    private func retryRecovery() {
+        guard let recoveryAction else { return }
+        Task { @MainActor in
+            apply(await WorkspaceMutationOutcomePresenter.retry(recoveryAction, in: store))
         }
     }
 }

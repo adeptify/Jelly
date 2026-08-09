@@ -232,13 +232,14 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
     func inspectRestoreSource(at source: URL) async throws -> WorkspaceRestorePreview {
         try await BackupService().inspectRestoreSource(source)
     }
-    func exportRawRecoveryCopy(to destination: URL) async throws {
+    func exportRawRecoveryCopy(to destination: URL) async throws -> WorkspaceRawRecoveryArtifact {
         let artifact = try await repository.currentRawRecoveryData()
         do {
             try FoundationAtomicFileWriter().replaceAtomically(data: artifact.rawData, at: destination)
             guard try Data(contentsOf: destination) == artifact.rawData else {
                 throw WorkspacePersistenceError.atomicWriteFailed
             }
+            return artifact
         } catch let error as WorkspacePersistenceError {
             throw error
         } catch {

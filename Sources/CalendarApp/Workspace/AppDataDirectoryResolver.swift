@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct AppDataURLs: Equatable, Sendable {
@@ -55,6 +56,7 @@ enum AppDataDirectoryResolver {
               fileManager.isWritableFile(atPath: root.path), fileManager.isReadableFile(atPath: root.path) else {
             throw AppDataDirectoryResolverError.inaccessibleDirectory
         }
+        try validateSearchableDirectoryWithoutFollowingTheFinalPathComponent(root)
         return .init(
             root: root,
             mainDocument: root.appendingPathComponent("calendar-v1.json"),
@@ -86,6 +88,25 @@ enum AppDataDirectoryResolver {
             guard isDirectory.boolValue || current.standardizedFileURL == root.standardizedFileURL else {
                 throw AppDataDirectoryResolverError.inaccessibleDirectory
             }
+        }
+    }
+
+    /// Opening the final path with `O_NOFOLLOW` closes the check/use gap left
+    /// by Foundation's path-based readability APIs.  A directory needs execute
+    /// (search) permission as well as read/write permission before it can host
+    /// the workspace document and its recovery sidecars.
+    private static func validateSearchableDirectoryWithoutFollowingTheFinalPathComponent(_ root: URL) throws {
+        let fileDescriptor = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard fileDescriptor >= 0 else {
+            throw AppDataDirectoryResolverError.inaccessibleDirectory
+        }
+        defer { _ = close(fileDescriptor) }
+
+        var metadata = stat()
+        guard fstat(fileDescriptor, &metadata) == 0,
+              (metadata.st_mode & S_IFMT) == S_IFDIR,
+              faccessat(fileDescriptor, ".", X_OK, 0) == 0 else {
+            throw AppDataDirectoryResolverError.inaccessibleDirectory
         }
     }
 }

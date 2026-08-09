@@ -11,6 +11,8 @@ struct DayDrawerView: View {
     let onOpenDetail: (ProjectedItem) -> Void
     var onDelete: ((ProjectedItem) -> Void)?
     @StateObject private var model: DayDrawerViewModel
+    @State private var actionError: String?
+    @State private var recoveryAction: WorkspaceRecoveryAction?
 
     init(
         date: CalendarDate,
@@ -73,6 +75,18 @@ struct DayDrawerView: View {
                 onQuickCreate(model.quickCreateDate)
             }
             .keyboardShortcut("n", modifiers: [.command])
+
+            if let actionError {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(actionError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                    if recoveryAction != nil {
+                        Button("继续恢复", action: retryRecovery)
+                            .controlSize(.small)
+                    }
+                }
+            }
         }
         .padding(16)
         .frame(width: 340)
@@ -93,9 +107,32 @@ struct DayDrawerView: View {
     }
 
     private func sendCompletion(_ command: CalendarCommand) {
-        guard store.phase == .ready else { return }
+        actionError = nil
+        recoveryAction = nil
+        guard store.phase == .ready else {
+            actionError = "日历尚未准备好，完成状态没有保存。"
+            return
+        }
         Task {
-            try? await store.sendCalendar(command, undoLabel: "已更新完成状态")
+            do {
+                receive(WorkspaceMutationOutcomePresenter.presentation(
+                    for: try await store.sendCalendar(command, undoLabel: "已更新完成状态")
+                ))
+            } catch {
+                actionError = WorkspaceMutationOutcomePresenter.message(for: error)
+            }
+        }
+    }
+
+    private func receive(_ presentation: WorkspaceMutationPresentation) {
+        actionError = presentation.message
+        recoveryAction = presentation.recoveryAction
+    }
+
+    private func retryRecovery() {
+        guard let recoveryAction else { return }
+        Task { @MainActor in
+            receive(await WorkspaceMutationOutcomePresenter.retry(recoveryAction, in: store))
         }
     }
 }

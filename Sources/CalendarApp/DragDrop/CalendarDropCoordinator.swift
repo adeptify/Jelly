@@ -207,11 +207,7 @@ final class CalendarDropCoordinator: ObservableObject {
     }
 
     private func requirePersistedCalendarOutcome(_ outcome: WorkspaceTransactionOutcome) throws {
-        switch outcome {
-        case .committed, .noChange:
-            return
-        case .conflict, .draftSuperseded, .commitPending, .notCommitted,
-             .externalSourceChanged, .persistenceBlocked, .restored:
+        guard WorkspaceMutationOutcomePresenter.presentation(for: outcome).allowsDismissal else {
             throw CalendarDropCoordinatorError.persistenceNotCommitted
         }
     }

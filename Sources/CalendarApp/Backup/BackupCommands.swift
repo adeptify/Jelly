@@ -18,17 +18,23 @@ struct BackupCommands: Commands {
                 .disabled(store.phase != .ready)
             Button("恢复备份…", action: chooseBackupToRestore)
                 .disabled(!canRestore)
+            if case .exportRawRecoveryCopy? = BackupRecoveryPolicy.actions(for: store.phase).first {
+                Divider()
+                Button("导出原始恢复副本…", action: exportRawRecoveryCopy)
+            }
+            if case let .retryPendingCommit(transactionID)? = BackupRecoveryPolicy.actions(for: store.phase).first {
+                Divider()
+                Button("继续确认未完成保存", action: { retryPendingCommit(transactionID) })
+            }
+            if case let .retryJournalCleanup(identity, step)? = BackupRecoveryPolicy.actions(for: store.phase).first {
+                Divider()
+                Button("继续清理草稿记录", action: { retryJournalCleanup(identity, step: step) })
+            }
         }
     }
 
     private var canRestore: Bool {
-        switch store.phase {
-        case .ready, .loadFailed, .opaquePrimaryLoadFailed, .unreadablePrimaryLoadFailed,
-             .needsRelationshipRepair, .externalSourceChanged:
-            true
-        case .notLoaded, .loading, .mutating, .parkedCommitUncertain, .parkedJournalCleanup:
-            false
-        }
+        BackupRecoveryPolicy.allowsRestore(from: store.phase)
     }
 
     private func exportBackup() {
@@ -46,6 +52,67 @@ struct BackupCommands: Commands {
                 showInformation(title: "备份已导出", message: "已保存到：\n\(destination.path)")
             } catch {
                 showError(title: "无法导出备份", message: "备份没有写入。请确认目标位置可写后重试。")
+            }
+        }
+    }
+
+    private func exportRawRecoveryCopy() {
+        guard BackupRecoveryPolicy.actions(for: store.phase).contains(.exportRawRecoveryCopy) else { return }
+        let panel = NSSavePanel()
+        panel.title = "导出 Jelly 原始恢复副本"
+        panel.message = "此副本保留当前无法解析或读取的原始数据，仅用于后续恢复分析。"
+        panel.nameFieldStringValue = "Jelly原始恢复副本-\(backupTimestamp()).bin"
+        panel.allowedContentTypes = [.data]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        Task { @MainActor in
+            do {
+                let artifact = try await store.exportRawRecoveryCopy(to: destination)
+                showInformation(
+                    title: "原始恢复副本已导出",
+                    message: "已保存到：\n\(destination.path)\n\n校验：\(artifact.identity.sha256)（\(artifact.identity.byteCount) 字节）"
+                )
+            } catch {
+                showError(
+                    title: "无法导出原始恢复副本",
+                    message: "原始数据没有写入目标位置。请确认目标位置可写后重试。"
+                )
+            }
+        }
+    }
+
+    private func retryPendingCommit(_ transactionID: UUID) {
+        Task { @MainActor in
+            do {
+                let outcome = try await store.retryPendingCommit(transactionID)
+                let message = BackupRecoveryPolicy.message(for: outcome) + artifactMessage(for: outcome)
+                switch outcome {
+                case .committed:
+                    showInformation(title: "保存确认结果", message: message)
+                case .notCommitted, .sourceChanged, .stillPending:
+                    showError(title: "保存确认结果", message: message)
+                }
+            } catch {
+                showError(
+                    title: "无法确认此前保存",
+                    message: "未能继续确认这次保存；当前数据没有被新的操作覆盖。"
+                )
+            }
+        }
+    }
+
+    private func retryJournalCleanup(_ identity: DraftJournalIdentity, step: JournalCleanupStep) {
+        Task { @MainActor in
+            let status = await store.retryJournalCleanup(identity)
+            let message = BackupRecoveryPolicy.message(for: status)
+            switch status {
+            case .clean:
+                showInformation(title: "草稿清理结果", message: message)
+            case .cleanupPending:
+                showError(
+                    title: "草稿清理结果",
+                    message: "\(message)\n\n记录：\(identity.noteID.rawValue.uuidString)，步骤：\(step.displayName)。"
+                )
             }
         }
     }
@@ -108,6 +175,18 @@ struct BackupCommands: Commands {
         }
     }
 
+    private func artifactMessage(for outcome: PendingCommitRetryOutcome) -> String {
+        let artifacts: WorkspacePendingCommitArtifacts?
+        switch outcome {
+        case .committed:
+            artifacts = nil
+        case let .notCommitted(_, _, value), let .sourceChanged(_, _, value), let .stillPending(_, value):
+            artifacts = value
+        }
+        guard let rollback = artifacts?.rollback else { return "" }
+        return "\n\n\(rollbackMessage(for: rollback))"
+    }
+
     private func backupTimestamp() -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -124,6 +203,17 @@ struct BackupCommands: Commands {
     private func showError(title: String, message: String) {
         let alert = NSAlert(); alert.messageText = title; alert.informativeText = message
         alert.alertStyle = .warning; alert.addButton(withTitle: "知道了"); alert.runModal()
+    }
+}
+
+private extension JournalCleanupStep {
+    var displayName: String {
+        switch self {
+        case .record: "记录保存回执"
+        case .acknowledge: "确认草稿回执"
+        case .unbind: "解除草稿绑定"
+        case .clear: "清除草稿记录"
+        }
     }
 }
 

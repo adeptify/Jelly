@@ -145,7 +145,7 @@ final class CategoryManagerViewModel: ObservableObject {
         self.previewPalette = previewPalette
     }
 
-    func create() async throws {
+    func create() async throws -> WorkspaceMutationPresentation {
         try validateDraft(excluding: nil)
         let now = Date()
         let category = CalendarCategory(
@@ -156,11 +156,14 @@ final class CategoryManagerViewModel: ObservableObject {
             createdAt: now,
             updatedAt: now
         )
-        try await send(.createCategory(category), undoLabel: "已添加分类")
-        beginCreating()
+        let presentation = try await send(.createCategory(category), undoLabel: "已添加分类")
+        if presentation.allowsDismissal {
+            beginCreating()
+        }
+        return presentation
     }
 
-    func update(_ category: CalendarCategory) async throws {
+    func update(_ category: CalendarCategory) async throws -> WorkspaceMutationPresentation {
         guard category.id != store.calendarState.uncategorizedID else {
             throw CategoryManagerError.protectedCategory
         }
@@ -168,35 +171,39 @@ final class CategoryManagerViewModel: ObservableObject {
         var updated = category
         updated.name = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
         updated.colorHex = draftColorHex
-        try await send(.updateCategory(updated), undoLabel: "已更新分类")
-        if let authoritative = store.calendarState.categories[category.id] {
+        let presentation = try await send(.updateCategory(updated), undoLabel: "已更新分类")
+        if presentation.allowsDismissal, let authoritative = store.calendarState.categories[category.id] {
             beginEditing(authoritative)
         }
+        return presentation
     }
 
-    func reorder(_ ids: [UUID]) async throws {
+    func reorder(_ ids: [UUID]) async throws -> WorkspaceMutationPresentation {
         try await send(.reorderCategories(ids), undoLabel: "已调整分类顺序")
     }
 
-    func deleteConfirmed() async throws {
+    func deleteConfirmed() async throws -> WorkspaceMutationPresentation? {
         guard let category = categoryToDelete else {
-            return
+            return nil
         }
         guard category.id != store.calendarState.uncategorizedID else {
             throw CategoryManagerError.protectedCategory
         }
-        try await deleteConfirmed(category: category)
+        return try await deleteConfirmed(category: category)
     }
 
-    func deleteConfirmed(category: CalendarCategory) async throws {
+    func deleteConfirmed(category: CalendarCategory) async throws -> WorkspaceMutationPresentation {
         guard category.id != store.calendarState.uncategorizedID else {
             throw CategoryManagerError.protectedCategory
         }
-        try await send(
+        let presentation = try await send(
             .deleteCategory(category.id),
             undoLabel: "已删除分类并转入未分类"
         )
-        categoryToDelete = nil
+        if presentation.allowsDismissal {
+            categoryToDelete = nil
+        }
+        return presentation
     }
 
     func beginEditing(_ category: CalendarCategory) {
@@ -254,9 +261,11 @@ final class CategoryManagerViewModel: ObservableObject {
         return draftName != editingBaseline.name || draftColorHex != editingBaseline.colorHex
     }
 
-    private func send(_ command: WorkspaceCommand, undoLabel: String) async throws {
+    private func send(_ command: WorkspaceCommand, undoLabel: String) async throws -> WorkspaceMutationPresentation {
         do {
-            _ = try await store.sendWorkspace(command, undoLabel: undoLabel)
+            return WorkspaceMutationOutcomePresenter.presentation(
+                for: try await store.sendWorkspace(command, undoLabel: undoLabel)
+            )
         } catch let error as WorkspaceReducerError {
             guard case let .calendarFailure(calendarError) = error else { throw error }
             switch calendarError {
