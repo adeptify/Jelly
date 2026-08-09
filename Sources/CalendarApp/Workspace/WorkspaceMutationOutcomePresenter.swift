@@ -6,9 +6,18 @@ import WorkspaceDomain
 /// a calendar editor's visible state.  Callers must not infer success from the
 /// absence of an error: several persistence outcomes are non-throwing but must
 /// keep the user's draft open and expose the exact recovery token.
+enum WorkspaceCleanupRecoveryDisposition: Equatable {
+    /// The main transaction has completed.  A clean journal retry may now
+    /// dismiss the UI that initiated it.
+    case mayDismiss
+    /// The main transaction did not complete.  Journal cleanup only releases
+    /// bookkeeping and must not turn a failed edit into a saved edit.
+    case retain(String)
+}
+
 enum WorkspaceRecoveryAction: Equatable {
     case retryPendingCommit(UUID, WorkspacePendingCommitArtifacts)
-    case retryJournalCleanup(DraftJournalIdentity, JournalCleanupStep)
+    case retryJournalCleanup(DraftJournalIdentity, JournalCleanupStep, WorkspaceCleanupRecoveryDisposition)
 }
 
 struct WorkspaceMutationPresentation: Equatable {
@@ -43,24 +52,31 @@ enum WorkspaceMutationOutcomePresenter {
             } catch {
                 return .retain(message(for: error), recoveryAction: action)
             }
-        case let .retryJournalCleanup(identity, _):
-            return presentation(for: await store.retryJournalCleanup(identity))
+        case let .retryJournalCleanup(identity, _, disposition):
+            return presentation(for: await store.retryJournalCleanup(identity), after: disposition)
         }
     }
 
     static func presentation(for outcome: WorkspaceTransactionOutcome) -> WorkspaceMutationPresentation {
         switch outcome {
         case let .committed(_, journal), let .noChange(_, journal):
-            return presentation(for: journal)
-        case .restored:
-            return .saved
+            return presentation(for: journal, after: .mayDismiss)
+        case let .restored(outcome):
+            return .init(
+                allowsDismissal: true,
+                message: "恢复完成。\(rollbackMessage(for: outcome.rollback))",
+                recoveryAction: nil
+            )
         case .conflict:
             return .retain("当前数据已被其他操作改变，未覆盖你的输入；请检查后重试。")
         case .draftSuperseded:
             return .retain("已有更新的编辑版本，当前输入未覆盖它。")
         case let .commitPending(transactionID, artifacts):
+            let message = artifacts.rollback == nil
+                ? "保存结果尚未确认，当前输入仍保留；请在恢复菜单中继续确认。"
+                : "恢复结果尚未确认，当前数据是否已替换仍未知；请在恢复菜单中继续确认。"
             return .retain(
-                "保存结果尚未确认，当前输入仍保留；请在恢复菜单中继续确认。",
+                message,
                 recoveryAction: .retryPendingCommit(transactionID, artifacts)
             )
         case let .notCommitted(_, journal, _):
@@ -68,23 +84,43 @@ enum WorkspaceMutationOutcomePresenter {
                 journal: journal,
                 message: "没有保存到磁盘，已保留当前输入；请重试。"
             )
-        case .externalSourceChanged:
-            return .retain("检测到本地数据已在外部变化，当前输入未保存；请先恢复或重新载入。")
-        case .persistenceBlocked:
-            return .retain("本地数据暂时无法安全读取，当前输入未保存；请先导出原始恢复副本。")
+        case let .externalSourceChanged(_, _, journal, _):
+            return failedSavePresentation(
+                journal: journal,
+                message: "检测到本地数据已在外部变化，当前输入未保存；请先恢复或重新载入。"
+            )
+        case let .persistenceBlocked(_, reason, journal):
+            let message = switch reason {
+            case .opaqueInvalidPrimary:
+                "本地数据无法解析，当前输入未保存；请先导出原始恢复副本。"
+            case .unreadablePrimary:
+                "本地数据暂时无法读取，原始字节也不可用；当前输入未保存。"
+            case .loadFailed:
+                "本地数据加载失败，当前输入未保存；请先恢复或重新载入。"
+            }
+            return failedSavePresentation(journal: journal, message: message)
         }
     }
 
     static func presentation(for outcome: PendingCommitRetryOutcome) -> WorkspaceMutationPresentation {
         switch outcome {
         case let .committed(operation, journal):
-            let settled = presentation(for: journal)
-            guard settled.recoveryAction == nil else { return settled }
             switch operation {
             case .save:
-                return .init(allowsDismissal: true, message: "此前保存已确认。", recoveryAction: nil)
-            case .restore:
-                return .init(allowsDismissal: true, message: "此前恢复已确认。", recoveryAction: nil)
+                return presentation(
+                    for: journal,
+                    after: .mayDismiss,
+                    successMessage: "此前保存已确认。",
+                    cleanMessage: "此前保存已确认。"
+                )
+            case let .restore(outcome):
+                let message = "此前恢复已确认。\(rollbackMessage(for: outcome.rollback))"
+                return presentation(
+                    for: journal,
+                    after: .mayDismiss,
+                    successMessage: message,
+                    cleanMessage: message
+                )
             }
         case let .notCommitted(_, journal, _):
             return failedSavePresentation(
@@ -104,16 +140,47 @@ enum WorkspaceMutationOutcomePresenter {
         }
     }
 
-    static func presentation(for status: JournalResolutionStatus) -> WorkspaceMutationPresentation {
+    static func presentation(
+        for status: JournalResolutionStatus,
+        after disposition: WorkspaceCleanupRecoveryDisposition,
+        successMessage: String = "内容已写入，但草稿清理尚未完成；请在恢复菜单中继续清理。",
+        cleanMessage: String? = nil
+    ) -> WorkspaceMutationPresentation {
         switch status {
         case .clean:
-            return .saved
+            switch disposition {
+            case .mayDismiss:
+                return .init(allowsDismissal: true, message: cleanMessage, recoveryAction: nil)
+            case let .retain(message):
+                return .retain(message)
+            }
         case let .cleanupPending(identity, step):
+            let message: String
+            switch disposition {
+            case .mayDismiss:
+                message = successMessage
+            case let .retain(terminalMessage):
+                message = messageWithCleanupPending(terminalMessage)
+            }
             return .retain(
-                "内容已写入，但草稿清理尚未完成；请在恢复菜单中继续清理。",
-                recoveryAction: .retryJournalCleanup(identity, step)
+                message,
+                recoveryAction: .retryJournalCleanup(identity, step, disposition)
             )
         }
+    }
+
+    /// Reuse the disposition attached to the exact visible recovery action.
+    /// This is intentionally separate from a bare `JournalResolutionStatus`:
+    /// `.clean` only means cleanup is clean, not that the original mutation
+    /// saved successfully.
+    static func presentation(
+        for status: JournalResolutionStatus,
+        after action: WorkspaceRecoveryAction
+    ) -> WorkspaceMutationPresentation {
+        guard case let .retryJournalCleanup(_, _, disposition) = action else {
+            return .retain("恢复操作类型不匹配，当前输入仍保留。", recoveryAction: action)
+        }
+        return presentation(for: status, after: disposition)
     }
 
     static func message(for error: Error) -> String {
@@ -138,8 +205,26 @@ enum WorkspaceMutationOutcomePresenter {
             return .retain(message)
         }
         return .retain(
-            message.replacingOccurrences(of: "；请重试。", with: "；草稿清理也需要继续完成。"),
-            recoveryAction: .retryJournalCleanup(identity, step)
+            messageWithCleanupPending(message),
+            recoveryAction: .retryJournalCleanup(identity, step, .retain(message))
         )
+    }
+
+    private static func messageWithCleanupPending(_ terminalMessage: String) -> String {
+        let replacement = terminalMessage.replacingOccurrences(
+            of: "；请重试。", with: "；草稿清理也需要继续完成。"
+        )
+        return replacement == terminalMessage
+            ? "\(terminalMessage) 草稿清理也需要继续完成。"
+            : replacement
+    }
+
+    private static func rollbackMessage(for rollback: WorkspaceRollbackArtifact) -> String {
+        switch rollback {
+        case let .file(url, _):
+            "恢复前的数据已保留在：\n\(url.path)"
+        case .nonePreviousSourceAbsent:
+            "恢复前没有可回滚的主数据文件。"
+        }
     }
 }

@@ -33,6 +33,11 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
     private let rollbackWriter: any ExclusiveFileWriting
     private let mainFileWriter: any MainFileCompareAndReplaceWriting
     private var loadedSource: LoadedSource = .unresolved
+    // An absent primary is a source binding, not a request to ask the caller
+    // for a new seed each time `load()` is observed.  Re-running a seed
+    // closure can manufacture different IDs while the same repository is
+    // still bound to the same missing file.
+    private var seededAbsentLoad: WorkspaceLoadResult?
     private var pendingRestores: [UUID: PreparedWorkspaceRestore] = [:]
     private var pendingCommit: PendingWorkspaceCommit?
 
@@ -536,6 +541,14 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
     ) throws -> WorkspaceRollbackArtifact {
         switch source {
         case .absent:
+            do {
+                try FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+            } catch {
+                throw WorkspacePersistenceError.rollbackWriteFailed
+            }
             return .nonePreviousSourceAbsent
         case let .valid(rawData, _), let .opaqueInvalid(rawData, _):
             try writeVerifiedRollback(rawData, to: url)
@@ -649,17 +662,20 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
     }
 
     private func seededLoadResult() throws -> WorkspaceLoadResult {
+        if let seededAbsentLoad { return seededAbsentLoad }
         let state = seed()
         do {
             try WorkspaceValidator.validate(state)
         } catch {
             throw WorkspacePersistenceError.invalidWorkspace
         }
-        return WorkspaceLoadResult(
+        let result = WorkspaceLoadResult(
             state: state,
             provenance: .init(sourceSchema: 0, sourceBytesSHA256: "", sourceByteCount: 0),
             consistencyIssues: []
         )
+        seededAbsentLoad = result
+        return result
     }
 
     private func requireReadableSourceBinding() throws -> SourceBinding {

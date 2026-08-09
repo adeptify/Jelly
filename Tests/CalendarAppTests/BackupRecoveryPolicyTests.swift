@@ -25,6 +25,10 @@ struct BackupRecoveryPolicyTests {
         #expect(BackupRecoveryPolicy.message(for: .stillPending(
             transactionID: transactionID, artifacts: artifacts
         )) == "保存结果仍未确认；请稍后再次确认。")
+        #expect(BackupRecoveryPolicy.message(for: .committed(.restore(.init(
+            receipt: .init(workspaceRevision: 3, persistedDraft: nil),
+            rollback: .nonePreviousSourceAbsent
+        )), journal: .clean)) == "此前恢复已确认。恢复前没有可回滚的主数据文件。")
     }
 
     @Test func parkedJournalExposesTheExactIdentityAndStep() {
@@ -37,9 +41,9 @@ struct BackupRecoveryPolicyTests {
             "草稿清理仍未完成；请稍后继续清理。")
     }
 
-    @Test func opaqueAndUnreadablePrimaryExposeRawRecoveryCopyButNotWrites() {
+    @Test func onlyOpaquePrimaryExposesRawRecoveryCopy() {
         #expect(BackupRecoveryPolicy.actions(for: .opaquePrimaryLoadFailed) == [.exportRawRecoveryCopy])
-        #expect(BackupRecoveryPolicy.actions(for: .unreadablePrimaryLoadFailed) == [.exportRawRecoveryCopy])
+        #expect(BackupRecoveryPolicy.actions(for: .unreadablePrimaryLoadFailed) == [])
     }
 
     @Test func restoreAvailabilityMatchesTheStoreRecoveryContract() {

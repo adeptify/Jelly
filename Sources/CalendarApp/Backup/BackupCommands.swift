@@ -141,11 +141,16 @@ struct BackupCommands: Commands {
         guard confirmRestore(preview.loadResult.state.calendar) else { return }
         do {
             let outcome = try await store.restore(preview, rollbackDirectoryURL: rollbackDirectory)
-            guard case let .restored(restored) = outcome else {
-                showError(title: "恢复备份失败", message: "恢复没有提交，当前数据没有被替换。")
-                return
+            switch outcome {
+            case let .restored(restored):
+                showInformation(title: "备份已恢复", message: rollbackMessage(for: restored.rollback))
+            default:
+                let presentation = WorkspaceMutationOutcomePresenter.presentation(for: outcome)
+                showError(
+                    title: "恢复确认结果",
+                    message: presentation.message ?? "恢复没有完成；当前数据是否已替换尚未确认。"
+                )
             }
-            showInformation(title: "备份已恢复", message: rollbackMessage(for: restored.rollback))
         } catch {
             showError(title: "恢复备份失败", message: "当前本地文件没有被替换。请检查备份和磁盘空间后重试。")
         }

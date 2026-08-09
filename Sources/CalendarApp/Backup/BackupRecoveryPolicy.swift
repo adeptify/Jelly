@@ -31,10 +31,10 @@ enum BackupRecoveryPolicy {
             [.retryPendingCommit(transactionID)]
         case let .parkedJournalCleanup(identity, step):
             [.retryJournalCleanup(identity, step)]
-        case .opaquePrimaryLoadFailed, .unreadablePrimaryLoadFailed:
+        case .opaquePrimaryLoadFailed:
             [.exportRawRecoveryCopy]
         case .notLoaded, .loading, .ready, .mutating, .needsRelationshipRepair,
-             .externalSourceChanged, .loadFailed:
+             .externalSourceChanged, .loadFailed, .unreadablePrimaryLoadFailed:
             []
         }
     }
@@ -45,7 +45,8 @@ enum BackupRecoveryPolicy {
             let suffix = cleanupSuffix(for: journal)
             switch operation {
             case .save: return "此前保存已确认。\(suffix)"
-            case .restore: return "此前恢复已确认。\(suffix)"
+            case let .restore(outcome):
+                return "此前恢复已确认。\(rollbackMessage(for: outcome.rollback))\(suffix)"
             }
         case let .notCommitted(_, journal, _):
             return "已确认此前保存没有写入磁盘，当前输入仍保留。\(cleanupSuffix(for: journal))"
@@ -68,5 +69,12 @@ enum BackupRecoveryPolicy {
     private static func cleanupSuffix(for status: JournalResolutionStatus) -> String {
         guard case .cleanupPending = status else { return "" }
         return " 草稿清理仍未完成，请继续清理。"
+    }
+
+    private static func rollbackMessage(for rollback: WorkspaceRollbackArtifact) -> String {
+        switch rollback {
+        case let .file(url, _): "恢复前的数据已保留在：\n\(url.path)"
+        case .nonePreviousSourceAbsent: "恢复前没有可回滚的主数据文件。"
+        }
     }
 }

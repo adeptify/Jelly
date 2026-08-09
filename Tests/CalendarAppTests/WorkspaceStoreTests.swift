@@ -274,6 +274,37 @@ struct WorkspaceStoreTests {
         #expect(store.phase == .unreadablePrimaryLoadFailed)
     }
 
+    @Test func realJSONUnreadablePrimaryCannotExportRawRecoveryBytes() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-6c-unreadable-raw-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let initial = WorkspaceState.empty(calendar: calendar)
+        let document = directory.appendingPathComponent("calendar-v1.json")
+        let alternate = directory.appendingPathComponent("alternate.json")
+        try WorkspaceDocumentCodec.encode(initial).write(to: document)
+        try WorkspaceDocumentCodec.encode(initial).write(to: alternate)
+        let store = WorkspaceStore(
+            initialState: initial,
+            repository: JSONWorkspaceRepository(documentURL: document, seed: { initial })
+        )
+        await store.load()
+        try FileManager.default.removeItem(at: document)
+        try FileManager.default.createSymbolicLink(at: document, withDestinationURL: alternate)
+
+        let blocked = try await store.sendCalendar(
+            .createItem(try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "must remain unreadable")),
+            undoLabel: "blocked"
+        )
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try await store.rawRecoveryData()
+        }
+        let presentation = WorkspaceMutationOutcomePresenter.presentation(for: blocked)
+        #expect(presentation.message == "本地数据暂时无法读取，原始字节也不可用；当前输入未保存。")
+        #expect(presentation.recoveryAction == nil)
+    }
+
     @Test func invalidDraftContextSaveErrorStillThrowsInsteadOfBecomingATerminalOutcome() async throws {
         let (state, _, original) = try draftFixture()
         var snapshot = original.snapshot
@@ -2652,6 +2683,10 @@ private actor RestoreCountingRepository: WorkspaceRepository {
 actor WorkspaceStoreTestRepository: WorkspaceRepository {
     private var state: WorkspaceState
     private var loadFailure = false
+    private var loadSuspended = false
+    private var loadStarted = false
+    private var loadWaiters: [CheckedContinuation<Void, Never>] = []
+    private var loadResumeWaiters: [CheckedContinuation<Void, Never>] = []
     private var saveCountStorage = 0
     private var failSave = false
     private var unreadablePrimarySave = false
@@ -2672,7 +2707,12 @@ actor WorkspaceStoreTestRepository: WorkspaceRepository {
     private var saveWaiters: [CheckedContinuation<Void, Never>] = []
     private var saveResumeWaiters: [CheckedContinuation<Void, Never>] = []
     init(initial: WorkspaceState) { state = initial }
-    func load() throws -> WorkspaceLoadResult {
+    func load() async throws -> WorkspaceLoadResult {
+        if loadSuspended {
+            loadStarted = true
+            let waiters = loadWaiters; loadWaiters.removeAll(); waiters.forEach { $0.resume() }
+            await withCheckedContinuation { loadResumeWaiters.append($0) }
+        }
         if loadFailure { loadFailure = false; throw WorkspacePersistenceError.invalidDocument }
         return .init(state: state, provenance: .init(sourceSchema: 3, sourceBytesSHA256: "test", sourceByteCount: 0), consistencyIssues: [])
     }
@@ -2709,9 +2749,9 @@ actor WorkspaceStoreTestRepository: WorkspaceRepository {
     func discardPreparedRestore(_ prepared: PreparedWorkspaceRestore) -> Bool { false }
     func commitRestore(_ prepared: PreparedWorkspaceRestore, state: WorkspaceState) throws -> WorkspaceRestoreOutcome { throw WorkspacePersistenceError.invalidRestoreCapability }
     func currentDocumentData() throws -> Data { Data() }
-    func reloadCurrentSourceAfterExternalChange() throws -> WorkspaceReloadedSource {
+    func reloadCurrentSourceAfterExternalChange() async throws -> WorkspaceReloadedSource {
         if let reloaded { return reloaded }
-        return .valid(try load())
+        return .valid(try await load())
     }
     func currentRawRecoveryData() throws -> WorkspaceRawRecoveryArtifact {
         guard let rawRecoveryArtifact else { throw WorkspacePersistenceError.invalidDocument }
@@ -2722,8 +2762,18 @@ actor WorkspaceStoreTestRepository: WorkspaceRepository {
         return reconciliation
     }
     var saveCount: Int { saveCountStorage }
+    var persistedState: WorkspaceState { state }
     var reconciliationCount: Int { reconciliationCountStorage }
     func failNextLoad() { loadFailure = true }
+    func suspendNextLoad() { loadSuspended = true }
+    func waitForLoadStart() async {
+        guard !loadStarted else { return }
+        await withCheckedContinuation { loadWaiters.append($0) }
+    }
+    func resumeLoad() {
+        loadSuspended = false
+        let waiters = loadResumeWaiters; loadResumeWaiters.removeAll(); waiters.forEach { $0.resume() }
+    }
     func failNextSave() { failSave = true }
     func failNextSaveWithUnreadablePrimary() { unreadablePrimarySave = true }
     func failNextSaveWithInvalidDraftContext() { invalidDraftContextSave = true }
@@ -2752,3 +2802,360 @@ actor WorkspaceStoreTestRepository: WorkspaceRepository {
         let waiters = saveResumeWaiters; saveResumeWaiters.removeAll(); waiters.forEach { $0.resume() }
     }
 }
+
+// These are direct behavioral ports of the deleted calendar-store assertions.
+// Workspace now queues an in-flight operation rather than throwing for every
+// concurrent caller, so the restore port proves the stronger invariant: a
+// queued command cannot reduce or publish before its restore commits.
+@MainActor
+extension WorkspaceStoreTests {
+    @Test func legacyV1PrimaryProjectionAndUndoRoundTripKeepsCrossDayIdentity() async throws {
+        let directory = try legacyStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let primary = directory.appendingPathComponent("calendar-v1.json")
+        try legacyStoreV1CompleteGraphData.write(to: primary)
+        let seed = WorkspaceState.empty(calendar: CalendarState.empty(uncategorizedID: legacyStoreCategoryID, now: .distantPast))
+        let repository = JSONWorkspaceRepository(documentURL: primary, seed: { seed })
+        let store = WorkspaceStore(initialState: seed, repository: repository, clock: { .distantPast })
+
+        await store.load()
+        #expect(store.phase == .ready)
+        let migrated = store.state
+        try legacyAssertCompleteV1Graph(migrated.calendar)
+        let item = try CalendarItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000001201")!, kind: .task,
+            title: "跨层跨日事项", categoryID: legacyStoreCategoryID,
+            schedule: .init(startDate: .init(year: 2026, month: 8, day: 30)!, endDate: .init(year: 2026, month: 9, day: 2)!, startTime: nil, endTime: nil),
+            completedAt: nil, createdAt: .distantPast, updatedAt: .distantPast
+        )
+
+        guard case .committed = try await store.sendCalendar(.createItem(item), undoLabel: "添加跨日事项") else {
+            Issue.record("跨日事项必须先持久化后才发布")
+            return
+        }
+        let projection = TimelineProjection.make(
+            in: .init(start: .init(year: 2026, month: 8, day: 3)!, end: .init(year: 2026, month: 9, day: 6)!),
+            state: store.calendarState, hiddenCategoryIDs: []
+        )
+        #expect(projection.entries.filter { $0.id == .item(item.id) }.count == 1)
+        #expect(projection.entries.contains { $0.id == .item(legacyStoreItemID) })
+        #expect(projection.entries.first { $0.id == .occurrence(legacyStoreMovedKey) }?.title == "已移动")
+        #expect(projection.entries.first { $0.id == .occurrence(legacyStoreCompletionKey) }?.completedAt == legacyStoreOccurrenceCompletionDate)
+        #expect(projection.entries.contains { $0.id == .occurrence(legacyStoreSkippedKey) } == false)
+        #expect(try await repository.load().state == store.state)
+
+        _ = try await store.undo()
+        // Workspace revisions are monotonic across undo; the restored content
+        // itself must still be the complete migrated snapshot.
+        #expect(store.state.calendar == migrated.calendar)
+        #expect(store.state.notes == migrated.notes)
+        #expect(store.state.calendar.items[item.id] == nil)
+        #expect(try await repository.load().state == store.state)
+    }
+
+    @Test func legacyV1BackupRestoreMigratesAndCorruptBackupCannotOverwriteIt() async throws {
+        let directory = try legacyStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let primary = directory.appendingPathComponent("main.json")
+        let initial = WorkspaceState.empty(calendar: CalendarState.empty(uncategorizedID: legacyStoreCategoryID, now: .distantPast))
+        try WorkspaceDocumentCodec.encode(initial).write(to: primary)
+        let repository = JSONWorkspaceRepository(documentURL: primary, seed: { initial })
+        let store = WorkspaceStore(initialState: initial, repository: repository, clock: { .distantPast })
+        await store.load()
+        let beforePrimary = try Data(contentsOf: primary)
+        let source = directory.appendingPathComponent("schema-one-backup.json")
+        try legacyStoreV1CompleteGraphData.write(to: source)
+
+        let restored = try await store.restore(
+            try await store.inspectRestoreSource(at: source),
+            rollbackDirectoryURL: directory.appendingPathComponent("Rollbacks", isDirectory: true)
+        )
+        guard case let .restored(outcome) = restored, case let .file(rollbackURL, _) = outcome.rollback else {
+            Issue.record("有主数据的恢复必须返回原始 rollback")
+            return
+        }
+        try legacyAssertCompleteV1Graph(store.calendarState)
+        #expect(try Data(contentsOf: rollbackURL) == beforePrimary)
+        let persisted = try Data(contentsOf: primary)
+
+        let corrupt = directory.appendingPathComponent("corrupt.json")
+        try Data("{not-valid-json".utf8).write(to: corrupt)
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) { _ = try await store.inspectRestoreSource(at: corrupt) }
+        #expect(try Data(contentsOf: primary) == persisted)
+        #expect(try Data(contentsOf: rollbackURL) == beforePrimary)
+    }
+
+    @Test func legacyFailedReductionReturnsReadyWithoutSaveOrUndo() async throws {
+        let initial = WorkspaceState.empty(calendar: CalendarState.empty(uncategorizedID: UUID(), now: .distantPast))
+        let repository = WorkspaceStoreTestRepository(initial: initial)
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+
+        await #expect(throws: WorkspaceReducerError.calendarFailure(.missingItem)) {
+            _ = try await store.sendCalendar(.deleteItem(UUID()), undoLabel: "删除")
+        }
+        #expect(store.phase == .ready)
+        #expect(store.state == initial)
+        #expect(store.canUndo == false)
+        #expect(await repository.saveCount == 0)
+    }
+
+    @Test func legacySuccessfulSendPersistsBeforePublishing() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let initial = WorkspaceState.empty(calendar: calendar)
+        let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "持久化优先")
+        let repository = WorkspaceStoreTestRepository(initial: initial)
+        await repository.suspendNextSave()
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+        let operation = Task { @MainActor in try await store.sendCalendar(.createItem(item), undoLabel: "添加事项") }
+        await repository.waitForSaveStart()
+
+        #expect(store.state == initial)
+        #expect(store.canUndo == false)
+        await repository.resumeSave()
+        guard case .committed = try await operation.value else { Issue.record("保存成功必须提交"); return }
+        #expect(store.state.calendar.items[item.id] == item)
+        #expect(await repository.persistedState == store.state)
+        #expect(store.canUndo)
+    }
+
+    @Test func legacyUndoRestoresWholeSnapshotAfterSuccessfulSave() async throws {
+        let uncategorized = UUID()
+        let deleted = UUID()
+        let target = UUID()
+        var calendar = CalendarState.empty(uncategorizedID: uncategorized, now: .distantPast)
+        calendar.categories[deleted] = .init(id: deleted, name: "删除", colorHex: "#4F7FFF", sortIndex: 1, createdAt: .distantPast, updatedAt: .distantPast)
+        calendar.categories[target] = .init(id: target, name: "迁移", colorHex: "#D65772", sortIndex: 2, createdAt: .distantPast, updatedAt: .distantPast)
+        let item = try makeItem(id: UUID(), categoryID: deleted, title: "应跟随分类迁移")
+        calendar.items[item.id] = item
+        let initial = WorkspaceState.empty(calendar: calendar)
+        let repository = WorkspaceStoreTestRepository(initial: initial)
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+
+        _ = try await store.sendWorkspace(.deleteCategory(deleted), undoLabel: "删除分类")
+        #expect(store.state != initial)
+        _ = try await store.undo()
+
+        #expect(store.state.calendar == initial.calendar)
+        #expect(store.state.notes == initial.notes)
+        #expect(await repository.persistedState == store.state)
+        #expect(store.canUndo == false)
+    }
+
+    @Test func legacySendDuringLoadIsRejectedBeforeSeedCanReduce() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let disk = WorkspaceState.empty(calendar: calendar)
+        let repository = WorkspaceStoreTestRepository(initial: disk)
+        await repository.suspendNextLoad()
+        let store = WorkspaceStore(initialState: .empty(calendar: CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)), repository: repository)
+        let loading = Task { @MainActor in await store.load() }
+        await repository.waitForLoadStart()
+
+        await #expect(throws: WorkspaceStoreError.frozen) {
+            _ = try await store.sendCalendar(.deleteItem(UUID()), undoLabel: "删除")
+        }
+        #expect(await repository.saveCount == 0)
+        await repository.resumeLoad()
+        await loading.value
+        #expect(store.phase == .ready)
+        #expect(store.state == disk)
+    }
+
+    @Test func legacyRestorePreventsQueuedMutationAndUndoFromPublishingEarly() async throws {
+        let directory = try legacyStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let initial = WorkspaceState.empty(calendar: CalendarState.empty(uncategorizedID: legacyStoreCategoryID, now: .distantPast))
+        let source = directory.appendingPathComponent("restore.json")
+        try legacyStoreV1CompleteGraphData.write(to: source)
+        let backing = JSONWorkspaceRepository(documentURL: directory.appendingPathComponent("main.json"), seed: { initial })
+        let repository = RestoreCountingRepository(backing: backing)
+        await repository.suspendNextCommit()
+        let store = WorkspaceStore(initialState: initial, repository: repository, clock: { .distantPast })
+        await store.load()
+        let preview = try await store.inspectRestoreSource(at: source)
+        let restoring = Task { @MainActor in try await store.restore(preview, rollbackDirectoryURL: directory.appendingPathComponent("Rollbacks", isDirectory: true)) }
+        await repository.waitForCommitStart()
+        let queuedItem = try makeItem(id: UUID(), categoryID: legacyStoreCategoryID, title: "不得抢跑")
+        let queued = Task { @MainActor in try await store.sendCalendar(.createItem(queuedItem), undoLabel: "队列事项") }
+        await Task.yield()
+
+        #expect(store.phase == .mutating)
+        #expect(store.state == initial)
+        #expect(store.state.calendar.items[queuedItem.id] == nil)
+        await repository.resumeCommit()
+        guard case .restored = try await restoring.value else { Issue.record("恢复必须完成"); return }
+        guard case .committed = try await queued.value else { Issue.record("恢复后的队列事务必须再独立提交"); return }
+        #expect(store.state.calendar.items[queuedItem.id] != nil)
+    }
+
+    @Test func legacyCorruptPrimaryCanRestoreValidBackupAndPreserveRawRollback() async throws {
+        let directory = try legacyStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let primary = directory.appendingPathComponent("main.json")
+        let opaque = Data("corrupt primary bytes".utf8)
+        try opaque.write(to: primary)
+        let seed = WorkspaceState.empty(calendar: CalendarState.empty(uncategorizedID: legacyStoreCategoryID, now: .distantPast))
+        let store = WorkspaceStore(initialState: seed, repository: JSONWorkspaceRepository(documentURL: primary, seed: { seed }))
+        await store.load()
+        #expect(store.phase == .opaquePrimaryLoadFailed)
+        let source = directory.appendingPathComponent("valid-v1.json")
+        try legacyStoreV1CompleteGraphData.write(to: source)
+
+        let outcome = try await store.restore(try await store.inspectRestoreSource(at: source), rollbackDirectoryURL: directory.appendingPathComponent("Rollbacks", isDirectory: true))
+        guard case let .restored(restoration) = outcome, case let .file(rollbackURL, _) = restoration.rollback else { Issue.record("opaque 主文件也必须有原始 rollback"); return }
+        #expect(try Data(contentsOf: rollbackURL) == opaque)
+        #expect(store.phase == .ready)
+        try legacyAssertCompleteV1Graph(store.calendarState)
+    }
+
+    @Test func legacyInvalidSemanticV1RestoreKeepsMemoryDiskAndUndoUntouched() async throws {
+        let directory = try legacyStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let initial = WorkspaceState.empty(calendar: CalendarState.empty(uncategorizedID: legacyStoreCategoryID, now: .distantPast))
+        let primary = directory.appendingPathComponent("main.json")
+        try WorkspaceDocumentCodec.encode(initial).write(to: primary)
+        let repository = JSONWorkspaceRepository(documentURL: primary, seed: { initial })
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+        let category = CalendarCategory(id: UUID(), name: "保留撤销", colorHex: "#4F7FFF", sortIndex: 1, createdAt: .distantPast, updatedAt: .distantPast)
+        _ = try await store.sendWorkspace(.createCategory(category), undoLabel: "添加分类")
+        let before = store.state
+        let beforeBytes = try Data(contentsOf: primary)
+        let beforeGeneration = store.statePublicationGeneration
+        let invalid = Data(String(decoding: legacyStoreV1CompleteGraphData, as: UTF8.self)
+            .replacingOccurrences(of: "\"categoryID\":\"00000000-0000-0000-0000-000000000100\"", with: "\"categoryID\":\"00000000-0000-0000-0000-000000000199\"").utf8)
+        let source = directory.appendingPathComponent("invalid-v1.json")
+        try invalid.write(to: source)
+
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) { _ = try await store.inspectRestoreSource(at: source) }
+        #expect(store.state == before)
+        #expect(store.statePublicationGeneration == beforeGeneration)
+        #expect(try Data(contentsOf: primary) == beforeBytes)
+        #expect(store.canUndo)
+    }
+
+    @Test func legacyFailedV1RestoreRollbackWriteDoesNotPublishMigratedState() async throws {
+        let directory = try legacyStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let initial = WorkspaceState.empty(calendar: CalendarState.empty(uncategorizedID: legacyStoreCategoryID, now: .distantPast))
+        let primary = directory.appendingPathComponent("main.json")
+        try WorkspaceDocumentCodec.encode(initial).write(to: primary)
+        let writer = LegacyStoreFailingRollbackWriter()
+        let repository = JSONWorkspaceRepository(documentURL: primary, seed: { initial }, rollbackWriter: writer)
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+        let before = store.state
+        let beforeGeneration = store.statePublicationGeneration
+        let beforeBytes = try Data(contentsOf: primary)
+        let source = directory.appendingPathComponent("v1.json")
+        try legacyStoreV1CompleteGraphData.write(to: source)
+        writer.failNextWrite = true
+
+        await #expect(throws: WorkspacePersistenceError.rollbackWriteFailed) {
+            _ = try await store.restore(try await store.inspectRestoreSource(at: source), rollbackDirectoryURL: directory.appendingPathComponent("Rollbacks", isDirectory: true))
+        }
+        #expect(store.state == before)
+        #expect(store.statePublicationGeneration == beforeGeneration)
+        #expect(try Data(contentsOf: primary) == beforeBytes)
+    }
+
+    @Test func legacyFailedV1RestorePrimarySaveDoesNotPublishState() async throws {
+        let directory = try legacyStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let initial = WorkspaceState.empty(calendar: CalendarState.empty(uncategorizedID: legacyStoreCategoryID, now: .distantPast))
+        let primary = directory.appendingPathComponent("main.json")
+        try WorkspaceDocumentCodec.encode(initial).write(to: primary)
+        let repository = JSONWorkspaceRepository(documentURL: primary, seed: { initial }, mainFileWriter: LegacyStoreAlwaysFailingMainWriter())
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+        let before = store.state
+        let beforeGeneration = store.statePublicationGeneration
+        let beforeBytes = try Data(contentsOf: primary)
+        let source = directory.appendingPathComponent("v1.json")
+        try legacyStoreV1CompleteGraphData.write(to: source)
+
+        await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
+            _ = try await store.restore(try await store.inspectRestoreSource(at: source), rollbackDirectoryURL: directory.appendingPathComponent("Rollbacks", isDirectory: true))
+        }
+        #expect(store.state == before)
+        #expect(store.statePublicationGeneration == beforeGeneration)
+        #expect(try Data(contentsOf: primary) == beforeBytes)
+        #expect(try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .contains { $0.lastPathComponent == "Rollbacks" })
+    }
+
+    @Test func legacySuccessfulRestorePublishesOnceAndClearsUndo() async throws {
+        let directory = try legacyStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let initial = WorkspaceState.empty(calendar: CalendarState.empty(uncategorizedID: legacyStoreCategoryID, now: .distantPast))
+        let primary = directory.appendingPathComponent("main.json")
+        try WorkspaceDocumentCodec.encode(initial).write(to: primary)
+        let repository = JSONWorkspaceRepository(documentURL: primary, seed: { initial })
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+        _ = try await store.sendWorkspace(.createCategory(.init(id: UUID(), name: "待撤销", colorHex: "#4F7FFF", sortIndex: 1, createdAt: .distantPast, updatedAt: .distantPast)), undoLabel: "添加分类")
+        let beforeRestore = store.state
+        let beforeBytes = try Data(contentsOf: primary)
+        let beforeGeneration = store.statePublicationGeneration
+        let source = directory.appendingPathComponent("v1.json")
+        try legacyStoreV1CompleteGraphData.write(to: source)
+
+        let outcome = try await store.restore(try await store.inspectRestoreSource(at: source), rollbackDirectoryURL: directory.appendingPathComponent("Rollbacks", isDirectory: true))
+        guard case let .restored(restoration) = outcome, case let .file(rollbackURL, _) = restoration.rollback else { Issue.record("恢复必须携带 rollback"); return }
+        try legacyAssertCompleteV1Graph(store.calendarState)
+        #expect(store.statePublicationGeneration == beforeGeneration + 1)
+        #expect(try Data(contentsOf: rollbackURL) == beforeBytes)
+        #expect(store.canUndo == false)
+        #expect(store.canRedo == false)
+        #expect(store.state != beforeRestore)
+    }
+}
+
+private let legacyStoreCategoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000100")!
+private let legacyStoreItemID = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
+private let legacyStoreSeriesID = UUID(uuidString: "00000000-0000-0000-0000-000000000102")!
+private let legacyStoreMovedKey = OccurrenceKey(seriesID: legacyStoreSeriesID, originalDate: .init(year: 2026, month: 8, day: 10)!)
+private let legacyStoreSkippedKey = OccurrenceKey(seriesID: legacyStoreSeriesID, originalDate: .init(year: 2026, month: 8, day: 12)!)
+private let legacyStoreCompletionKey = OccurrenceKey(seriesID: legacyStoreSeriesID, originalDate: .init(year: 2026, month: 8, day: 17)!)
+private let legacyStoreOccurrenceCompletionDate = Date(timeIntervalSince1970: 1_700_000_300.5)
+
+private func legacyStoreDirectory() throws -> URL {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("JellyLegacyStore-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+    return url
+}
+
+private func legacyAssertCompleteV1Graph(_ state: CalendarState) throws {
+    #expect(state.uncategorizedID == legacyStoreCategoryID)
+    #expect(state.categories[legacyStoreCategoryID]?.id == legacyStoreCategoryID)
+    #expect(state.items[legacyStoreItemID]?.id == legacyStoreItemID)
+    #expect(state.recurrence.series[legacyStoreSeriesID]?.id == legacyStoreSeriesID)
+    #expect(state.recurrence.exceptions[legacyStoreMovedKey] != nil)
+    #expect(state.recurrence.exceptions[legacyStoreSkippedKey] == .skipped)
+    #expect(state.recurrence.completions[legacyStoreCompletionKey]?.key == legacyStoreCompletionKey)
+}
+
+private final class LegacyStoreFailingRollbackWriter: ExclusiveFileWriting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var shouldFail = false
+    var failNextWrite: Bool { get { lock.withLock { shouldFail } } set { lock.withLock { shouldFail = newValue } } }
+    func createExclusively(data: Data, at destination: URL) throws {
+        if lock.withLock({ defer { shouldFail = false }; return shouldFail }) { throw LegacyStoreInjectedFailure.requested }
+        try FoundationExclusiveFileWriter().createExclusively(data: data, at: destination)
+    }
+}
+
+private enum LegacyStoreInjectedFailure: Error { case requested }
+
+private struct LegacyStoreAlwaysFailingMainWriter: MainFileCompareAndReplaceWriting {
+    func createIfAbsent(candidate: Data, at destination: URL) throws -> MainFileCompareAndReplaceResult { throw WorkspacePersistenceError.atomicWriteFailed }
+    func replaceIfSHA256Matches(expectedSHA256: String, candidate: Data, at destination: URL) throws -> MainFileCompareAndReplaceResult { throw WorkspacePersistenceError.atomicWriteFailed }
+    func createIfAbsentUnlocked(candidate: Data, at destination: URL) throws -> MainFileCompareAndReplaceResult { throw WorkspacePersistenceError.atomicWriteFailed }
+    func replaceIfSHA256MatchesUnlocked(expectedSHA256: String, candidate: Data, at destination: URL) throws -> MainFileCompareAndReplaceResult { throw WorkspacePersistenceError.atomicWriteFailed }
+}
+
+private let legacyStoreV1CompleteGraphData = Data(#"""
+{"schemaVersion":1,"state":{"categories":["00000000-0000-0000-0000-000000000100",{"id":"00000000-0000-0000-0000-000000000100","name":"未分类","colorHex":"#8E8E93","sortIndex":0,"createdAt":1700000000000,"updatedAt":1700000000100}],"items":["00000000-0000-0000-0000-000000000101",{"id":"00000000-0000-0000-0000-000000000101","kind":"task","title":"单日事项","categoryID":"00000000-0000-0000-0000-000000000100","date":{"year":2026,"month":8,"day":6},"timeRange":{"start":{"value":540},"end":{"value":600}},"creationTimeZoneIdentifier":"Asia/Shanghai","completedAt":1700000100250,"createdAt":1700000000200,"updatedAt":1700000000300}],"recurrence":{"series":["00000000-0000-0000-0000-000000000102",{"id":"00000000-0000-0000-0000-000000000102","kind":"task","title":"每周回顾","categoryID":"00000000-0000-0000-0000-000000000100","startDate":{"year":2026,"month":8,"day":3},"endDate":{"year":2026,"month":8,"day":31},"weekdays":[1,4],"timeRange":{"start":{"value":570},"end":{"value":615}},"creationTimeZoneIdentifier":"Asia/Shanghai","createdAt":1700000000400,"updatedAt":1700000000500}],"exceptions":[{"seriesID":"00000000-0000-0000-0000-000000000102","originalDate":{"year":2026,"month":8,"day":10}},{"modified":{"_0":{"displayedDate":{"year":2026,"month":8,"day":13},"title":"已移动","kind":"task","categoryID":"00000000-0000-0000-0000-000000000100","timeRange":{"start":{"value":660},"end":{"value":720}}}}},{"seriesID":"00000000-0000-0000-0000-000000000102","originalDate":{"year":2026,"month":8,"day":12}},{"skipped":{}}],"completions":[{"seriesID":"00000000-0000-0000-0000-000000000102","originalDate":{"year":2026,"month":8,"day":17}},{"key":{"seriesID":"00000000-0000-0000-0000-000000000102","originalDate":{"year":2026,"month":8,"day":17}},"completedAt":1700000300500}]},"uncategorizedID":"00000000-0000-0000-0000-000000000100"}}
+"""#.utf8)

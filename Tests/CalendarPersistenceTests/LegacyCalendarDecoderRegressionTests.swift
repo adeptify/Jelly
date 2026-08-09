@@ -10,6 +10,19 @@ import WorkspaceDomain
 /// similar name.
 @Suite("LegacyCalendarDecoderRegressionTests")
 struct LegacyCalendarDecoderRegressionTests {
+    @Test func decodableDanglingCategoryBackupIsRejectedWithoutCreatingARepairCandidate() throws {
+        let state = try legacyPopulatedCalendarState()
+        let data = try legacyV2DocumentData(from: state) { document in
+            var payload = try legacyDictionary(at: "state", in: document)
+            payload["categories"] = []
+            document["state"] = payload
+        }
+
+        #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try WorkspaceDocumentCodec.decode(data)
+        }
+    }
+
     @Test func decodableInvalidRecurrenceBackupIsRejectedBeforeWorkspaceRestoreCanBegin() throws {
         let state = try legacyPopulatedCalendarState()
         let seriesID = try #require(state.recurrence.series.keys.first)
@@ -23,8 +36,34 @@ struct LegacyCalendarDecoderRegressionTests {
                 }
             },
             legacyV2DocumentData(from: state) { document in
+                try mutateLegacySeries(&document, id: seriesID) {
+                    $0["ruleStartDate"] = ["year": 2026, "month": 8, "day": 4]
+                    $0["recurrenceEndDate"] = ["year": 2026, "month": 8, "day": 4]
+                    $0["weekdays"] = [Weekday.monday.rawValue]
+                }
+            },
+            legacyV2DocumentData(from: state) { document in
                 try mutateLegacyRecurrence(&document) { recurrence in
                     recurrence["series"] = []
+                }
+            },
+            legacyV2DocumentData(from: state) { document in
+                try mutateLegacyRecurrence(&document) { recurrence in
+                    recurrence["series"] = []
+                    recurrence["exceptions"] = []
+                }
+            },
+            legacyV2DocumentData(from: state) { document in
+                try mutateLegacyFirstOccurrencePair(in: &document, collection: "exceptions") { key, _ in
+                    key["originalDate"] = ["year": 2026, "month": 9, "day": 1]
+                }
+            },
+            legacyV2DocumentData(from: state) { document in
+                try mutateLegacyFirstOccurrencePair(in: &document, collection: "completions") { key, completion in
+                    key["originalDate"] = ["year": 2026, "month": 8, "day": 12]
+                    var embeddedKey = try legacyDictionary(at: "key", in: completion)
+                    embeddedKey["originalDate"] = ["year": 2026, "month": 8, "day": 12]
+                    completion["key"] = embeddedKey
                 }
             }
         ]
@@ -161,6 +200,7 @@ struct LegacyCalendarDecoderRegressionTests {
         let state = try legacyPopulatedCalendarState()
         let itemID = try #require(state.items.keys.first)
         let seriesID = try #require(state.recurrence.series.keys.first)
+        let categoryID = state.uncategorizedID
         let invalidDocuments = try [
             legacyV2DocumentData(from: state) { document in
                 try mutateLegacyItem(&document, id: itemID) { $0["title"] = "" }
@@ -177,10 +217,23 @@ struct LegacyCalendarDecoderRegressionTests {
                 )
             },
             legacyV2DocumentData(from: state) { document in
+                try renameLegacyStateMapKey(
+                    &document, collection: "categories", from: categoryID.uuidString,
+                    to: UUID(uuidString: "00000000-0000-0000-0000-000000000499")!.uuidString
+                )
+            },
+            legacyV2DocumentData(from: state) { document in
                 try renameLegacyRecurrenceSeriesKey(
                     &document, from: seriesID.uuidString,
                     to: UUID(uuidString: "00000000-0000-0000-0000-000000000497")!.uuidString
                 )
+            },
+            legacyV2DocumentData(from: state) { document in
+                try mutateLegacyFirstOccurrencePair(in: &document, collection: "completions") { _, completion in
+                    var embeddedKey = try legacyDictionary(at: "key", in: completion)
+                    embeddedKey["originalDate"] = ["year": 2026, "month": 8, "day": 12]
+                    completion["key"] = embeddedKey
+                }
             }
         ]
 
@@ -192,7 +245,7 @@ struct LegacyCalendarDecoderRegressionTests {
     }
 }
 
-private func legacyPopulatedCalendarState() throws -> CalendarState {
+func legacyPopulatedCalendarState() throws -> CalendarState {
     let uncategorizedID = UUID(uuidString: "00000000-0000-0000-0000-000000000400")!
     var state = CalendarState.empty(uncategorizedID: uncategorizedID, now: .distantPast)
     let item = try CalendarItem(
@@ -213,6 +266,8 @@ private func legacyPopulatedCalendarState() throws -> CalendarState {
         creationTimeZoneIdentifier: "Asia/Shanghai", createdAt: .distantPast, updatedAt: .distantPast
     )
     let modifiedKey = OccurrenceKey(seriesID: series.id, originalDate: .init(year: 2026, month: 8, day: 10)!)
+    let skippedKey = OccurrenceKey(seriesID: series.id, originalDate: .init(year: 2026, month: 8, day: 12)!)
+    let completionKey = OccurrenceKey(seriesID: series.id, originalDate: .init(year: 2026, month: 8, day: 17)!)
     state.recurrence = .init(
         series: [series.id: series],
         exceptions: [
@@ -221,9 +276,10 @@ private func legacyPopulatedCalendarState() throws -> CalendarState {
                     startDate: .init(year: 2026, month: 8, day: 11)!,
                     endDate: .init(year: 2026, month: 8, day: 11)!, startTime: nil, endTime: nil
                 ), title: "改期复盘", kind: .task, categoryID: uncategorizedID
-            ))
+            )),
+            skippedKey: .skipped
         ],
-        completions: [:]
+        completions: [completionKey: .init(key: completionKey, completedAt: .distantPast)]
     )
     return state
 }
@@ -315,6 +371,26 @@ private func renameLegacyRecurrenceSeriesKey(
     var entries = try legacyKeyedEntries(at: "series", in: recurrence)
     try renameLegacyMapKey(&entries, from: oldKey, to: newKey)
     recurrence["series"] = entries
+    state["recurrence"] = recurrence
+    document["state"] = state
+}
+
+private func mutateLegacyFirstOccurrencePair(
+    in document: inout [String: Any],
+    collection: String,
+    mutation: (inout [String: Any], inout [String: Any]) throws -> Void
+) throws {
+    var state = try legacyDictionary(at: "state", in: document)
+    var recurrence = try legacyDictionary(at: "recurrence", in: state)
+    var entries = try legacyKeyedEntries(at: collection, in: recurrence)
+    guard entries.count >= 2,
+          var key = entries[0] as? [String: Any],
+          var value = entries[1] as? [String: Any]
+    else { throw LegacyCalendarRegressionError.unexpectedShape }
+    try mutation(&key, &value)
+    entries[0] = key
+    entries[1] = value
+    recurrence[collection] = entries
     state["recurrence"] = recurrence
     document["state"] = state
 }
