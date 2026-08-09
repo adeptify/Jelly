@@ -73,6 +73,12 @@ public struct WorkspaceSaveReceipt: Equatable, Sendable {
     public let persistedDraft: PersistedDraftReceipt?
 }
 
+public enum WorkspaceCommitReconciliation: Equatable, Sendable {
+    case committed(WorkspaceSaveReceipt)
+    case notCommitted
+    case sourceChanged
+}
+
 private enum LoadedSource: Sendable {
     case absent
     case bytes(rawData: Data, provenance: WorkspaceLoadProvenance)
@@ -93,7 +99,7 @@ load 原始字节并保留 source schema/hash
 → 返回 WorkspaceSaveReceipt
 ~~~
 
-若源是已登记的 V3，后续保存只走验证、编码、协调式 CAS、读回和 receipt；若主文件在 load 后被协作式写入者修改，返回 sourceChanged 并保持当前文件。从 snapshot preflight 到 CAS、读回和 LoadedSource 更新不得出现 actor suspension。主文件 compare-and-replace 的保证范围是所有 Jelly 进程和遵守同一文件协调/锁协议的写入者；普通文件系统无法阻止完全不协作的进程在任意两条系统调用之间改写文件，因此不得宣称对这种写入者具备绝对 CAS。每次成功 save/restore 后必须用候选 V3 的 exact rawData 与新 provenance 整体替换 LoadedSource，不能只更新 expected hash。
+若源是已登记的 V3，后续保存只走验证、编码、协调式 CAS、读回和 receipt；若主文件在 load 后被协作式写入者修改，返回 sourceChanged 并保持当前文件。从 snapshot preflight 到 CAS、读回和 LoadedSource 更新不得出现 actor suspension。主文件 compare-and-replace 的保证范围是所有 Jelly 进程和遵守同一文件协调/锁协议的写入者；普通文件系统无法阻止完全不协作的进程在任意两条系统调用之间改写文件，因此不得宣称对这种写入者具备绝对 CAS。每次成功 save/restore 后必须用候选 V3 的 exact rawData 与新 provenance 整体替换 LoadedSource，不能只更新 expected hash。若 rename 已成功但同锁内 exact readback 失败，CAS 返回独立 `commitUncertain`，repository 保留旧 bytes、candidate、receipt 与 restore capability 的 pending binding，并阻止后续普通保存和重复 load；它不能把这个状态降级成普通 `atomicWriteFailed`。底层原子写 helper 即使抛错也不证明 rename 未发生：CAS 必须在同一锁内以 no-follow 三态 probe 重新读取，candidate 视为已提交、exact previous 或由 `open`/`lstat` 明确得到 `ENOENT` 的真实 absent 视为确定未提交，`EACCES`、`ELOOP`、父目录不可搜索、不可读或第三值均视为 `commitUncertain`；`FileManager.fileExists == false` 永远不能单独证明 absent。
 
 ## Transaction, Undo, and Journal Contract
 
@@ -982,7 +988,7 @@ git commit -m "feat(workspace): 完成跨对象原子命令"
 
 **Consumes:** Existing atomic writer, V1/V2 codecs, WorkspaceState/validator/checksum.
 
-- [ ] Write RED codec tests for V1 → V2 → V3, raw V2 → V3, exact V3 round trip, unknown schema rejection, corrupted payload rejection, deterministic dictionary/set encoding, and non-destructive reporting of a dangling relationship.
+- [x] Write RED codec tests for V1 → V2 → V3, raw V2 → V3, exact V3 round trip, unknown schema rejection, corrupted payload rejection, deterministic dictionary/set encoding, and non-destructive reporting of a dangling relationship.
 
 ~~~swift
 @Test func v2LoadReturnsRawByteProvenance() throws {
@@ -994,10 +1000,10 @@ git commit -m "feat(workspace): 完成跨对象原子命令"
 }
 ~~~
 
-- [ ] Write RED failure-injection tests for snapshot write, snapshot read/hash verification, manifest write, source hash recheck, coordinated compare-and-replace and main replace. Assert main bytes remain byte-for-byte V1/V2 for every pre-replace failure. Add a hook that attempts a cooperating main-file mutation after the repository has prepared the candidate but before the CAS primitive compares and renames; the stale candidate must lose without overwrite.
-- [ ] Add RED cases for source changed before snapshot producing neither snapshot nor manifest entry, source changed after manifest but before replace preserving the changed main, identical source hash reusing the verified record, and a different source hash adding a record without deleting the old snapshot/record.
-- [ ] Add RED concurrency cases for two saves and for save interleaved with commitRestore. The second transaction must not enter the snapshot/manifest/CAS chain until the first has finished and LoadedSource has been replaced. No test may pass merely because an outdated actor continuation resumes last.
-- [ ] Run RED.
+- [x] Write RED failure-injection tests for snapshot write, snapshot read/hash verification, manifest write, source hash recheck, coordinated compare-and-replace and main replace. Assert main bytes remain byte-for-byte V1/V2 for every pre-replace failure. Add a hook that attempts a cooperating main-file mutation after the repository has prepared the candidate but before the CAS primitive compares and renames; the stale candidate must lose without overwrite.
+- [x] Add RED cases for source changed before snapshot producing neither snapshot nor manifest entry, source changed after manifest but before replace preserving the changed main, identical source hash reusing the verified record, and a different source hash adding a record without deleting the old snapshot/record.
+- [x] Add RED concurrency cases for two saves and for save interleaved with commitRestore. The second transaction must not enter the snapshot/manifest/CAS chain until the first has finished and LoadedSource has been replaced. No test may pass merely because an outdated actor continuation resumes last.
+- [x] Run RED.
 
 ~~~zsh
 ./Scripts/test.sh --filter CalendarPersistenceTests.WorkspaceDocumentCodecTests
@@ -1008,9 +1014,9 @@ git commit -m "feat(workspace): 完成跨对象原子命令"
 ./Scripts/test.sh --filter CalendarPersistenceTests.JSONWorkspaceRepositoryTests
 ~~~
 
-- [ ] Implement an envelope-first decoder. V1 uses the existing V1 DTO to construct valid V2 CalendarState semantics before wrapping V3; unknown schema returns before payload decode.
-- [ ] Move the existing unconditional AtomicFileWriting and FoundationAtomicFileWriter API into AtomicFileWriter.swift for sidecars, and add a separate main-file CAS primitive that accepts expected SHA-256 plus candidate bytes. It acquires the shared Jelly advisory lock/file-coordination critical section, re-reads and compares the main file inside that same critical section, then renames without releasing the lock. Its stated guarantee covers Jelly/cooperating writers only; a typed sourceChanged result is not an assertion of impossible protection from an uncooperative process. Port every applicable atomic-write, snapshot, rollback, corruption and reopen assertion from JSONCalendarRepositoryTests into the Workspace repository suites. Keep the now-protocol-only CalendarRepository and JSONCalendarRepository just long enough for the still-unmigrated Task 5 App to compile; Task 6 removes both and the old tests in the same single-Store cutover. CalendarDocument is the one frozen schema-2 DTO/decoder and V1CalendarDocument is schema 1; do not create a parallel V2 migration algorithm.
-- [ ] Define repository load/save contracts.
+- [x] Implement an envelope-first decoder. V1 uses the existing V1 DTO to construct valid V2 CalendarState semantics before wrapping V3; unknown schema returns before payload decode.
+- [x] Move the existing unconditional AtomicFileWriting and FoundationAtomicFileWriter API into AtomicFileWriter.swift for sidecars, and add a separate main-file CAS primitive that accepts expected SHA-256 plus candidate bytes. It acquires the shared Jelly advisory lock/file-coordination critical section, re-reads and compares the main file inside that same critical section, renames without releasing the lock, then performs exact candidate readback before returning `.replaced(verifiedRawData)`. A post-rename readback failure returns `.commitUncertain`, never a generic pre-commit error. If the underlying atomic writer throws, the CAS must still classify the destination under that same lock with one shared no-follow tri-state probe: exact candidate returns `.replaced`; exact previous bytes, or a true absence proven only by `ENOENT`, rethrows the definite pre-commit failure; unreadable/unknown/third bytes return `.commitUncertain`. `FileManager.fileExists` is not an absence proof because inaccessible parents also return false. Its stated guarantee covers Jelly/cooperating writers only; a typed sourceChanged result is not an assertion of impossible protection from an uncooperative process. Port every applicable atomic-write, snapshot, rollback, corruption and reopen assertion from JSONCalendarRepositoryTests into the Workspace repository suites. Keep the now-protocol-only CalendarRepository and JSONCalendarRepository just long enough for the still-unmigrated Task 5 App to compile; Task 6 removes both and the old tests in the same single-Store cutover. CalendarDocument is the one frozen schema-2 DTO/decoder and V1CalendarDocument is schema 1; do not create a parallel V2 migration algorithm.
+- [x] Define repository load/save contracts.
 
 ~~~swift
 public protocol WorkspaceRepository: Sendable {
@@ -1025,10 +1031,11 @@ public protocol WorkspaceRepository: Sendable {
         state: WorkspaceState
     ) async throws -> WorkspaceSaveReceipt
     func currentDocumentData() async throws -> Data
+    func reconcilePendingCommit() async throws -> WorkspaceCommitReconciliation
 }
 ~~~
 
-- [ ] Implement JSONWorkspaceRepository as one actor retaining `LoadedSource.absent` or `LoadedSource.bytes(rawData, provenance)`. Snapshot bytes come only from LoadedSource rawData, never a decoded/re-encoded state. Before first V3 replace: preflight current main against the loaded hash, write raw snapshot, read and hash it, atomically register manifest, then invoke the main-file CAS. From preflight through snapshot/manifest/CAS and LoadedSource replacement, the repository must not `await` or call a reentrant actor: all file helpers are synchronous actor-isolated value/reference helpers, or the whole chain is guarded by an explicit non-reentrant transaction lock. An absent main is not represented by fake zero bytes; its first seed write is a coordinated create-if-absent CAS, is read back and verified, and only then becomes `.bytes`.
+- [x] Implement JSONWorkspaceRepository as one actor retaining `LoadedSource.absent` or `LoadedSource.bytes(rawData, provenance)`. Snapshot bytes come only from LoadedSource rawData, never a decoded/re-encoded state. Before first V3 replace: preflight current main against the loaded hash, write raw snapshot, read and hash it, atomically register manifest, then invoke the main-file CAS. From preflight through snapshot/manifest/CAS and LoadedSource replacement, the repository must not `await` or call a reentrant actor: all file helpers are synchronous actor-isolated value/reference helpers, or the whole chain is guarded by an explicit non-reentrant transaction lock. An absent main is not represented by fake zero bytes; its first seed write is a coordinated create-if-absent CAS, is read back and verified, and only then becomes `.bytes`. Before CAS it records an in-memory pending commit containing old raw bytes, candidate raw bytes/state, exact receipt and optional restore capability. `reconcilePendingCommit` reuses the same no-follow three-state probe under the same coordination lock: candidate bytes return `.committed(receipt)` and atomically update LoadedSource/consume capability; old bytes or confirmed `ENOENT` for a previous absent source return `.notCommitted`; exact third bytes return `.sourceChanged`. Unreadable/unknown state, lock failure, or candidate decode/provenance failure throws `commitUncertain` and preserves pending plus capability identity for a later retry; it may not fabricate `.sourceChanged` or discard the exact receipt. A repository with pending uncertainty rejects load, save, restore and current-data operations until reconciliation.
 
 ~~~swift
 public struct RecoveryManifest: Codable, Equatable, Sendable {
@@ -1045,17 +1052,17 @@ public struct RecoverySnapshotRecord: Codable, Equatable, Sendable {
 }
 ~~~
 
-- [ ] Make manifest and Journal independent atomic files. The manifest appends a new record for new source bytes, reuses a record only after re-reading the referenced snapshot and matching hash plus byteCount, and never discards older records. Reject absolute snapshot paths, `..`, symlink/path escape outside the snapshot directory and malformed manifests; fail closed. A snapshot without a verified manifest entry cannot permit main replacement.
-- [ ] Apply the coordinated compare-and-replace primitive to every save, not only migration. For cooperating writers the compare and rename occur in one critical section. After each successful own replace, read back the exact candidate and replace the actor's complete LoadedSource with schema-3 raw bytes, hash and byte count.
-- [ ] Define the durable Journal envelope and actor API. `StoredDraftJournalRecord(entry,savedReceipt,recordChecksum)` is the atomic on-disk unit. `persist(entry)`, `record(receipt)` and `clear(ifMatching:)` each perform one actor-isolated read-validate-modify-atomic-write operation; `record`/`clear` compare noteID, generation, note snapshot checksum and persisted Note revision. A generation-5 receipt cannot overwrite or clear generation 6. Validate the record checksum before any recovery comparison; Journal-clear failure leaves the matching receipt durable for restart reconciliation.
-- [ ] Before `save(state,draft:)` encodes anything, validate WorkspaceState and, when draft is present, require its Note to exist and its normalized checksum to equal `PersistableDraftContext.noteSnapshotChecksum`. Construct the persisted receipt only from that exact Note's revision in the candidate being written. Add missing-Note, checksum-mismatch and correct-receipt REDs.
-- [ ] Treat a missing main file as `.absent` and a fresh V3 seed with no legacy snapshot requirement. The create-if-absent write failure leaves it absent. A V1/V2 source requires the migration chain; an already registered V3 source uses normal coordinated saves. Add missing seed failure, V1 load followed by two saves, and reopen provenance tests.
-- [ ] On load, run a non-destructive WorkspaceConsistencyInspector before strict mutation validation. Dangling relationships remain in the decoded state but are excluded from clickable projections and returned as WorkspaceLoadResult.consistencyIssues. The Store enters needsRelationshipRepair and permits only backup/restore or an explicit relink/unlink command until issues are resolved; it never silently drops the relationship to make a save pass.
-- [ ] Add tests for generation 5 receipt after generation 6, unrelated calendar saves, title-only edits, Journal clear failure and restart reconciliation.
-- [ ] Add pure BackupService validation/planning for JSONWorkspaceRepository.prepareRestore. `PreparedWorkspaceRestore` carries validated raw source bytes and provenance, `WorkspaceContentSnapshot`, source revision high watermark, exact `[NoteID: Int64]` source revisions, and a unique rollback URL. The Note-revision keys must equal prepared content Note IDs. `commitRestore(prepared,state:)` revalidates raw hash/count, requires the candidate business content to equal prepared content, validates the candidate Workspace, and rejects any binding mismatch before writing rollback.
-- [ ] Fix commitRestore ordering: while holding the same non-reentrant repository transaction, lock/read the current exact main bytes, write a unique raw rollback, read it back and verify hash plus byteCount, then invoke the coordinated main-file CAS and finally replace LoadedSource. Rollback write/readback corruption, sourceChanged and main replace failures must leave the main bytes untouched. A rollback is recovery evidence and is never silently deleted on failure.
-- [ ] Add the public Workspace backup export path that Task 6 will call, for example `BackupService.exportCurrent(from:to:)`. It reads, envelope-validates and exports the repository's exact currently persisted raw V1, V2 or V3 bytes, atomically writes the destination and reads back hash plus byteCount. A V1/V2 load whose first user action is backup therefore succeeds without forcing or simulating a V3 migration save; add that RED. It never re-encodes an in-memory subgraph. To keep Task 5 independently compiling, retain the existing deprecated Calendar-only export(state:), validatedState and restore(from:repository:rollbackURL:) wrappers unchanged and backed only by the temporary JSONCalendarRepository actor. Task 6 migrates BackupCommands/Store to the Workspace export/prepareRestore APIs and removes those wrappers together with the old repository. In the final architecture, the Store applies WorkspaceReducer.restoreContent against latest FIFO state, then JSONWorkspaceRepository.commitRestore performs the verified rollback/CAS transaction; no BackupService or UI path writes the main file outside that actor.
-- [ ] Run GREEN and full persistence tests.
+- [x] Make manifest and Journal independent atomic files. Before acquiring the manifest lock, idempotently create and validate its parent directory so a custom nested manifest URL works on first use. The manifest appends a new record for new source bytes, reuses a record only after re-reading the referenced snapshot and matching hash plus byteCount, and never discards older records. Reject absolute snapshot paths, `..`, symlink/path escape outside the snapshot directory and malformed manifests; fail closed. A snapshot without a verified manifest entry cannot permit main replacement.
+- [x] Apply the coordinated compare-and-replace primitive to every save, not only migration. For cooperating writers the compare and rename occur in one critical section. After each successful own replace, read back the exact candidate and replace the actor's complete LoadedSource with schema-3 raw bytes, hash and byte count.
+- [x] Define the durable Journal envelope and actor API. `StoredDraftJournalRecord(entry,pendingReceipt,savedReceipt,recordChecksum)` is the atomic on-disk unit. `persist(entry)`, `bindPending(receipt)`, `record(receipt)` and `clear(ifMatching:)` each perform one actor-isolated read-validate-modify-atomic-write operation. The Store persists the draft before enqueue; after reducer allocation and before main save it atomically binds the exact final candidate receipt. `record` accepts only that exact pending receipt, and `clear` accepts only the exact saved receipt. Never compare `persistedNoteRevision` to the draft snapshot's old revision; require it to be greater than the base Note revision, while exact equality comes from the actor-issued pending binding. A generation-5 binding/receipt cannot overwrite or clear generation 6. Validate the record checksum before any recovery comparison; Journal-clear failure leaves the matching receipt durable for restart reconciliation.
+- [x] Before `save(state,draft:)` encodes anything, validate WorkspaceState and, when draft is present, require its Note to exist and its normalized checksum to equal `PersistableDraftContext.noteSnapshotChecksum`. Construct the persisted receipt only from that exact Note's revision in the candidate being written. Add missing-Note, checksum-mismatch and correct-receipt REDs.
+- [x] Treat a missing main file as `.absent` and a fresh V3 seed with no legacy snapshot requirement. The create-if-absent write failure leaves it absent. A V1/V2 source requires the migration chain; an already registered V3 source uses normal coordinated saves. Add missing seed failure, V1 load followed by two saves, and reopen provenance tests.
+- [x] On load, run a non-destructive WorkspaceConsistencyInspector before strict mutation validation. Dangling relationships remain in the decoded state but are excluded from clickable projections and returned as WorkspaceLoadResult.consistencyIssues. The Store enters needsRelationshipRepair and permits only backup/restore or an explicit relink/unlink command until issues are resolved; it never silently drops the relationship to make a save pass.
+- [x] Add tests for generation 5 receipt after generation 6, unrelated calendar saves, title-only edits, Journal clear failure and restart reconciliation.
+- [x] Add pure BackupService validation/planning for JSONWorkspaceRepository.prepareRestore. `PreparedWorkspaceRestore` carries validated raw source bytes and provenance, `WorkspaceContentSnapshot`, source revision high watermark, exact `[NoteID: Int64]` source revisions, and a unique rollback URL. The Note-revision keys must equal prepared content Note IDs. `commitRestore(prepared,state:)` revalidates raw hash/count, requires the candidate business content to equal prepared content, validates the candidate Workspace, and rejects any binding mismatch before writing rollback.
+- [x] Fix commitRestore ordering: while holding the same non-reentrant repository transaction, lock/read the current exact main bytes, consume the one-shot restore capability as rollback creation begins, write a unique raw rollback, read it back and verify hash plus byteCount, then invoke the coordinated main-file CAS and finally replace LoadedSource. A commit-uncertain attempt transfers the reconciliation identity into PendingWorkspaceCommit; every rollback readback, snapshot/manifest, definite CAS failure, sourceChanged, reconcile-old or reconcile-third path leaves the old capability invalid and requires a fresh prepare with a new rollback URL. Rollback write/readback corruption, sourceChanged and main replace failures must leave the main bytes untouched. A rollback is recovery evidence and is never silently deleted on failure.
+- [x] Add the public Workspace backup export path that Task 6 will call, for example `BackupService.exportCurrent(from:to:)`. It reads, envelope-validates and exports the repository's exact currently persisted raw V1, V2 or V3 bytes, atomically writes the destination and reads back hash plus byteCount. A V1/V2 load whose first user action is backup therefore succeeds without forcing or simulating a V3 migration save; add that RED. It never re-encodes an in-memory subgraph. To keep Task 5 independently compiling, retain the existing deprecated Calendar-only export(state:), validatedState and restore(from:repository:rollbackURL:) wrappers unchanged and backed only by the temporary JSONCalendarRepository actor. Task 6 migrates BackupCommands/Store to the Workspace export/prepareRestore APIs and removes those wrappers together with the old repository. In the final architecture, the Store applies WorkspaceReducer.restoreContent against latest FIFO state, then JSONWorkspaceRepository.commitRestore performs the verified rollback/CAS transaction; no BackupService or UI path writes the main file outside that actor.
+- [x] Run GREEN and full persistence tests.
 
 ~~~zsh
 ./Scripts/test.sh --filter CalendarPersistenceTests.WorkspaceDocumentCodecTests
@@ -1069,8 +1076,8 @@ swift build
 git diff --check
 ~~~
 
-- [ ] Request fresh Sol xhigh review focused on raw-byte identity, source-change race, manifest ordering, atomic replacement and recovery; fix every Critical/Important finding and rerun all Task 5 filters.
-- [ ] Commit.
+- [x] Request fresh Sol xhigh review focused on raw-byte identity, source-change race, manifest ordering, atomic replacement and recovery; fix every Critical/Important finding and rerun all Task 5 filters.
+- [x] Commit.
 
 ~~~zsh
 git add Sources/CalendarPersistence Tests/CalendarPersistenceTests
@@ -1147,7 +1154,7 @@ rg -n 'CalendarStore|CalendarRepository|JSONCalendarRepository' Sources/Calendar
 ./Scripts/test.sh --filter CalendarAppTests.AppDataDirectoryResolverTests
 ~~~
 
-- [ ] Implement WorkspaceTransactionQueue as a MainActor FIFO. Each request is reduced only when dequeued; while repository.save awaits, newer requests remain queued. Resume each continuation exactly once.
+- [ ] Implement WorkspaceTransactionQueue as a MainActor FIFO. Each request is reduced only when dequeued; while repository.save awaits, newer requests remain queued. Resume each continuation exactly once. A repository `commitUncertain` keeps that transaction at the queue head and blocks later work until `reconcilePendingCommit` returns committed/notCommitted/sourceChanged; it is never treated as an ordinary write-before-commit failure.
 - [ ] Implement WorkspaceStore with calendarState projection and sendCalendar wrapper. sendCalendar creates WorkspaceCommand.calendar and follows the same reducer/validator/repository path.
 - [ ] Route restore through WorkspaceTransactionQueue as prepareRestore → WorkspaceReducer.restoreContent against latest state → commitRestore. A successful restore publishes once and clears incompatible undo/redo only after disk replacement; failure keeps state/stacks unchanged. A draft queued after restore reduces against the restored latest state and remains protected/conflicted rather than disappearing.
 - [ ] A Note draft applies only its modifiedFields to the latest Note. Disjoint category/archive/title/document changes are merged; a same-field change whose base revision/checksum no longer matches becomes an explicit draft conflict and remains in Journal. A draft can never overwrite the entire latest Note or Workspace merely because its snapshot is older.
@@ -1171,7 +1178,7 @@ func performUndo() {
 }
 ~~~
 
-- [ ] Implement DraftJournalCoordinator ordering: persist Journal entry before enqueueing draft; record receipt; clear only exact noteID + generation + checksum + persistedNoteRevision. Journal clear failure preserves the receipt for restart reconciliation.
+- [ ] Implement DraftJournalCoordinator ordering: persist Journal entry before enqueueing draft; after WorkspaceReducer creates the final candidate, atomically `bindPending` the exact expected receipt before calling repository.save; record only the exact returned/reconciled receipt; clear only exact noteID + generation + checksum + persistedNoteRevision. A commit-uncertain attempt keeps the pending binding and Journal until reconciliation. Journal clear failure preserves the receipt for restart reconciliation.
 - [ ] Add AppDataDirectoryResolver. Default remains Application Support/PersonalCalendar; a nonempty JELLY_ACCEPTANCE_DATA_DIRECTORY places main/snapshot/manifest/journal/backup below the supplied directory. Never alter HOME.
 
 ~~~swift
