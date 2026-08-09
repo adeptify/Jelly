@@ -16,6 +16,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "CalendarDomain", targets: ["CalendarDomain"]),
+        .library(name: "WorkspaceDomain", targets: ["WorkspaceDomain"]),
         .library(name: "CalendarPersistence", targets: ["CalendarPersistence"]),
         .executable(name: "PersonalCalendar", targets: ["CalendarApp"])
     ],
@@ -28,12 +29,16 @@ let package = Package(
     targets: [
         .target(name: "CalendarDomain"),
         .target(
-            name: "CalendarPersistence",
+            name: "WorkspaceDomain",
             dependencies: ["CalendarDomain"]
+        ),
+        .target(
+            name: "CalendarPersistence",
+            dependencies: ["CalendarDomain", "WorkspaceDomain"]
         ),
         .executableTarget(
             name: "CalendarApp",
-            dependencies: ["CalendarDomain", "CalendarPersistence"]
+            dependencies: ["CalendarDomain", "WorkspaceDomain", "CalendarPersistence"]
         ),
         .testTarget(
             name: "CalendarDomainTests",
@@ -44,23 +49,31 @@ let package = Package(
             linkerSettings: testingLinkerSettings
         ),
         .testTarget(
+            name: "WorkspaceDomainTests",
+            dependencies: [
+                "CalendarDomain",
+                "WorkspaceDomain",
+                .product(name: "Testing", package: "swift-testing")
+            ]
+        ),
+        .testTarget(
             name: "CalendarPersistenceTests",
             dependencies: [
                 "CalendarDomain",
+                "WorkspaceDomain",
                 "CalendarPersistence",
                 .product(name: "Testing", package: "swift-testing")
-            ],
-            linkerSettings: testingLinkerSettings
+            ]
         ),
         .testTarget(
             name: "CalendarAppTests",
             dependencies: [
                 "CalendarApp",
                 "CalendarDomain",
+                "WorkspaceDomain",
                 "CalendarPersistence",
                 .product(name: "Testing", package: "swift-testing")
-            ],
-            linkerSettings: testingLinkerSettings
+            ]
         )
     ]
 )
