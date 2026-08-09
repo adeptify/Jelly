@@ -9,7 +9,9 @@ public enum BlockDocumentValidationError: Error, Equatable, Sendable {
     case unexpectedTaskState(BlockID)
     case unexpectedCodeInfo(BlockID)
     case invalidCodeInfo(BlockID)
+    case invalidCodeInlineContent(BlockID)
     case dividerHasContent(BlockID)
+    case invalidDividerInlineContent(BlockID)
     case invalidLink(BlockID)
 }
 
@@ -68,8 +70,27 @@ public enum BlockDocumentValidator {
                 throw BlockDocumentValidationError.invalidCodeInfo(block.id)
             }
         }
-        if block.kind == .divider, !block.inlineContent.isEmpty {
-            throw BlockDocumentValidationError.dividerHasContent(block.id)
+        if block.kind == .code {
+            guard block.inlineContent.spans.count == 1,
+                  let span = block.inlineContent.spans.first,
+                  span.marks.isEmpty,
+                  span.linkURL == nil else {
+                throw BlockDocumentValidationError.invalidCodeInlineContent(block.id)
+            }
+        }
+        if block.kind == .divider {
+            guard block.inlineContent.spans.count == 1,
+                  let span = block.inlineContent.spans.first,
+                  span.text.isEmpty,
+                  span.marks.isEmpty,
+                  span.linkURL == nil else {
+                if block.inlineContent.spans.count == 1,
+                   let span = block.inlineContent.spans.first,
+                   !span.text.isEmpty {
+                    throw BlockDocumentValidationError.dividerHasContent(block.id)
+                }
+                throw BlockDocumentValidationError.invalidDividerInlineContent(block.id)
+            }
         }
         if block.kind == .link,
            !block.inlineContent.spans.contains(where: hasValidLinkURL) {

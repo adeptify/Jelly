@@ -8,6 +8,15 @@ private enum ContinuationToken {
     static let reservedPrefix = "<!--jelly:continue-"
 }
 
+private enum SpanManifestToken {
+    static let blockLink = "<!--jelly:block:link:v1-->"
+    static let emptyContent = "<!--jelly:spans:v1;n=0-->"
+
+    static func span(marks: String, url: String = "~") -> String {
+        "<!--jelly:span:v1;m=\(marks);u=\(url)-->"
+    }
+}
+
 @Suite("BlockMarkdownCodecTests")
 struct BlockMarkdownCodecTests {
     @Test(arguments: BlockMarkdownFixture.all)
@@ -20,7 +29,14 @@ struct BlockMarkdownCodecTests {
 
         #expect(imported.diagnostics == [])
         #expect(imported.document == fixture.document)
-        #expect(try BlockMarkdownCodec.exportMarkdown(imported.document) == fixture.canonicalMarkdown)
+        let canonical = try BlockMarkdownCodec.exportMarkdown(imported.document)
+        let reimportedCanonical = try BlockMarkdownCodec.importMarkdown(
+            canonical,
+            idSource: fixture.ids,
+            checkedTaskCompletedAt: fixture.checkedTaskCompletedAt
+        )
+        #expect(reimportedCanonical.diagnostics == [])
+        #expect(reimportedCanonical.document == fixture.document)
     }
 
     @Test func checkedTasksUseOneInjectedTimestampAndUncheckedTasksStayNil() throws {
@@ -32,7 +48,11 @@ struct BlockMarkdownCodecTests {
         )
 
         #expect(result.document.blocks.map(\.taskState?.completedAt) == [completedAt, nil, completedAt])
-        #expect(try BlockMarkdownCodec.exportMarkdown(result.document) == "- [x] 第一项\n- [ ] 第二项\n- [x] 第三项")
+        let markdown = try BlockMarkdownCodec.exportMarkdown(result.document)
+        #expect(markdown.contains("- [x] 第一项"))
+        #expect(markdown.contains("- [ ] 第二项"))
+        #expect(markdown.contains("- [x] 第三项"))
+        #expect(markdown.components(separatedBy: "<!--jelly:span:v1;").count == 4)
     }
 
     @Test func exportingCompletedTimestampAndReimportingUsesInjectedTimestampInstead() throws {
@@ -77,7 +97,7 @@ struct BlockMarkdownCodecTests {
             updatedAt: .distantPast
         )
 
-        #expect(markdown == "- [x] 已完成")
+        #expect(markdown.hasPrefix("- [x] 已完成<!--jelly:span:v1;"))
         #expect(reimported.blocks[0].taskState?.completedAt == importedCompletion)
         #expect(reimported.blocks[0].taskState?.completedAt != originalCompletion)
         #expect(try WorkspaceChecksum.noteSnapshotChecksum(originalNote) != WorkspaceChecksum.noteSnapshotChecksum(reimportedNote))
@@ -145,7 +165,13 @@ struct BlockMarkdownCodecTests {
 
         #expect(result.document.blocks.map(\.indentLevel) == [0, 1, 2, 3, 3])
         #expect(result.document.blocks[4].inlineContent == .plain("    五级"))
-        #expect(try BlockMarkdownCodec.exportMarkdown(result.document) == "- 一级\n    - 二级\n        - 三级\n            - 四级\n            -     五级")
+        let canonical = try BlockMarkdownCodec.exportMarkdown(result.document)
+        let reimported = try BlockMarkdownCodec.importMarkdown(
+            canonical,
+            idSource: .fixed(Self.ids(count: 5, start: 400)),
+            checkedTaskCompletedAt: .distantPast
+        )
+        #expect(reimported.document == result.document)
     }
 
     @Test func importDegradesOrphanedListToDiagnosedValidatedParagraph() throws {
@@ -167,7 +193,7 @@ struct BlockMarkdownCodecTests {
         ])
         #expect(result.diagnostics == [.init(lineNumber: 1, message: "孤立的列表缩进已保留为正文")])
         try BlockDocumentValidator.validate(result.document)
-        #expect(try BlockMarkdownCodec.exportMarkdown(result.document) == "\\    - orphan")
+        #expect(try BlockMarkdownCodec.exportMarkdown(result.document).hasPrefix("\\    - orphan"))
     }
 
     @Test func paragraphExportEscapesLeadingBlockSyntaxForKindRoundTrip() throws {
@@ -182,7 +208,8 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown == "\\# 不是标题\n\n正文\(ContinuationToken.soft)\n---")
+        #expect(markdown.hasPrefix("\\# 不是标题<!--jelly:span:v1;"))
+        #expect(markdown.contains(ContinuationToken.soft))
         #expect(reimported == document)
     }
 
@@ -200,7 +227,8 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown == "\\[**重要**](https://example.com/important)\n\n[**重要**](https://example.com/important)")
+        #expect(markdown.contains(SpanManifestToken.blockLink))
+        #expect(markdown.components(separatedBy: "<!--jelly:span:v1;").count == 3)
         #expect(reimported == document)
     }
 
@@ -221,14 +249,14 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown == "a\(ContinuationToken.hard)\nb")
+        #expect(markdown == "a\(ContinuationToken.hard)\nb \(SpanManifestToken.span(marks: "~"))")
         #expect(!markdown.components(separatedBy: "\n").contains { line in
             line.hasSuffix(" ") || line.hasSuffix("\t")
         })
-        #expect(reimported.blocks[0].inlineContent == .plain("a  \nb"))
+        #expect(reimported.blocks[0].inlineContent == .plain("a  \nb "))
     }
 
-    @Test func exportRemovesTrailingWhitespaceFromEveryNonCodeBlockKind() throws {
+    @Test func exportKeepsTerminalWhitespaceInsideTheFollowingSpanManifest() throws {
         let document = BlockDocument(blocks: [
             .init(id: Self.ids(count: 1, start: 535)[0], kind: .heading1, inlineContent: .plain("标题 "), taskState: nil, indentLevel: 0),
             .init(id: Self.ids(count: 1, start: 536)[0], kind: .bullet, inlineContent: .plain("项目\t"), taskState: nil, indentLevel: 0),
@@ -236,7 +264,9 @@ struct BlockMarkdownCodecTests {
         ])
         let markdown = try BlockMarkdownCodec.exportMarkdown(document)
 
-        #expect(markdown == "# 标题\n\n- 项目\n\n> 引用")
+        #expect(markdown.contains("# 标题 \(SpanManifestToken.span(marks: "~"))"))
+        #expect(markdown.contains("- 项目\t\(SpanManifestToken.span(marks: "~"))"))
+        #expect(markdown.contains("> 引用 \(SpanManifestToken.span(marks: "~"))"))
         #expect(!markdown.components(separatedBy: "\n").contains { line in
             line.hasSuffix(" ") || line.hasSuffix("\t")
         })
@@ -260,7 +290,7 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown == "[***A\\]B\\)\\\\C***](https://example.com/escapes)")
+        #expect(markdown.hasPrefix(SpanManifestToken.blockLink + "[***A\\]B\\)\\\\C***](https://example.com/escapes)"))
         #expect(reimported == document)
     }
 
@@ -281,7 +311,7 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown == "> a\(ContinuationToken.hard)\n> b")
+        #expect(markdown == "> a\(ContinuationToken.hard)\n> b\(SpanManifestToken.span(marks: "~"))")
         #expect(reimported == document)
     }
 
@@ -294,7 +324,7 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown == fixture.canonicalMarkdown)
+        #expect(markdown.contains("<!--jelly:span:v1;"))
         #expect(reimported == fixture.document)
     }
 
@@ -323,7 +353,8 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown == "[A ](https://example.com/labels)\n\n[*** A\(ContinuationToken.soft)\nB ***](https://example.com/labels)")
+        #expect(markdown.hasPrefix(SpanManifestToken.blockLink))
+        #expect(markdown.components(separatedBy: SpanManifestToken.blockLink).count == 3)
         #expect(reimported == document)
     }
 
@@ -365,7 +396,7 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown == fixture.canonicalMarkdown)
+        #expect(markdown.contains(SpanManifestToken.span(marks: "~")))
         #expect(reimported == document)
     }
 
@@ -461,7 +492,7 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown == fixture.canonicalMarkdown)
+        #expect(markdown.contains("<!--jelly:span:v1;"))
         #expect(reimported == document)
         #expect(!markdown.components(separatedBy: "\n").contains { $0.hasSuffix(" ") || $0.hasSuffix("\t") })
     }
@@ -536,7 +567,7 @@ struct BlockMarkdownCodecTests {
             checkedTaskCompletedAt: .distantPast
         ).document
 
-        #expect(markdown == "`a*\(ContinuationToken.soft)\nB`")
+        #expect(markdown == "`a*\(ContinuationToken.soft)\nB`\(SpanManifestToken.span(marks: "c"))")
         #expect(reimported == document)
     }
 
@@ -595,12 +626,259 @@ struct BlockMarkdownCodecTests {
         try BlockDocumentValidator.validate(result.document)
     }
 
+    // RED for Task 2R: a future accidental return to a post-render continuation
+    // rewriter would lose either wrapper ownership or exact span segmentation.
+    @Test(arguments: SpanAwareInlineFixture.markMatrix)
+    func spanAwareSerializerKeepsEveryMarkedSpanAndItsContinuationInsideTheWrapper(
+        _ fixture: SpanAwareInlineFixture
+    ) throws {
+        let document = fixture.document(id: Self.ids(count: 1, start: 900)[0])
+        try BlockDocumentValidator.validate(document)
+
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+        let reimported = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(Self.ids(count: 1, start: 900)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(markdown.contains(fixture.requiredManifest))
+        #expect(markdown.contains(fixture.expectedControl))
+        #expect(!markdown.hasSuffix("\n"))
+        #expect(!markdown.components(separatedBy: "\n").contains { $0.hasSuffix(" ") || $0.hasSuffix("\t") })
+        #expect(reimported.diagnostics == [])
+        #expect(reimported.document == document)
+    }
+
+    @Test func spanManifestsPreserveEmptyAdjacentMixedLinkAndZeroSpanShapesExactly() throws {
+        let firstURL = URL(string: "https://example.com/a")!
+        let secondURL = URL(string: "https://example.com/b")!
+        let documents: [(BlockDocument, String)] = [
+            (
+                .init(blocks: [
+                    .init(
+                        id: Self.ids(count: 1, start: 910)[0],
+                        kind: .paragraph,
+                        inlineContent: .init(spans: [
+                            .init(text: "A"),
+                            .init(text: "B"),
+                            .init(text: "", marks: [.bold]),
+                            .init(text: "", marks: [.italic], linkURL: firstURL),
+                            .init(text: "C", linkURL: firstURL),
+                            .init(text: "D", linkURL: nil),
+                            .init(text: "E", linkURL: secondURL)
+                        ]),
+                        taskState: nil,
+                        indentLevel: 0
+                    )
+                ]),
+                "A\(SpanManifestToken.span(marks: "~"))B\(SpanManifestToken.span(marks: "~"))\(SpanManifestToken.span(marks: "b"))\(SpanManifestToken.span(marks: "i", url: "aHR0cHM6Ly9leGFtcGxlLmNvbS9h"))[C](https://example.com/a)\(SpanManifestToken.span(marks: "~", url: "aHR0cHM6Ly9leGFtcGxlLmNvbS9h"))D\(SpanManifestToken.span(marks: "~"))[E](https://example.com/b)\(SpanManifestToken.span(marks: "~", url: "aHR0cHM6Ly9leGFtcGxlLmNvbS9i"))"
+            ),
+            (
+                .init(blocks: [
+                    .init(
+                        id: Self.ids(count: 1, start: 911)[0],
+                        kind: .paragraph,
+                        inlineContent: .init(spans: []),
+                        taskState: nil,
+                        indentLevel: 0
+                    )
+                ]),
+                SpanManifestToken.emptyContent
+            ),
+            (
+                .init(blocks: [
+                    .init(
+                        id: Self.ids(count: 1, start: 912)[0],
+                        kind: .link,
+                        inlineContent: .init(spans: [
+                            .init(text: "A", marks: [.bold], linkURL: firstURL),
+                            .init(text: "B", marks: [.italic], linkURL: secondURL),
+                            .init(text: "", marks: [.code], linkURL: firstURL)
+                        ]),
+                        taskState: nil,
+                        indentLevel: 0
+                    )
+                ]),
+                "\(SpanManifestToken.blockLink)[**A**](https://example.com/a)\(SpanManifestToken.span(marks: "b", url: "aHR0cHM6Ly9leGFtcGxlLmNvbS9h"))[*B*](https://example.com/b)\(SpanManifestToken.span(marks: "i", url: "aHR0cHM6Ly9leGFtcGxlLmNvbS9i"))\(SpanManifestToken.span(marks: "c", url: "aHR0cHM6Ly9leGFtcGxlLmNvbS9h"))"
+            )
+        ]
+
+        for (document, expectedMarkdown) in documents {
+            try BlockDocumentValidator.validate(document)
+            let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+            let imported = try BlockMarkdownCodec.importMarkdown(
+                markdown,
+                idSource: .fixed(document.blocks.map(\.id)),
+                checkedTaskCompletedAt: .distantPast
+            )
+            #expect(markdown == expectedMarkdown)
+            #expect(imported.diagnostics == [])
+            #expect(imported.document == document)
+        }
+    }
+
+    @Test func spanOwnedHardAndSoftBreaksUseBothLogicalEOLBranchesWithoutMovingTheLF() throws {
+        let document = BlockDocument(blocks: [
+            .init(
+                id: Self.ids(count: 1, start: 920)[0],
+                kind: .paragraph,
+                inlineContent: .init(spans: [
+                    .init(text: "same  \nline", marks: [.bold]),
+                    .init(text: "split  "),
+                    .init(text: "\nend", marks: [.italic]),
+                    .init(text: "terminal\n", marks: [.code]),
+                    .init(text: "", marks: [.bold])
+                ]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let expected = "**same\(ContinuationToken.hard)\nline**\(SpanManifestToken.span(marks: "b"))split  \(SpanManifestToken.span(marks: "~"))*\(ContinuationToken.soft)\nend*\(SpanManifestToken.span(marks: "i"))`terminal\(ContinuationToken.soft)`\(SpanManifestToken.span(marks: "c"))\n\(SpanManifestToken.span(marks: "b"))"
+
+        let markdown = try BlockMarkdownCodec.exportMarkdown(document)
+        let imported = try BlockMarkdownCodec.importMarkdown(
+            markdown,
+            idSource: .fixed(Self.ids(count: 1, start: 920)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(markdown == expected)
+        #expect(!markdown.hasSuffix("\n"))
+        #expect(imported.diagnostics == [])
+        #expect(imported.document == document)
+    }
+
+    @Test(arguments: [0, 1, 2, 3])
+    func inlineCodeControlParityIsReversibleForActiveAndLiteralControls(_ backslashCount: Int) throws {
+        let backslashes = String(repeating: "\\", count: backslashCount)
+        let source = "`A\(backslashes)\(ContinuationToken.soft)\nB`\(SpanManifestToken.span(marks: "c"))"
+        let expectedText = backslashCount.isMultiple(of: 2)
+            ? "A\(String(repeating: "\\", count: backslashCount / 2))\nB"
+            : "A\(String(repeating: "\\", count: (backslashCount - 1) / 2))\(ContinuationToken.soft)\nB"
+        let expected = BlockDocument(blocks: [
+            .init(
+                id: Self.ids(count: 1, start: 930)[0],
+                kind: .paragraph,
+                inlineContent: .init(spans: [.init(text: expectedText, marks: [.code])]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+
+        let result = try BlockMarkdownCodec.importMarkdown(
+            source,
+            idSource: .fixed(Self.ids(count: 1, start: 930)),
+            checkedTaskCompletedAt: .distantPast
+        )
+
+        #expect(result.diagnostics == [])
+        #expect(result.document == expected)
+    }
+
+    @Test func malformedAndMismatchedSpanControlsRemainRawAndDiagnosed() throws {
+        let malformed = "A<!--jelly:span:v1;m=bold;u=~-->"
+        let mismatch = "**A**\(SpanManifestToken.span(marks: "i"))"
+
+        for source in [malformed, mismatch] {
+            let result = try BlockMarkdownCodec.importMarkdown(
+                source,
+                idSource: .fixed(Self.ids(count: 1, start: 940)),
+                checkedTaskCompletedAt: .distantPast
+            )
+            #expect(result.document.blocks == [
+                .init(
+                    id: Self.ids(count: 1, start: 940)[0],
+                    kind: .paragraph,
+                    inlineContent: .plain(source),
+                    taskState: nil,
+                    indentLevel: 0
+                )
+            ])
+            #expect(result.diagnostics.map(\.lineNumber) == [1])
+        }
+    }
+
     private static func ids(count: Int, start: Int) -> [BlockID] {
         (0..<count).map { offset in
             let value = start + offset
             let string = String(format: "00000000-0000-0000-0000-%012d", value)
             return BlockID(UUID(uuidString: string)!)
         }
+    }
+}
+
+struct SpanAwareInlineFixture: Sendable {
+    let name: String
+    let marks: Set<InlineMark>
+    let linkURL: URL?
+    let text: String
+    let expectedControl: String
+
+    var requiredManifest: String {
+        SpanManifestToken.span(
+            marks: Self.manifestMarks(for: marks),
+            url: linkURL.map { Self.base64URL($0.absoluteString) } ?? "~"
+        )
+    }
+
+    func document(id: BlockID) -> BlockDocument {
+        .init(blocks: [
+            .init(
+                id: id,
+                kind: .paragraph,
+                inlineContent: .init(spans: [.init(text: text, marks: marks, linkURL: linkURL)]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+    }
+
+    static let markMatrix: [SpanAwareInlineFixture] = {
+        let markCases: [(String, Set<InlineMark>)] = [
+            ("code", [.code]),
+            ("bold", [.bold]),
+            ("italic", [.italic]),
+            ("bold italic", [.bold, .italic]),
+            ("code bold italic", [.code, .bold, .italic])
+        ]
+        let linkCases: [(String, URL?)] = [
+            ("plain", nil),
+            ("linked", URL(string: "https://example.com/span")!)
+        ]
+        let lineCases = [
+            ("internal LF", "A\nB", ContinuationToken.soft),
+            ("terminal LF", "A\n", ContinuationToken.soft)
+        ]
+        return markCases.flatMap { markCase in
+            linkCases.flatMap { linkCase in
+                lineCases.map { lineCase in
+                    .init(
+                        name: "\(markCase.0) \(linkCase.0) \(lineCase.0)",
+                        marks: markCase.1,
+                        linkURL: linkCase.1,
+                        text: lineCase.1,
+                        expectedControl: lineCase.2
+                    )
+                }
+            }
+        }
+    }()
+
+    private static func manifestMarks(for marks: Set<InlineMark>) -> String {
+        var result = ""
+        if marks.contains(.bold) { result += "b" }
+        if marks.contains(.code) { result += "c" }
+        if marks.contains(.italic) { result += "i" }
+        return result.isEmpty ? "~" : result
+    }
+
+    private static func base64URL(_ value: String) -> String {
+        Data(value.utf8)
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }
 

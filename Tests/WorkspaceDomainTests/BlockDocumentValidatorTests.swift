@@ -161,4 +161,38 @@ struct BlockDocumentValidatorTests {
             try BlockDocumentValidator.validate(.init(blocks: [block]))
         }
     }
+
+    @Test func validatorRejectsEveryNonCanonicalCodeAndDividerSpanShape() throws {
+        let code = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000217")!)
+        let divider = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000218")!)
+        let url = URL(string: "https://example.com/invalid")!
+        let invalidCodeContents: [InlineContent] = [
+            .init(spans: []),
+            .init(spans: [.init(text: "one"), .init(text: "two")]),
+            .init(spans: [.init(text: "marked", marks: [.bold])]),
+            .init(spans: [.init(text: "linked", linkURL: url)])
+        ]
+        let invalidDividerContents: [InlineContent] = [
+            .init(spans: []),
+            .init(spans: [.init(text: "not empty")]),
+            .init(spans: [.init(text: "", marks: [.italic])]),
+            .init(spans: [.init(text: "", linkURL: url)]),
+            .init(spans: [.init(text: ""), .init(text: "")])
+        ]
+
+        for inlineContent in invalidCodeContents {
+            #expect(throws: (any Error).self) {
+                try BlockDocumentValidator.validate(.init(blocks: [
+                    .init(id: code, kind: .code, inlineContent: inlineContent, taskState: nil, indentLevel: 0)
+                ]))
+            }
+        }
+        for inlineContent in invalidDividerContents {
+            #expect(throws: (any Error).self) {
+                try BlockDocumentValidator.validate(.init(blocks: [
+                    .init(id: divider, kind: .divider, inlineContent: inlineContent, taskState: nil, indentLevel: 0)
+                ]))
+            }
+        }
+    }
 }
