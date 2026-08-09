@@ -79,6 +79,9 @@ struct JSONWorkspaceRepositoryTests {
         #expect(try Data(contentsOf: rollbackURL) == currentData)
         #expect(identity == .init(sha256: WorkspacePersistenceFixtures.sha256(currentData), byteCount: currentData.count))
         #expect(try await repository.load().state == restored)
+        await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
     }
 
     @Test func absentPrimaryRestoreCreatesWithoutFabricatingRollbackFile() async throws {
@@ -298,7 +301,8 @@ struct JSONWorkspaceRepositoryTests {
         var restored = current
         restored.revision = 2
         restored.notes[restored.notes.keys.first!]!.revision = 2
-        try WorkspaceDocumentCodec.encode(current).write(to: main)
+        let currentData = try WorkspaceDocumentCodec.encode(current)
+        try currentData.write(to: main)
         try WorkspaceDocumentCodec.encode(restored).write(to: source)
         let repository = JSONWorkspaceRepository(documentURL: main, seed: { current })
         _ = try await repository.load()
@@ -313,6 +317,10 @@ struct JSONWorkspaceRepositoryTests {
             _ = try await repository.commitRestore(prepared, state: restored)
         }
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.url.path)
+        #expect(FileManager.default.fileExists(atPath: prepared.rollbackURL.path) == false)
+        #expect(try Data(contentsOf: main) == currentData)
+        #expect(try await repository.reconcilePendingCommit() == .notCommitted(.init()))
+        await #expect(throws: WorkspacePersistenceError.invalidDocument) { _ = try await repository.load() }
         await #expect(throws: WorkspacePersistenceError.invalidDocument) {
             _ = try await repository.commitRestore(prepared, state: restored)
         }

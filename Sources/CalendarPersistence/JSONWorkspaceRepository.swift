@@ -14,6 +14,10 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         case unreadable(lastKnown: SourceBinding?)
     }
 
+    private enum RestoreMainLockFailure: Error {
+        case acquisitionFailed
+    }
+
     private struct PendingWorkspaceCommit: Sendable {
         let previousSource: SourceBinding
         let candidateRawData: Data
@@ -264,7 +268,7 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
             throw WorkspacePersistenceError.invalidWorkspace
         }
         do {
-            return try withJellyAdvisoryLock(for: documentURL) {
+            return try withRestoreMainFileLock {
                 let currentSource: SourceBinding
                 switch noFollowFileProbe(at: documentURL) {
                 case .unreadableUnknown:
@@ -322,7 +326,7 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
                 return outcome
             }
         } catch {
-            if isAdvisoryLockFailure(error) {
+            if case RestoreMainLockFailure.acquisitionFailed = error {
                 loadedSource = .unreadable(lastKnown: lastKnownSourceBinding())
                 throw WorkspacePersistenceError.invalidDocument
             }
@@ -456,7 +460,13 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         guard provenance.sourceSchema == 1 || provenance.sourceSchema == 2 else {
             throw WorkspacePersistenceError.invalidDocument
         }
-        _ = try manifestStore.registerVerifiedSnapshot(rawData: rawData, provenance: provenance)
+        do {
+            _ = try manifestStore.registerVerifiedSnapshot(rawData: rawData, provenance: provenance)
+        } catch let error as WorkspacePersistenceError {
+            throw error
+        } catch {
+            throw WorkspacePersistenceError.atomicWriteFailed
+        }
     }
 
     private func beginPendingCommit(
@@ -719,6 +729,23 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
     private func isAdvisoryLockFailure(_ error: Error) -> Bool {
         let cocoa = error as NSError
         return cocoa.domain == NSCocoaErrorDomain && cocoa.code == CocoaError.fileLocking.rawValue
+    }
+
+    private func withRestoreMainFileLock<Result>(
+        _ body: () throws -> Result
+    ) throws -> Result {
+        var enteredCriticalSection = false
+        do {
+            return try withJellyAdvisoryLock(for: documentURL) {
+                enteredCriticalSection = true
+                return try body()
+            }
+        } catch {
+            if enteredCriticalSection == false, isAdvisoryLockFailure(error) {
+                throw RestoreMainLockFailure.acquisitionFailed
+            }
+            throw error
+        }
     }
 
     private func receipt(

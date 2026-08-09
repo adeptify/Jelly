@@ -445,6 +445,32 @@ struct DraftJournalRepositoryTests {
         #expect(bare.savedReceipt == nil)
     }
 
+    @Test func legacyNullAndBareMigrationWriteFailuresPreserveExactBytes() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let state = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 4)
+        let note = try #require(state.notes.values.first)
+        let fixtures = [
+            ("null", Data("null".utf8)),
+            ("bare", try legacyRecordData(
+                entry: makeLegacyEntry(note: note, generation: 3),
+                pending: nil,
+                saved: nil
+            )),
+        ]
+
+        for (name, bytes) in fixtures {
+            let url = directory.file("\(name)-write-failure.json")
+            try bytes.write(to: url)
+            let journal = DraftJournalRepository(fileURL: url, writer: DraftJournalAlwaysFailingWriter())
+
+            await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
+                _ = try await journal.current()
+            }
+            #expect(try Data(contentsOf: url) == bytes)
+        }
+    }
+
     @Test func unreadableJournalNeverLooksAbsentAndPreservesExactBytes() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }

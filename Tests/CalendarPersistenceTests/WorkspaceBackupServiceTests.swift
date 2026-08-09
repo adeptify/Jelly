@@ -373,6 +373,85 @@ struct WorkspaceBackupServiceTests {
         #expect(try Data(contentsOf: prepared.rollbackURL) == v2)
     }
 
+    @Test func snapshotAndManifestFailuresAfterRollbackConsumeCapabilityWithoutFreezingTheValidBinding() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let v2 = try WorkspacePersistenceFixtures.v2CalendarDocument()
+        let restored = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        let source = directory.file("sidecar-restore.json")
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let preview = try await BackupService().inspectRestoreSource(source)
+
+        for failure in SidecarFailure.allCases {
+            let main = directory.file("\(failure.rawValue)-main.json")
+            let snapshots = directory.file("\(failure.rawValue)-snapshots")
+            let manifest = directory.file("\(failure.rawValue)-manifest.json")
+            try v2.write(to: main)
+            let writer: any AtomicFileWriting
+            switch failure {
+            case .snapshotLock:
+                writer = WorkspacePersistenceCocoaLockingWriter {
+                    $0.deletingLastPathComponent().path == snapshots.path
+                }
+            case .snapshotWrite:
+                writer = WorkspacePersistenceFailingWriter {
+                    $0.deletingLastPathComponent().path == snapshots.path
+                }
+            case .snapshotReadback:
+                writer = WorkspacePersistenceCorruptingWriter {
+                    $0.deletingLastPathComponent().path == snapshots.path
+                }
+            case .manifestWrite:
+                writer = WorkspacePersistenceFailingWriter { $0 == manifest }
+            case .manifestReadback:
+                writer = WorkspacePersistenceCorruptingWriter { $0 == manifest }
+            case .manifestLock:
+                writer = FoundationAtomicFileWriter()
+            }
+            let repository = JSONWorkspaceRepository(
+                documentURL: main,
+                seed: { .empty(calendar: WorkspacePersistenceFixtures.calendarState) },
+                snapshotDirectoryURL: snapshots,
+                recoveryManifestURL: manifest,
+                atomicWriter: writer
+            )
+            _ = try await repository.load()
+            let prepared = try await repository.prepareRestore(preview, rollbackDirectoryURL: directory.url)
+            let manifestLock = manifest.deletingLastPathComponent()
+                .appendingPathComponent(".\(manifest.lastPathComponent).jelly.lock")
+            if failure == .manifestLock {
+                try Data().write(to: manifestLock)
+                try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: manifestLock.path)
+            }
+
+            var observed: Error?
+            do {
+                _ = try await repository.commitRestore(prepared, state: restored)
+            } catch {
+                observed = error
+            }
+            if failure == .manifestLock {
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: manifestLock.path)
+            }
+
+            #expect((observed as? WorkspacePersistenceError) == failure.expectedError)
+            #expect(try Data(contentsOf: prepared.rollbackURL) == v2)
+            #expect(try Data(contentsOf: main) == v2)
+            let loadedData: Data?
+            do {
+                loadedData = try await repository.currentDocumentData()
+            } catch {
+                Issue.record("\(failure.rawValue) unexpectedly froze the valid binding: \(error)")
+                loadedData = nil
+            }
+            #expect(loadedData == v2)
+            #expect(try await repository.reconcilePendingCommit() == .notCommitted(.init()))
+            await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+                _ = try await repository.commitRestore(prepared, state: restored)
+            }
+        }
+    }
+
     @Test func existingRollbackPathAndDefiniteCASFailureConsumeCapabilitiesWithoutOverwritingEvidence() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
@@ -477,8 +556,46 @@ struct WorkspaceBackupServiceTests {
                 #expect(try await repository.reconcilePendingCommit() == .stillPending(artifacts))
                 writer.restoreReadability(at: main)
             }
+            if terminal == "candidate" || terminal == "old" || terminal == "third" {
+                await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+                    _ = try await repository.commitRestore(prepared, state: restored)
+                }
+            }
             #expect(try Data(contentsOf: prepared.rollbackURL) == initialData)
         }
+    }
+}
+
+private enum SidecarFailure: String, CaseIterable {
+    case snapshotLock
+    case snapshotWrite
+    case snapshotReadback
+    case manifestLock
+    case manifestWrite
+    case manifestReadback
+
+    var expectedError: WorkspacePersistenceError {
+        switch self {
+        case .snapshotLock, .snapshotWrite, .manifestLock, .manifestWrite:
+            return .atomicWriteFailed
+        case .snapshotReadback:
+            return .invalidSnapshot
+        case .manifestReadback:
+            return .invalidManifest
+        }
+    }
+}
+
+private final class WorkspacePersistenceCocoaLockingWriter: AtomicFileWriting, @unchecked Sendable {
+    private let predicate: @Sendable (URL) -> Bool
+
+    init(predicate: @escaping @Sendable (URL) -> Bool) {
+        self.predicate = predicate
+    }
+
+    func replaceAtomically(data: Data, at destination: URL) throws {
+        if predicate(destination) { throw CocoaError(.fileLocking) }
+        try FoundationAtomicFileWriter().replaceAtomically(data: data, at: destination)
     }
 }
 

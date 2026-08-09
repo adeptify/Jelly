@@ -33,7 +33,7 @@ struct WorkspaceRepositoryFailureTests {
         #expect(try await repository.verifyPersistedDraft(context) == .verified(receipt.persistedDraft!))
     }
 
-    @Test func invalidDraftContextCannotCreateOrReplaceTheMainDocument() async throws {
+    @Test func invalidDraftMissingNoteChecksumAndRevisionCannotCreateOrReplaceTheMainDocument() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
         let main = directory.file("calendar-v1.json")
@@ -41,16 +41,34 @@ struct WorkspaceRepositoryFailureTests {
         let repository = JSONWorkspaceRepository(documentURL: main, seed: { state })
         _ = try await repository.load()
         let note = try #require(state.notes.values.first)
-        let invalid = PersistableDraftContext(
-            noteID: note.id,
-            editSessionID: .editor(UUID()),
-            draftGeneration: 1,
-            noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(note),
-            persistedNoteRevision: note.revision + 1
-        )
+        let invalid = [
+            PersistableDraftContext(
+                noteID: NoteID(UUID()),
+                editSessionID: .editor(UUID()),
+                draftGeneration: 1,
+                noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(note),
+                persistedNoteRevision: note.revision
+            ),
+            PersistableDraftContext(
+                noteID: note.id,
+                editSessionID: .editor(UUID()),
+                draftGeneration: 1,
+                noteSnapshotChecksum: "wrong-checksum",
+                persistedNoteRevision: note.revision
+            ),
+            PersistableDraftContext(
+                noteID: note.id,
+                editSessionID: .editor(UUID()),
+                draftGeneration: 1,
+                noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(note),
+                persistedNoteRevision: note.revision + 1
+            ),
+        ]
 
-        await #expect(throws: WorkspacePersistenceError.invalidDraftContext) {
-            _ = try await repository.save(state, draft: invalid)
+        for context in invalid {
+            await #expect(throws: WorkspacePersistenceError.invalidDraftContext) {
+                _ = try await repository.save(state, draft: context)
+            }
         }
         #expect(FileManager.default.fileExists(atPath: main.path) == false)
     }
@@ -177,6 +195,22 @@ struct WorkspaceRepositoryFailureTests {
             noteSnapshotChecksum: context.noteSnapshotChecksum,
             persistedNoteRevision: context.persistedNoteRevision
         )))
+        let revisionMismatch = PersistableDraftContext(
+            noteID: note.id,
+            editSessionID: context.editSessionID,
+            draftGeneration: context.draftGeneration,
+            noteSnapshotChecksum: context.noteSnapshotChecksum,
+            persistedNoteRevision: note.revision + 1
+        )
+        let checksumMismatch = PersistableDraftContext(
+            noteID: note.id,
+            editSessionID: context.editSessionID,
+            draftGeneration: context.draftGeneration,
+            noteSnapshotChecksum: "wrong-checksum",
+            persistedNoteRevision: note.revision
+        )
+        #expect(try await repository.verifyPersistedDraft(revisionMismatch) == .notPersisted)
+        #expect(try await repository.verifyPersistedDraft(checksumMismatch) == .notPersisted)
         try FileManager.default.removeItem(at: main)
         #expect(try await repository.verifyPersistedDraft(context) == .sourceChanged)
         try WorkspaceDocumentCodec.encode(state).write(to: main)
