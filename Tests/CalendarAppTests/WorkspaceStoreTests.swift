@@ -171,6 +171,134 @@ struct WorkspaceStoreTests {
         #expect(store.phase == .unreadablePrimaryLoadFailed)
     }
 
+    @Test func unreadablePrimarySaveFailureFreezesAndTerminatesAlreadyQueuedOrdinaryCaller() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let initial = WorkspaceState.empty(calendar: calendar)
+        let firstItem = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "unreadable head")
+        let secondItem = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "must not drain")
+        let repository = WorkspaceStoreTestRepository(initial: initial)
+        await repository.suspendNextSave()
+        await repository.failNextSaveWithUnreadablePrimary()
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+
+        let head = Task { @MainActor in try await store.sendCalendar(.createItem(firstItem), undoLabel: "head") }
+        await repository.waitForSaveStart()
+        let queued = Task { @MainActor in try await store.sendCalendar(.createItem(secondItem), undoLabel: "tail") }
+        await repository.resumeSave()
+
+        let headOutcome = try await head.value
+        let queuedOutcome = try await queued.value
+        guard case let .persistenceBlocked(headID?, headReason, headJournal) = headOutcome,
+              case let .persistenceBlocked(queuedID?, queuedReason, queuedJournal) = queuedOutcome
+        else {
+            Issue.record("An unreadable primary save must freeze its head and terminate its already-appended tail")
+            return
+        }
+        #expect(headID != queuedID)
+        #expect(headReason == .unreadablePrimary)
+        #expect(queuedReason == .unreadablePrimary)
+        #expect(headJournal == .clean)
+        #expect(queuedJournal == .clean)
+        #expect(store.state == initial)
+        #expect(store.canUndo == false)
+        #expect(store.canRedo == false)
+        #expect(store.phase == .unreadablePrimaryLoadFailed)
+        #expect(await repository.saveCount == 0)
+    }
+
+    @Test func unreadablePrimaryDraftSaveUnbindsItsJournalAndFreezesWithoutPublishing() async throws {
+        let (state, _, original) = try draftFixture()
+        var snapshot = original.snapshot
+        snapshot.title = "must remain only journaled"
+        let submission = NoteDraftSubmission(
+            noteID: original.noteID, editSessionID: original.editSessionID, baseNoteRevision: original.baseNoteRevision,
+            baseNoteSnapshotChecksum: original.baseNoteSnapshotChecksum, baseSnapshot: original.baseSnapshot,
+            baseLinkedTaskBlockLinks: original.baseLinkedTaskBlockLinks, draftGeneration: original.draftGeneration,
+            snapshot: snapshot, noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(snapshot),
+            modifiedFields: [.title], linkedBlockDeletionDispositions: [:]
+        )
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("jelly-6b-unreadable-draft-save-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let journal = DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"))
+        let repository = WorkspaceStoreTestRepository(initial: state)
+        await repository.failNextSaveWithUnreadablePrimary()
+        let store = WorkspaceStore(initialState: state, repository: repository, journal: journal)
+        await store.load()
+
+        let outcome = try await store.submitDraft(submission)
+
+        guard case let .persistenceBlocked(transactionID?, reason, journalStatus) = outcome else {
+            Issue.record("An unreadable draft save must return a typed persistence block")
+            return
+        }
+        #expect(transactionID.uuidString.isEmpty == false)
+        #expect(reason == .unreadablePrimary)
+        #expect(journalStatus == .clean)
+        let protected = try #require(await journal.current()?.records.first)
+        #expect(protected.pendingReceipt == nil)
+        #expect(protected.savedReceipt == nil)
+        #expect(store.state == state)
+        #expect(store.phase == .unreadablePrimaryLoadFailed)
+        #expect(await repository.saveCount == 0)
+    }
+
+    @Test func realJSONUnreadablePrimaryAfterValidLoadReturnsTypedPersistenceBlock() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("jelly-6b-real-unreadable-primary-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let initial = WorkspaceState.empty(calendar: calendar)
+        let document = directory.appendingPathComponent("calendar-v1.json")
+        let alternate = directory.appendingPathComponent("alternate.json")
+        try WorkspaceDocumentCodec.encode(initial).write(to: document)
+        try WorkspaceDocumentCodec.encode(initial).write(to: alternate)
+        let repository = JSONWorkspaceRepository(documentURL: document, seed: { initial })
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+        try FileManager.default.removeItem(at: document)
+        try FileManager.default.createSymbolicLink(at: document, withDestinationURL: alternate)
+        let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "real unreadable")
+
+        let outcome = try await store.sendCalendar(.createItem(item), undoLabel: "must fail closed")
+
+        guard case let .persistenceBlocked(transactionID?, reason, journalStatus) = outcome else {
+            Issue.record("A no-follow JSON primary probe must not become a normal not-committed write failure")
+            return
+        }
+        #expect(transactionID.uuidString.isEmpty == false)
+        #expect(reason == .unreadablePrimary)
+        #expect(journalStatus == .clean)
+        #expect(store.state == initial)
+        #expect(store.canUndo == false)
+        #expect(store.phase == .unreadablePrimaryLoadFailed)
+    }
+
+    @Test func invalidDraftContextSaveErrorStillThrowsInsteadOfBecomingATerminalOutcome() async throws {
+        let (state, _, original) = try draftFixture()
+        var snapshot = original.snapshot
+        snapshot.title = "valid caller context, invalid repository response"
+        let submission = NoteDraftSubmission(
+            noteID: original.noteID, editSessionID: original.editSessionID, baseNoteRevision: original.baseNoteRevision,
+            baseNoteSnapshotChecksum: original.baseNoteSnapshotChecksum, baseSnapshot: original.baseSnapshot,
+            baseLinkedTaskBlockLinks: original.baseLinkedTaskBlockLinks, draftGeneration: original.draftGeneration,
+            snapshot: snapshot, noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(snapshot),
+            modifiedFields: [.title], linkedBlockDeletionDispositions: [:]
+        )
+        let repository = WorkspaceStoreTestRepository(initial: state)
+        await repository.failNextSaveWithInvalidDraftContext()
+        let store = WorkspaceStore(initialState: state, repository: repository)
+        await store.load()
+
+        await #expect(throws: WorkspacePersistenceError.invalidDraftContext) {
+            _ = try await store.submitDraft(submission)
+        }
+
+        #expect(store.state == state)
+        #expect(store.phase == .ready)
+        #expect(await repository.saveCount == 0)
+    }
+
     @Test func queuedCalendarCommandsReduceAgainstTheLatestPublishedState() async throws {
         let calendar = CalendarState.empty(
             uncategorizedID: UUID(uuidString: "00000000-0000-0000-0000-000000006031")!, now: .distantPast
@@ -2526,6 +2654,8 @@ actor WorkspaceStoreTestRepository: WorkspaceRepository {
     private var loadFailure = false
     private var saveCountStorage = 0
     private var failSave = false
+    private var unreadablePrimarySave = false
+    private var invalidDraftContextSave = false
     private var sourceChangedSave = false
     private var saveUncertain = false
     private var verification: WorkspaceDraftPersistenceVerification = .notPersisted
@@ -2554,6 +2684,15 @@ actor WorkspaceStoreTestRepository: WorkspaceRepository {
         }
         if saveUncertain { saveUncertain = false; throw WorkspacePersistenceError.commitUncertain }
         if sourceChangedSave { sourceChangedSave = false; throw WorkspaceDirectCommitFailure.sourceChanged(.init()) }
+        if unreadablePrimarySave {
+            unreadablePrimarySave = false
+            reloaded = .unreadableUnknown
+            throw WorkspacePersistenceError.invalidDocument
+        }
+        if invalidDraftContextSave {
+            invalidDraftContextSave = false
+            throw WorkspacePersistenceError.invalidDraftContext
+        }
         if failSave { failSave = false; throw WorkspacePersistenceError.atomicWriteFailed }
         state = next; saveCountStorage += 1
         return .init(workspaceRevision: next.revision, persistedDraft: draft.map { .init(noteID: $0.noteID, editSessionID: $0.editSessionID, draftGeneration: $0.draftGeneration, noteSnapshotChecksum: $0.noteSnapshotChecksum, persistedNoteRevision: $0.persistedNoteRevision) })
@@ -2586,6 +2725,8 @@ actor WorkspaceStoreTestRepository: WorkspaceRepository {
     var reconciliationCount: Int { reconciliationCountStorage }
     func failNextLoad() { loadFailure = true }
     func failNextSave() { failSave = true }
+    func failNextSaveWithUnreadablePrimary() { unreadablePrimarySave = true }
+    func failNextSaveWithInvalidDraftContext() { invalidDraftContextSave = true }
     func failNextSaveWithSourceChanged() { sourceChangedSave = true }
     func makeNextSaveUncertain() { saveUncertain = true }
     func setVerification(_ value: WorkspaceDraftPersistenceVerification) { verification = value }

@@ -602,11 +602,23 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
             return try await reconcileImmediately(
                 transactionID: transactionID, candidate: candidate, draftReceipt: draftReceipt, completion: completion
             )
-        } catch {
+        } catch WorkspacePersistenceError.atomicWriteFailed {
             let journalStatus = await finishNotCommittedSave(
                 completion: completion, draftReceipt: draftReceipt, artifacts: .init()
             )
             return .notCommitted(transactionID: transactionID, journal: journalStatus, artifacts: .init())
+        } catch WorkspacePersistenceError.invalidDocument {
+            guard await repositoryReportsUnreadablePrimary() else {
+                throw WorkspacePersistenceError.invalidDocument
+            }
+            let journalStatus = await finishUnreadablePrimarySave(draftReceipt)
+            return .persistenceBlocked(
+                transactionID: transactionID, reason: .unreadablePrimary, journal: journalStatus
+            )
+        } catch let error as WorkspacePersistenceError {
+            throw error
+        } catch {
+            throw error
         }
     }
 
@@ -675,6 +687,32 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         case .forward, .undo:
             phase = .ready
         }
+    }
+
+    private func repositoryReportsUnreadablePrimary() async -> Bool {
+        do {
+            if case .unreadableUnknown = try await repository.reloadCurrentSourceAfterExternalChange() {
+                return true
+            }
+        } catch {
+            // The original save error is the authoritative result when the
+            // verification probe itself cannot establish unreadability.
+        }
+        return false
+    }
+
+    private func finishUnreadablePrimarySave(
+        _ draftReceipt: PersistedDraftReceipt?
+    ) async -> JournalResolutionStatus {
+        let journalStatus = await unbindIfNeeded(draftReceipt)
+        let terminalPhase = WorkspaceStorePhase.unreadablePrimaryLoadFailed
+        if case .cleanupPending = journalStatus {
+            parkJournalCleanup(journalStatus, receipt: draftReceipt, terminalPhase: terminalPhase)
+        } else {
+            phase = terminalPhase
+        }
+        terminateQueuedForPersistenceBlock(reason: .unreadablePrimary)
+        return journalStatus
     }
 
     private func finishSourceChangedSave(
