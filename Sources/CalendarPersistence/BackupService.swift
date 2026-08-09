@@ -1,5 +1,6 @@
 import CalendarDomain
 import Foundation
+import WorkspaceDomain
 
 public actor BackupService {
     private let writer: any AtomicFileWriting
@@ -14,6 +15,25 @@ public actor BackupService {
             try writer.replaceAtomically(data: data, at: destination)
         } catch {
             throw BackupError.atomicWriteFailed
+        }
+    }
+
+    public func exportCurrent(
+        from repository: any WorkspaceRepository,
+        to destination: URL
+    ) async throws {
+        let rawData = try await repository.currentDocumentData()
+        _ = try WorkspaceDocumentCodec.decode(rawData)
+        do {
+            try writer.replaceAtomically(data: rawData, at: destination)
+            let readback = try Data(contentsOf: destination)
+            guard readback.count == rawData.count,
+                  persistenceSHA256(readback) == persistenceSHA256(rawData)
+            else { throw WorkspacePersistenceError.atomicWriteFailed }
+        } catch let error as WorkspacePersistenceError {
+            throw error
+        } catch {
+            throw WorkspacePersistenceError.atomicWriteFailed
         }
     }
 
