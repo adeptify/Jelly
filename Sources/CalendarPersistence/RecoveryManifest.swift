@@ -48,7 +48,8 @@ public final class RecoveryManifestStore: @unchecked Sendable {
     }
 
     public func load() throws -> RecoveryManifest {
-        try withJellyAdvisoryLock(for: manifestURL) {
+        try prepareManifestParent()
+        return try withJellyAdvisoryLock(for: manifestURL) {
             try loadUnlocked()
         }
     }
@@ -84,7 +85,8 @@ public final class RecoveryManifestStore: @unchecked Sendable {
         provenance: WorkspaceLoadProvenance,
         registeredAt: Date = Date()
     ) throws -> RecoverySnapshotRecord {
-        try withJellyAdvisoryLock(for: manifestURL) {
+        try prepareManifestParent()
+        return try withJellyAdvisoryLock(for: manifestURL) {
             var manifest = try loadUnlocked()
             if let existing = manifest.entries.first(where: {
                 $0.sourceSchema == provenance.sourceSchema
@@ -108,10 +110,6 @@ public final class RecoveryManifestStore: @unchecked Sendable {
             let data: Data
             do {
                 data = try JSONEncoder.workspaceDeterministic.encode(manifest)
-                try FileManager.default.createDirectory(
-                    at: manifestURL.deletingLastPathComponent(),
-                    withIntermediateDirectories: true
-                )
                 try writer.replaceAtomically(data: data, at: manifestURL)
             } catch {
                 throw WorkspacePersistenceError.atomicWriteFailed
@@ -136,5 +134,20 @@ public final class RecoveryManifestStore: @unchecked Sendable {
               snapshots.safeURL(for: record.snapshotFileName) != nil
         else { return false }
         return true
+    }
+
+    private func prepareManifestParent() throws {
+        let parent = manifestURL.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: parent.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue
+            else { throw WorkspacePersistenceError.atomicWriteFailed }
+        } catch let error as WorkspacePersistenceError {
+            throw error
+        } catch {
+            throw WorkspacePersistenceError.atomicWriteFailed
+        }
     }
 }

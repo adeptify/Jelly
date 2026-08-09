@@ -3,11 +3,18 @@ import WorkspaceDomain
 
 public struct StoredDraftJournalRecord: Codable, Equatable, Sendable {
     public let entry: DraftJournalEntry
+    public let pendingReceipt: PersistedDraftReceipt?
     public let savedReceipt: PersistedDraftReceipt?
     public let recordChecksum: String
 
-    public init(entry: DraftJournalEntry, savedReceipt: PersistedDraftReceipt?, recordChecksum: String) {
+    public init(
+        entry: DraftJournalEntry,
+        pendingReceipt: PersistedDraftReceipt?,
+        savedReceipt: PersistedDraftReceipt?,
+        recordChecksum: String
+    ) {
         self.entry = entry
+        self.pendingReceipt = pendingReceipt
         self.savedReceipt = savedReceipt
         self.recordChecksum = recordChecksum
     }
@@ -18,9 +25,17 @@ public enum DraftJournal {
         try persistenceSHA256(WorkspaceDocumentCodec.canonicalPersistentData(EntryChecksumInput(entry: entry)))
     }
 
-    static func recordChecksum(entry: DraftJournalEntry, receipt: PersistedDraftReceipt?) throws -> String {
+    static func recordChecksum(
+        entry: DraftJournalEntry,
+        pendingReceipt: PersistedDraftReceipt?,
+        savedReceipt: PersistedDraftReceipt?
+    ) throws -> String {
         try persistenceSHA256(WorkspaceDocumentCodec.canonicalPersistentData(
-            RecordChecksumInput(entry: entry, savedReceipt: receipt)
+            RecordChecksumInput(
+                entry: entry,
+                pendingReceipt: pendingReceipt,
+                savedReceipt: savedReceipt
+            )
         ))
     }
 
@@ -46,6 +61,7 @@ public enum DraftJournal {
 
     private struct RecordChecksumInput: Codable {
         let entry: DraftJournalEntry
+        let pendingReceipt: PersistedDraftReceipt?
         let savedReceipt: PersistedDraftReceipt?
     }
 }

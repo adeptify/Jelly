@@ -233,6 +233,9 @@ struct WorkspaceBackupServiceTests {
         }
         #expect(try Data(contentsOf: main) == changed)
         #expect(try Data(contentsOf: prepared.rollbackURL) == beforeMain)
+        await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
     }
 
     @Test func successfulRestoreCapabilityIsSingleUse() async throws {
@@ -256,6 +259,76 @@ struct WorkspaceBackupServiceTests {
             _ = try await repository.commitRestore(prepared, state: restored)
         }
         #expect(try Data(contentsOf: main) == afterFirst)
+    }
+
+    @Test func uncertainRestoreKeepsCapabilityPendingUntilCandidateReconciliation() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("main.json")
+        let source = directory.file("restore.json")
+        let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = initial
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        restored.notes[restored.notes.keys.first!]!.title = "uncertain restored candidate"
+        try WorkspaceDocumentCodec.encode(initial).write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let readbackFailure = WorkspacePersistencePostRenameReadbackFailureWriter()
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { initial },
+            mainFileWriter: FoundationMainFileCompareAndReplaceWriter(writer: readbackFailure)
+        )
+        _ = try await repository.load()
+        let prepared = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+        defer { readbackFailure.restoreReadability(at: main) }
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+
+        readbackFailure.restoreReadability(at: main)
+        #expect(try await repository.reconcilePendingCommit() == .committed(
+            WorkspaceSaveReceipt(workspaceRevision: restored.revision, persistedDraft: nil)
+        ))
+        await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+    }
+
+    @Test func notCommittedRestoreReconciliationInvalidatesTheOldCapability() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("main.json")
+        let source = directory.file("restore.json")
+        let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = initial
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        try WorkspaceDocumentCodec.encode(initial).write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let initialData = try Data(contentsOf: main)
+        let readbackFailure = WorkspacePersistencePostRenameReadbackFailureWriter()
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { initial },
+            mainFileWriter: FoundationMainFileCompareAndReplaceWriter(writer: readbackFailure)
+        )
+        _ = try await repository.load()
+        let prepared = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+        readbackFailure.restoreReadability(at: main)
+        try initialData.write(to: main)
+        #expect(try await repository.reconcilePendingCommit() == .notCommitted)
+        await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
     }
 }
 

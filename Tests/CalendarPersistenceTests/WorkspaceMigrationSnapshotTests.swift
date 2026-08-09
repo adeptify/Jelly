@@ -292,6 +292,30 @@ struct WorkspaceMigrationSnapshotTests {
             snapshotDirectoryURL: directory.file("snapshots")
         ).load().entries.count == 2)
     }
+
+    @Test func nestedMissingManifestParentIsCreatedBeforeThePathBoundLock() throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let manifest = directory.url
+            .appendingPathComponent("nested", isDirectory: true)
+            .appendingPathComponent("manifest", isDirectory: true)
+            .appendingPathComponent("recovery.json")
+        let snapshots = directory.url
+            .appendingPathComponent("nested", isDirectory: true)
+            .appendingPathComponent("snapshots", isDirectory: true)
+        let raw = Data("nested manifest source".utf8)
+        let provenance = WorkspaceLoadProvenance(
+            sourceSchema: 2,
+            sourceBytesSHA256: WorkspacePersistenceFixtures.sha256(raw),
+            sourceByteCount: raw.count
+        )
+        let store = RecoveryManifestStore(manifestURL: manifest, snapshotDirectoryURL: snapshots)
+
+        let record = try store.registerVerifiedSnapshot(rawData: raw, provenance: provenance)
+
+        #expect(FileManager.default.fileExists(atPath: manifest.path))
+        #expect(try store.load().entries.map(\.snapshotFileName) == [record.snapshotFileName])
+    }
 }
 
 struct WorkspacePersistenceTemporaryDirectory {

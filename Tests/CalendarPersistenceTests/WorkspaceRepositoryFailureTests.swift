@@ -131,7 +131,7 @@ struct WorkspaceRepositoryFailureTests {
         #expect(try await JSONWorkspaceRepository(documentURL: main, seed: { first }).load().state == second)
     }
 
-    @Test func claimedReplacementWithoutCandidateReadbackKeepsV2MainAndLoadedSourceUnchanged() async throws {
+    @Test func invalidVerifiedCASResultStaysPendingUntilTheOldV2BytesReconcile() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
         let main = directory.file("calendar-v1.json")
@@ -140,14 +140,18 @@ struct WorkspaceRepositoryFailureTests {
         let repository = JSONWorkspaceRepository(
             documentURL: main,
             seed: { .empty(calendar: WorkspacePersistenceFixtures.calendarState) },
-            mainFileWriter: WorkspacePersistenceNoWriteMainWriter()
+            mainFileWriter: WorkspacePersistenceInvalidVerifiedMainWriter()
         )
         _ = try await repository.load()
 
-        await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
             _ = try await repository.save(try WorkspacePersistenceFixtures.workspaceWithOneNote())
         }
         #expect(try Data(contentsOf: main) == v2)
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.currentDocumentData()
+        }
+        #expect(try await repository.reconcilePendingCommit() == .notCommitted)
         #expect(try await repository.currentDocumentData() == v2)
     }
 
@@ -171,6 +175,121 @@ struct WorkspaceRepositoryFailureTests {
         }
         #expect(try Data(contentsOf: main) == v2)
         #expect(try await repository.currentDocumentData() == v2)
+    }
+
+    @Test func postRenameReadbackFailureIsCommitUncertainAndCandidateReconcilesExactly() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var candidate = initial
+        candidate.revision = 2
+        candidate.notes[candidate.notes.keys.first!]!.revision = 2
+        candidate.notes[candidate.notes.keys.first!]!.title = "commit uncertain candidate"
+        let initialData = try WorkspaceDocumentCodec.encode(initial)
+        let candidateData = try WorkspaceDocumentCodec.encode(candidate)
+        try initialData.write(to: main)
+        let readbackFailure = WorkspacePersistencePostRenameReadbackFailureWriter()
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { initial },
+            mainFileWriter: FoundationMainFileCompareAndReplaceWriter(writer: readbackFailure)
+        )
+        _ = try await repository.load()
+
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.save(candidate)
+        }
+        defer { readbackFailure.restoreReadability(at: main) }
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.currentDocumentData()
+        }
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.save(candidate)
+        }
+
+        readbackFailure.restoreReadability(at: main)
+        #expect(try Data(contentsOf: main) == candidateData)
+        #expect(try await JSONWorkspaceRepository(documentURL: main, seed: { initial }).load().state == candidate)
+        #expect(try await repository.reconcilePendingCommit() == .committed(
+            WorkspaceSaveReceipt(workspaceRevision: candidate.revision, persistedDraft: nil)
+        ))
+        #expect(try await repository.currentDocumentData() == candidateData)
+    }
+
+    @Test func unreadableExistingCandidateDuringAbsentCommitReconciliationFailsClosed() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let state = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        let candidate = try WorkspaceDocumentCodec.encode(state)
+        let readbackFailure = WorkspacePersistencePostRenameReadbackFailureWriter()
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { state },
+            mainFileWriter: FoundationMainFileCompareAndReplaceWriter(writer: readbackFailure)
+        )
+        _ = try await repository.load()
+
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.save(state)
+        }
+        defer { readbackFailure.restoreReadability(at: main) }
+
+        #expect(try await repository.reconcilePendingCommit() == .sourceChanged)
+        readbackFailure.restoreReadability(at: main)
+        #expect(try Data(contentsOf: main) == candidate)
+    }
+
+    @Test func uncertainCommitReconcilesOldAndThirdMainBytesWithoutFabricatingSuccess() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var candidate = initial
+        candidate.revision = 2
+        candidate.notes[candidate.notes.keys.first!]!.revision = 2
+        let initialData = try WorkspaceDocumentCodec.encode(initial)
+        try initialData.write(to: main)
+        let failure = WorkspacePersistencePostRenameReadbackFailureWriter()
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { initial },
+            mainFileWriter: FoundationMainFileCompareAndReplaceWriter(writer: failure)
+        )
+        _ = try await repository.load()
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.save(candidate)
+        }
+        failure.restoreReadability(at: main)
+        try initialData.write(to: main)
+        #expect(try await repository.reconcilePendingCommit() == .notCommitted)
+        #expect(try await repository.currentDocumentData() == initialData)
+
+        let thirdFailure = WorkspacePersistencePostRenameReadbackFailureWriter()
+        let thirdRepository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { initial },
+            mainFileWriter: FoundationMainFileCompareAndReplaceWriter(writer: thirdFailure)
+        )
+        _ = try await thirdRepository.load()
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await thirdRepository.save(candidate)
+        }
+        thirdFailure.restoreReadability(at: main)
+        try Data("third cooperating bytes".utf8).write(to: main)
+        #expect(try await thirdRepository.reconcilePendingCommit() == .sourceChanged)
+    }
+}
+
+final class WorkspacePersistencePostRenameReadbackFailureWriter: AtomicFileWriting, @unchecked Sendable {
+    func replaceAtomically(data: Data, at destination: URL) throws {
+        try FoundationAtomicFileWriter().replaceAtomically(data: data, at: destination)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: destination.path)
+    }
+
+    func restoreReadability(at destination: URL) {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
     }
 }
 
@@ -209,9 +328,9 @@ struct WorkspacePersistenceAlwaysFailingMainWriter: MainFileCompareAndReplaceWri
     }
 }
 
-struct WorkspacePersistenceNoWriteMainWriter: MainFileCompareAndReplaceWriting {
+struct WorkspacePersistenceInvalidVerifiedMainWriter: MainFileCompareAndReplaceWriting {
     func createIfAbsent(candidate: Data, at destination: URL) throws -> MainFileCompareAndReplaceResult {
-        .replaced
+        .replaced(verifiedRawData: Data())
     }
 
     func replaceIfSHA256Matches(
@@ -219,6 +338,6 @@ struct WorkspacePersistenceNoWriteMainWriter: MainFileCompareAndReplaceWriting {
         candidate: Data,
         at destination: URL
     ) throws -> MainFileCompareAndReplaceResult {
-        .replaced
+        .replaced(verifiedRawData: Data())
     }
 }

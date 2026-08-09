@@ -42,6 +42,7 @@ struct DraftJournalRepositoryTests {
         )
         let journal = DraftJournalRepository(fileURL: url)
         try await journal.persist(entry)
+        try await journal.bindPending(receipt)
         try await journal.record(receipt)
 
         let reopened = DraftJournalRepository(fileURL: url)
@@ -79,6 +80,7 @@ struct DraftJournalRepositoryTests {
         )
         let journal = DraftJournalRepository(fileURL: directory.file("journal.json"))
         try await journal.persist(entry)
+        try await journal.bindPending(correct)
         try await journal.record(correct)
         try await journal.record(wrongRevision)
 
@@ -138,6 +140,7 @@ struct DraftJournalRepositoryTests {
         )
         let journal = DraftJournalRepository(fileURL: url, writer: writer)
         try await journal.persist(entry)
+        try await journal.bindPending(receipt)
         try await journal.record(receipt)
         writer.failNextWrite = true
 
@@ -160,6 +163,7 @@ struct DraftJournalRepositoryTests {
         let calendarJournalURL = directory.file("calendar-journal.json")
         let calendarJournal = DraftJournalRepository(fileURL: calendarJournalURL)
         try await calendarJournal.persist(entry)
+        try await calendarJournal.bindPending(receipt)
         try await calendarJournal.record(receipt)
 
         let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
@@ -215,6 +219,126 @@ struct DraftJournalRepositoryTests {
         #expect(titleRecord.entry == titleOnlyEntry)
         #expect(titleRecord.savedReceipt == nil)
     }
+
+    @Test func reducerAllocatedRevisionBindsTheExactPendingReceiptBeforeRecordAndClear() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 3)
+        let base = try #require(initial.notes.values.first)
+        var submitted = base
+        submitted.title = "由 reducer 分配 revision"
+        let draftGeneration: UInt64 = 42
+        let submission = NoteDraftSubmission(
+            noteID: base.id,
+            editSessionID: UUID(),
+            baseNoteRevision: base.revision,
+            baseNoteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(base),
+            baseSnapshot: base,
+            baseLinkedTaskBlockLinks: [],
+            draftGeneration: draftGeneration,
+            snapshot: submitted,
+            noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(submitted),
+            modifiedFields: [.title],
+            linkedBlockDeletionDispositions: [:]
+        )
+        let reduction = try WorkspaceReducer.reduce(
+            initial,
+            command: .updateNote(submission),
+            now: Date(timeIntervalSince1970: 10)
+        )
+        let candidate = try #require(reduction.change?.state)
+        let candidateNote = try #require(candidate.notes[base.id])
+        #expect(candidateNote.revision == 4)
+        let entry = try WorkspacePersistenceFixtures.draftEntry(
+            baseWorkspaceRevision: initial.revision,
+            baseNoteRevision: base.revision,
+            draftGeneration: draftGeneration,
+            snapshot: submitted
+        )
+        let receipt = PersistedDraftReceipt(
+            noteID: base.id,
+            draftGeneration: draftGeneration,
+            noteSnapshotChecksum: entry.noteSnapshotChecksum,
+            persistedNoteRevision: candidateNote.revision
+        )
+        let journal = DraftJournalRepository(fileURL: directory.file("journal.json"))
+        try await journal.persist(entry)
+        for wrong in [
+            PersistedDraftReceipt(noteID: NoteID(), draftGeneration: receipt.draftGeneration, noteSnapshotChecksum: receipt.noteSnapshotChecksum, persistedNoteRevision: receipt.persistedNoteRevision),
+            PersistedDraftReceipt(noteID: receipt.noteID, draftGeneration: receipt.draftGeneration + 1, noteSnapshotChecksum: receipt.noteSnapshotChecksum, persistedNoteRevision: receipt.persistedNoteRevision),
+            PersistedDraftReceipt(noteID: receipt.noteID, draftGeneration: receipt.draftGeneration, noteSnapshotChecksum: "wrong", persistedNoteRevision: receipt.persistedNoteRevision),
+            PersistedDraftReceipt(noteID: receipt.noteID, draftGeneration: receipt.draftGeneration, noteSnapshotChecksum: receipt.noteSnapshotChecksum, persistedNoteRevision: entry.baseNoteRevision)
+        ] {
+            #expect(try await journal.bindPending(wrong) == false)
+        }
+        #expect(try await journal.bindPending(receipt) == true)
+
+        let bound = try #require(try await journal.current())
+        #expect(bound.pendingReceipt == receipt)
+        #expect(bound.savedReceipt == nil)
+        for wrong in [
+            PersistedDraftReceipt(noteID: NoteID(), draftGeneration: receipt.draftGeneration, noteSnapshotChecksum: receipt.noteSnapshotChecksum, persistedNoteRevision: receipt.persistedNoteRevision),
+            PersistedDraftReceipt(noteID: receipt.noteID, draftGeneration: receipt.draftGeneration + 1, noteSnapshotChecksum: receipt.noteSnapshotChecksum, persistedNoteRevision: receipt.persistedNoteRevision),
+            PersistedDraftReceipt(noteID: receipt.noteID, draftGeneration: receipt.draftGeneration, noteSnapshotChecksum: "wrong", persistedNoteRevision: receipt.persistedNoteRevision),
+            PersistedDraftReceipt(noteID: receipt.noteID, draftGeneration: receipt.draftGeneration, noteSnapshotChecksum: receipt.noteSnapshotChecksum, persistedNoteRevision: receipt.persistedNoteRevision + 1)
+        ] {
+            #expect(try await journal.record(wrong) == false)
+            #expect(try await journal.current()?.savedReceipt == nil)
+        }
+        #expect(try await journal.record(receipt) == true)
+        #expect(try await journal.current()?.pendingReceipt == nil)
+        #expect(try await journal.current()?.savedReceipt == receipt)
+        #expect(try await journal.clear(ifMatching: receipt) == true)
+        #expect(try await journal.current() == nil)
+    }
+
+    @Test func reducerCurrentRevisionFiveCanBindAndRecordTheFinalRevisionSixReceipt() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 5)
+        let base = try #require(initial.notes.values.first)
+        var submitted = base
+        submitted.title = "revision six candidate"
+        let submission = NoteDraftSubmission(
+            noteID: base.id,
+            editSessionID: UUID(),
+            baseNoteRevision: base.revision,
+            baseNoteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(base),
+            baseSnapshot: base,
+            baseLinkedTaskBlockLinks: [],
+            draftGeneration: 43,
+            snapshot: submitted,
+            noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(submitted),
+            modifiedFields: [.title],
+            linkedBlockDeletionDispositions: [:]
+        )
+        let reduction = try WorkspaceReducer.reduce(
+            initial,
+            command: .updateNote(submission),
+            now: Date(timeIntervalSince1970: 11)
+        )
+        let candidate = try #require(reduction.change?.state)
+        let candidateNote = try #require(candidate.notes[base.id])
+        #expect(candidateNote.revision == 6)
+        let entry = try WorkspacePersistenceFixtures.draftEntry(
+            baseWorkspaceRevision: initial.revision,
+            baseNoteRevision: base.revision,
+            draftGeneration: submission.draftGeneration,
+            snapshot: submitted
+        )
+        let receipt = PersistedDraftReceipt(
+            noteID: base.id,
+            draftGeneration: submission.draftGeneration,
+            noteSnapshotChecksum: entry.noteSnapshotChecksum,
+            persistedNoteRevision: candidateNote.revision
+        )
+        let journal = DraftJournalRepository(fileURL: directory.file("journal.json"))
+        try await journal.persist(entry)
+        try await journal.bindPending(receipt)
+        try await journal.record(receipt)
+
+        #expect(try await journal.current()?.savedReceipt == receipt)
+    }
 }
 
 final class WorkspacePersistenceFailOnceWriter: AtomicFileWriting, @unchecked Sendable {
@@ -237,6 +361,35 @@ final class WorkspacePersistenceFailOnceWriter: AtomicFileWriting, @unchecked Se
 }
 
 extension WorkspacePersistenceFixtures {
+    static func draftEntry(
+        baseWorkspaceRevision: Int64,
+        baseNoteRevision: Int64,
+        draftGeneration: UInt64,
+        snapshot: Note
+    ) throws -> DraftJournalEntry {
+        let checksum = try WorkspaceChecksum.noteSnapshotChecksum(snapshot)
+        let unsigned = DraftJournalEntry(
+            noteID: snapshot.id,
+            baseWorkspaceRevision: baseWorkspaceRevision,
+            baseNoteRevision: baseNoteRevision,
+            draftGeneration: draftGeneration,
+            noteSnapshot: snapshot,
+            updatedAt: Date(timeIntervalSince1970: 0),
+            noteSnapshotChecksum: checksum,
+            journalChecksum: ""
+        )
+        return DraftJournalEntry(
+            noteID: unsigned.noteID,
+            baseWorkspaceRevision: unsigned.baseWorkspaceRevision,
+            baseNoteRevision: unsigned.baseNoteRevision,
+            draftGeneration: unsigned.draftGeneration,
+            noteSnapshot: unsigned.noteSnapshot,
+            updatedAt: unsigned.updatedAt,
+            noteSnapshotChecksum: unsigned.noteSnapshotChecksum,
+            journalChecksum: try DraftJournal.entryChecksum(for: unsigned)
+        )
+    }
+
     static func draftEntry(generation: UInt64) throws -> DraftJournalEntry {
         let note = try workspaceWithOneNote(revision: Int64(generation)).notes.values.first!
         let checksum = try WorkspaceChecksum.noteSnapshotChecksum(note)

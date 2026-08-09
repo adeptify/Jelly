@@ -39,11 +39,18 @@ public struct WorkspaceSaveReceipt: Equatable, Sendable {
     }
 }
 
+public enum WorkspaceCommitReconciliation: Equatable, Sendable {
+    case committed(WorkspaceSaveReceipt)
+    case notCommitted
+    case sourceChanged
+}
+
 public enum WorkspacePersistenceError: Error, Equatable, Sendable {
     case invalidDocument
     case unsupportedSchema(Int)
     case invalidWorkspace
     case atomicWriteFailed
+    case commitUncertain
     case sourceChanged
     case missingDocument
     case invalidManifest

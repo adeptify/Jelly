@@ -7,6 +7,14 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         case bytes(rawData: Data, provenance: WorkspaceLoadProvenance)
     }
 
+    private struct PendingWorkspaceCommit: Sendable {
+        let previousSource: LoadedSource
+        let candidateRawData: Data
+        let candidateState: WorkspaceState
+        let receipt: WorkspaceSaveReceipt
+        let restoreCapabilityID: UUID?
+    }
+
     private let documentURL: URL
     private let seed: @Sendable () -> WorkspaceState
     private let manifestStore: RecoveryManifestStore
@@ -15,6 +23,7 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
     private let mainFileWriter: any MainFileCompareAndReplaceWriting
     private var loadedSource: LoadedSource = .absent
     private var pendingRestores: [UUID: PreparedWorkspaceRestore] = [:]
+    private var pendingCommit: PendingWorkspaceCommit?
 
     public init(
         documentURL: URL,
@@ -72,18 +81,21 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         _ state: WorkspaceState,
         draft: PersistableDraftContext? = nil
     ) throws -> WorkspaceSaveReceipt {
+        try rejectIfCommitUncertain()
         do {
             try WorkspaceValidator.validate(state)
         } catch {
             throw WorkspacePersistenceError.invalidWorkspace
         }
-        let receipt = try receipt(for: draft, in: state)
+        let persistedDraft = try receipt(for: draft, in: state)
+        let receipt = WorkspaceSaveReceipt(workspaceRevision: state.revision, persistedDraft: persistedDraft)
         let candidate = try WorkspaceDocumentCodec.encode(state)
-        try persist(candidate: candidate, state: state)
-        return WorkspaceSaveReceipt(workspaceRevision: state.revision, persistedDraft: receipt)
+        try persist(candidate: candidate, state: state, receipt: receipt)
+        return receipt
     }
 
     public func currentDocumentData() throws -> Data {
+        try rejectIfCommitUncertain()
         guard case let .bytes(rawData, _) = loadedSource else {
             throw WorkspacePersistenceError.missingDocument
         }
@@ -99,6 +111,7 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
     }
 
     public func prepareRestore(_ request: WorkspaceRestoreRequest) throws -> PreparedWorkspaceRestore {
+        try rejectIfCommitUncertain()
         let rawData: Data
         do {
             rawData = try Data(contentsOf: request.sourceURL)
@@ -137,6 +150,7 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         _ prepared: PreparedWorkspaceRestore,
         state: WorkspaceState
     ) throws -> WorkspaceSaveReceipt {
+        try rejectIfCommitUncertain()
         guard let issued = pendingRestores[prepared.capabilityID], issued == prepared else {
             throw WorkspacePersistenceError.invalidRestoreCapability
         }
@@ -167,28 +181,58 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         if provenance.sourceSchema < WorkspaceDocument.currentSchemaVersion {
             try registerMigrationSnapshot(rawData: rawData, provenance: provenance)
         }
-        switch try replaceIfSHA256Matches(
-            expectedSHA256: provenance.sourceBytesSHA256,
-            candidate: candidate
-        ) {
-        case .sourceChanged:
-            throw WorkspacePersistenceError.sourceChanged
-        case .replaced:
-            try replaceLoadedSourceWithReadback(candidate)
+        let receipt = WorkspaceSaveReceipt(workspaceRevision: state.revision, persistedDraft: nil)
+        beginPendingCommit(
+            previousSource: .bytes(rawData: rawData, provenance: provenance),
+            candidate: candidate,
+            state: state,
+            receipt: receipt,
+            restoreCapabilityID: prepared.capabilityID
+        )
+        let result: MainFileCompareAndReplaceResult
+        do {
+            result = try replaceIfSHA256Matches(
+                expectedSHA256: provenance.sourceBytesSHA256,
+                candidate: candidate
+            )
+        } catch {
+            pendingCommit = nil
+            pendingRestores[prepared.capabilityID] = nil
+            throw error
         }
-        pendingRestores[prepared.capabilityID] = nil
-        return WorkspaceSaveReceipt(workspaceRevision: state.revision, persistedDraft: nil)
+        do {
+            try finishMainReplacement(result, candidate: candidate)
+        } catch {
+            if (error as? WorkspacePersistenceError) != .commitUncertain {
+                pendingRestores[prepared.capabilityID] = nil
+            }
+            throw error
+        }
+        return receipt
     }
 
-    private func persist(candidate: Data, state: WorkspaceState) throws {
+    private func persist(
+        candidate: Data,
+        state: WorkspaceState,
+        receipt: WorkspaceSaveReceipt
+    ) throws {
         switch loadedSource {
         case .absent:
-            switch try createIfAbsent(candidate: candidate) {
-            case .sourceChanged:
-                throw WorkspacePersistenceError.sourceChanged
-            case .replaced:
-                try replaceLoadedSourceWithReadback(candidate)
+            beginPendingCommit(
+                previousSource: .absent,
+                candidate: candidate,
+                state: state,
+                receipt: receipt,
+                restoreCapabilityID: nil
+            )
+            let result: MainFileCompareAndReplaceResult
+            do {
+                result = try createIfAbsent(candidate: candidate)
+            } catch {
+                pendingCommit = nil
+                throw error
             }
+            try finishMainReplacement(result, candidate: candidate)
         case let .bytes(rawData, provenance):
             if provenance.sourceSchema < WorkspaceDocument.currentSchemaVersion {
                 guard let current = try? Data(contentsOf: documentURL), current == rawData else {
@@ -196,15 +240,24 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
                 }
                 try registerMigrationSnapshot(rawData: rawData, provenance: provenance)
             }
-            switch try replaceIfSHA256Matches(
-                expectedSHA256: provenance.sourceBytesSHA256,
-                candidate: candidate
-            ) {
-            case .sourceChanged:
-                throw WorkspacePersistenceError.sourceChanged
-            case .replaced:
-                try replaceLoadedSourceWithReadback(candidate)
+            beginPendingCommit(
+                previousSource: .bytes(rawData: rawData, provenance: provenance),
+                candidate: candidate,
+                state: state,
+                receipt: receipt,
+                restoreCapabilityID: nil
+            )
+            let result: MainFileCompareAndReplaceResult
+            do {
+                result = try replaceIfSHA256Matches(
+                    expectedSHA256: provenance.sourceBytesSHA256,
+                    candidate: candidate
+                )
+            } catch {
+                pendingCommit = nil
+                throw error
             }
+            try finishMainReplacement(result, candidate: candidate)
         }
     }
 
@@ -218,19 +271,109 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         _ = try manifestStore.registerVerifiedSnapshot(rawData: rawData, provenance: provenance)
     }
 
-    private func replaceLoadedSourceWithReadback(_ candidate: Data) throws {
-        let readback: Data
-        do {
-            readback = try Data(contentsOf: documentURL)
-        } catch {
-            throw WorkspacePersistenceError.atomicWriteFailed
+    public func reconcilePendingCommit() throws -> WorkspaceCommitReconciliation {
+        guard let pending = pendingCommit else { return .notCommitted }
+        return try withJellyAdvisoryLock(for: documentURL) {
+            let current: Data?
+            if FileManager.default.fileExists(atPath: documentURL.path) {
+                guard let readback = try? dataReadingNoFollow(at: documentURL) else {
+                    completePendingRestoreCapability(pending.restoreCapabilityID)
+                    pendingCommit = nil
+                    return .sourceChanged
+                }
+                current = readback
+            } else {
+                current = nil
+            }
+            if current == pending.candidateRawData {
+                try replaceLoadedSourceWithVerifiedRawData(
+                    pending.candidateRawData,
+                    expectedCandidate: pending.candidateRawData
+                )
+                completePendingRestoreCapability(pending.restoreCapabilityID)
+                pendingCommit = nil
+                return .committed(pending.receipt)
+            }
+            if matchesPreviousSource(current, pending.previousSource) {
+                loadedSource = pending.previousSource
+                completePendingRestoreCapability(pending.restoreCapabilityID)
+                pendingCommit = nil
+                return .notCommitted
+            }
+            completePendingRestoreCapability(pending.restoreCapabilityID)
+            pendingCommit = nil
+            return .sourceChanged
         }
-        guard readback == candidate else { throw WorkspacePersistenceError.atomicWriteFailed }
-        let decoded = try WorkspaceDocumentCodec.decode(readback)
+    }
+
+    private func beginPendingCommit(
+        previousSource: LoadedSource,
+        candidate: Data,
+        state: WorkspaceState,
+        receipt: WorkspaceSaveReceipt,
+        restoreCapabilityID: UUID?
+    ) {
+        pendingCommit = .init(
+            previousSource: previousSource,
+            candidateRawData: candidate,
+            candidateState: state,
+            receipt: receipt,
+            restoreCapabilityID: restoreCapabilityID
+        )
+    }
+
+    private func finishMainReplacement(
+        _ result: MainFileCompareAndReplaceResult,
+        candidate: Data
+    ) throws {
+        switch result {
+        case .sourceChanged:
+            pendingCommit = nil
+            throw WorkspacePersistenceError.sourceChanged
+        case .commitUncertain:
+            throw WorkspacePersistenceError.commitUncertain
+        case let .replaced(verifiedRawData):
+            do {
+                try replaceLoadedSourceWithVerifiedRawData(verifiedRawData, expectedCandidate: candidate)
+            } catch {
+                throw WorkspacePersistenceError.commitUncertain
+            }
+            guard let pending = pendingCommit else {
+                throw WorkspacePersistenceError.commitUncertain
+            }
+            completePendingRestoreCapability(pending.restoreCapabilityID)
+            pendingCommit = nil
+        }
+    }
+
+    private func replaceLoadedSourceWithVerifiedRawData(
+        _ verifiedRawData: Data,
+        expectedCandidate: Data
+    ) throws {
+        guard verifiedRawData == expectedCandidate else { throw WorkspacePersistenceError.atomicWriteFailed }
+        let decoded = try WorkspaceDocumentCodec.decode(verifiedRawData)
         guard decoded.provenance.sourceSchema == WorkspaceDocument.currentSchemaVersion else {
             throw WorkspacePersistenceError.atomicWriteFailed
         }
-        loadedSource = .bytes(rawData: readback, provenance: decoded.provenance)
+        loadedSource = .bytes(rawData: verifiedRawData, provenance: decoded.provenance)
+    }
+
+    private func matchesPreviousSource(_ current: Data?, _ source: LoadedSource) -> Bool {
+        switch source {
+        case .absent:
+            current == nil
+        case let .bytes(rawData, _):
+            current == rawData
+        }
+    }
+
+    private func completePendingRestoreCapability(_ capabilityID: UUID?) {
+        guard let capabilityID else { return }
+        pendingRestores[capabilityID] = nil
+    }
+
+    private func rejectIfCommitUncertain() throws {
+        if pendingCommit != nil { throw WorkspacePersistenceError.commitUncertain }
     }
 
     private func createIfAbsent(candidate: Data) throws -> MainFileCompareAndReplaceResult {

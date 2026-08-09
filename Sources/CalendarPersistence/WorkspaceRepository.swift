@@ -10,4 +10,5 @@ public protocol WorkspaceRepository: Sendable {
         state: WorkspaceState
     ) async throws -> WorkspaceSaveReceipt
     func currentDocumentData() async throws -> Data
+    func reconcilePendingCommit() async throws -> WorkspaceCommitReconciliation
 }

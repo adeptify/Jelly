@@ -42,7 +42,8 @@ public struct FoundationAtomicFileWriter: AtomicFileWriting {
 }
 
 public enum MainFileCompareAndReplaceResult: Equatable, Sendable {
-    case replaced
+    case replaced(verifiedRawData: Data)
+    case commitUncertain
     case sourceChanged
 }
 
@@ -91,7 +92,7 @@ public struct FoundationMainFileCompareAndReplaceWriter: MainFileCompareAndRepla
                 return .sourceChanged
             }
             try writer.replaceAtomically(data: candidate, at: destination)
-            return .replaced
+            return verifiedReplacement(candidate: candidate, at: destination)
         }
     }
 
@@ -101,12 +102,19 @@ public struct FoundationMainFileCompareAndReplaceWriter: MainFileCompareAndRepla
         at destination: URL
     ) throws -> MainFileCompareAndReplaceResult {
         try withSharedJellyLock(for: destination) {
-            guard let current = try? Data(contentsOf: destination), persistenceSHA256(current) == expectedSHA256 else {
+            guard let current = try? dataReadingNoFollow(at: destination), persistenceSHA256(current) == expectedSHA256 else {
                 return .sourceChanged
             }
             try writer.replaceAtomically(data: candidate, at: destination)
-            return .replaced
+            return verifiedReplacement(candidate: candidate, at: destination)
         }
+    }
+
+    private func verifiedReplacement(candidate: Data, at destination: URL) -> MainFileCompareAndReplaceResult {
+        guard let readback = try? dataReadingNoFollow(at: destination), readback == candidate else {
+            return .commitUncertain
+        }
+        return .replaced(verifiedRawData: readback)
     }
 
     private func withSharedJellyLock<Result>(

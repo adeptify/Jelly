@@ -22,20 +22,32 @@ public actor DraftJournalRepository {
         if let current = try readValidated(), current.entry.draftGeneration > entry.draftGeneration {
             return
         }
-        try write(entry: entry, receipt: nil)
+        try write(entry: entry, pendingReceipt: nil, savedReceipt: nil)
     }
 
-    public func record(_ receipt: PersistedDraftReceipt) throws {
-        guard let current = try readValidated(), matches(receipt, entry: current.entry) else { return }
-        if let existing = current.savedReceipt, existing != receipt { return }
-        try write(entry: current.entry, receipt: receipt)
-    }
-
-    public func clear(ifMatching receipt: PersistedDraftReceipt) throws {
+    @discardableResult
+    public func bindPending(_ receipt: PersistedDraftReceipt) throws -> Bool {
         guard let current = try readValidated(),
-              current.savedReceipt == receipt,
-              matches(receipt, entry: current.entry)
-        else { return }
+              current.savedReceipt == nil,
+              current.pendingReceipt == nil,
+              isCompatible(receipt, with: current.entry)
+        else { return false }
+        try write(entry: current.entry, pendingReceipt: receipt, savedReceipt: nil)
+        return true
+    }
+
+    @discardableResult
+    public func record(_ receipt: PersistedDraftReceipt) throws -> Bool {
+        guard let current = try readValidated(), current.pendingReceipt == receipt else { return false }
+        try write(entry: current.entry, pendingReceipt: nil, savedReceipt: receipt)
+        return true
+    }
+
+    @discardableResult
+    public func clear(ifMatching receipt: PersistedDraftReceipt) throws -> Bool {
+        guard let current = try readValidated(),
+              current.savedReceipt == receipt
+        else { return false }
         do {
             try FileManager.default.createDirectory(
                 at: fileURL.deletingLastPathComponent(),
@@ -45,6 +57,7 @@ public actor DraftJournalRepository {
         } catch {
             throw WorkspacePersistenceError.atomicWriteFailed
         }
+        return true
     }
 
     private func readValidated() throws -> StoredDraftJournalRecord? {
@@ -65,18 +78,30 @@ public actor DraftJournalRepository {
               decoded.entry.journalChecksum == (try? DraftJournal.entryChecksum(for: decoded.entry)),
               decoded.recordChecksum == (try? DraftJournal.recordChecksum(
                 entry: decoded.entry,
-                receipt: decoded.savedReceipt
+                pendingReceipt: decoded.pendingReceipt,
+                savedReceipt: decoded.savedReceipt
               )),
-              decoded.savedReceipt.map({ matches($0, entry: decoded.entry) }) ?? true
+              decoded.pendingReceipt.map({ isCompatible($0, with: decoded.entry) }) ?? true,
+              decoded.savedReceipt.map({ isCompatible($0, with: decoded.entry) }) ?? true,
+              !(decoded.pendingReceipt != nil && decoded.savedReceipt != nil)
         else { throw WorkspacePersistenceError.invalidJournal }
         return decoded
     }
 
-    private func write(entry: DraftJournalEntry, receipt: PersistedDraftReceipt?) throws {
+    private func write(
+        entry: DraftJournalEntry,
+        pendingReceipt: PersistedDraftReceipt?,
+        savedReceipt: PersistedDraftReceipt?
+    ) throws {
         let record = StoredDraftJournalRecord(
             entry: entry,
-            savedReceipt: receipt,
-            recordChecksum: try DraftJournal.recordChecksum(entry: entry, receipt: receipt)
+            pendingReceipt: pendingReceipt,
+            savedReceipt: savedReceipt,
+            recordChecksum: try DraftJournal.recordChecksum(
+                entry: entry,
+                pendingReceipt: pendingReceipt,
+                savedReceipt: savedReceipt
+            )
         )
         do {
             try FileManager.default.createDirectory(
@@ -92,10 +117,13 @@ public actor DraftJournalRepository {
         }
     }
 
-    private nonisolated func matches(_ receipt: PersistedDraftReceipt, entry: DraftJournalEntry) -> Bool {
+    private nonisolated func isCompatible(
+        _ receipt: PersistedDraftReceipt,
+        with entry: DraftJournalEntry
+    ) -> Bool {
         receipt.noteID == entry.noteID
             && receipt.draftGeneration == entry.draftGeneration
             && receipt.noteSnapshotChecksum == entry.noteSnapshotChecksum
-            && receipt.persistedNoteRevision == entry.noteSnapshot.revision
+            && receipt.persistedNoteRevision > entry.baseNoteRevision
     }
 }
