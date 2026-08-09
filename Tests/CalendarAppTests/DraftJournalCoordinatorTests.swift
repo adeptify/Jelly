@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import Combine
 import CalendarPersistence
 import WorkspaceDomain
 @testable import CalendarApp
@@ -75,6 +76,31 @@ struct DraftJournalCoordinatorTests {
         registry.clear(ownerID: owner)
         #expect(registry.canUndo == false)
         #expect(registry.canRedo == false)
+    }
+
+    @Test func focusAvailabilityPublishesForRegisterUndoRedoAndClear() async {
+        let registry = EditorFocusRegistry()
+        let manager = UndoManager()
+        let target = FocusUndoTarget()
+        target.manager = manager
+        let owner = UUID()
+        var observedAvailability: [(Bool, Bool)] = []
+        let observation = registry.availabilityPublisher.sink { availability in
+            observedAvailability.append(availability)
+        }
+        defer { observation.cancel() }
+
+        registry.register(manager, ownerID: owner)
+        manager.registerUndo(withTarget: target) { $0.performUndo() }
+        NotificationCenter.default.post(name: .NSUndoManagerCheckpoint, object: manager)
+        await Task.yield()
+        _ = registry.routeUndo()
+        await Task.yield()
+        registry.clear(ownerID: owner)
+
+        #expect(observedAvailability.contains { $0.0 && !$0.1 })
+        #expect(observedAvailability.contains { !$0.0 && $0.1 })
+        #expect(observedAvailability.last.map { $0 == (false, false) } == true)
     }
 
     @Test func boundReceiptIsRecordedThenClearedForItsExactIdentity() async throws {

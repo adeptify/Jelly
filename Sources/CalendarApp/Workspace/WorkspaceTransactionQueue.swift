@@ -9,17 +9,21 @@ final class WorkspaceTransactionQueue {
     private struct Entry {
         let id: UUID
         let operation: Operation
+        let pausesAfterFailure: @MainActor @Sendable () -> Bool
         let continuation: CheckedContinuation<Result<WorkspaceTransactionOutcome, Error>, Never>
     }
 
     private var entries: [Entry] = []
     private var draining = false
 
-    func enqueue(_ operation: @escaping Operation) async throws -> WorkspaceTransactionOutcome {
+    func enqueue(
+        _ operation: @escaping Operation,
+        pausesAfterFailure: @escaping @MainActor @Sendable () -> Bool = { false }
+    ) async throws -> WorkspaceTransactionOutcome {
         try Task.checkCancellation()
         let id = UUID()
         return try await withCheckedContinuation { continuation in
-            entries.append(.init(id: id, operation: operation, continuation: continuation))
+            entries.append(.init(id: id, operation: operation, pausesAfterFailure: pausesAfterFailure, continuation: continuation))
             Task { @MainActor [weak self] in await self?.drain() }
         }.get()
     }
@@ -53,6 +57,7 @@ final class WorkspaceTransactionQueue {
                 if outcome.parksFIFO { return }
             } catch {
                 entry.continuation.resume(returning: .failure(error))
+                if entry.pausesAfterFailure() { return }
             }
         }
     }

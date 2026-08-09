@@ -103,7 +103,6 @@ private struct CalendarNoteSetFieldWrite: Equatable, Sendable {
 
 private enum CalendarNoteSetWrite: Equatable, Sendable {
     case update(CalendarNoteSetFieldWrite)
-    case structural(ValueChange<CalendarNoteSet>)
 }
 
 private struct OccurrenceNoteOverrideFieldWrite: Equatable, Sendable {
@@ -124,7 +123,6 @@ private struct OccurrenceNoteOverrideFieldWrite: Equatable, Sendable {
 
 private enum OccurrenceNoteOverrideWrite: Equatable, Sendable {
     case update(OccurrenceNoteOverrideFieldWrite)
-    case structural(ValueChange<OccurrenceNoteOverride>)
 }
 
 private struct NoteFieldWrite: Equatable, Sendable {
@@ -284,9 +282,8 @@ private func makeInspirationChanges(_ before: [InspirationID: Inspiration], _ af
 
 private func makeBaselineChanges(_ before: [CalendarNoteOwnerID: CalendarNoteSet], _ after: [CalendarNoteOwnerID: CalendarNoteSet]) -> [CalendarNoteOwnerID: CalendarNoteSetWrite] {
     Dictionary(uniqueKeysWithValues: Set(before.keys).union(after.keys).compactMap { owner in
-        guard let old = before[owner], let new = after[owner] else {
-            return before[owner] == after[owner] ? nil : (owner, .structural(.init(before: before[owner], after: after[owner])))
-        }
+        let old = before[owner] ?? .init(primaryNoteID: nil, referenceNoteIDs: [])
+        let new = after[owner] ?? .init(primaryNoteID: nil, referenceNoteIDs: [])
         let fields = CalendarNoteSetFieldWrite(
             primaryNoteID: old.primaryNoteID == new.primaryNoteID ? nil : .init(before: old.primaryNoteID, after: new.primaryNoteID),
             addedReferenceNoteIDs: new.referenceNoteIDs.subtracting(old.referenceNoteIDs),
@@ -301,11 +298,11 @@ private func makeOccurrenceOverrideChanges(
     _ after: [OccurrenceKey: OccurrenceNoteOverride]
 ) -> [OccurrenceKey: OccurrenceNoteOverrideWrite] {
     Dictionary(uniqueKeysWithValues: Set(before.keys).union(after.keys).compactMap { key in
-        guard let old = before[key], let new = after[key] else {
-            return before[key] == after[key]
-                ? nil
-                : (key, .structural(.init(before: before[key], after: after[key])))
-        }
+        let empty = OccurrenceNoteOverride(
+            key: key, primary: .inherit, addedReferenceNoteIDs: [], removedReferenceNoteIDs: []
+        )
+        let old = before[key] ?? empty
+        let new = after[key] ?? empty
         let fields = OccurrenceNoteOverrideFieldWrite(
             primary: old.primary == new.primary ? nil : .init(before: old.primary, after: new.primary),
             addedReferenceNoteIDs: new.addedReferenceNoteIDs.subtracting(old.addedReferenceNoteIDs),
@@ -488,7 +485,7 @@ public enum WorkspaceUndoReducer {
         for (owner, change) in changes {
             switch change {
             case let .update(fields):
-                guard var next = baselines[owner] else { throw WorkspaceUndoReducerError.conflict }
+                var next = baselines[owner] ?? .init(primaryNoteID: nil, referenceNoteIDs: [])
                 try applyField(fields.primaryNoteID, value: &next.primaryNoteID, undo: undo)
                 let expectPresent = undo ? fields.addedReferenceNoteIDs : fields.removedReferenceNoteIDs
                 let expectAbsent = undo ? fields.removedReferenceNoteIDs : fields.addedReferenceNoteIDs
@@ -497,12 +494,11 @@ public enum WorkspaceUndoReducer {
                 }
                 next.referenceNoteIDs.subtract(expectPresent)
                 next.referenceNoteIDs.formUnion(expectAbsent)
-                baselines[owner] = next
-            case let .structural(change):
-                let expected = undo ? change.after : change.before
-                let replacement = undo ? change.before : change.after
-                guard baselines[owner] == expected else { throw WorkspaceUndoReducerError.conflict }
-                baselines[owner] = replacement
+                if next.primaryNoteID == nil && next.referenceNoteIDs.isEmpty {
+                    baselines.removeValue(forKey: owner)
+                } else {
+                    baselines[owner] = next
+                }
             }
         }
     }
@@ -515,7 +511,9 @@ public enum WorkspaceUndoReducer {
         for (key, change) in changes {
             switch change {
             case let .update(fields):
-                guard var next = overrides[key] else { throw WorkspaceUndoReducerError.conflict }
+                var next = overrides[key] ?? .init(
+                    key: key, primary: .inherit, addedReferenceNoteIDs: [], removedReferenceNoteIDs: []
+                )
                 try applyField(fields.primary, value: &next.primary, undo: undo)
                 try applySetDelta(
                     added: fields.addedReferenceNoteIDs,
@@ -529,12 +527,13 @@ public enum WorkspaceUndoReducer {
                     to: &next.removedReferenceNoteIDs,
                     undo: undo
                 )
-                overrides[key] = next
-            case let .structural(change):
-                let expected = undo ? change.after : change.before
-                let replacement = undo ? change.before : change.after
-                guard overrides[key] == expected else { throw WorkspaceUndoReducerError.conflict }
-                overrides[key] = replacement
+                if next.primary == .inherit
+                    && next.addedReferenceNoteIDs.isEmpty
+                    && next.removedReferenceNoteIDs.isEmpty {
+                    overrides.removeValue(forKey: key)
+                } else {
+                    overrides[key] = next
+                }
             }
         }
     }

@@ -229,6 +229,33 @@ struct WorkspaceUndoReducerTests {
         #expect(application.candidate.calendarNoteRelations.baselines[owner]?.referenceNoteIDs == [firstNoteID, laterNoteID])
     }
 
+    @Test func undoOfTheFirstBaselineEdgeKeepsALaterUnrelatedEdgeInTheNewContainer() throws {
+        let category = UUID()
+        let itemID = UUID()
+        let touched = NoteID(UUID())
+        let later = NoteID(UUID())
+        var before = WorkspaceState.empty(calendar: .empty(uncategorizedID: category, now: .distantPast))
+        before.calendar.items[itemID] = try CalendarItem(
+            id: itemID, kind: .task, title: "task", categoryID: category,
+            schedule: .init(startDate: .init(year: 2026, month: 8, day: 10)!, endDate: .init(year: 2026, month: 8, day: 10)!, startTime: nil, endTime: nil),
+            completedAt: nil, createdAt: .distantPast, updatedAt: .distantPast
+        )
+        before.notes[touched] = .empty(id: touched, categoryID: category, now: .distantPast)
+        before.notes[later] = .empty(id: later, categoryID: category, now: .distantPast)
+        let owner = CalendarNoteOwnerID.item(itemID)
+        var after = before
+        after.revision = 1
+        after.calendarNoteRelations.baselines[owner] = .init(primaryNoteID: nil, referenceNoteIDs: [touched])
+        let record = try #require(WorkspaceUndoReducer.record(before: before, after: after, label: "first baseline edge"))
+        var current = after
+        current.revision = 2
+        current.calendarNoteRelations.baselines[owner]?.referenceNoteIDs.insert(later)
+
+        let application = try WorkspaceUndoReducer.apply(record, direction: .undo, to: current, noteRevisionHighWatermarks: [:])
+
+        #expect(application.candidate.calendarNoteRelations.baselines[owner]?.referenceNoteIDs == [later])
+    }
+
     @Test func occurrenceRelationUndoRemovesOnlyItsTouchedReferenceEdge() throws {
         let category = UUID()
         let seriesID = UUID()
@@ -260,6 +287,36 @@ struct WorkspaceUndoReducerTests {
         let application = try WorkspaceUndoReducer.apply(record, direction: .undo, to: laterAdd, noteRevisionHighWatermarks: [:])
 
         #expect(application.candidate.calendarNoteRelations.occurrenceOverrides[key]?.addedReferenceNoteIDs == [firstNoteID, laterNoteID])
+    }
+
+    @Test func undoOfTheFirstOccurrenceEdgeKeepsALaterUnrelatedEdgeInTheNewContainer() throws {
+        let category = UUID()
+        let seriesID = UUID()
+        let touched = NoteID(UUID())
+        let later = NoteID(UUID())
+        let day = try #require(CalendarDate(year: 2026, month: 8, day: 10))
+        var before = WorkspaceState.empty(calendar: .empty(uncategorizedID: category, now: .distantPast))
+        before.calendar.recurrence.series[seriesID] = try WeeklySeries(
+            id: seriesID, kind: .task, title: "series", categoryID: category,
+            ruleStartDate: day, recurrenceEndDate: nil, weekdays: [.monday], durationDays: 1,
+            startTime: nil, endTime: nil, notes: "", createdAt: .distantPast, updatedAt: .distantPast
+        )
+        before.notes[touched] = .empty(id: touched, categoryID: category, now: .distantPast)
+        before.notes[later] = .empty(id: later, categoryID: category, now: .distantPast)
+        let key = OccurrenceKey(seriesID: seriesID, originalDate: day)
+        var after = before
+        after.revision = 1
+        after.calendarNoteRelations.occurrenceOverrides[key] = .init(
+            key: key, primary: .inherit, addedReferenceNoteIDs: [touched], removedReferenceNoteIDs: []
+        )
+        let record = try #require(WorkspaceUndoReducer.record(before: before, after: after, label: "first occurrence edge"))
+        var current = after
+        current.revision = 2
+        current.calendarNoteRelations.occurrenceOverrides[key]?.addedReferenceNoteIDs.insert(later)
+
+        let application = try WorkspaceUndoReducer.apply(record, direction: .undo, to: current, noteRevisionHighWatermarks: [:])
+
+        #expect(application.candidate.calendarNoteRelations.occurrenceOverrides[key]?.addedReferenceNoteIDs == [later])
     }
 
     @Test func deleteUndoRedoUndoKeepsAllocatingMonotonicNoteIncarnations() throws {

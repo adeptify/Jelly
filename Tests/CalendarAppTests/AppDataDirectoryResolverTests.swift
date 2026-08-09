@@ -54,6 +54,22 @@ struct AppDataDirectoryResolverTests {
         }
     }
 
+    @Test func rejectsASymlinkAncestorBeforeCreatingANonexistentDescendantOutsideTheRequestedTree() throws {
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent("jelly-6b-ancestor-\(UUID().uuidString)", isDirectory: true)
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent("jelly-6b-outside-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: parent); try? FileManager.default.removeItem(at: outside) }
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let link = parent.appendingPathComponent("link", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+        let requested = link.appendingPathComponent("not-created/yet", isDirectory: true)
+
+        #expect(throws: AppDataDirectoryResolverError.inaccessibleDirectory) {
+            _ = try AppDataDirectoryResolver.resolve(environment: ["JELLY_ACCEPTANCE_DATA_DIRECTORY": requested.path])
+        }
+        #expect(FileManager.default.fileExists(atPath: outside.appendingPathComponent("not-created").path) == false)
+    }
+
     @Test func rejectsControlCharactersInsteadOfCreatingAnUnexpectedDirectory() throws {
         let path = FileManager.default.temporaryDirectory.path + "/jelly-6b-\u{0001}-control"
         defer { try? FileManager.default.removeItem(atPath: path) }

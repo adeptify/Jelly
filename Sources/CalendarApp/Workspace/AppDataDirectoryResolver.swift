@@ -41,6 +41,7 @@ enum AppDataDirectoryResolver {
             root = support.appendingPathComponent("PersonalCalendar", isDirectory: true).standardizedFileURL
         }
         guard root.path != "/" else { throw AppDataDirectoryResolverError.invalidOverride }
+        try rejectExistingSymlinkAncestors(of: root, fileManager: fileManager)
         if fileManager.fileExists(atPath: root.path) {
             var isDirectory: ObjCBool = false
             guard fileManager.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue,
@@ -49,6 +50,7 @@ enum AppDataDirectoryResolver {
         } else {
             try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
         }
+        try rejectExistingSymlinkAncestors(of: root, fileManager: fileManager)
         guard root.resolvingSymlinksInPath().standardizedFileURL == root,
               fileManager.isWritableFile(atPath: root.path), fileManager.isReadableFile(atPath: root.path) else {
             throw AppDataDirectoryResolverError.inaccessibleDirectory
@@ -62,5 +64,28 @@ enum AppDataDirectoryResolver {
             rollbackDirectory: root.appendingPathComponent("restore-rollbacks", isDirectory: true),
             automaticRecoveryDirectory: root.appendingPathComponent("automatic-recovery", isDirectory: true)
         )
+    }
+
+    /// Inspect every existing component before `createDirectory` is allowed to
+    /// follow it.  This prevents a missing tail below an attacker-controlled
+    /// symlink from being created outside the requested root.
+    private static func rejectExistingSymlinkAncestors(of root: URL, fileManager: FileManager) throws {
+        var current = URL(fileURLWithPath: "/", isDirectory: true)
+        for component in root.standardizedFileURL.pathComponents.dropFirst() {
+            current.appendPathComponent(component, isDirectory: true)
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: current.path, isDirectory: &isDirectory) else { break }
+            // `/var` is the platform's canonical compatibility alias on
+            // macOS. Foundation preserves it as the same sandbox root; all
+            // caller-controlled components below it still receive no-follow
+            // inspection.
+            if current.path != "/var",
+               (try? current.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
+                throw AppDataDirectoryResolverError.inaccessibleDirectory
+            }
+            guard isDirectory.boolValue || current.standardizedFileURL == root.standardizedFileURL else {
+                throw AppDataDirectoryResolverError.inaccessibleDirectory
+            }
+        }
     }
 }

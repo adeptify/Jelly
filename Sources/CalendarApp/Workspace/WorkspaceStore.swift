@@ -37,6 +37,11 @@ enum PendingCommitRetryOutcome: Equatable, Sendable {
     case stillPending(transactionID: UUID, artifacts: WorkspacePendingCommitArtifacts)
 }
 
+enum WorkspaceExternalReloadOutcome: Equatable, Sendable {
+    case source(WorkspaceReloadedSource)
+    case transaction(WorkspaceTransactionOutcome)
+}
+
 enum WorkspacePersistenceBlockReason: Equatable, Sendable { case unreadablePrimary, opaqueInvalidPrimary, loadFailed }
 enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUndo, nothingToRedo }
 
@@ -45,7 +50,7 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
     private(set) var state: WorkspaceState { didSet { statePublicationGeneration &+= 1 } }
     var calendarState: CalendarState { state.calendar }
     private(set) var statePublicationGeneration: UInt = 0
-    private(set) var phase: WorkspaceStorePhase = .ready
+    private(set) var phase: WorkspaceStorePhase = .notLoaded
     private(set) var canUndo = false
     private(set) var canRedo = false
 
@@ -66,9 +71,14 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
     private struct ParkedSave {
         let transactionID: UUID
         let candidate: WorkspaceState
-        let undoRecord: WorkspaceStoreUndoRecord?
         let draftReceipt: PersistedDraftReceipt?
-        let acceptedDraft: AcceptedDraftGeneration?
+        let completion: SaveCompletion
+    }
+    private enum SaveCompletion {
+        case forward(undoRecord: WorkspaceStoreUndoRecord?, acceptedDraft: AcceptedDraftGeneration?)
+        case undo(undo: Bool, reverseRecord: WorkspaceStoreUndoRecord, ledger: [NoteID: Int64])
+        case externalAdoption(ledger: [NoteID: Int64])
+        case externalRepair(ledger: [NoteID: Int64])
     }
     private struct ParkedRestore {
         let transactionID: UUID
@@ -107,7 +117,15 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
                 await recoverJournalAtStartup()
             }
         } catch {
-            phase = .loadFailed
+            let projection = try? await repository.reloadCurrentSourceAfterExternalChange()
+            switch projection {
+            case .opaqueInvalid:
+                phase = .opaquePrimaryLoadFailed
+            case .unreadableUnknown:
+                phase = .unreadablePrimaryLoadFailed
+            default:
+                phase = .loadFailed
+            }
         }
     }
 
@@ -118,13 +136,13 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         if case let .repairConsistency(payload) = command,
            phase == .needsRelationshipRepair,
            pendingExternalRepairState != nil {
-            return try await queue.enqueue { [weak self] id in
+            return try await enqueueTransaction { [weak self] id in
                 guard let self else { throw CancellationError() }
                 return try await self.performExternalRepair(payload: payload, transactionID: id)
             }
         }
         try ensureOrdinaryMutationAllowed()
-        return try await queue.enqueue { [weak self] id in
+        return try await enqueueTransaction { [weak self] id in
             guard let self else { throw CancellationError() }
             return try await self.perform(command: command, undoLabel: undoLabel, transactionID: id)
         }
@@ -146,7 +164,7 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
     func undo() async throws -> WorkspaceTransactionOutcome {
         try ensureOrdinaryMutationAllowed()
         guard let record = undoStack.last else { throw WorkspaceStoreError.nothingToUndo }
-        return try await queue.enqueue { [weak self] id in
+        return try await enqueueTransaction { [weak self] id in
             guard let self else { throw CancellationError() }
             return try await self.performUndo(record: record, transactionID: id, undo: true)
         }
@@ -155,7 +173,7 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
     func redo() async throws -> WorkspaceTransactionOutcome {
         try ensureOrdinaryMutationAllowed()
         guard let record = redoStack.last else { throw WorkspaceStoreError.nothingToRedo }
-        return try await queue.enqueue { [weak self] id in
+        return try await enqueueTransaction { [weak self] id in
             guard let self else { throw CancellationError() }
             return try await self.performUndo(record: record, transactionID: id, undo: false)
         }
@@ -166,13 +184,13 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         rollbackDirectoryURL: URL
     ) async throws -> WorkspaceTransactionOutcome {
         guard phase == .ready
-            || phase == .externalSourceChanged(.externalBytesChanged)
+            || phase.isExternalSourceChanged
             || phase == .opaquePrimaryLoadFailed
             || phase == .needsRelationshipRepair
         else {
             throw WorkspaceStoreError.frozen
         }
-        return try await queue.enqueue { [weak self] id in
+        return try await enqueueTransaction { [weak self] id in
             guard let self else { throw CancellationError() }
             return try await self.performRestore(
                 preview: preview, rollbackDirectoryURL: rollbackDirectoryURL, transactionID: id
@@ -203,7 +221,7 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
     }
 
     @discardableResult
-    func reloadExternalSource() async throws -> WorkspaceReloadedSource {
+    func reloadExternalSource() async throws -> WorkspaceExternalReloadOutcome {
         guard phase.allowsExternalReload else { throw WorkspaceStoreError.frozen }
         let reloaded = try await repository.reloadCurrentSourceAfterExternalChange()
         switch reloaded {
@@ -214,7 +232,7 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
             guard adoption.consistencyIssues.isEmpty else {
                 pendingExternalRepairState = external.state
                 phase = .needsRelationshipRepair
-                return reloaded
+                return .source(reloaded)
             }
             let direct = external.provenance.sourceSchema == WorkspaceDocument.currentSchemaVersion
                 && adoption.candidate == external.state && !adoption.requiresNormalization
@@ -222,9 +240,13 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
                 state = adoption.candidate
                 noteRevisionHighWatermarks = adoption.noteRevisionHighWatermarks
             } else {
-                _ = try await repository.save(adoption.candidate, draft: nil)
-                state = adoption.candidate
-                noteRevisionHighWatermarks = adoption.noteRevisionHighWatermarks
+                let outcome = try await enqueueTransaction { [weak self] id in
+                    guard let self else { throw CancellationError() }
+                    return try await self.performExternalAdoption(
+                        candidate: adoption.candidate, ledger: adoption.noteRevisionHighWatermarks, transactionID: id
+                    )
+                }
+                return .transaction(outcome)
             }
             pendingExternalRepairState = nil
             phase = .ready
@@ -238,7 +260,7 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
             pendingExternalRepairState = nil
             phase = .externalSourceChanged(.externalBytesChanged)
         }
-        return reloaded
+        return .source(reloaded)
     }
 
 
@@ -251,13 +273,11 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
             switch operation {
             case let .save(receipt):
                 guard let parked = parkedSave, parked.transactionID == transactionID else { throw WorkspaceStoreError.frozen }
-                publish(parked.candidate, undoRecord: parked.undoRecord)
-                remember(parked.acceptedDraft)
-                let journalStatus = if let journal, let receipt = parked.draftReceipt {
-                    await DraftJournalCoordinator.recordAndClear(receipt, journal: journal)
-                } else { JournalResolutionStatus.clean }
+                let journalStatus = await finishCommittedSave(
+                    candidate: parked.candidate, completion: parked.completion, draftReceipt: parked.draftReceipt
+                )
                 parkedSave = nil
-                phase = .ready
+                if phase == .parkedCommitUncertain(transactionID) { phase = .ready }
                 if case .cleanupPending = journalStatus { parkJournalCleanup(journalStatus, receipt: parked.draftReceipt) } else { queue.resume() }
                 return .committed(.save(receipt), journal: journalStatus)
             case let .restore(outcome):
@@ -361,37 +381,16 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
             } else {
                 draftReceipt = nil
             }
-            do {
-                let receipt = try await repository.save(change.state, draft: change.draftContext)
-                publish(change.state, undoRecord: WorkspaceUndoReducer.record(before: state, after: change.state, label: undoLabel))
-                remember(acceptedDraft(command: command, candidate: change.state))
-                let journalStatus = if let journal, let draftReceipt {
-                    await DraftJournalCoordinator.recordAndClear(draftReceipt, journal: journal)
-                } else { JournalResolutionStatus.clean }
-                if case .cleanupPending = journalStatus { parkJournalCleanup(journalStatus, receipt: draftReceipt) }
-                return .committed(receipt, journal: journalStatus)
-            } catch let failure as WorkspaceDirectCommitFailure {
-                let cleanup = await unbindIfNeeded(draftReceipt)
-                let artifacts: WorkspacePendingCommitArtifacts
-                switch failure { case let .sourceChanged(value): artifacts = value }
-                let terminalPhase = WorkspaceStorePhase.externalSourceChanged(.externalBytesChanged)
-                if case .cleanupPending = cleanup {
-                    parkJournalCleanup(cleanup, receipt: draftReceipt, terminalPhase: terminalPhase)
-                } else {
-                    phase = terminalPhase
-                }
-                terminateQueuedForExternal(reason: .externalBytesChanged, artifacts: artifacts)
-                return .externalSourceChanged(transactionID: transactionID, reason: .externalBytesChanged, journal: cleanup, artifacts: artifacts)
-            } catch WorkspacePersistenceError.commitUncertain {
-                return try await reconcileImmediately(
-                    transactionID: transactionID, candidate: change.state, undoLabel: undoLabel, draftReceipt: draftReceipt,
+            return try await persistSave(
+                candidate: change.state,
+                draftContext: change.draftContext,
+                draftReceipt: draftReceipt,
+                completion: .forward(
+                    undoRecord: WorkspaceUndoReducer.record(before: state, after: change.state, label: undoLabel),
                     acceptedDraft: acceptedDraft(command: command, candidate: change.state)
-                )
-            } catch {
-                let cleanup = await unbindIfNeeded(draftReceipt)
-                if case .cleanupPending = cleanup { parkJournalCleanup(cleanup, receipt: draftReceipt) }
-                throw error
-            }
+                ),
+                transactionID: transactionID
+            )
         }
     }
 
@@ -534,23 +533,87 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         }
     }
 
+    /// All ordinary, undo/redo, external-normalization and repair saves go
+    /// through this single driver.  The parked record owns the post-save
+    /// transition, so a later FIFO head can never publish the earlier save.
+    private func persistSave(
+        candidate: WorkspaceState,
+        draftContext: PersistableDraftContext?,
+        draftReceipt: PersistedDraftReceipt?,
+        completion: SaveCompletion,
+        transactionID: UUID
+    ) async throws -> WorkspaceTransactionOutcome {
+        do {
+            let receipt = try await repository.save(candidate, draft: draftContext)
+            let journalStatus = await finishCommittedSave(candidate: candidate, completion: completion, draftReceipt: draftReceipt)
+            return .committed(receipt, journal: journalStatus)
+        } catch let failure as WorkspaceDirectCommitFailure {
+            let cleanup = await unbindIfNeeded(draftReceipt)
+            let artifacts: WorkspacePendingCommitArtifacts
+            switch failure { case let .sourceChanged(value): artifacts = value }
+            let terminalPhase = WorkspaceStorePhase.externalSourceChanged(.externalBytesChanged)
+            if case .cleanupPending = cleanup {
+                parkJournalCleanup(cleanup, receipt: draftReceipt, terminalPhase: terminalPhase)
+            } else {
+                phase = terminalPhase
+            }
+            terminateQueuedForExternal(reason: .externalBytesChanged, artifacts: artifacts)
+            return .externalSourceChanged(
+                transactionID: transactionID, reason: .externalBytesChanged, journal: cleanup, artifacts: artifacts
+            )
+        } catch WorkspacePersistenceError.commitUncertain {
+            return try await reconcileImmediately(
+                transactionID: transactionID, candidate: candidate, draftReceipt: draftReceipt, completion: completion
+            )
+        } catch {
+            let cleanup = await unbindIfNeeded(draftReceipt)
+            if case .cleanupPending = cleanup {
+                parkJournalCleanup(cleanup, receipt: draftReceipt)
+                return .notCommitted(transactionID: transactionID, journal: cleanup, artifacts: .init())
+            }
+            throw error
+        }
+    }
+
+    private func finishCommittedSave(
+        candidate: WorkspaceState,
+        completion: SaveCompletion,
+        draftReceipt: PersistedDraftReceipt?
+    ) async -> JournalResolutionStatus {
+        switch completion {
+        case let .forward(undoRecord, acceptedDraft):
+            publish(candidate, undoRecord: undoRecord)
+            remember(acceptedDraft)
+        case let .undo(undo, reverseRecord, ledger):
+            state = candidate
+            noteRevisionHighWatermarks = ledger
+            if undo { _ = undoStack.popLast(); redoStack.append(reverseRecord) }
+            else { _ = redoStack.popLast(); undoStack.append(reverseRecord) }
+            updateUndoAvailability()
+        case let .externalAdoption(ledger), let .externalRepair(ledger):
+            state = candidate
+            noteRevisionHighWatermarks = ledger
+            pendingExternalRepairState = nil
+            updateUndoAvailability()
+        }
+        let journalStatus = if case .forward = completion, let journal, let draftReceipt {
+            await DraftJournalCoordinator.recordAndClear(draftReceipt, journal: journal)
+        } else { JournalResolutionStatus.clean }
+        if case .cleanupPending = journalStatus { parkJournalCleanup(journalStatus, receipt: draftReceipt) }
+        return journalStatus
+    }
+
     private func reconcileImmediately(
         transactionID: UUID,
         candidate: WorkspaceState,
-        undoLabel: String?,
         draftReceipt: PersistedDraftReceipt?,
-        acceptedDraft: AcceptedDraftGeneration?
+        completion: SaveCompletion
     ) async throws -> WorkspaceTransactionOutcome {
         switch try await repository.reconcilePendingCommit() {
         case let .committed(.save(receipt)):
-            publish(candidate, undoRecord: WorkspaceUndoReducer.record(before: state, after: candidate, label: undoLabel))
-            remember(acceptedDraft)
-            let journalStatus = if let journal, let draftReceipt {
-                await DraftJournalCoordinator.recordAndClear(draftReceipt, journal: journal)
-            } else { JournalResolutionStatus.clean }
-            if case .cleanupPending = journalStatus {
-                parkJournalCleanup(journalStatus, receipt: draftReceipt)
-            }
+            let journalStatus = await finishCommittedSave(
+                candidate: candidate, completion: completion, draftReceipt: draftReceipt
+            )
             return .committed(receipt, journal: journalStatus)
         case .committed(.restore):
             throw WorkspaceStoreError.frozen
@@ -572,9 +635,7 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
             return .externalSourceChanged(transactionID: transactionID, reason: .externalBytesChanged, journal: cleanup, artifacts: artifacts)
         case let .stillPending(artifacts):
             parkedSave = .init(
-                transactionID: transactionID, candidate: candidate,
-                undoRecord: WorkspaceUndoReducer.record(before: state, after: candidate, label: undoLabel),
-                draftReceipt: draftReceipt, acceptedDraft: acceptedDraft
+                transactionID: transactionID, candidate: candidate, draftReceipt: draftReceipt, completion: completion
             )
             phase = .parkedCommitUncertain(transactionID)
             return .commitPending(transactionID: transactionID, artifacts: artifacts)
@@ -592,13 +653,15 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
             record, direction: undo ? .undo : .redo, to: state,
             noteRevisionHighWatermarks: noteRevisionHighWatermarks
         )
-        let receipt = try await repository.save(application.candidate, draft: nil)
-        state = application.candidate
-        noteRevisionHighWatermarks = application.noteRevisionHighWatermarks
-        if undo { _ = undoStack.popLast(); redoStack.append(application.reverseRecord) }
-        else { _ = redoStack.popLast(); undoStack.append(application.reverseRecord) }
-        updateUndoAvailability()
-        return .committed(receipt, journal: .clean)
+        return try await persistSave(
+            candidate: application.candidate,
+            draftContext: nil,
+            draftReceipt: nil,
+            completion: .undo(
+                undo: undo, reverseRecord: application.reverseRecord, ledger: application.noteRevisionHighWatermarks
+            ),
+            transactionID: transactionID
+        )
     }
 
     private func performExternalRepair(
@@ -626,13 +689,35 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
                 sessionNoteHighWatermarks: noteRevisionHighWatermarks
             )
             guard adoption.consistencyIssues.isEmpty else { throw WorkspaceStoreError.frozen }
-            let receipt = try await repository.save(adoption.candidate, draft: nil)
-            state = adoption.candidate
-            noteRevisionHighWatermarks = adoption.noteRevisionHighWatermarks
-            pendingExternalRepairState = nil
-            phase = .ready
-            return .committed(receipt, journal: .clean)
+            let outcome = try await persistSave(
+                candidate: adoption.candidate,
+                draftContext: nil,
+                draftReceipt: nil,
+                completion: .externalRepair(ledger: adoption.noteRevisionHighWatermarks),
+                transactionID: transactionID
+            )
+            if case .committed = outcome { phase = .ready }
+            return outcome
         }
+    }
+
+    private func performExternalAdoption(
+        candidate: WorkspaceState,
+        ledger: [NoteID: Int64],
+        transactionID: UUID
+    ) async throws -> WorkspaceTransactionOutcome {
+        phase = .mutating
+        defer { if phase == .mutating { phase = .ready } }
+        _ = clock()
+        let outcome = try await persistSave(
+            candidate: candidate,
+            draftContext: nil,
+            draftReceipt: nil,
+            completion: .externalAdoption(ledger: ledger),
+            transactionID: transactionID
+        )
+        if case .committed = outcome { phase = .ready }
+        return outcome
     }
 
     private func performRestore(
@@ -804,6 +889,15 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
 
     private func updateUndoAvailability() { canUndo = !undoStack.isEmpty; canRedo = !redoStack.isEmpty }
 
+    private func enqueueTransaction(
+        _ operation: @escaping WorkspaceTransactionQueue.Operation
+    ) async throws -> WorkspaceTransactionOutcome {
+        try await queue.enqueue(operation) { [weak self] in
+            guard let self else { return true }
+            return self.phase.blocksQueuedDrainAfterFailure
+        }
+    }
+
     private func terminateQueuedForExternal(
         reason: WorkspaceExternalSourceChangeReason,
         artifacts: WorkspacePendingCommitArtifacts
@@ -832,6 +926,22 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
 }
 
 private extension WorkspaceStorePhase {
+    var isExternalSourceChanged: Bool {
+        if case .externalSourceChanged = self { return true }
+        return false
+    }
+
+    var blocksQueuedDrainAfterFailure: Bool {
+        switch self {
+        case .ready:
+            false
+        case .mutating:
+            true
+        default:
+            true
+        }
+    }
+
     var allowsExternalReload: Bool {
         switch self {
         case .ready, .needsRelationshipRepair, .opaquePrimaryLoadFailed, .externalSourceChanged:

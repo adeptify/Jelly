@@ -8,6 +8,43 @@ import WorkspaceDomain
 @Suite("WorkspaceStoreTests")
 @MainActor
 struct WorkspaceStoreTests {
+    @Test func ordinaryMutationsAreRejectedUntilTheInitialLoadCompletes() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "too early")
+        let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+
+        await #expect(throws: WorkspaceStoreError.frozen) {
+            _ = try await store.sendCalendar(.createItem(item), undoLabel: "too early")
+        }
+        #expect(store.phase == .notLoaded)
+        #expect(await repository.saveCount == 0)
+    }
+
+    @Test func initialOpaqueAndUnreadableLoadsProjectTheirTypedRecoveryModes() async throws {
+        let initial = WorkspaceState.empty(calendar: .empty(uncategorizedID: UUID(), now: .distantPast))
+        let opaqueRepository = WorkspaceStoreTestRepository(initial: initial)
+        await opaqueRepository.failNextLoad()
+        await opaqueRepository.setReloaded(.opaqueInvalid(.init(sha256: "opaque", byteCount: 6)))
+        let opaque = WorkspaceStore(initialState: initial, repository: opaqueRepository)
+
+        await opaque.load()
+
+        #expect(opaque.phase == .opaquePrimaryLoadFailed)
+        let unreadableRepository = WorkspaceStoreTestRepository(initial: initial)
+        await unreadableRepository.failNextLoad()
+        await unreadableRepository.setReloaded(.unreadableUnknown)
+        let unreadable = WorkspaceStore(initialState: initial, repository: unreadableRepository)
+
+        await unreadable.load()
+
+        #expect(unreadable.phase == .unreadablePrimaryLoadFailed)
+        let blocked = try await unreadable.sendCalendar(.createItem(
+            try makeItem(id: UUID(), categoryID: initial.calendar.uncategorizedID, title: "blocked")
+        ))
+        #expect(blocked == .persistenceBlocked(transactionID: nil, reason: .unreadablePrimary, journal: .clean))
+    }
+
     @Test func queueDropsPreAppendCancellationWithoutRunningTheOperation() async throws {
         let queue = WorkspaceTransactionQueue()
         let start = AsyncTestGate()
@@ -58,6 +95,7 @@ struct WorkspaceStoreTests {
         await repository.suspendNextSave()
         await repository.failNextSaveWithSourceChanged()
         let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
         let first = Task { @MainActor in try await store.sendCalendar(.createItem(firstItem), undoLabel: "first") }
         await repository.waitForSaveStart()
         let second = Task { @MainActor in try await store.sendCalendar(.createItem(secondItem), undoLabel: "second") }
@@ -87,6 +125,7 @@ struct WorkspaceStoreTests {
         await repository.setVerification(.notPersisted)
         await repository.suspendNextVerification()
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal)
+        await store.load()
         let first = Task { @MainActor in try await store.submitDraft(submission) }
         await repository.waitForVerificationStart()
         let second = Task { @MainActor in try await store.sendCalendar(.createItem(item), undoLabel: "queued") }
@@ -114,6 +153,7 @@ struct WorkspaceStoreTests {
         await repository.setVerification(.unreadableUnknown)
         await repository.suspendNextVerification()
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal)
+        await store.load()
         let first = Task { @MainActor in try await store.submitDraft(submission) }
         await repository.waitForVerificationStart()
         let second = Task { @MainActor in try await store.sendCalendar(.createItem(item), undoLabel: "queued") }
@@ -143,6 +183,7 @@ struct WorkspaceStoreTests {
         )
         let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
         let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository, clock: { .distantPast })
+        await store.load()
         let first = Task { @MainActor in try await store.sendCalendar(.createItem(item), undoLabel: "创建") }
         let second = Task { @MainActor in try await store.sendCalendar(.setTaskCompleted(item.id, Date(timeIntervalSince1970: 3)), undoLabel: "完成") }
         _ = try await first.value
@@ -158,6 +199,7 @@ struct WorkspaceStoreTests {
         let clock = CountingTestClock()
         let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
         let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository, clock: { clock.now() })
+        await store.load()
 
         _ = try await store.sendCalendar(.createItem(firstItem), undoLabel: "first")
         _ = try await store.sendCalendar(.createItem(secondItem), undoLabel: "second")
@@ -173,6 +215,7 @@ struct WorkspaceStoreTests {
         await repository.suspendNextSave()
         await repository.makeNextSaveUncertain()
         let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository, clock: { .distantPast })
+        await store.load()
         let first = Task { @MainActor in try await store.sendCalendar(.createItem(firstItem), undoLabel: "first") }
         await repository.waitForSaveStart()
         let second = Task { @MainActor in try await store.sendCalendar(.createItem(secondItem), undoLabel: "second") }
@@ -197,6 +240,7 @@ struct WorkspaceStoreTests {
         await repository.makeNextSaveUncertain()
         await repository.setReconciliation(.stillPending(artifacts))
         let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
         let first = Task { @MainActor in try await store.sendCalendar(.createItem(firstItem), undoLabel: "first") }
         await repository.waitForSaveStart()
         let second = Task { @MainActor in try await store.sendCalendar(.createItem(secondItem), undoLabel: "second") }
@@ -221,6 +265,7 @@ struct WorkspaceStoreTests {
         let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
         await repository.makeNextSaveUncertain()
         let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
         let pending = try await store.sendCalendar(.createItem(item), undoLabel: "create")
         let id = try #require({ if case let .commitPending(value, _) = pending { value } else { nil } }())
         await repository.setReconciliation(.committed(.save(.init(workspaceRevision: 1, persistedDraft: nil))))
@@ -249,6 +294,7 @@ struct WorkspaceStoreTests {
         await repository.makeNextSaveUncertain()
         await repository.setReconciliation(.committed(.save(.init(workspaceRevision: 2, persistedDraft: nil))))
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal)
+        await store.load()
 
         let outcome = try await store.submitDraft(submission)
 
@@ -278,6 +324,7 @@ struct WorkspaceStoreTests {
         await repository.makeNextSaveUncertain()
         await repository.setReconciliation(.notCommitted(.init()))
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal)
+        await store.load()
 
         let outcome = try await store.submitDraft(submission)
 
@@ -312,6 +359,7 @@ struct WorkspaceStoreTests {
         await repository.makeNextSaveUncertain()
         await repository.setReconciliation(.notCommitted(.init()))
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal)
+        await store.load()
 
         let result = try await store.submitDraft(submission)
         let identity = DraftJournalIdentity(noteID: submission.noteID, editSessionID: .editor(submission.editSessionID))
@@ -333,12 +381,58 @@ struct WorkspaceStoreTests {
         #expect(await repository.saveCount == 0)
     }
 
+    @Test func definiteSaveFailureWithUnbindCleanupFailureReturnsTypedTerminalAndPausesTheQueuedCaller() async throws {
+        let (state, _, original) = try draftFixture()
+        var snapshot = original.snapshot
+        snapshot.title = "must remain journaled"
+        let submission = NoteDraftSubmission(
+            noteID: original.noteID, editSessionID: original.editSessionID, baseNoteRevision: original.baseNoteRevision,
+            baseNoteSnapshotChecksum: original.baseNoteSnapshotChecksum, baseSnapshot: original.baseSnapshot,
+            baseLinkedTaskBlockLinks: original.baseLinkedTaskBlockLinks, draftGeneration: original.draftGeneration,
+            snapshot: snapshot, noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(snapshot),
+            modifiedFields: [.title], linkedBlockDeletionDispositions: [:]
+        )
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("jelly-6b-definite-unbind-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = SwitchableStoreJournalWriter()
+        writer.failOnWriteNumber = 3
+        let journal = DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"), writer: writer)
+        let repository = WorkspaceStoreTestRepository(initial: state)
+        await repository.suspendNextSave()
+        await repository.failNextSave()
+        let store = WorkspaceStore(initialState: state, repository: repository, journal: journal)
+        await store.load()
+        let tail = try makeItem(id: UUID(), categoryID: state.calendar.uncategorizedID, title: "must wait")
+
+        let head = Task { @MainActor in try await store.submitDraft(submission) }
+        await repository.waitForSaveStart()
+        let queued = Task { @MainActor in try await store.sendCalendar(.createItem(tail), undoLabel: "tail") }
+        await repository.resumeSave()
+        let outcome = try await head.value
+        let identity = DraftJournalIdentity(noteID: submission.noteID, editSessionID: .editor(submission.editSessionID))
+
+        guard case let .notCommitted(transactionID, journalStatus, artifacts) = outcome else {
+            Issue.record("The definite save failure must return a typed terminal outcome when exact unbind is pending")
+            return
+        }
+        #expect(journalStatus == .cleanupPending(identity: identity, step: .unbind))
+        #expect(artifacts == .init())
+        #expect(transactionID.uuidString.isEmpty == false)
+        #expect(store.phase == .parkedJournalCleanup(identity, .unbind))
+        #expect(store.state == state)
+        writer.failOnWriteNumber = nil
+        #expect(await store.retryJournalCleanup(identity) == .clean)
+        _ = try await queued.value
+        #expect(store.calendarState.items[tail.id] != nil)
+    }
+
     @Test func sourceChangedRetryNeverPublishesTheParkedCandidate() async throws {
         let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
         let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "lost")
         let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
         await repository.makeNextSaveUncertain()
         let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
         let pending = try await store.sendCalendar(.createItem(item), undoLabel: "create")
         let id = try #require({ if case let .commitPending(value, _) = pending { value } else { nil } }())
         await repository.setReconciliation(.sourceChanged(.init()))
@@ -359,6 +453,7 @@ struct WorkspaceStoreTests {
         await repository.suspendNextSave()
         await repository.makeNextSaveUncertain()
         let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
         let first = Task { @MainActor in try await store.sendCalendar(.createItem(firstItem), undoLabel: "first") }
         await repository.waitForSaveStart()
         let second = Task { @MainActor in try await store.sendCalendar(.createItem(secondItem), undoLabel: "second") }
@@ -388,6 +483,7 @@ struct WorkspaceStoreTests {
         let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
         await repository.failNextSave()
         let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
         await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
             _ = try await store.sendCalendar(.createItem(item), undoLabel: "create")
         }
@@ -407,6 +503,7 @@ struct WorkspaceStoreTests {
         staleEditorPayload.title = "renamed"
         let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
         let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
 
         _ = try await store.sendCalendar(.updateItem(staleEditorPayload), undoLabel: "rename")
 
@@ -414,11 +511,67 @@ struct WorkspaceStoreTests {
         #expect(store.calendarState.items[item.id]?.completedAt == completion)
     }
 
+    @Test func queuedEditorUpdateAndDedicatedCompletionEachReduceAtTheirOwnLatestQueueHead() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "original")
+        var initial = WorkspaceState.empty(calendar: calendar)
+        initial.calendar.items[item.id] = item
+        initial.revision = 1
+        var editorPayload = item
+        editorPayload.title = "renamed"
+        let completion = Date(timeIntervalSince1970: 99)
+        let repository = WorkspaceStoreTestRepository(initial: initial)
+        await repository.suspendNextSave()
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+
+        let update = Task { @MainActor in try await store.sendCalendar(.updateItem(editorPayload), undoLabel: "rename") }
+        await repository.waitForSaveStart()
+        let complete = Task { @MainActor in try await store.sendCalendar(.setTaskCompleted(item.id, completion), undoLabel: "complete") }
+        await repository.resumeSave()
+        _ = try await update.value
+        _ = try await complete.value
+
+        #expect(store.calendarState.items[item.id]?.title == "renamed")
+        #expect(store.calendarState.items[item.id]?.completedAt == completion)
+        #expect(store.state.revision == 3)
+    }
+
+    @Test func suspendedCalendarSaveThenQueuedDraftReducesAgainstThePublishedCalendarHead() async throws {
+        let (state, _, original) = try draftFixture()
+        var snapshot = original.snapshot
+        snapshot.title = "draft after calendar"
+        let draft = NoteDraftSubmission(
+            noteID: original.noteID, editSessionID: original.editSessionID, baseNoteRevision: original.baseNoteRevision,
+            baseNoteSnapshotChecksum: original.baseNoteSnapshotChecksum, baseSnapshot: original.baseSnapshot,
+            baseLinkedTaskBlockLinks: original.baseLinkedTaskBlockLinks, draftGeneration: original.draftGeneration,
+            snapshot: snapshot, noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(snapshot),
+            modifiedFields: [.title], linkedBlockDeletionDispositions: [:]
+        )
+        let item = try makeItem(id: UUID(), categoryID: state.calendar.uncategorizedID, title: "calendar head")
+        let repository = WorkspaceStoreTestRepository(initial: state)
+        await repository.suspendNextSave()
+        let store = WorkspaceStore(initialState: state, repository: repository)
+        await store.load()
+
+        let calendarHead = Task { @MainActor in try await store.sendCalendar(.createItem(item), undoLabel: "calendar") }
+        await repository.waitForSaveStart()
+        let queuedDraft = Task { @MainActor in try await store.submitDraft(draft) }
+        await repository.resumeSave()
+        _ = try await calendarHead.value
+        _ = try await queuedDraft.value
+
+        #expect(store.calendarState.items[item.id] != nil)
+        #expect(store.state.notes[draft.noteID]?.title == "draft after calendar")
+        #expect(store.state.revision == state.revision + 2)
+    }
+
     @Test func undoRedoAndUndoRemainPersistedTransactions() async throws {
         let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
         let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "roundtrip")
         let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
         let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
         _ = try await store.sendCalendar(.createItem(item), undoLabel: "create")
         let firstRevision = store.state.revision
         _ = try await store.undo()
@@ -434,12 +587,137 @@ struct WorkspaceStoreTests {
         #expect(store.calendarState.items[item.id] == nil)
     }
 
+    @Test func uncertainUndoParksItsExactStackTransitionAndBlocksTheNextCallerUntilRetry() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let created = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "created")
+        let later = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "later")
+        let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
+        _ = try await store.sendCalendar(.createItem(created), undoLabel: "create")
+        await repository.suspendNextSave()
+        await repository.makeNextSaveUncertain()
+        await repository.setReconciliation(.stillPending(.init()))
+
+        let undoTask = Task { @MainActor in try await store.undo() }
+        await repository.waitForSaveStart()
+        let queued = Task { @MainActor in try await store.sendCalendar(.createItem(later), undoLabel: "later") }
+        await repository.resumeSave()
+        let undo = try await undoTask.value
+        let transactionID = try #require({ if case let .commitPending(value, _) = undo { value } else { nil } }())
+
+        #expect(store.calendarState.items[created.id] != nil)
+        #expect(store.calendarState.items[later.id] == nil)
+        #expect(store.canUndo)
+        #expect(store.canRedo == false)
+        await repository.setReconciliation(.committed(.save(.init(workspaceRevision: 2, persistedDraft: nil))))
+        #expect(try await store.retryPendingCommit(transactionID) == .committed(.save(.init(workspaceRevision: 2, persistedDraft: nil)), journal: .clean))
+        _ = try await queued.value
+        #expect(store.calendarState.items[created.id] == nil)
+        #expect(store.calendarState.items[later.id] != nil)
+        #expect(store.canUndo)
+    }
+
+    @Test func notCommittedUndoRetryKeepsItsUndoStackAndPublishedCandidateUntouched() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "undo not committed")
+        let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
+        _ = try await store.sendCalendar(.createItem(item), undoLabel: "create")
+        await repository.makeNextSaveUncertain()
+        await repository.setReconciliation(.stillPending(.init()))
+        let pending = try await store.undo()
+        let transactionID = try #require({ if case let .commitPending(id, _) = pending { id } else { nil } }())
+        await repository.setReconciliation(.notCommitted(.init()))
+
+        #expect(try await store.retryPendingCommit(transactionID) == .notCommitted(transactionID: transactionID, journal: .clean, artifacts: .init()))
+        #expect(store.calendarState.items[item.id] != nil)
+        #expect(store.canUndo)
+        #expect(store.canRedo == false)
+        #expect(store.phase == .ready)
+    }
+
+    @Test func sourceChangedUndoRetryNeverConsumesTheUndoStackOrPublishesTheCandidate() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "undo source changed")
+        let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
+        _ = try await store.sendCalendar(.createItem(item), undoLabel: "create")
+        await repository.makeNextSaveUncertain()
+        await repository.setReconciliation(.stillPending(.init()))
+        let pending = try await store.undo()
+        let transactionID = try #require({ if case let .commitPending(id, _) = pending { id } else { nil } }())
+        await repository.setReconciliation(.sourceChanged(.init()))
+
+        #expect(try await store.retryPendingCommit(transactionID) == .sourceChanged(transactionID: transactionID, journal: .clean, artifacts: .init()))
+        #expect(store.calendarState.items[item.id] != nil)
+        #expect(store.canUndo)
+        #expect(store.canRedo == false)
+        #expect(store.phase == .externalSourceChanged(.externalBytesChanged))
+    }
+
+    @Test func uncertainRedoLeavesTheRedoRecordUntilItsExactRetryCommits() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "redo pending")
+        let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
+        _ = try await store.sendCalendar(.createItem(item), undoLabel: "create")
+        _ = try await store.undo()
+        await repository.makeNextSaveUncertain()
+        await repository.setReconciliation(.stillPending(.init()))
+
+        let pending = try await store.redo()
+        let transactionID = try #require({ if case let .commitPending(id, _) = pending { id } else { nil } }())
+        #expect(store.calendarState.items[item.id] == nil)
+        #expect(store.canRedo)
+        await repository.setReconciliation(.committed(.save(.init(workspaceRevision: 3, persistedDraft: nil))))
+
+        #expect(try await store.retryPendingCommit(transactionID) == .committed(.save(.init(workspaceRevision: 3, persistedDraft: nil)), journal: .clean))
+        #expect(store.calendarState.items[item.id] != nil)
+        #expect(store.canUndo)
+        #expect(store.canRedo == false)
+    }
+
+    @Test func redoRetryNotCommittedAndSourceChangedNeverConsumeTheRedoRecord() async throws {
+        for sourceChanged in [false, true] {
+            let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+            let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "redo terminal")
+            let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
+            let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+            await store.load()
+            _ = try await store.sendCalendar(.createItem(item), undoLabel: "create")
+            _ = try await store.undo()
+            await repository.makeNextSaveUncertain()
+            await repository.setReconciliation(.stillPending(.init()))
+            let pending = try await store.redo()
+            let transactionID = try #require({ if case let .commitPending(id, _) = pending { id } else { nil } }())
+            await repository.setReconciliation(sourceChanged ? .sourceChanged(.init()) : .notCommitted(.init()))
+
+            let retry = try await store.retryPendingCommit(transactionID)
+
+            if sourceChanged {
+                #expect(retry == .sourceChanged(transactionID: transactionID, journal: .clean, artifacts: .init()))
+                #expect(store.phase == .externalSourceChanged(.externalBytesChanged))
+            } else {
+                #expect(retry == .notCommitted(transactionID: transactionID, journal: .clean, artifacts: .init()))
+                #expect(store.phase == .ready)
+            }
+            #expect(store.calendarState.items[item.id] == nil)
+            #expect(store.canRedo)
+            #expect(store.canUndo == false)
+        }
+    }
+
     @Test func failedNewTransactionLeavesRedoStackAndPublishedStateUntouched() async throws {
         let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
         let original = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "original")
         let replacement = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "replacement")
         let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
         let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
         _ = try await store.sendCalendar(.createItem(original), undoLabel: "create")
         _ = try await store.undo()
         #expect(store.canRedo)
@@ -461,6 +739,7 @@ struct WorkspaceStoreTests {
         let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "undo must stay")
         let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
         let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
         _ = try await store.sendCalendar(.createItem(item), undoLabel: "create")
         let published = store.state
         await repository.failNextSave()
@@ -484,6 +763,7 @@ struct WorkspaceStoreTests {
         let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "overflow")
         let repository = WorkspaceStoreTestRepository(initial: initial)
         let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
 
         _ = try await store.sendCalendar(.createItem(item), undoLabel: "create")
         let published = store.state
@@ -506,6 +786,7 @@ struct WorkspaceStoreTests {
         await repository.setVerification(.verified(receipt))
         let journal = DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"))
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal, clock: { .distantPast })
+        await store.load()
 
         #expect(try await store.submitDraft(submission) == .noChange(.identical, journal: .clean))
         #expect(await repository.saveCount == 0)
@@ -571,6 +852,7 @@ struct WorkspaceStoreTests {
         let repository = WorkspaceStoreTestRepository(initial: state)
         await repository.suspendNextSave()
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal, clock: { .distantPast })
+        await store.load()
         let first = Task { @MainActor in try await store.submitDraft(firstDraft) }
         await repository.waitForSaveStart()
         let second = Task { @MainActor in try await store.submitDraft(secondDraft) }
@@ -628,6 +910,7 @@ struct WorkspaceStoreTests {
         let repository = WorkspaceStoreTestRepository(initial: state)
         await repository.suspendNextSave()
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal)
+        await store.load()
         let firstTask = Task { @MainActor in try await store.submitDraft(first) }
         await repository.waitForSaveStart()
         let secondTask = Task { @MainActor in try await store.submitDraft(second) }
@@ -672,6 +955,7 @@ struct WorkspaceStoreTests {
         let repository = WorkspaceStoreTestRepository(initial: state)
         await repository.suspendNextSave()
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal)
+        await store.load()
         let firstTask = Task { @MainActor in try await store.submitDraft(first) }
         await repository.waitForSaveStart()
         let thirdPartyTask = Task { @MainActor in try await store.submitDraft(thirdParty) }
@@ -867,6 +1151,7 @@ struct WorkspaceStoreTests {
         await repository.setVerification(.notPersisted)
         let journal = DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"))
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal, clock: { .distantPast })
+        await store.load()
 
         let outcome = try await store.submitDraft(submission)
 
@@ -883,6 +1168,7 @@ struct WorkspaceStoreTests {
         let repository = WorkspaceStoreTestRepository(initial: state)
         await repository.setVerification(.sourceChanged)
         let store = WorkspaceStore(initialState: state, repository: repository, journal: DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json")))
+        await store.load()
         let outcome = try await store.submitDraft(submission)
         guard case let .externalSourceChanged(_, reason, _, _) = outcome else { Issue.record("Expected external source change"); return }
         #expect(reason == .externalBytesChanged)
@@ -896,6 +1182,7 @@ struct WorkspaceStoreTests {
         let repository = WorkspaceStoreTestRepository(initial: state)
         await repository.setVerification(.unreadableUnknown)
         let store = WorkspaceStore(initialState: state, repository: repository, journal: DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json")))
+        await store.load()
         let outcome = try await store.submitDraft(submission)
         guard case let .persistenceBlocked(transactionID, reason, journalStatus) = outcome else { Issue.record("Expected persistence block"); return }
         #expect(transactionID != nil)
@@ -915,6 +1202,7 @@ struct WorkspaceStoreTests {
             repository: repository,
             journal: DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"))
         )
+        await store.load()
         _ = try await store.submitDraft(submission)
         let item = try makeItem(id: UUID(), categoryID: state.calendar.uncategorizedID, title: "must remain blocked")
 
@@ -942,6 +1230,7 @@ struct WorkspaceStoreTests {
         let journal = DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"), writer: writer)
         let repository = WorkspaceStoreTestRepository(initial: state)
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal)
+        await store.load()
         writer.failOnWriteNumber = 3
         let result = try await store.submitDraft(submission)
         guard case let .committed(_, journal: .cleanupPending(identity, step)) = result else { Issue.record("Expected cleanup parking"); return }
@@ -970,6 +1259,7 @@ struct WorkspaceStoreTests {
         await repository.setVerification(.verified(receipt))
         writer.failOnWriteNumber = 2
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal)
+        await store.load()
 
         let outcome = try await store.submitDraft(submission)
         let identity = DraftJournalIdentity(noteID: note.id, editSessionID: receipt.editSessionID)
@@ -1001,6 +1291,7 @@ struct WorkspaceStoreTests {
         let journal = DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"), writer: writer)
         let repository = WorkspaceStoreTestRepository(initial: state)
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal)
+        await store.load()
 
         await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
             _ = try await store.submitDraft(submission)
@@ -1034,6 +1325,7 @@ struct WorkspaceStoreTests {
         let repository = WorkspaceStoreTestRepository(initial: state)
         await repository.failNextSaveWithSourceChanged()
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal)
+        await store.load()
 
         let result = try await store.submitDraft(submission)
         let identity = DraftJournalIdentity(noteID: submission.noteID, editSessionID: .editor(submission.editSessionID))
@@ -1066,6 +1358,7 @@ struct WorkspaceStoreTests {
         let repository = WorkspaceStoreTestRepository(initial: state)
         await repository.setVerification(.verified(receipt))
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal)
+        await store.load()
 
         let outcome = try await store.submitDraft(submission)
         let identity = DraftJournalIdentity(noteID: note.id, editSessionID: receipt.editSessionID)
@@ -1162,6 +1455,47 @@ struct WorkspaceStoreTests {
 
         guard case .restored = outcome else { Issue.record("Expected opaque primary recovery restore"); return }
         #expect(store.state.calendar.items[restoredItem.id] != nil)
+        #expect(store.phase == .ready)
+    }
+
+    @Test func restoreIsAllowedFromThePublishedDraftNotPersistedExternalReason() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("jelly-6b-restore-published-draft-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let category = UUID()
+        let calendar = CalendarState.empty(uncategorizedID: category, now: .distantPast)
+        let note = Note.empty(id: NoteID(UUID()), categoryID: category, now: .distantPast)
+        var initial = WorkspaceState.empty(calendar: calendar)
+        initial.notes[note.id] = note
+        let initialState = initial
+        let draft = NoteDraftSubmission(
+            noteID: note.id, editSessionID: UUID(), baseNoteRevision: note.revision,
+            baseNoteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(note), baseSnapshot: note,
+            baseLinkedTaskBlockLinks: [], draftGeneration: 1, snapshot: note,
+            noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(note), modifiedFields: [], linkedBlockDeletionDispositions: [:]
+        )
+        let restoredItem = try makeItem(id: UUID(), categoryID: category, title: "restored after draft warning")
+        var restored = WorkspaceState.empty(calendar: calendar)
+        restored.revision = 1
+        restored.calendar.items[restoredItem.id] = restoredItem
+        let source = directory.appendingPathComponent("restore.json")
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let repository = JSONWorkspaceRepository(documentURL: directory.appendingPathComponent("calendar-v1.json"), seed: { initialState })
+        let journal = DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"))
+        let store = WorkspaceStore(initialState: initialState, repository: repository, journal: journal)
+        await store.load()
+
+        let warning = try await store.submitDraft(draft)
+        guard case .externalSourceChanged(_, .publishedDraftNotPersisted, _, _) = warning else {
+            Issue.record("Expected the bare draft verification to freeze as published-not-persisted")
+            return
+        }
+        let preview = try await store.inspectRestoreSource(at: source)
+
+        let outcome = try await store.restore(preview, rollbackDirectoryURL: directory.appendingPathComponent("rollbacks", isDirectory: true))
+
+        guard case .restored = outcome else { Issue.record("Restore must be permitted from every external-source reason"); return }
+        #expect(store.calendarState.items[restoredItem.id] != nil)
         #expect(store.phase == .ready)
     }
 
@@ -1421,6 +1755,15 @@ struct WorkspaceStoreTests {
             let envelope = try #require(await journal.current())
             #expect(envelope.records.contains { $0.identity.noteID == note.id })
             #expect(store.state.notes[note.id] == nil)
+
+            let restartRepository = JSONWorkspaceRepository(
+                documentURL: directory.appendingPathComponent("calendar-v1.json"), seed: { initialState }
+            )
+            let restarted = WorkspaceStore(initialState: initialState, repository: restartRepository)
+            await restarted.load()
+            #expect(restarted.phase == .ready)
+            #expect(restarted.state.revision == store.state.revision)
+            #expect(restarted.state.notes.values.allSatisfy { $0.revision <= restarted.state.revision })
         }
     }
 
@@ -1434,11 +1777,40 @@ struct WorkspaceStoreTests {
         let repository = WorkspaceStoreTestRepository(initial: initial)
         await repository.setReloaded(.valid(.init(state: external, provenance: .init(sourceSchema: 3, sourceBytesSHA256: "external", sourceByteCount: 1), consistencyIssues: [])))
         let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
 
         _ = try await store.reloadExternalSource()
 
         #expect(store.state.calendar.items[item.id] != nil)
         #expect(await repository.saveCount == 1)
+        #expect(store.phase == .ready)
+    }
+
+    @Test func uncertainExternalNormalizationParksItsCandidateUntilTheExactRetryCommits() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let initial = WorkspaceState.empty(calendar: calendar)
+        let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "external pending")
+        var external = initial
+        external.revision = 1
+        external.calendar.items[item.id] = item
+        let repository = WorkspaceStoreTestRepository(initial: initial)
+        await repository.setReloaded(.valid(.init(
+            state: external, provenance: .init(sourceSchema: 2, sourceBytesSHA256: "normalize", sourceByteCount: 1), consistencyIssues: []
+        )))
+        await repository.makeNextSaveUncertain()
+        await repository.setReconciliation(.stillPending(.init()))
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+
+        let outcome = try await store.reloadExternalSource()
+        let transactionID = try #require({
+            if case let .transaction(.commitPending(id, _)) = outcome { id } else { nil }
+        }())
+        #expect(store.state == initial)
+        await repository.setReconciliation(.committed(.save(.init(workspaceRevision: 1, persistedDraft: nil))))
+
+        #expect(try await store.retryPendingCommit(transactionID) == .committed(.save(.init(workspaceRevision: 1, persistedDraft: nil)), journal: .clean))
+        #expect(store.state.calendar.items[item.id] != nil)
         #expect(store.phase == .ready)
     }
 
@@ -1456,6 +1828,7 @@ struct WorkspaceStoreTests {
         )))
         await repository.suspendNextSave()
         let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
         let local = Task { @MainActor in
             try await store.sendCalendar(.createItem(localItem), undoLabel: "local")
         }
@@ -1482,6 +1855,7 @@ struct WorkspaceStoreTests {
             consistencyIssues: []
         )))
         let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
 
         _ = try await store.reloadExternalSource()
 
@@ -1496,6 +1870,7 @@ struct WorkspaceStoreTests {
         let absentRepository = WorkspaceStoreTestRepository(initial: initial)
         await absentRepository.setReloaded(.absent)
         let absentStore = WorkspaceStore(initialState: initial, repository: absentRepository)
+        await absentStore.load()
 
         _ = try await absentStore.reloadExternalSource()
 
@@ -1504,6 +1879,7 @@ struct WorkspaceStoreTests {
         let unreadableRepository = WorkspaceStoreTestRepository(initial: initial)
         await unreadableRepository.setReloaded(.unreadableUnknown)
         let unreadableStore = WorkspaceStore(initialState: initial, repository: unreadableRepository)
+        await unreadableStore.load()
 
         _ = try await unreadableStore.reloadExternalSource()
 
@@ -1522,6 +1898,7 @@ struct WorkspaceStoreTests {
         await repository.setReloaded(.valid(.init(state: external, provenance: .init(sourceSchema: 3, sourceBytesSHA256: "external", sourceByteCount: 1), consistencyIssues: [])))
         await repository.failNextSave()
         let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
 
         await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
             _ = try await store.reloadExternalSource()
@@ -1549,6 +1926,7 @@ struct WorkspaceStoreTests {
         )))
         await repository.failNextSave()
         let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
 
         await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
             _ = try await store.reloadExternalSource()
@@ -1582,6 +1960,7 @@ struct WorkspaceStoreTests {
             consistencyIssues: report.issues
         )))
         let store = WorkspaceStore(initialState: initial, repository: repository, clock: { .distantPast })
+        await store.load()
 
         _ = try await store.reloadExternalSource()
 
@@ -1595,6 +1974,37 @@ struct WorkspaceStoreTests {
         #expect(WorkspaceConsistencyInspector.inspect(store.state).issues.isEmpty)
         #expect(store.state.calendarNoteRelations.baselines.isEmpty)
         #expect(await repository.saveCount == 1)
+        #expect(store.phase == .ready)
+    }
+
+    @Test func uncertainExternalRepairParksTheRepairCandidateUntilTheExactRetryCommits() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let initial = WorkspaceState.empty(calendar: calendar)
+        var external = initial
+        external.revision = 1
+        external.calendarNoteRelations.baselines[.item(UUID())] = .init(primaryNoteID: nil, referenceNoteIDs: [])
+        let report = WorkspaceConsistencyInspector.inspect(external)
+        let repair = WorkspaceConsistencyRepairPayload(
+            expectedIssuesChecksum: report.issuesChecksum,
+            resolutions: Dictionary(uniqueKeysWithValues: report.issues.map { ($0.id, .unlink) })
+        )
+        let repository = WorkspaceStoreTestRepository(initial: initial)
+        await repository.setReloaded(.valid(.init(
+            state: external, provenance: .init(sourceSchema: 3, sourceBytesSHA256: "repair pending", sourceByteCount: 1), consistencyIssues: report.issues
+        )))
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+        _ = try await store.reloadExternalSource()
+        await repository.makeNextSaveUncertain()
+        await repository.setReconciliation(.stillPending(.init()))
+
+        let pending = try await store.sendWorkspace(.repairConsistency(repair))
+        let transactionID = try #require({ if case let .commitPending(id, _) = pending { id } else { nil } }())
+        #expect(store.state == initial)
+        await repository.setReconciliation(.committed(.save(.init(workspaceRevision: 2, persistedDraft: nil))))
+
+        #expect(try await store.retryPendingCommit(transactionID) == .committed(.save(.init(workspaceRevision: 2, persistedDraft: nil)), journal: .clean))
+        #expect(WorkspaceConsistencyInspector.inspect(store.state).issues.isEmpty)
         #expect(store.phase == .ready)
     }
 
@@ -1618,6 +2028,7 @@ struct WorkspaceStoreTests {
             consistencyIssues: report.issues
         )))
         let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
         _ = try await store.reloadExternalSource()
         await repository.failNextSave()
 
@@ -1665,6 +2076,7 @@ struct WorkspaceStoreTests {
         let repository = WorkspaceStoreTestRepository(initial: state)
         await repository.setRawRecoveryArtifact(artifact)
         let store = WorkspaceStore(initialState: state, repository: repository)
+        await store.load()
         let destination = directory.appendingPathComponent("opaque-copy.json")
 
         try await store.exportRawRecoveryCopy(to: destination)
@@ -1848,6 +2260,7 @@ private actor RestoreCountingRepository: WorkspaceRepository {
 
 actor WorkspaceStoreTestRepository: WorkspaceRepository {
     private var state: WorkspaceState
+    private var loadFailure = false
     private var saveCountStorage = 0
     private var failSave = false
     private var sourceChangedSave = false
@@ -1866,7 +2279,10 @@ actor WorkspaceStoreTestRepository: WorkspaceRepository {
     private var saveWaiters: [CheckedContinuation<Void, Never>] = []
     private var saveResumeWaiters: [CheckedContinuation<Void, Never>] = []
     init(initial: WorkspaceState) { state = initial }
-    func load() throws -> WorkspaceLoadResult { .init(state: state, provenance: .init(sourceSchema: 3, sourceBytesSHA256: "test", sourceByteCount: 0), consistencyIssues: []) }
+    func load() throws -> WorkspaceLoadResult {
+        if loadFailure { loadFailure = false; throw WorkspacePersistenceError.invalidDocument }
+        return .init(state: state, provenance: .init(sourceSchema: 3, sourceBytesSHA256: "test", sourceByteCount: 0), consistencyIssues: [])
+    }
     func save(_ next: WorkspaceState, draft: PersistableDraftContext?) async throws -> WorkspaceSaveReceipt {
         if saveSuspended {
             saveStarted = true
@@ -1905,6 +2321,7 @@ actor WorkspaceStoreTestRepository: WorkspaceRepository {
     }
     var saveCount: Int { saveCountStorage }
     var reconciliationCount: Int { reconciliationCountStorage }
+    func failNextLoad() { loadFailure = true }
     func failNextSave() { failSave = true }
     func failNextSaveWithSourceChanged() { sourceChangedSave = true }
     func makeNextSaveUncertain() { saveUncertain = true }
