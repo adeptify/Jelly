@@ -48,6 +48,7 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
     }
 
     public func load() throws -> WorkspaceLoadResult {
+        try rejectIfCommitUncertain()
         switch loadedSource {
         case let .bytes(rawData, _):
             return try WorkspaceDocumentCodec.decode(rawData)
@@ -177,6 +178,7 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         guard let current = try? Data(contentsOf: documentURL), current == rawData else {
             throw WorkspacePersistenceError.sourceChanged
         }
+        pendingRestores[prepared.capabilityID] = nil
         try writeVerifiedRollback(rawData, to: issued.rollbackURL)
         if provenance.sourceSchema < WorkspaceDocument.currentSchemaVersion {
             try registerMigrationSnapshot(rawData: rawData, provenance: provenance)

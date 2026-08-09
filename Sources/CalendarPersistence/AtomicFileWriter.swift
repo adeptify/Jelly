@@ -91,7 +91,16 @@ public struct FoundationMainFileCompareAndReplaceWriter: MainFileCompareAndRepla
             guard !FileManager.default.fileExists(atPath: destination.path) else {
                 return .sourceChanged
             }
-            try writer.replaceAtomically(data: candidate, at: destination)
+            do {
+                try writer.replaceAtomically(data: candidate, at: destination)
+            } catch {
+                return try classifyDestinationAfterWriterFailure(
+                    candidate: candidate,
+                    previous: nil,
+                    at: destination,
+                    originalError: error
+                )
+            }
             return verifiedReplacement(candidate: candidate, at: destination)
         }
     }
@@ -102,12 +111,43 @@ public struct FoundationMainFileCompareAndReplaceWriter: MainFileCompareAndRepla
         at destination: URL
     ) throws -> MainFileCompareAndReplaceResult {
         try withSharedJellyLock(for: destination) {
-            guard let current = try? dataReadingNoFollow(at: destination), persistenceSHA256(current) == expectedSHA256 else {
+            guard let previous = try? dataReadingNoFollow(at: destination),
+                  persistenceSHA256(previous) == expectedSHA256
+            else {
                 return .sourceChanged
             }
-            try writer.replaceAtomically(data: candidate, at: destination)
+            do {
+                try writer.replaceAtomically(data: candidate, at: destination)
+            } catch {
+                return try classifyDestinationAfterWriterFailure(
+                    candidate: candidate,
+                    previous: previous,
+                    at: destination,
+                    originalError: error
+                )
+            }
             return verifiedReplacement(candidate: candidate, at: destination)
         }
+    }
+
+    private func classifyDestinationAfterWriterFailure(
+        candidate: Data,
+        previous: Data?,
+        at destination: URL,
+        originalError: Error
+    ) throws -> MainFileCompareAndReplaceResult {
+        let current: Data?
+        if FileManager.default.fileExists(atPath: destination.path) {
+            guard let readback = try? dataReadingNoFollow(at: destination) else {
+                return .commitUncertain
+            }
+            current = readback
+        } else {
+            current = nil
+        }
+        if current == candidate { return .replaced(verifiedRawData: candidate) }
+        if current == previous { throw originalError }
+        return .commitUncertain
     }
 
     private func verifiedReplacement(candidate: Data, at destination: URL) -> MainFileCompareAndReplaceResult {

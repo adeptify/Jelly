@@ -131,6 +131,110 @@ struct WorkspaceRepositoryFailureTests {
         #expect(try await JSONWorkspaceRepository(documentURL: main, seed: { first }).load().state == second)
     }
 
+    @Test func writerThatReplacesThenThrowsStillCommitsAnExistingSave() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var candidate = initial
+        candidate.revision = 2
+        candidate.notes[candidate.notes.keys.first!]!.revision = 2
+        candidate.notes[candidate.notes.keys.first!]!.title = "verified despite writer throw"
+        let candidateData = try WorkspaceDocumentCodec.encode(candidate)
+        try WorkspaceDocumentCodec.encode(initial).write(to: main)
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { initial },
+            mainFileWriter: FoundationMainFileCompareAndReplaceWriter(
+                writer: WorkspacePersistenceReplaceThenThrowWriter(outcome: .candidate)
+            )
+        )
+        _ = try await repository.load()
+
+        #expect(try await repository.save(candidate) == WorkspaceSaveReceipt(
+            workspaceRevision: candidate.revision,
+            persistedDraft: nil
+        ))
+        #expect(try Data(contentsOf: main) == candidateData)
+        #expect(try await repository.currentDocumentData() == candidateData)
+    }
+
+    @Test func writerThatReplacesThenThrowsStillCommitsAnAbsentSeed() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let state = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        let candidateData = try WorkspaceDocumentCodec.encode(state)
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { state },
+            mainFileWriter: FoundationMainFileCompareAndReplaceWriter(
+                writer: WorkspacePersistenceReplaceThenThrowWriter(outcome: .candidate)
+            )
+        )
+        _ = try await repository.load()
+
+        #expect(try await repository.save(state) == WorkspaceSaveReceipt(
+            workspaceRevision: state.revision,
+            persistedDraft: nil
+        ))
+        #expect(try Data(contentsOf: main) == candidateData)
+        #expect(try await repository.currentDocumentData() == candidateData)
+    }
+
+    @Test func writerThrowWithoutReplacementRemainsADefiniteSaveFailure() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var candidate = initial
+        candidate.revision = 2
+        candidate.notes[candidate.notes.keys.first!]!.revision = 2
+        let initialData = try WorkspaceDocumentCodec.encode(initial)
+        try initialData.write(to: main)
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { initial },
+            mainFileWriter: FoundationMainFileCompareAndReplaceWriter(
+                writer: WorkspacePersistenceReplaceThenThrowWriter(outcome: .noReplacement)
+            )
+        )
+        _ = try await repository.load()
+
+        await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
+            _ = try await repository.save(candidate)
+        }
+        #expect(try Data(contentsOf: main) == initialData)
+        #expect(try await repository.currentDocumentData() == initialData)
+    }
+
+    @Test func writerThrowWithThirdOrUnreadableDestinationIsCommitUncertain() throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let initial = Data("initial".utf8)
+        let candidate = Data("candidate".utf8)
+        try initial.write(to: main)
+        let thirdWriter = WorkspacePersistenceReplaceThenThrowWriter(outcome: .third(Data("third".utf8)))
+        let thirdCAS = FoundationMainFileCompareAndReplaceWriter(writer: thirdWriter)
+
+        #expect(try thirdCAS.replaceIfSHA256Matches(
+            expectedSHA256: WorkspacePersistenceFixtures.sha256(initial),
+            candidate: candidate,
+            at: main
+        ) == .commitUncertain)
+
+        try initial.write(to: main)
+        let unreadableWriter = WorkspacePersistenceReplaceThenThrowWriter(outcome: .unreadable)
+        defer { unreadableWriter.restoreReadability(at: main) }
+        let unreadableCAS = FoundationMainFileCompareAndReplaceWriter(writer: unreadableWriter)
+        #expect(try unreadableCAS.replaceIfSHA256Matches(
+            expectedSHA256: WorkspacePersistenceFixtures.sha256(initial),
+            candidate: candidate,
+            at: main
+        ) == .commitUncertain)
+    }
+
     @Test func invalidVerifiedCASResultStaysPendingUntilTheOldV2BytesReconcile() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
@@ -286,6 +390,41 @@ final class WorkspacePersistencePostRenameReadbackFailureWriter: AtomicFileWriti
     func replaceAtomically(data: Data, at destination: URL) throws {
         try FoundationAtomicFileWriter().replaceAtomically(data: data, at: destination)
         try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: destination.path)
+    }
+
+    func restoreReadability(at destination: URL) {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+    }
+}
+
+final class WorkspacePersistenceReplaceThenThrowWriter: AtomicFileWriting, @unchecked Sendable {
+    enum Outcome: Sendable {
+        case candidate
+        case noReplacement
+        case third(Data)
+        case unreadable
+    }
+
+    private let outcome: Outcome
+
+    init(outcome: Outcome) {
+        self.outcome = outcome
+    }
+
+    func replaceAtomically(data: Data, at destination: URL) throws {
+        switch outcome {
+        case .noReplacement:
+            throw WorkspacePersistenceInjectedFailure.requested
+        case .candidate:
+            try FoundationAtomicFileWriter().replaceAtomically(data: data, at: destination)
+        case let .third(third):
+            try FoundationAtomicFileWriter().replaceAtomically(data: data, at: destination)
+            try third.write(to: destination)
+        case .unreadable:
+            try FoundationAtomicFileWriter().replaceAtomically(data: data, at: destination)
+            try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: destination.path)
+        }
+        throw WorkspacePersistenceInjectedFailure.requested
     }
 
     func restoreReadability(at destination: URL) {

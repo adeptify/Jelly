@@ -167,6 +167,108 @@ struct WorkspaceBackupServiceTests {
         #expect(try Data(contentsOf: prepared.rollbackURL) != beforeMain)
     }
 
+    @Test func rollbackReadbackFailureConsumesTheCapabilityAndFreshPrepareCanContinue() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("main.json")
+        let source = directory.file("restore.json")
+        let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = current
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        try WorkspaceDocumentCodec.encode(current).write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { current },
+            rollbackWriter: WorkspacePersistenceCorruptingOnceExclusiveWriter()
+        )
+        _ = try await repository.load()
+        let prepared = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+
+        await #expect(throws: WorkspacePersistenceError.rollbackWriteFailed) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+        await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+
+        let fresh = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+        #expect(fresh.rollbackURL != prepared.rollbackURL)
+        _ = try await repository.commitRestore(fresh, state: restored)
+        #expect(try await repository.load().state == restored)
+    }
+
+    @Test func migrationSnapshotFailureAfterRollbackConsumesTheCapabilityAndFreshPrepareCanContinue() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("main.json")
+        let source = directory.file("restore.json")
+        let legacy = try WorkspacePersistenceFixtures.v2CalendarDocument()
+        let restored = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        try legacy.write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let sidecarWriter = WorkspacePersistenceFailOnceWriter()
+        sidecarWriter.failNextWrite = true
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { .empty(calendar: WorkspacePersistenceFixtures.calendarState) },
+            snapshotDirectoryURL: directory.file("snapshots"),
+            recoveryManifestURL: directory.file("manifest.json"),
+            atomicWriter: sidecarWriter
+        )
+        _ = try await repository.load()
+        let prepared = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+
+        await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+        #expect(try Data(contentsOf: main) == legacy)
+        await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+
+        let fresh = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+        #expect(fresh.rollbackURL != prepared.rollbackURL)
+        _ = try await repository.commitRestore(fresh, state: restored)
+        #expect(try await repository.load().state == restored)
+    }
+
+    @Test func manifestFailureAfterRollbackConsumesTheCapabilityAndFreshPrepareCanContinue() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("main.json")
+        let source = directory.file("restore.json")
+        let manifest = directory.file("manifest.json")
+        let legacy = try WorkspacePersistenceFixtures.v2CalendarDocument()
+        let restored = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        try legacy.write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let sidecarWriter = WorkspacePersistenceFailOnceDestinationWriter { $0 == manifest }
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { .empty(calendar: WorkspacePersistenceFixtures.calendarState) },
+            snapshotDirectoryURL: directory.file("snapshots"),
+            recoveryManifestURL: manifest,
+            atomicWriter: sidecarWriter
+        )
+        _ = try await repository.load()
+        let prepared = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+
+        await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+        #expect(try Data(contentsOf: main) == legacy)
+        await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+
+        let fresh = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+        #expect(fresh.rollbackURL != prepared.rollbackURL)
+        _ = try await repository.commitRestore(fresh, state: restored)
+        #expect(try await repository.load().state == restored)
+    }
+
     @Test func forgedPreparedRestorePathCannotOverwriteItsVictim() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
@@ -238,6 +340,75 @@ struct WorkspaceBackupServiceTests {
         }
     }
 
+    @Test func writerThatReplacesThenThrowsStillCommitsRestore() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("main.json")
+        let source = directory.file("restore.json")
+        let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = current
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        restored.notes[restored.notes.keys.first!]!.title = "restored despite writer throw"
+        let restoredData = try WorkspaceDocumentCodec.encode(restored)
+        try WorkspaceDocumentCodec.encode(current).write(to: main)
+        try restoredData.write(to: source)
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { current },
+            mainFileWriter: FoundationMainFileCompareAndReplaceWriter(
+                writer: WorkspacePersistenceReplaceThenThrowWriter(outcome: .candidate)
+            )
+        )
+        _ = try await repository.load()
+        let prepared = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+
+        #expect(try await repository.commitRestore(prepared, state: restored) == WorkspaceSaveReceipt(
+            workspaceRevision: restored.revision,
+            persistedDraft: nil
+        ))
+        #expect(try Data(contentsOf: main) == restoredData)
+        await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+    }
+
+    @Test func definiteCASFailureAfterRollbackConsumesTheCapabilityAndFreshPrepareCanContinue() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("main.json")
+        let source = directory.file("restore.json")
+        let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = current
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        let initialData = try WorkspaceDocumentCodec.encode(current)
+        try initialData.write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { current },
+            mainFileWriter: FoundationMainFileCompareAndReplaceWriter(
+                writer: WorkspacePersistenceNoWriteThenThrowOnceWriter()
+            )
+        )
+        _ = try await repository.load()
+        let prepared = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+
+        await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+        #expect(try Data(contentsOf: main) == initialData)
+        await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+
+        let fresh = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+        #expect(fresh.rollbackURL != prepared.rollbackURL)
+        _ = try await repository.commitRestore(fresh, state: restored)
+        #expect(try await repository.load().state == restored)
+    }
+
     @Test func successfulRestoreCapabilityIsSingleUse() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
@@ -287,6 +458,15 @@ struct WorkspaceBackupServiceTests {
         }
         defer { readbackFailure.restoreReadability(at: main) }
         await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.load()
+        }
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.save(restored)
+        }
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+        }
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
             _ = try await repository.commitRestore(prepared, state: restored)
         }
 
@@ -294,6 +474,7 @@ struct WorkspaceBackupServiceTests {
         #expect(try await repository.reconcilePendingCommit() == .committed(
             WorkspaceSaveReceipt(workspaceRevision: restored.revision, persistedDraft: nil)
         ))
+        #expect(try await repository.load().state == restored)
         await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
             _ = try await repository.commitRestore(prepared, state: restored)
         }
@@ -330,11 +511,90 @@ struct WorkspaceBackupServiceTests {
             _ = try await repository.commitRestore(prepared, state: restored)
         }
     }
+
+    @Test func thirdValueReconciliationInvalidatesTheOldRestoreCapability() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("main.json")
+        let source = directory.file("restore.json")
+        let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = initial
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        try WorkspaceDocumentCodec.encode(initial).write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let readbackFailure = WorkspacePersistencePostRenameReadbackFailureWriter()
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { initial },
+            mainFileWriter: FoundationMainFileCompareAndReplaceWriter(writer: readbackFailure)
+        )
+        _ = try await repository.load()
+        let prepared = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+        readbackFailure.restoreReadability(at: main)
+        try Data("third main bytes".utf8).write(to: main)
+        #expect(try await repository.reconcilePendingCommit() == .sourceChanged)
+        await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+    }
 }
 
 struct WorkspacePersistenceCorruptingExclusiveWriter: ExclusiveFileWriting {
     func createExclusively(data: Data, at destination: URL) throws {
         try FoundationExclusiveFileWriter().createExclusively(data: data, at: destination)
         try Data("corrupted rollback".utf8).write(to: destination)
+    }
+}
+
+final class WorkspacePersistenceCorruptingOnceExclusiveWriter: ExclusiveFileWriting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var shouldCorrupt = true
+
+    func createExclusively(data: Data, at destination: URL) throws {
+        try FoundationExclusiveFileWriter().createExclusively(data: data, at: destination)
+        let corrupt = lock.withLock {
+            defer { shouldCorrupt = false }
+            return shouldCorrupt
+        }
+        if corrupt { try Data("corrupted rollback".utf8).write(to: destination) }
+    }
+}
+
+final class WorkspacePersistenceFailOnceDestinationWriter: AtomicFileWriting, @unchecked Sendable {
+    private let predicate: @Sendable (URL) -> Bool
+    private let lock = NSLock()
+    private var didFail = false
+
+    init(predicate: @escaping @Sendable (URL) -> Bool) {
+        self.predicate = predicate
+    }
+
+    func replaceAtomically(data: Data, at destination: URL) throws {
+        let shouldFail = lock.withLock {
+            guard didFail == false, predicate(destination) else { return false }
+            didFail = true
+            return true
+        }
+        if shouldFail { throw WorkspacePersistenceInjectedFailure.requested }
+        try FoundationAtomicFileWriter().replaceAtomically(data: data, at: destination)
+    }
+}
+
+final class WorkspacePersistenceNoWriteThenThrowOnceWriter: AtomicFileWriting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var shouldThrow = true
+
+    func replaceAtomically(data: Data, at destination: URL) throws {
+        let throwsNow = lock.withLock {
+            defer { shouldThrow = false }
+            return shouldThrow
+        }
+        if throwsNow { throw WorkspacePersistenceInjectedFailure.requested }
+        try FoundationAtomicFileWriter().replaceAtomically(data: data, at: destination)
     }
 }
