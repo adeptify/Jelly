@@ -476,9 +476,9 @@ Migration rejects outcome/resulting-graph mismatch and destination baseline/over
 
 Task 3 does not implement undo APIs. It proves only-this skip preserves its relation override, resolver makes it non-clickable and the input relation graph is not destroyed. `WorkspaceReducer.restoreContent` coverage belongs to Task 4; persistent undo/redo and monotonic revisions belong to Task 6.
 
-- [ ] Write RED tests for only-this move/resize retaining a stable key and nil outcome, only-this primary/reference override, first-actual-instance split, split with retained history, future delete with and without retained history, first-actual-instance `.thisAndFuture + .delete` as entire-series delete, positive/negative/cross-month/DST civil dayDelta remap, skipped occurrence preserved but not clickable, modified occurrence, completion remap, and a relation override that has no matching recurrence exception/completion. Include no-occurrence bounded rules, exact injected ID, same/existing ID collisions, modified displayed dates crossing the boundary without changing their original-date partition, wrapper equality, outcome/resulting-graph mismatch, destination baseline collision and destination override collision; every migration error leaves the input relation graph byte-for-byte/Equatable unchanged.
+- [x] Write RED tests for only-this move/resize retaining a stable key and nil outcome, only-this primary/reference override, first-actual-instance split, split with retained history, future delete with and without retained history, first-actual-instance `.thisAndFuture + .delete` as entire-series delete, positive/negative/cross-month/DST civil dayDelta remap, skipped occurrence preserved but not clickable, modified occurrence, completion remap, and a relation override that has no matching recurrence exception/completion. Include no-occurrence bounded rules, exact injected ID, same/existing ID collisions, modified displayed dates crossing the boundary without changing their original-date partition, wrapper equality, outcome/resulting-graph mismatch, destination baseline collision and destination override collision; every migration error leaves the input relation graph byte-for-byte/Equatable unchanged.
 
-- [ ] Write resolver/validator RED for item/series/occurrence inherit-replace-clear; natural, modified, skipped, completion-only and invalid nonweekday keys; raw added/removed and explicit-added-primary overlap; `.replace` promoting an inherited reference; item/series/modified-occurrence legacy Markdown; inherited series primary with occurrence notes; skipped primary retention; reference-only coexistence; explicit empty baseline copied versus absent baseline not synthesized; and stale old-future keys rejected after split.
+- [x] Write resolver/validator RED for item/series/occurrence inherit-replace-clear; natural, modified, skipped, completion-only and invalid nonweekday keys; raw added/removed and explicit-added-primary overlap; `.replace` promoting an inherited reference; item/series/modified-occurrence legacy Markdown; inherited series primary with occurrence notes; skipped primary retention; reference-only coexistence; explicit empty baseline copied versus absent baseline not synthesized; and stale old-future keys rejected after split.
 
 ~~~swift
 @Test func relationOverrideMigratesWithoutRecurrenceState() throws {
@@ -492,7 +492,7 @@ Task 3 does not implement undo APIs. It proves only-this skip preserves its rela
 }
 ~~~
 
-- [ ] Run RED.
+- [x] Run RED.
 
 ~~~zsh
 ./Scripts/test.sh --filter CalendarDomainTests.SeriesMutationEngineTests
@@ -501,7 +501,7 @@ Task 3 does not implement undo APIs. It proves only-this skip preserves its rela
 ./Scripts/test.sh --filter WorkspaceDomainTests.SeriesRelationMigrationTests
 ~~~
 
-- [ ] Add one outcome API and keep old APIs only as wrappers around it.
+- [x] Add one outcome API and keep old APIs only as wrappers around it.
 
 ~~~swift
 public struct SeriesMutationResult: Equatable, Sendable {
@@ -515,7 +515,7 @@ public struct CalendarReduction: Equatable, Sendable {
 }
 ~~~
 
-- [ ] Build SeriesFutureMutationOutcome in the same code path that closes or removes the historical series. The close/remove helper returns `historicalOwnerRetained`; the outcome uses the confirmed exact cases below and `SeriesMutationResult.graph` is passed explicitly to relationship migration.
+- [x] Build SeriesFutureMutationOutcome in the same code path that closes or removes the historical series. The close/remove helper returns `historicalOwnerRetained`; the outcome uses the confirmed exact cases below and `SeriesMutationResult.graph` is passed explicitly to relationship migration.
 
 ~~~swift
 public enum SeriesFutureMutationOutcome: Equatable, Sendable {
@@ -534,7 +534,7 @@ public enum SeriesFutureMutationOutcome: Equatable, Sendable {
 }
 ~~~
 
-- [ ] Implement CalendarNoteRelationGraph with owner baselines and occurrence overrides. References are sets, and primary is at most one.
+- [x] Implement CalendarNoteRelationGraph with owner baselines and occurrence overrides. References are sets, and primary is at most one.
 
 ~~~swift
 public struct CalendarNoteSet: Codable, Equatable, Sendable {
@@ -561,11 +561,11 @@ public struct CalendarNoteRelationGraph: Codable, Equatable, Sendable {
 }
 ~~~
 
-- [ ] Implement `CalendarNoteRelationResolver`: item reads item baseline; occurrence validates logical identity, inherits series baseline, applies primary inherit/replace/clear and reference subtraction/addition, removes the effective primary from references, and reports skipped clickability.
-- [ ] Extend WorkspaceValidator to reject baselines/overrides for deleted owners, invalid relation-only keys, duplicate logical instances under old/new keys, raw added/removed or explicit-added-primary overlap, and effective primary with nonempty legacy Markdown under the scope rules above. Skipped overrides retain endpoint/raw validation but skip effective-primary/legacy conflict.
-- [ ] Implement `SeriesRelationMigration` using outcome plus explicit resulting graph. Split visits every relation override at/after boundary, maps originalDate by civil dayDelta, retains only logical instances in the new series and copies an existing baseline entry—including an explicitly empty `CalendarNoteSet`—before old-owner cleanup; it does not synthesize a baseline when the old key is absent. Delete future removes future overrides. Collision/mismatch errors are atomic and old baseline retention follows `historicalOwnerRetained`.
-- [ ] Preserve only-this overrides on the stable OccurrenceKey; keep skipped-instance overrides for future undo while excluding them from clickable projections; first-occurrence delete removes its baseline and all overrides without deleting any Note. Task 4, not this task, migrates first and applies a requested relation exactly once to the selected new target.
-- [ ] Run GREEN plus all recurrence tests.
+- [x] Implement `CalendarNoteRelationResolver`: item reads item baseline; occurrence validates logical identity, inherits series baseline, applies primary inherit/replace/clear and reference subtraction/addition, removes the effective primary from references, and reports skipped clickability.
+- [x] Extend WorkspaceValidator to reject baselines/overrides for deleted owners, invalid relation-only keys, duplicate logical instances under old/new keys, raw added/removed or explicit-added-primary overlap, and effective primary with nonempty legacy Markdown under the scope rules above. Skipped overrides retain endpoint/raw validation but skip effective-primary/legacy conflict.
+- [x] Implement `SeriesRelationMigration` using outcome plus explicit resulting graph. Split visits every relation override at/after boundary, maps originalDate by civil dayDelta, retains only logical instances in the new series and copies an existing baseline entry—including an explicitly empty `CalendarNoteSet`—before old-owner cleanup; it does not synthesize a baseline when the old key is absent. Delete future removes future overrides. Collision/mismatch errors are atomic and old baseline retention follows `historicalOwnerRetained`.
+- [x] Preserve only-this overrides on the stable OccurrenceKey; keep skipped-instance overrides for future undo while excluding them from clickable projections; first-occurrence delete removes its baseline and all overrides without deleting any Note. Task 4, not this task, migrates first and applies a requested relation exactly once to the selected new target.
+- [x] Run GREEN plus all recurrence tests.
 
 ~~~zsh
 ./Scripts/test.sh --filter CalendarDomainTests.SeriesMutationEngineTests
@@ -577,8 +577,8 @@ public struct CalendarNoteRelationGraph: Codable, Equatable, Sendable {
 git diff --check
 ~~~
 
-- [ ] Request fresh Sol xhigh review of engine → CalendarReducer → Workspace migration contract; fix every Critical/Important finding and rerun scoped tests.
-- [ ] Commit.
+- [x] Request fresh Sol xhigh review of engine → CalendarReducer → Workspace migration contract; fix every Critical/Important finding and rerun scoped tests.
+- [x] Commit.
 
 ~~~zsh
 git add Sources/CalendarDomain Sources/WorkspaceDomain Tests/CalendarDomainTests Tests/WorkspaceDomainTests
