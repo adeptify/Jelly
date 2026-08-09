@@ -88,8 +88,13 @@ public struct FoundationMainFileCompareAndReplaceWriter: MainFileCompareAndRepla
 
     public func createIfAbsent(candidate: Data, at destination: URL) throws -> MainFileCompareAndReplaceResult {
         try withSharedJellyLock(for: destination) {
-            guard !FileManager.default.fileExists(atPath: destination.path) else {
+            switch noFollowFileProbe(at: destination) {
+            case .confirmedAbsent:
+                break
+            case .bytes:
                 return .sourceChanged
+            case .unreadableUnknown:
+                return .commitUncertain
             }
             do {
                 try writer.replaceAtomically(data: candidate, at: destination)
@@ -111,11 +116,16 @@ public struct FoundationMainFileCompareAndReplaceWriter: MainFileCompareAndRepla
         at destination: URL
     ) throws -> MainFileCompareAndReplaceResult {
         try withSharedJellyLock(for: destination) {
-            guard let previous = try? dataReadingNoFollow(at: destination),
-                  persistenceSHA256(previous) == expectedSHA256
-            else {
+            let previous: Data
+            switch noFollowFileProbe(at: destination) {
+            case let .bytes(data):
+                previous = data
+            case .confirmedAbsent:
                 return .sourceChanged
+            case .unreadableUnknown:
+                return .commitUncertain
             }
+            guard persistenceSHA256(previous) == expectedSHA256 else { return .sourceChanged }
             do {
                 try writer.replaceAtomically(data: candidate, at: destination)
             } catch {
@@ -136,18 +146,17 @@ public struct FoundationMainFileCompareAndReplaceWriter: MainFileCompareAndRepla
         at destination: URL,
         originalError: Error
     ) throws -> MainFileCompareAndReplaceResult {
-        let current: Data?
-        if FileManager.default.fileExists(atPath: destination.path) {
-            guard let readback = try? dataReadingNoFollow(at: destination) else {
-                return .commitUncertain
-            }
-            current = readback
-        } else {
-            current = nil
+        switch noFollowFileProbe(at: destination) {
+        case let .bytes(current):
+            if current == candidate { return .replaced(verifiedRawData: candidate) }
+            if current == previous { throw originalError }
+            return .commitUncertain
+        case .confirmedAbsent:
+            if previous == nil { throw originalError }
+            return .commitUncertain
+        case .unreadableUnknown:
+            return .commitUncertain
         }
-        if current == candidate { return .replaced(verifiedRawData: candidate) }
-        if current == previous { throw originalError }
-        return .commitUncertain
     }
 
     private func verifiedReplacement(candidate: Data, at destination: URL) -> MainFileCompareAndReplaceResult {
@@ -175,6 +184,26 @@ func dataReadingNoFollow(at url: URL) throws -> Data {
     defer { _ = close(descriptor) }
     let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
     return try handle.readToEnd() ?? Data()
+}
+
+enum NoFollowFileProbe: Equatable, Sendable {
+    case bytes(Data)
+    case confirmedAbsent
+    case unreadableUnknown
+}
+
+func noFollowFileProbe(at url: URL) -> NoFollowFileProbe {
+    let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW)
+    guard descriptor >= 0 else {
+        return errno == ENOENT ? .confirmedAbsent : .unreadableUnknown
+    }
+    defer { _ = close(descriptor) }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+    do {
+        return .bytes(try handle.readToEnd() ?? Data())
+    } catch {
+        return .unreadableUnknown
+    }
 }
 
 func withJellyAdvisoryLock<Result>(

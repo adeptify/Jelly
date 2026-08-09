@@ -182,6 +182,82 @@ struct WorkspaceRepositoryFailureTests {
         #expect(try await repository.currentDocumentData() == candidateData)
     }
 
+    @Test func absentSeedWriterThrowWithUnsearchableParentRetainsPendingUntilCandidateReconciliation() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let state = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        let candidate = try WorkspaceDocumentCodec.encode(state)
+        let writer = WorkspacePersistenceReplaceThenThrowWriter(outcome: .unsearchableParent)
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { state },
+            mainFileWriter: FoundationMainFileCompareAndReplaceWriter(writer: writer)
+        )
+        _ = try await repository.load()
+
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.save(state)
+        }
+        defer { writer.restoreParentSearchability(at: main) }
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.currentDocumentData()
+        }
+
+        writer.restoreParentSearchability(at: main)
+        #expect(try await repository.reconcilePendingCommit() == .committed(
+            WorkspaceSaveReceipt(workspaceRevision: state.revision, persistedDraft: nil)
+        ))
+        #expect(try Data(contentsOf: main) == candidate)
+    }
+
+    @Test func unsearchableParentDuringAbsentReconciliationIsNeverReportedAsNotCommitted() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let state = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        let candidate = try WorkspaceDocumentCodec.encode(state)
+        let writer = WorkspacePersistenceReplaceThenThrowWriter(outcome: .unsearchableParent)
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { state },
+            mainFileWriter: FoundationMainFileCompareAndReplaceWriter(writer: writer)
+        )
+        _ = try await repository.load()
+
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.save(state)
+        }
+        defer { writer.restoreParentSearchability(at: main) }
+        #expect(try await repository.reconcilePendingCommit() == .sourceChanged)
+
+        writer.restoreParentSearchability(at: main)
+        #expect(try Data(contentsOf: main) == candidate)
+    }
+
+    @Test func confirmedAbsentMainAfterUncertainAbsentSeedReconcilesNotCommitted() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let state = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        let writer = WorkspacePersistenceReplaceThenThrowWriter(outcome: .unsearchableParent)
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { state },
+            mainFileWriter: FoundationMainFileCompareAndReplaceWriter(writer: writer)
+        )
+        _ = try await repository.load()
+
+        await #expect(throws: WorkspacePersistenceError.commitUncertain) {
+            _ = try await repository.save(state)
+        }
+        defer { writer.restoreParentSearchability(at: main) }
+        writer.restoreParentSearchability(at: main)
+        try FileManager.default.removeItem(at: main)
+
+        #expect(try await repository.reconcilePendingCommit() == .notCommitted)
+    }
+
     @Test func writerThrowWithoutReplacementRemainsADefiniteSaveFailure() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
@@ -403,6 +479,7 @@ final class WorkspacePersistenceReplaceThenThrowWriter: AtomicFileWriting, @unch
         case noReplacement
         case third(Data)
         case unreadable
+        case unsearchableParent
     }
 
     private let outcome: Outcome
@@ -423,12 +500,25 @@ final class WorkspacePersistenceReplaceThenThrowWriter: AtomicFileWriting, @unch
         case .unreadable:
             try FoundationAtomicFileWriter().replaceAtomically(data: data, at: destination)
             try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: destination.path)
+        case .unsearchableParent:
+            try FoundationAtomicFileWriter().replaceAtomically(data: data, at: destination)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0],
+                ofItemAtPath: destination.deletingLastPathComponent().path
+            )
         }
         throw WorkspacePersistenceInjectedFailure.requested
     }
 
     func restoreReadability(at destination: URL) {
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+    }
+
+    func restoreParentSearchability(at destination: URL) {
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: destination.deletingLastPathComponent().path
+        )
     }
 }
 

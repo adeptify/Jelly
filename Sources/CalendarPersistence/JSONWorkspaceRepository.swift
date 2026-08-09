@@ -53,7 +53,9 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         case let .bytes(rawData, _):
             return try WorkspaceDocumentCodec.decode(rawData)
         case .absent:
-            guard FileManager.default.fileExists(atPath: documentURL.path) else {
+            let rawData: Data
+            switch noFollowFileProbe(at: documentURL) {
+            case .confirmedAbsent:
                 let state = seed()
                 do {
                     try WorkspaceValidator.validate(state)
@@ -65,11 +67,9 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
                     provenance: .init(sourceSchema: 0, sourceBytesSHA256: "", sourceByteCount: 0),
                     consistencyIssues: []
                 )
-            }
-            let rawData: Data
-            do {
-                rawData = try Data(contentsOf: documentURL)
-            } catch {
+            case let .bytes(data):
+                rawData = data
+            case .unreadableUnknown:
                 throw WorkspacePersistenceError.invalidDocument
             }
             let result = try WorkspaceDocumentCodec.decode(rawData)
@@ -275,18 +275,19 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
 
     public func reconcilePendingCommit() throws -> WorkspaceCommitReconciliation {
         guard let pending = pendingCommit else { return .notCommitted }
-        return try withJellyAdvisoryLock(for: documentURL) {
-            let current: Data?
-            if FileManager.default.fileExists(atPath: documentURL.path) {
-                guard let readback = try? dataReadingNoFollow(at: documentURL) else {
+        do {
+            return try withJellyAdvisoryLock(for: documentURL) {
+                let current: Data?
+                switch noFollowFileProbe(at: documentURL) {
+                case let .bytes(data):
+                    current = data
+                case .confirmedAbsent:
+                    current = nil
+                case .unreadableUnknown:
                     completePendingRestoreCapability(pending.restoreCapabilityID)
                     pendingCommit = nil
                     return .sourceChanged
                 }
-                current = readback
-            } else {
-                current = nil
-            }
             if current == pending.candidateRawData {
                 try replaceLoadedSourceWithVerifiedRawData(
                     pending.candidateRawData,
@@ -302,6 +303,11 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
                 pendingCommit = nil
                 return .notCommitted
             }
+            completePendingRestoreCapability(pending.restoreCapabilityID)
+            pendingCommit = nil
+            return .sourceChanged
+            }
+        } catch {
             completePendingRestoreCapability(pending.restoreCapabilityID)
             pendingCommit = nil
             return .sourceChanged
