@@ -103,6 +103,33 @@ struct DraftJournalCoordinatorTests {
         #expect(observedAvailability.last.map { $0 == (false, false) } == true)
     }
 
+    @Test func focusAvailabilityAlsoSendsStandardObservableObjectChanges() async {
+        let registry = EditorFocusRegistry()
+        let manager = UndoManager()
+        let target = FocusUndoTarget()
+        target.manager = manager
+        let owner = UUID()
+        var changeCount = 0
+        let observation = registry.objectWillChange.sink { _ in changeCount += 1 }
+        defer { observation.cancel() }
+
+        registry.register(manager, ownerID: owner)
+        manager.registerUndo(withTarget: target) { $0.performUndo() }
+        NotificationCenter.default.post(name: .NSUndoManagerCheckpoint, object: manager)
+        await Task.yield()
+        _ = registry.routeUndo()
+        await Task.yield()
+        _ = registry.routeRedo()
+        await Task.yield()
+        registry.clear(ownerID: owner)
+        var releasedManager: UndoManager? = UndoManager()
+        registry.register(releasedManager!, ownerID: UUID())
+        releasedManager = nil
+        #expect(registry.routeUndo() == .noFocusedOwner)
+
+        #expect(changeCount >= 6)
+    }
+
     @Test func boundReceiptIsRecordedThenClearedForItsExactIdentity() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("jelly-6b-journal-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }

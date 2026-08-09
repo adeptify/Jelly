@@ -4,7 +4,8 @@ import Foundation
 enum EditorUndoRouteResult: Equatable, Sendable { case noFocusedOwner, focusedPerformed, focusedUnavailable }
 
 @MainActor
-final class EditorFocusRegistry: ObservableObject {
+final class EditorFocusRegistry: @preconcurrency ObservableObject {
+    let objectWillChange = ObservableObjectPublisher()
     private weak var focusedManager: UndoManager?
     private var focusedOwnerID: UUID?
     private var notificationTokens: [NSObjectProtocol] = []
@@ -20,30 +21,30 @@ final class EditorFocusRegistry: ObservableObject {
         focusedManager = manager
         focusedOwnerID = ownerID
         bindNotifications(to: manager)
-        refreshAvailability()
+        refreshAvailability(forceNotification: true)
     }
     func clear(ownerID: UUID) {
         guard focusedOwnerID == ownerID else { return }
         focusedOwnerID = nil
         focusedManager = nil
         unbindNotifications()
-        refreshAvailability()
+        refreshAvailability(forceNotification: true)
     }
     func routeUndo() -> EditorUndoRouteResult { route(undo: true) }
     func routeRedo() -> EditorUndoRouteResult { route(undo: false) }
 
-    private func refreshAvailability() {
+    private func refreshAvailability(forceNotification: Bool = false) {
         guard focusedOwnerID != nil else {
-            publishAvailability((false, false))
+            publishAvailability((false, false), forceNotification: forceNotification)
             return
         }
         guard let manager = focusedManager else {
             focusedOwnerID = nil
             unbindNotifications()
-            publishAvailability((false, false))
+            publishAvailability((false, false), forceNotification: true)
             return
         }
-        publishAvailability((manager.canUndo, manager.canRedo))
+        publishAvailability((manager.canUndo, manager.canRedo), forceNotification: forceNotification)
     }
 
     private func route(undo: Bool) -> EditorUndoRouteResult {
@@ -51,15 +52,15 @@ final class EditorFocusRegistry: ObservableObject {
         guard let manager = focusedManager else {
             focusedOwnerID = nil
             unbindNotifications()
-            refreshAvailability()
+            refreshAvailability(forceNotification: true)
             return .noFocusedOwner
         }
         if undo ? manager.canUndo : manager.canRedo {
             if undo { manager.undo() } else { manager.redo() }
-            refreshAvailability()
+            refreshAvailability(forceNotification: true)
             return .focusedPerformed
         }
-        refreshAvailability()
+        refreshAvailability(forceNotification: true)
         return .focusedUnavailable
     }
 
@@ -68,7 +69,7 @@ final class EditorFocusRegistry: ObservableObject {
         let names: [Notification.Name] = [.NSUndoManagerDidUndoChange, .NSUndoManagerDidRedoChange, .NSUndoManagerCheckpoint]
         for name in names {
             notificationTokens.append(center.addObserver(forName: name, object: manager, queue: nil) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.refreshAvailability() }
+                Task { @MainActor [weak self] in self?.refreshAvailability(forceNotification: true) }
             })
         }
     }
@@ -79,9 +80,13 @@ final class EditorFocusRegistry: ObservableObject {
         notificationTokens.removeAll()
     }
 
-    private func publishAvailability(_ availability: (Bool, Bool)) {
-        guard availability != lastAvailability else { return }
+    private func publishAvailability(_ availability: (Bool, Bool), forceNotification: Bool = false) {
+        let changed = availability != lastAvailability
+        guard changed || forceNotification else { return }
+        objectWillChange.send()
         lastAvailability = availability
-        availabilitySubject.send(availability)
+        if changed || forceNotification {
+            availabilitySubject.send(availability)
+        }
     }
 }

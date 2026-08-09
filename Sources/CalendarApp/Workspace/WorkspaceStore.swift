@@ -79,6 +79,32 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         case undo(undo: Bool, reverseRecord: WorkspaceStoreUndoRecord, ledger: [NoteID: Int64])
         case externalAdoption(ledger: [NoteID: Int64])
         case externalRepair(ledger: [NoteID: Int64])
+
+        var notCommittedTerminalPhase: WorkspaceStorePhase {
+            switch self {
+            case .externalRepair:
+                .needsRelationshipRepair
+            case .externalAdoption:
+                .externalSourceChanged(.externalBytesChanged)
+            case .forward, .undo:
+                .ready
+            }
+        }
+
+        var resumesQueueAfterNotCommitted: Bool {
+            switch self {
+            case .forward, .undo:
+                true
+            case .externalAdoption, .externalRepair:
+                false
+            }
+        }
+
+        var sourceChangedTerminalPhase: WorkspaceStorePhase {
+            // A direct or reconciled source change invalidates every saved
+            // candidate, including a repair candidate held only in memory.
+            .externalSourceChanged(.externalBytesChanged)
+        }
     }
     private struct ParkedRestore {
         let transactionID: UUID
@@ -293,31 +319,47 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
             }
         case let .notCommitted(artifacts):
             guard (parkedSave?.transactionID == transactionID) || (parkedRestore?.transactionID == transactionID) else { throw WorkspaceStoreError.frozen }
-            let draftReceipt = parkedSave?.draftReceipt
-            if let parked = parkedRestore, parked.transactionID == transactionID {
-                _ = await repository.discardPreparedRestore(parked.prepared)
+            let parked = parkedSave
+            let restore = parkedRestore
+            let draftReceipt = parked?.draftReceipt
+            if let restore, restore.transactionID == transactionID {
+                _ = await repository.discardPreparedRestore(restore.prepared)
             }
-            let journalStatus = await unbindIfNeeded(draftReceipt)
+            let journalStatus: JournalResolutionStatus
+            if let parked, parked.transactionID == transactionID {
+                journalStatus = await finishNotCommittedSave(
+                    completion: parked.completion, draftReceipt: draftReceipt, artifacts: artifacts
+                )
+            } else {
+                journalStatus = await unbindIfNeeded(draftReceipt)
+            }
             parkedSave = nil
             parkedRestore = nil
-            phase = .ready
-            if case .cleanupPending = journalStatus { parkJournalCleanup(journalStatus, receipt: draftReceipt) } else { queue.resume() }
+            if restore?.transactionID == transactionID {
+                phase = .ready
+            }
+            if case .cleanupPending = journalStatus {
+                if parked == nil { parkJournalCleanup(journalStatus, receipt: draftReceipt) }
+            } else if parked?.completion.resumesQueueAfterNotCommitted ?? true {
+                queue.resume()
+            }
             return .notCommitted(transactionID: transactionID, journal: journalStatus, artifacts: artifacts)
         case let .sourceChanged(artifacts):
-            let draftReceipt = parkedSave?.draftReceipt
+            let parked = parkedSave
+            let draftReceipt = parked?.draftReceipt
             if let parked = parkedRestore, parked.transactionID == transactionID {
                 _ = await repository.discardPreparedRestore(parked.prepared)
             }
-            let journalStatus = await unbindIfNeeded(draftReceipt)
+            let journalStatus: JournalResolutionStatus
+            if let parked, parked.transactionID == transactionID {
+                journalStatus = await finishSourceChangedSave(
+                    completion: parked.completion, draftReceipt: draftReceipt, artifacts: artifacts
+                )
+            } else {
+                journalStatus = await finishSourceChangedRestore(artifacts: artifacts)
+            }
             parkedSave = nil
             parkedRestore = nil
-            let terminalPhase = WorkspaceStorePhase.externalSourceChanged(.externalBytesChanged)
-            if case .cleanupPending = journalStatus {
-                parkJournalCleanup(journalStatus, receipt: draftReceipt, terminalPhase: terminalPhase)
-            } else {
-                phase = terminalPhase
-            }
-            terminateQueuedForExternal(reason: .externalBytesChanged, artifacts: artifacts)
             return .sourceChanged(transactionID: transactionID, journal: journalStatus, artifacts: artifacts)
         case let .stillPending(artifacts):
             return .stillPending(transactionID: transactionID, artifacts: artifacts)
@@ -548,16 +590,11 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
             let journalStatus = await finishCommittedSave(candidate: candidate, completion: completion, draftReceipt: draftReceipt)
             return .committed(receipt, journal: journalStatus)
         } catch let failure as WorkspaceDirectCommitFailure {
-            let cleanup = await unbindIfNeeded(draftReceipt)
             let artifacts: WorkspacePendingCommitArtifacts
             switch failure { case let .sourceChanged(value): artifacts = value }
-            let terminalPhase = WorkspaceStorePhase.externalSourceChanged(.externalBytesChanged)
-            if case .cleanupPending = cleanup {
-                parkJournalCleanup(cleanup, receipt: draftReceipt, terminalPhase: terminalPhase)
-            } else {
-                phase = terminalPhase
-            }
-            terminateQueuedForExternal(reason: .externalBytesChanged, artifacts: artifacts)
+            let cleanup = await finishSourceChangedSave(
+                completion: completion, draftReceipt: draftReceipt, artifacts: artifacts
+            )
             return .externalSourceChanged(
                 transactionID: transactionID, reason: .externalBytesChanged, journal: cleanup, artifacts: artifacts
             )
@@ -566,12 +603,10 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
                 transactionID: transactionID, candidate: candidate, draftReceipt: draftReceipt, completion: completion
             )
         } catch {
-            let cleanup = await unbindIfNeeded(draftReceipt)
-            if case .cleanupPending = cleanup {
-                parkJournalCleanup(cleanup, receipt: draftReceipt)
-                return .notCommitted(transactionID: transactionID, journal: cleanup, artifacts: .init())
-            }
-            throw error
+            let journalStatus = await finishNotCommittedSave(
+                completion: completion, draftReceipt: draftReceipt, artifacts: .init()
+            )
+            return .notCommitted(transactionID: transactionID, journal: journalStatus, artifacts: .init())
         }
     }
 
@@ -603,6 +638,70 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         return journalStatus
     }
 
+    /// A definite failure cannot leave callers guessing.  External adoption
+    /// and repair have deliberately different terminal ownership: repair
+    /// keeps its inspected candidate for another repair attempt, while an
+    /// adoption requires the source to be read again before any ordinary
+    /// command may proceed.
+    private func finishNotCommittedSave(
+        completion: SaveCompletion,
+        draftReceipt: PersistedDraftReceipt?,
+        artifacts: WorkspacePendingCommitArtifacts
+    ) async -> JournalResolutionStatus {
+        let journalStatus = await unbindIfNeeded(draftReceipt)
+        if case .cleanupPending = journalStatus {
+            parkJournalCleanup(
+                journalStatus, receipt: draftReceipt, terminalPhase: completion.notCommittedTerminalPhase
+            )
+            return journalStatus
+        }
+        applyNotCommittedTerminal(completion: completion, artifacts: artifacts)
+        return .clean
+    }
+
+    private func applyNotCommittedTerminal(
+        completion: SaveCompletion,
+        artifacts: WorkspacePendingCommitArtifacts
+    ) {
+        switch completion {
+        case .externalRepair:
+            phase = .needsRelationshipRepair
+            queue.terminateQueued { transactionID in
+                .notCommitted(transactionID: transactionID, journal: .clean, artifacts: artifacts)
+            }
+        case .externalAdoption:
+            phase = .externalSourceChanged(.externalBytesChanged)
+            terminateQueuedForExternal(reason: .externalBytesChanged, artifacts: artifacts)
+        case .forward, .undo:
+            phase = .ready
+        }
+    }
+
+    private func finishSourceChangedSave(
+        completion: SaveCompletion,
+        draftReceipt: PersistedDraftReceipt?,
+        artifacts: WorkspacePendingCommitArtifacts
+    ) async -> JournalResolutionStatus {
+        let journalStatus = await unbindIfNeeded(draftReceipt)
+        let terminalPhase = completion.sourceChangedTerminalPhase
+        if case .cleanupPending = journalStatus {
+            parkJournalCleanup(journalStatus, receipt: draftReceipt, terminalPhase: terminalPhase)
+        } else {
+            phase = terminalPhase
+        }
+        terminateQueuedForExternal(reason: .externalBytesChanged, artifacts: artifacts)
+        return journalStatus
+    }
+
+    private func finishSourceChangedRestore(
+        artifacts: WorkspacePendingCommitArtifacts
+    ) async -> JournalResolutionStatus {
+        let terminalPhase = WorkspaceStorePhase.externalSourceChanged(.externalBytesChanged)
+        phase = terminalPhase
+        terminateQueuedForExternal(reason: .externalBytesChanged, artifacts: artifacts)
+        return .clean
+    }
+
     private func reconcileImmediately(
         transactionID: UUID,
         candidate: WorkspaceState,
@@ -618,20 +717,14 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         case .committed(.restore):
             throw WorkspaceStoreError.frozen
         case let .notCommitted(artifacts):
-            let journalStatus = await unbindIfNeeded(draftReceipt)
-            if case .cleanupPending = journalStatus {
-                parkJournalCleanup(journalStatus, receipt: draftReceipt)
-            }
+            let journalStatus = await finishNotCommittedSave(
+                completion: completion, draftReceipt: draftReceipt, artifacts: artifacts
+            )
             return .notCommitted(transactionID: transactionID, journal: journalStatus, artifacts: artifacts)
         case let .sourceChanged(artifacts):
-            let cleanup = await unbindIfNeeded(draftReceipt)
-            let terminalPhase = WorkspaceStorePhase.externalSourceChanged(.externalBytesChanged)
-            if case .cleanupPending = cleanup {
-                parkJournalCleanup(cleanup, receipt: draftReceipt, terminalPhase: terminalPhase)
-            } else {
-                phase = terminalPhase
-            }
-            terminateQueuedForExternal(reason: .externalBytesChanged, artifacts: artifacts)
+            let cleanup = await finishSourceChangedSave(
+                completion: completion, draftReceipt: draftReceipt, artifacts: artifacts
+            )
             return .externalSourceChanged(transactionID: transactionID, reason: .externalBytesChanged, journal: cleanup, artifacts: artifacts)
         case let .stillPending(artifacts):
             parkedSave = .init(

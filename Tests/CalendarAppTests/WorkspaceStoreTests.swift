@@ -477,16 +477,21 @@ struct WorkspaceStoreTests {
         #expect(await repository.saveCount == 0)
     }
 
-    @Test func failedSaveDoesNotPublishRevisionOrUndo() async throws {
+    @Test func definiteSaveFailureReturnsTypedNotCommittedWithoutPublishingRevisionOrUndo() async throws {
         let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
         let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "unsaved")
         let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
         await repository.failNextSave()
         let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
         await store.load()
-        await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
-            _ = try await store.sendCalendar(.createItem(item), undoLabel: "create")
+        let outcome = try await store.sendCalendar(.createItem(item), undoLabel: "create")
+        guard case let .notCommitted(transactionID, journal, artifacts) = outcome else {
+            Issue.record("A definite repository failure must not escape as an ambiguous caller throw")
+            return
         }
+        #expect(transactionID.uuidString.isEmpty == false)
+        #expect(journal == .clean)
+        #expect(artifacts == .init())
         #expect(store.state.revision == 0)
         #expect(store.calendarState.items[item.id] == nil)
         #expect(store.canUndo == false)
@@ -533,6 +538,36 @@ struct WorkspaceStoreTests {
         _ = try await complete.value
 
         #expect(store.calendarState.items[item.id]?.title == "renamed")
+        #expect(store.calendarState.items[item.id]?.completedAt == completion)
+        #expect(store.state.revision == 3)
+    }
+
+    @Test func queuedDedicatedCompletionThenStaleEditorUpdatePreservesTheCompletionAtItsOwnLatestHead() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "original")
+        var initial = WorkspaceState.empty(calendar: calendar)
+        initial.calendar.items[item.id] = item
+        initial.revision = 1
+        var staleEditorPayload = item
+        staleEditorPayload.title = "renamed after completion"
+        let completion = Date(timeIntervalSince1970: 101)
+        let repository = WorkspaceStoreTestRepository(initial: initial)
+        await repository.suspendNextSave()
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+
+        let complete = Task { @MainActor in
+            try await store.sendCalendar(.setTaskCompleted(item.id, completion), undoLabel: "complete")
+        }
+        await repository.waitForSaveStart()
+        let update = Task { @MainActor in
+            try await store.sendCalendar(.updateItem(staleEditorPayload), undoLabel: "rename")
+        }
+        await repository.resumeSave()
+        _ = try await complete.value
+        _ = try await update.value
+
+        #expect(store.calendarState.items[item.id]?.title == "renamed after completion")
         #expect(store.calendarState.items[item.id]?.completedAt == completion)
         #expect(store.state.revision == 3)
     }
@@ -711,7 +746,7 @@ struct WorkspaceStoreTests {
         }
     }
 
-    @Test func failedNewTransactionLeavesRedoStackAndPublishedStateUntouched() async throws {
+    @Test func definiteNewSaveFailureReturnsTypedOutcomeAndLeavesRedoStackAndPublishedStateUntouched() async throws {
         let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
         let original = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "original")
         let replacement = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "replacement")
@@ -723,9 +758,14 @@ struct WorkspaceStoreTests {
         #expect(store.canRedo)
         await repository.failNextSave()
 
-        await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
-            _ = try await store.sendCalendar(.createItem(replacement), undoLabel: "failed replacement")
+        let outcome = try await store.sendCalendar(.createItem(replacement), undoLabel: "failed replacement")
+        guard case let .notCommitted(transactionID, journal, artifacts) = outcome else {
+            Issue.record("A definite new-save failure must have a terminal typed outcome")
+            return
         }
+        #expect(transactionID.uuidString.isEmpty == false)
+        #expect(journal == .clean)
+        #expect(artifacts == .init())
 
         #expect(store.calendarState.items[replacement.id] == nil)
         #expect(store.canRedo)
@@ -734,7 +774,7 @@ struct WorkspaceStoreTests {
         #expect(store.calendarState.items[replacement.id] == nil)
     }
 
-    @Test func failedUndoPersistenceLeavesPublishedStateAndBothStacksUsable() async throws {
+    @Test func definiteUndoSaveFailureReturnsTypedOutcomeAndLeavesPublishedStateAndBothStacksUsable() async throws {
         let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
         let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "undo must stay")
         let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
@@ -744,9 +784,14 @@ struct WorkspaceStoreTests {
         let published = store.state
         await repository.failNextSave()
 
-        await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
-            _ = try await store.undo()
+        let outcome = try await store.undo()
+        guard case let .notCommitted(transactionID, journal, artifacts) = outcome else {
+            Issue.record("A definite undo-save failure must have a terminal typed outcome")
+            return
         }
+        #expect(transactionID.uuidString.isEmpty == false)
+        #expect(journal == .clean)
+        #expect(artifacts == .init())
 
         #expect(store.state == published)
         #expect(store.canUndo)
@@ -1786,10 +1831,11 @@ struct WorkspaceStoreTests {
         #expect(store.phase == .ready)
     }
 
-    @Test func uncertainExternalNormalizationParksItsCandidateUntilTheExactRetryCommits() async throws {
+    @Test func uncertainExternalNormalizationParksItsCandidateUntilTheExactRetryCommitsThenDrainsItsQueuedTail() async throws {
         let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
         let initial = WorkspaceState.empty(calendar: calendar)
         let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "external pending")
+        let tail = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "queued after external")
         var external = initial
         external.revision = 1
         external.calendar.items[item.id] = item
@@ -1797,20 +1843,33 @@ struct WorkspaceStoreTests {
         await repository.setReloaded(.valid(.init(
             state: external, provenance: .init(sourceSchema: 2, sourceBytesSHA256: "normalize", sourceByteCount: 1), consistencyIssues: []
         )))
+        await repository.suspendNextSave()
         await repository.makeNextSaveUncertain()
         await repository.setReconciliation(.stillPending(.init()))
         let store = WorkspaceStore(initialState: initial, repository: repository)
         await store.load()
 
-        let outcome = try await store.reloadExternalSource()
+        let head = Task { @MainActor in try await store.reloadExternalSource() }
+        await repository.waitForSaveStart()
+        let queued = Task { @MainActor in try await store.sendCalendar(.createItem(tail), undoLabel: "ordinary tail") }
+        await repository.resumeSave()
+        let outcome = try await head.value
         let transactionID = try #require({
             if case let .transaction(.commitPending(id, _)) = outcome { id } else { nil }
         }())
         #expect(store.state == initial)
+        #expect(try await store.retryPendingCommit(transactionID) == .stillPending(transactionID: transactionID, artifacts: .init()))
+        #expect(store.state == initial)
+        #expect(await repository.saveCount == 0)
         await repository.setReconciliation(.committed(.save(.init(workspaceRevision: 1, persistedDraft: nil))))
 
         #expect(try await store.retryPendingCommit(transactionID) == .committed(.save(.init(workspaceRevision: 1, persistedDraft: nil)), journal: .clean))
+        guard case .committed = try await queued.value else {
+            Issue.record("The queued tail must only run after the external normalization head commits")
+            return
+        }
         #expect(store.state.calendar.items[item.id] != nil)
+        #expect(store.state.calendar.items[tail.id] != nil)
         #expect(store.phase == .ready)
     }
 
@@ -1887,7 +1946,7 @@ struct WorkspaceStoreTests {
         #expect(unreadableStore.state == initial)
     }
 
-    @Test func externalNormalizationSaveFailureLeavesPublishedStateAndLedgerUnadvanced() async throws {
+    @Test func externalNormalizationSaveFailureReturnsTypedOutcomeAndLeavesPublishedStateAndLedgerUnadvanced() async throws {
         let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
         let initial = WorkspaceState.empty(calendar: calendar)
         let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "external")
@@ -1900,16 +1959,21 @@ struct WorkspaceStoreTests {
         let store = WorkspaceStore(initialState: initial, repository: repository)
         await store.load()
 
-        await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
-            _ = try await store.reloadExternalSource()
+        let outcome = try await store.reloadExternalSource()
+        guard case let .transaction(.notCommitted(transactionID, journal, artifacts)) = outcome else {
+            Issue.record("A definite normalization save failure must not escape as a throw")
+            return
         }
+        #expect(transactionID.uuidString.isEmpty == false)
+        #expect(journal == .clean)
+        #expect(artifacts == .init())
 
         #expect(store.state == initial)
-        #expect(store.phase == .ready)
+        #expect(store.phase == .externalSourceChanged(.externalBytesChanged))
         #expect(await repository.saveCount == 0)
     }
 
-    @Test func externalNormalizationFailureDoesNotRaiseTheDeletedNoteLedgerBeforeALaterSameIDCreate() async throws {
+    @Test func externalNormalizationFailureDoesNotPublishOrAdvanceTheExternalNoteLedger() async throws {
         let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
         let initial = WorkspaceState.empty(calendar: calendar)
         let noteID = NoteID(UUID())
@@ -1928,15 +1992,17 @@ struct WorkspaceStoreTests {
         let store = WorkspaceStore(initialState: initial, repository: repository)
         await store.load()
 
-        await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
-            _ = try await store.reloadExternalSource()
+        let outcome = try await store.reloadExternalSource()
+        guard case let .transaction(.notCommitted(transactionID, journal, artifacts)) = outcome else {
+            Issue.record("The failed normalized external note must remain a typed terminal outcome")
+            return
         }
-        let recreated = Note.empty(id: noteID, categoryID: calendar.uncategorizedID, now: .distantPast)
-        _ = try await store.sendWorkspace(.createNote(.init(note: recreated)), undoLabel: "recreate")
-
-        #expect(store.state.notes[noteID]?.revision == 1)
-        #expect(store.state.notes[noteID]?.revision != 9)
-        #expect(await repository.saveCount == 1)
+        #expect(transactionID.uuidString.isEmpty == false)
+        #expect(journal == .clean)
+        #expect(artifacts == .init())
+        #expect(store.state.notes[noteID] == nil)
+        #expect(store.phase == .externalSourceChanged(.externalBytesChanged))
+        #expect(await repository.saveCount == 0)
     }
 
     @Test func externalRelationshipRepairHoldsTheCandidateUntilExplicitRepairIsPersisted() async throws {
@@ -1977,7 +2043,7 @@ struct WorkspaceStoreTests {
         #expect(store.phase == .ready)
     }
 
-    @Test func uncertainExternalRepairParksTheRepairCandidateUntilTheExactRetryCommits() async throws {
+    @Test func uncertainExternalRepairParksTheRepairCandidateUntilTheExactRetryCommitsThenDrainsItsQueuedTail() async throws {
         let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
         let initial = WorkspaceState.empty(calendar: calendar)
         var external = initial
@@ -1988,6 +2054,7 @@ struct WorkspaceStoreTests {
             expectedIssuesChecksum: report.issuesChecksum,
             resolutions: Dictionary(uniqueKeysWithValues: report.issues.map { ($0.id, .unlink) })
         )
+        let tail = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "after repair")
         let repository = WorkspaceStoreTestRepository(initial: initial)
         await repository.setReloaded(.valid(.init(
             state: external, provenance: .init(sourceSchema: 3, sourceBytesSHA256: "repair pending", sourceByteCount: 1), consistencyIssues: report.issues
@@ -1995,20 +2062,211 @@ struct WorkspaceStoreTests {
         let store = WorkspaceStore(initialState: initial, repository: repository)
         await store.load()
         _ = try await store.reloadExternalSource()
+        await repository.suspendNextSave()
         await repository.makeNextSaveUncertain()
         await repository.setReconciliation(.stillPending(.init()))
 
-        let pending = try await store.sendWorkspace(.repairConsistency(repair))
+        let head = Task { @MainActor in try await store.sendWorkspace(.repairConsistency(repair)) }
+        await repository.waitForSaveStart()
+        let queued = Task { @MainActor in try await store.sendCalendar(.createItem(tail), undoLabel: "ordinary tail") }
+        await repository.resumeSave()
+        let pending = try await head.value
         let transactionID = try #require({ if case let .commitPending(id, _) = pending { id } else { nil } }())
         #expect(store.state == initial)
+        #expect(try await store.retryPendingCommit(transactionID) == .stillPending(transactionID: transactionID, artifacts: .init()))
+        #expect(store.state == initial)
+        #expect(await repository.saveCount == 0)
         await repository.setReconciliation(.committed(.save(.init(workspaceRevision: 2, persistedDraft: nil))))
 
         #expect(try await store.retryPendingCommit(transactionID) == .committed(.save(.init(workspaceRevision: 2, persistedDraft: nil)), journal: .clean))
+        guard case .committed = try await queued.value else {
+            Issue.record("The ordinary tail must wait for the external repair commit")
+            return
+        }
         #expect(WorkspaceConsistencyInspector.inspect(store.state).issues.isEmpty)
+        #expect(store.state.calendar.items[tail.id] != nil)
         #expect(store.phase == .ready)
     }
 
-    @Test func failedExternalRepairKeepsTheRepairableCandidateFrozenWithoutPublishingIt() async throws {
+    @Test func notCommittedExternalRepairTerminatesItsQueuedOrdinaryTailAndRetainsTheRepairCandidate() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let initial = WorkspaceState.empty(calendar: calendar)
+        var external = initial
+        external.revision = 1
+        external.calendarNoteRelations.baselines[.item(UUID())] = .init(primaryNoteID: nil, referenceNoteIDs: [])
+        let report = WorkspaceConsistencyInspector.inspect(external)
+        let repair = WorkspaceConsistencyRepairPayload(
+            expectedIssuesChecksum: report.issuesChecksum,
+            resolutions: Dictionary(uniqueKeysWithValues: report.issues.map { ($0.id, .unlink) })
+        )
+        let tail = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "must not bypass repair")
+        let repository = WorkspaceStoreTestRepository(initial: initial)
+        await repository.setReloaded(.valid(.init(
+            state: external, provenance: .init(sourceSchema: 3, sourceBytesSHA256: "repair retry", sourceByteCount: 1), consistencyIssues: report.issues
+        )))
+        await repository.suspendNextSave()
+        await repository.makeNextSaveUncertain()
+        await repository.setReconciliation(.stillPending(.init()))
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+        _ = try await store.reloadExternalSource()
+
+        let head = Task { @MainActor in try await store.sendWorkspace(.repairConsistency(repair)) }
+        await repository.waitForSaveStart()
+        let queued = Task { @MainActor in try await store.sendCalendar(.createItem(tail), undoLabel: "ordinary tail") }
+        await repository.resumeSave()
+        let pending = try await head.value
+        let transactionID = try #require({ if case let .commitPending(id, _) = pending { id } else { nil } }())
+        #expect(try await store.retryPendingCommit(transactionID) == .stillPending(transactionID: transactionID, artifacts: .init()))
+        #expect(store.state == initial)
+        #expect(await repository.saveCount == 0)
+        await repository.setReconciliation(.notCommitted(.init()))
+
+        #expect(try await store.retryPendingCommit(transactionID) == .notCommitted(transactionID: transactionID, journal: .clean, artifacts: .init()))
+        let tailOutcome = try await queued.value
+        guard case .notCommitted = tailOutcome else {
+            Issue.record("The queued ordinary command must terminate without reducing against the retained repair candidate")
+            return
+        }
+        #expect(store.phase == .needsRelationshipRepair)
+        #expect(store.state == initial)
+        #expect(await repository.saveCount == 0)
+    }
+
+    @Test func notCommittedExternalNormalizationFreezesAndTerminatesItsQueuedOrdinaryTail() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let initial = WorkspaceState.empty(calendar: calendar)
+        let adopted = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "external candidate")
+        let tail = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "must re-reload")
+        var external = initial
+        external.revision = 1
+        external.calendar.items[adopted.id] = adopted
+        let repository = WorkspaceStoreTestRepository(initial: initial)
+        await repository.setReloaded(.valid(.init(
+            state: external, provenance: .init(sourceSchema: 2, sourceBytesSHA256: "normalization retry", sourceByteCount: 1), consistencyIssues: []
+        )))
+        await repository.suspendNextSave()
+        await repository.makeNextSaveUncertain()
+        await repository.setReconciliation(.stillPending(.init()))
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+
+        let head = Task { @MainActor in try await store.reloadExternalSource() }
+        await repository.waitForSaveStart()
+        let queued = Task { @MainActor in try await store.sendCalendar(.createItem(tail), undoLabel: "ordinary tail") }
+        await repository.resumeSave()
+        let pending = try await head.value
+        let transactionID = try #require({
+            if case let .transaction(.commitPending(id, _)) = pending { id } else { nil }
+        }())
+        #expect(try await store.retryPendingCommit(transactionID) == .stillPending(transactionID: transactionID, artifacts: .init()))
+        #expect(store.state == initial)
+        #expect(await repository.saveCount == 0)
+        await repository.setReconciliation(.notCommitted(.init()))
+
+        #expect(try await store.retryPendingCommit(transactionID) == .notCommitted(transactionID: transactionID, journal: .clean, artifacts: .init()))
+        let tailOutcome = try await queued.value
+        guard case .externalSourceChanged = tailOutcome else {
+            Issue.record("The queued ordinary command must not run after normalization requires re-reload")
+            return
+        }
+        #expect(store.phase == .externalSourceChanged(.externalBytesChanged))
+        #expect(store.state == initial)
+        #expect(await repository.saveCount == 0)
+    }
+
+    @Test func sourceChangedExternalNormalizationFreezesAndTerminatesItsQueuedOrdinaryTail() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let initial = WorkspaceState.empty(calendar: calendar)
+        let adopted = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "external source changed")
+        let tail = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "must not run")
+        var external = initial
+        external.revision = 1
+        external.calendar.items[adopted.id] = adopted
+        let repository = WorkspaceStoreTestRepository(initial: initial)
+        await repository.setReloaded(.valid(.init(
+            state: external, provenance: .init(sourceSchema: 2, sourceBytesSHA256: "normalization source changed", sourceByteCount: 1), consistencyIssues: []
+        )))
+        await repository.suspendNextSave()
+        await repository.makeNextSaveUncertain()
+        await repository.setReconciliation(.stillPending(.init()))
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+
+        let head = Task { @MainActor in try await store.reloadExternalSource() }
+        await repository.waitForSaveStart()
+        let queued = Task { @MainActor in try await store.sendCalendar(.createItem(tail), undoLabel: "ordinary tail") }
+        await repository.resumeSave()
+        let pending = try await head.value
+        let transactionID = try #require({
+            if case let .transaction(.commitPending(id, _)) = pending { id } else { nil }
+        }())
+        #expect(try await store.retryPendingCommit(transactionID) == .stillPending(transactionID: transactionID, artifacts: .init()))
+        await repository.setReconciliation(.sourceChanged(.init()))
+
+        #expect(try await store.retryPendingCommit(transactionID) == .sourceChanged(transactionID: transactionID, journal: .clean, artifacts: .init()))
+        let tailOutcome = try await queued.value
+        guard case let .externalSourceChanged(tailID, reason, journal, artifacts) = tailOutcome else {
+            Issue.record("The queued normalization tail must receive a typed external-source terminal outcome")
+            return
+        }
+        #expect(tailID != transactionID)
+        #expect(reason == .externalBytesChanged)
+        #expect(journal == .clean)
+        #expect(artifacts == .init())
+        #expect(store.phase == .externalSourceChanged(.externalBytesChanged))
+        #expect(store.state == initial)
+        #expect(await repository.saveCount == 0)
+    }
+
+    @Test func sourceChangedExternalRepairFreezesAndTerminatesItsQueuedOrdinaryTail() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let initial = WorkspaceState.empty(calendar: calendar)
+        var external = initial
+        external.revision = 1
+        external.calendarNoteRelations.baselines[.item(UUID())] = .init(primaryNoteID: nil, referenceNoteIDs: [])
+        let report = WorkspaceConsistencyInspector.inspect(external)
+        let repair = WorkspaceConsistencyRepairPayload(
+            expectedIssuesChecksum: report.issuesChecksum,
+            resolutions: Dictionary(uniqueKeysWithValues: report.issues.map { ($0.id, .unlink) })
+        )
+        let tail = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "must not bypass changed repair")
+        let repository = WorkspaceStoreTestRepository(initial: initial)
+        await repository.setReloaded(.valid(.init(
+            state: external, provenance: .init(sourceSchema: 3, sourceBytesSHA256: "repair source changed", sourceByteCount: 1), consistencyIssues: report.issues
+        )))
+        await repository.suspendNextSave()
+        await repository.makeNextSaveUncertain()
+        await repository.setReconciliation(.stillPending(.init()))
+        let store = WorkspaceStore(initialState: initial, repository: repository)
+        await store.load()
+        _ = try await store.reloadExternalSource()
+
+        let head = Task { @MainActor in try await store.sendWorkspace(.repairConsistency(repair)) }
+        await repository.waitForSaveStart()
+        let queued = Task { @MainActor in try await store.sendCalendar(.createItem(tail), undoLabel: "ordinary tail") }
+        await repository.resumeSave()
+        let pending = try await head.value
+        let transactionID = try #require({ if case let .commitPending(id, _) = pending { id } else { nil } }())
+        #expect(try await store.retryPendingCommit(transactionID) == .stillPending(transactionID: transactionID, artifacts: .init()))
+        await repository.setReconciliation(.sourceChanged(.init()))
+
+        #expect(try await store.retryPendingCommit(transactionID) == .sourceChanged(transactionID: transactionID, journal: .clean, artifacts: .init()))
+        let tailOutcome = try await queued.value
+        guard case let .externalSourceChanged(tailID, reason, journal, artifacts) = tailOutcome else {
+            Issue.record("The queued repair tail must receive a typed external-source terminal outcome")
+            return
+        }
+        #expect(tailID != transactionID)
+        #expect(reason == .externalBytesChanged)
+        #expect(journal == .clean)
+        #expect(artifacts == .init())
+        #expect(store.phase == .externalSourceChanged(.externalBytesChanged))
+        #expect(store.state == initial)
+        #expect(await repository.saveCount == 0)
+    }
+
+    @Test func definiteExternalRepairSaveFailureReturnsTypedOutcomeAndKeepsTheRepairableCandidateFrozen() async throws {
         let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
         let initial = WorkspaceState.empty(calendar: calendar)
         var external = initial
@@ -2032,9 +2290,14 @@ struct WorkspaceStoreTests {
         _ = try await store.reloadExternalSource()
         await repository.failNextSave()
 
-        await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
-            _ = try await store.sendWorkspace(.repairConsistency(repair))
+        let outcome = try await store.sendWorkspace(.repairConsistency(repair))
+        guard case let .notCommitted(transactionID, journal, artifacts) = outcome else {
+            Issue.record("A definite repair-save failure must have a terminal typed outcome")
+            return
         }
+        #expect(transactionID.uuidString.isEmpty == false)
+        #expect(journal == .clean)
+        #expect(artifacts == .init())
 
         #expect(store.state == initial)
         #expect(store.phase == .needsRelationshipRepair)
