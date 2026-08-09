@@ -50,6 +50,7 @@ public enum WorkspacePersistenceError: Error, Equatable, Sendable {
     case invalidSnapshot
     case invalidJournal
     case invalidDraftContext
+    case invalidRestoreCapability
     case restoreBindingMismatch
     case rollbackWriteFailed
 }

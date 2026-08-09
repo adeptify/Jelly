@@ -84,7 +84,7 @@ public actor DraftJournalRepository {
                 withIntermediateDirectories: true
             )
             try writer.replaceAtomically(
-                data: JSONEncoder.workspaceDeterministic.encode(record),
+                data: WorkspaceDocumentCodec.canonicalPersistentData(record),
                 at: fileURL
             )
         } catch {
@@ -96,6 +96,6 @@ public actor DraftJournalRepository {
         receipt.noteID == entry.noteID
             && receipt.draftGeneration == entry.draftGeneration
             && receipt.noteSnapshotChecksum == entry.noteSnapshotChecksum
-            && receipt.persistedNoteRevision >= entry.baseNoteRevision
+            && receipt.persistedNoteRevision == entry.noteSnapshot.revision
     }
 }

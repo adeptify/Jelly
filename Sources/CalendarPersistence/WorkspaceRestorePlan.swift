@@ -17,15 +17,17 @@ public struct PreparedWorkspaceRestore: Equatable, Sendable {
     public let content: WorkspaceContentSnapshot
     public let sourceRevisionHighWatermark: Int64
     public let sourceNoteRevisions: [NoteID: Int64]
-    public let rollbackURL: URL
+    let capabilityID: UUID
+    let rollbackURL: URL
 
-    public init(
+    init(
         rawSourceData: Data,
         provenance: WorkspaceLoadProvenance,
         content: WorkspaceContentSnapshot,
         sourceRevisionHighWatermark: Int64,
         sourceNoteRevisions: [NoteID: Int64],
-        rollbackURL: URL
+        rollbackURL: URL,
+        capabilityID: UUID
     ) {
         self.rawSourceData = rawSourceData
         self.provenance = provenance
@@ -33,5 +35,6 @@ public struct PreparedWorkspaceRestore: Equatable, Sendable {
         self.sourceRevisionHighWatermark = sourceRevisionHighWatermark
         self.sourceNoteRevisions = sourceNoteRevisions
         self.rollbackURL = rollbackURL
+        self.capabilityID = capabilityID
     }
 }

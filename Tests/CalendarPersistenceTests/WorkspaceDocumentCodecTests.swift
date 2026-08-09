@@ -51,6 +51,17 @@ struct WorkspaceDocumentCodecTests {
         }
     }
 
+    @Test func corruptedV3PayloadIsRejectedWithoutARecoveryDecode() throws {
+        let valid = try WorkspaceDocumentCodec.encode(
+            WorkspacePersistenceFixtures.workspaceWithMultiMarkNote()
+        )
+        let corrupted = Data(valid.dropLast())
+
+        #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try WorkspaceDocumentCodec.decode(corrupted)
+        }
+    }
+
     @Test func danglingRelationshipIsReportedWithoutMutatingDecodedContent() throws {
         var workspace = WorkspaceState.empty(calendar: WorkspacePersistenceFixtures.calendarState)
         workspace.calendarNoteRelations.baselines[.item(UUID())] = .init(
@@ -66,6 +77,71 @@ struct WorkspaceDocumentCodecTests {
         #expect(result.state == workspace)
         #expect(result.consistencyIssues.count == 1)
         #expect(result.consistencyIssues.first?.defect == .missingCalendarOwner)
+    }
+
+    @Test func multiMarkV3AndJournalEncodingIsByteStableAcrossARealSubprocess() async throws {
+        guard ProcessInfo.processInfo.environment["JELLY_PERSISTENCE_SUBPROCESS"] == nil else { return }
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let childV3 = directory.file("child-v3.json")
+        let childJournal = directory.file("child-journal.json")
+        var environment = ProcessInfo.processInfo.environment
+        environment["JELLY_PERSISTENCE_SUBPROCESS"] = "writer"
+        environment["JELLY_PERSISTENCE_CHILD_V3"] = childV3.path
+        environment["JELLY_PERSISTENCE_CHILD_JOURNAL"] = childJournal.path
+        let testExecutablePath = try #require(CommandLine.arguments.first(where: {
+            $0.contains(".xctest/Contents/MacOS/")
+        }))
+        let testExecutable = URL(fileURLWithPath: testExecutablePath)
+        let process = Process()
+        process.executableURL = URL(
+            fileURLWithPath: "/Library/Developer/CommandLineTools/usr/libexec/swift/pm/swiftpm-testing-helper"
+        )
+        process.arguments = [
+            "--test-bundle-path", testExecutable.path,
+            "--filter", "PersistentEncodingSubprocessTests.writesStablePersistentFixturesWhenExplicitlyLaunchedAsChild",
+            testExecutable.path,
+            "--testing-library", "swift-testing"
+        ]
+        process.environment = environment
+        let childOutput = Pipe()
+        process.standardOutput = childOutput
+        process.standardError = childOutput
+        try process.run()
+        process.waitUntilExit()
+
+        #expect(process.terminationStatus == 0)
+        guard FileManager.default.fileExists(atPath: childV3.path),
+              FileManager.default.fileExists(atPath: childJournal.path)
+        else {
+            let output = String(decoding: childOutput.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            Issue.record(
+                "Child process completed without persistent sentinel: executable=\(testExecutable.path); output=\(output)"
+            )
+            return
+        }
+        let expected = try WorkspacePersistenceFixtures.workspaceWithMultiMarkNote()
+        #expect(try Data(contentsOf: childV3) == WorkspaceDocumentCodec.encode(expected))
+        let localJournal = directory.file("local-journal.json")
+        let entry = try WorkspacePersistenceFixtures.multiMarkDraftEntry()
+        try await DraftJournalRepository(fileURL: localJournal).persist(entry)
+        #expect(try Data(contentsOf: childJournal) == Data(contentsOf: localJournal))
+        #expect(try await DraftJournalRepository(fileURL: childJournal).current()?.entry == entry)
+    }
+}
+
+@Suite("PersistentEncodingSubprocessTests")
+struct PersistentEncodingSubprocessTests {
+    @Test func writesStablePersistentFixturesWhenExplicitlyLaunchedAsChild() async throws {
+        guard ProcessInfo.processInfo.environment["JELLY_PERSISTENCE_SUBPROCESS"] == "writer" else { return }
+        let v3URL = try #require(ProcessInfo.processInfo.environment["JELLY_PERSISTENCE_CHILD_V3"])
+        let journalURL = try #require(ProcessInfo.processInfo.environment["JELLY_PERSISTENCE_CHILD_JOURNAL"])
+        try WorkspaceDocumentCodec.encode(
+            WorkspacePersistenceFixtures.workspaceWithMultiMarkNote()
+        ).write(to: URL(fileURLWithPath: v3URL))
+        try await DraftJournalRepository(fileURL: URL(fileURLWithPath: journalURL)).persist(
+            WorkspacePersistenceFixtures.multiMarkDraftEntry()
+        )
     }
 }
 
@@ -101,6 +177,38 @@ enum WorkspacePersistenceFixtures {
         )
         return WorkspaceState(
             revision: revision,
+            calendar: calendarState,
+            notes: [note.id: note],
+            inspirations: [:],
+            calendarNoteRelations: .empty,
+            taskBlockLinks: [],
+            inspirationNoteLinks: []
+        )
+    }
+
+    static func workspaceWithMultiMarkNote() throws -> WorkspaceState {
+        let now = Date(timeIntervalSince1970: 0)
+        let spans = [InlineSpan(text: "带多个标记", marks: [.code, .bold, .italic], linkURL: nil)]
+        let block = DocumentBlock(
+            id: BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000503")!),
+            kind: .paragraph,
+            inlineContent: .init(spans: spans),
+            taskState: nil,
+            indentLevel: 0,
+            codeInfoString: nil
+        )
+        let note = Note(
+            id: NoteID(UUID(uuidString: "00000000-0000-0000-0000-000000000504")!),
+            title: "多标记",
+            document: .init(schemaVersion: 1, blocks: [block]),
+            categoryID: categoryID,
+            archivedAt: nil,
+            revision: 2,
+            createdAt: now,
+            updatedAt: now
+        )
+        return WorkspaceState(
+            revision: 2,
             calendar: calendarState,
             notes: [note.id: note],
             inspirations: [:],

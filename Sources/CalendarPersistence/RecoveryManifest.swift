@@ -48,6 +48,12 @@ public final class RecoveryManifestStore: @unchecked Sendable {
     }
 
     public func load() throws -> RecoveryManifest {
+        try withJellyAdvisoryLock(for: manifestURL) {
+            try loadUnlocked()
+        }
+    }
+
+    private func loadUnlocked() throws -> RecoveryManifest {
         guard FileManager.default.fileExists(atPath: manifestURL.path) else {
             return RecoveryManifest()
         }
@@ -55,7 +61,7 @@ public final class RecoveryManifestStore: @unchecked Sendable {
         do {
             manifest = try JSONDecoder.workspaceDeterministic.decode(
                 RecoveryManifest.self,
-                from: Data(contentsOf: manifestURL)
+                from: dataReadingNoFollow(at: manifestURL)
             )
         } catch {
             throw WorkspacePersistenceError.invalidManifest
@@ -65,7 +71,7 @@ public final class RecoveryManifestStore: @unchecked Sendable {
         else { throw WorkspacePersistenceError.invalidManifest }
         for record in manifest.entries {
             guard let url = snapshots.safeURL(for: record.snapshotFileName),
-                  let data = try? Data(contentsOf: url),
+                  let data = try? dataReadingNoFollow(at: url),
                   data.count == record.sourceByteCount,
                   persistenceSHA256(data) == record.sourceSHA256
             else { throw WorkspacePersistenceError.invalidManifest }
@@ -78,38 +84,48 @@ public final class RecoveryManifestStore: @unchecked Sendable {
         provenance: WorkspaceLoadProvenance,
         registeredAt: Date = Date()
     ) throws -> RecoverySnapshotRecord {
-        var manifest = try load()
-        if let existing = manifest.entries.first(where: {
-            $0.sourceSchema == provenance.sourceSchema
-                && $0.sourceSHA256 == provenance.sourceBytesSHA256
-                && $0.sourceByteCount == provenance.sourceByteCount
-        }) {
-            guard try snapshots.verified(rawData: rawData, named: existing.snapshotFileName) else {
-                throw WorkspacePersistenceError.invalidSnapshot
+        try withJellyAdvisoryLock(for: manifestURL) {
+            var manifest = try loadUnlocked()
+            if let existing = manifest.entries.first(where: {
+                $0.sourceSchema == provenance.sourceSchema
+                    && $0.sourceSHA256 == provenance.sourceBytesSHA256
+                    && $0.sourceByteCount == provenance.sourceByteCount
+            }) {
+                guard try snapshots.verified(rawData: rawData, named: existing.snapshotFileName) else {
+                    throw WorkspacePersistenceError.invalidSnapshot
+                }
+                return existing
             }
-            return existing
-        }
-        let name = try snapshots.writeAndVerify(rawData: rawData, provenance: provenance)
-        let record = RecoverySnapshotRecord(
-            sourceSchema: provenance.sourceSchema,
-            sourceSHA256: provenance.sourceBytesSHA256,
-            sourceByteCount: provenance.sourceByteCount,
-            snapshotFileName: name,
-            registeredAt: registeredAt
-        )
-        manifest.entries.append(record)
-        let data: Data
-        do {
-            data = try JSONEncoder.workspaceDeterministic.encode(manifest)
-            try FileManager.default.createDirectory(
-                at: manifestURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
+            let name = try snapshots.writeAndVerify(rawData: rawData, provenance: provenance)
+            let record = RecoverySnapshotRecord(
+                sourceSchema: provenance.sourceSchema,
+                sourceSHA256: provenance.sourceBytesSHA256,
+                sourceByteCount: provenance.sourceByteCount,
+                snapshotFileName: name,
+                registeredAt: registeredAt
             )
-            try writer.replaceAtomically(data: data, at: manifestURL)
-        } catch {
-            throw WorkspacePersistenceError.atomicWriteFailed
+            manifest.entries.append(record)
+            let data: Data
+            do {
+                data = try JSONEncoder.workspaceDeterministic.encode(manifest)
+                try FileManager.default.createDirectory(
+                    at: manifestURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try writer.replaceAtomically(data: data, at: manifestURL)
+            } catch {
+                throw WorkspacePersistenceError.atomicWriteFailed
+            }
+            let reread = try loadUnlocked()
+            guard reread.entries.contains(where: {
+                $0.sourceSchema == record.sourceSchema
+                    && $0.sourceSHA256 == record.sourceSHA256
+                    && $0.sourceByteCount == record.sourceByteCount
+                    && $0.snapshotFileName == record.snapshotFileName
+            })
+            else { throw WorkspacePersistenceError.invalidManifest }
+            return record
         }
-        return record
     }
 
     private func isStructurallySafe(_ record: RecoverySnapshotRecord) -> Bool {

@@ -23,7 +23,9 @@ public struct MigrationSnapshotStore: Sendable {
             throw WorkspacePersistenceError.atomicWriteFailed
         }
         let name = "calendar-v\(provenance.sourceSchema)-\(provenance.sourceBytesSHA256).json"
-        let destination = directoryURL.appendingPathComponent(name)
+        guard let destination = safeURL(for: name) else {
+            throw WorkspacePersistenceError.invalidSnapshot
+        }
         if fileManager.fileExists(atPath: destination.path) {
             guard try verified(rawData: rawData, at: destination) else {
                 throw WorkspacePersistenceError.invalidSnapshot
@@ -49,7 +51,7 @@ public struct MigrationSnapshotStore: Sendable {
     private func verified(rawData: Data, at url: URL) throws -> Bool {
         let readback: Data
         do {
-            readback = try Data(contentsOf: url)
+            readback = try dataReadingNoFollow(at: url)
         } catch {
             throw WorkspacePersistenceError.invalidSnapshot
         }
@@ -63,12 +65,18 @@ public struct MigrationSnapshotStore: Sendable {
               fileName != ".", fileName != "..",
               !fileName.contains("..")
         else { return nil }
-        let directory = directoryURL.standardizedFileURL
-        let candidate = directory.appendingPathComponent(fileName).standardizedFileURL
-        guard candidate.deletingLastPathComponent() == directory,
-              candidate.path.hasPrefix(directory.path + "/"),
-              (try? FileManager.default.destinationOfSymbolicLink(atPath: candidate.path)) == nil
+        let declaredRoot = directoryURL.standardizedFileURL
+        let realRoot = declaredRoot.resolvingSymlinksInPath().standardizedFileURL
+        let candidate = declaredRoot.appendingPathComponent(fileName).standardizedFileURL
+        let realCandidate = candidate.resolvingSymlinksInPath().standardizedFileURL
+        guard candidate.deletingLastPathComponent() == declaredRoot,
+              realCandidate.deletingLastPathComponent() == realRoot,
+              realCandidate.path.hasPrefix(realRoot.path + "/")
         else { return nil }
+        if FileManager.default.fileExists(atPath: candidate.path),
+           (try? dataReadingNoFollow(at: candidate)) == nil {
+            return nil
+        }
         return candidate
     }
 }

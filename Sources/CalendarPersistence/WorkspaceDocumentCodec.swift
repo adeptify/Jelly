@@ -75,7 +75,7 @@ public enum WorkspaceDocumentCodec {
         guard let key else { return values }
         if key == "weekdays"
             || [
-                "taskBlockLinks", "inspirationNoteLinks", "referenceNoteIDs",
+                "taskBlockLinks", "inspirationNoteLinks", "referenceNoteIDs", "marks",
                 "addedReferenceNoteIDs", "removedReferenceNoteIDs"
             ].contains(key) {
             return values.sorted { sortKey(for: $0) < sortKey(for: $1) }
@@ -96,5 +96,11 @@ public enum WorkspaceDocumentCodec {
               let data = try? JSONSerialization.data(withJSONObject: [value], options: [.sortedKeys])
         else { return "" }
         return String(decoding: data, as: UTF8.self)
+    }
+
+    static func canonicalPersistentData<Value: Encodable>(_ value: Value) throws -> Data {
+        let encoded = try JSONEncoder.workspaceDeterministic.encode(value)
+        let object = try JSONSerialization.jsonObject(with: encoded)
+        return try JSONSerialization.data(withJSONObject: canonicalized(object), options: [.sortedKeys])
     }
 }

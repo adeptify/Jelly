@@ -15,11 +15,11 @@ public struct StoredDraftJournalRecord: Codable, Equatable, Sendable {
 
 public enum DraftJournal {
     public static func entryChecksum(for entry: DraftJournalEntry) throws -> String {
-        try persistenceSHA256(JSONEncoder.workspaceDeterministic.encode(EntryChecksumInput(entry: entry)))
+        try persistenceSHA256(WorkspaceDocumentCodec.canonicalPersistentData(EntryChecksumInput(entry: entry)))
     }
 
     static func recordChecksum(entry: DraftJournalEntry, receipt: PersistedDraftReceipt?) throws -> String {
-        try persistenceSHA256(JSONEncoder.workspaceDeterministic.encode(
+        try persistenceSHA256(WorkspaceDocumentCodec.canonicalPersistentData(
             RecordChecksumInput(entry: entry, savedReceipt: receipt)
         ))
     }

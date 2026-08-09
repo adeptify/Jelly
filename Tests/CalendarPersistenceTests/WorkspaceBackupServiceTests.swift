@@ -24,6 +24,25 @@ struct WorkspaceBackupServiceTests {
         #expect(try Data(contentsOf: main) == v2)
     }
 
+    @Test func exportingLoadedV1CopiesExactRawBytesWithoutForcingV3Save() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let destination = directory.file("backup.json")
+        let v1 = WorkspacePersistenceFixtures.v1CalendarDocument()
+        try v1.write(to: main)
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { .empty(calendar: WorkspacePersistenceFixtures.calendarState) }
+        )
+        _ = try await repository.load()
+
+        try await BackupService().exportCurrent(from: repository, to: destination)
+
+        #expect(try Data(contentsOf: destination) == v1)
+        #expect(try Data(contentsOf: main) == v1)
+    }
+
     @Test func prepareRestoreBindsSourceRevisionsToExactlyItsPreparedContent() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
@@ -68,5 +87,181 @@ struct WorkspaceBackupServiceTests {
         let persisted = try Data(contentsOf: main)
         let expected = try WorkspaceDocumentCodec.encode(current)
         #expect(persisted == expected)
+    }
+
+    @Test func preparedRestoreFromAnotherRepositoryCannotWriteItsMainOrRollback() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let firstMain = directory.file("first.json")
+        let secondMain = directory.file("second.json")
+        let source = directory.file("restore.json")
+        let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = current
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        restored.notes[restored.notes.keys.first!]!.title = "restored"
+        try WorkspaceDocumentCodec.encode(current).write(to: firstMain)
+        try WorkspaceDocumentCodec.encode(current).write(to: secondMain)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let first = JSONWorkspaceRepository(documentURL: firstMain, seed: { current })
+        let second = JSONWorkspaceRepository(documentURL: secondMain, seed: { current })
+        _ = try await first.load()
+        _ = try await second.load()
+        let prepared = try await first.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+        let beforeSecond = try Data(contentsOf: secondMain)
+
+        await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+            _ = try await second.commitRestore(prepared, state: restored)
+        }
+        #expect(try Data(contentsOf: secondMain) == beforeSecond)
+    }
+
+    @Test func restoreRejectsExistingRollbackPathWithoutOverwritingVictim() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("main.json")
+        let source = directory.file("restore.json")
+        let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = current
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        try WorkspaceDocumentCodec.encode(current).write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let repository = JSONWorkspaceRepository(documentURL: main, seed: { current })
+        _ = try await repository.load()
+        let prepared = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+        try Data("victim rollback bytes".utf8).write(to: prepared.rollbackURL)
+        let beforeMain = try Data(contentsOf: main)
+
+        await #expect(throws: WorkspacePersistenceError.rollbackWriteFailed) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+        #expect(try Data(contentsOf: prepared.rollbackURL) == Data("victim rollback bytes".utf8))
+        #expect(try Data(contentsOf: main) == beforeMain)
+    }
+
+    @Test func corruptedRollbackReadbackFailsBeforeReplacingTheMainDocument() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("main.json")
+        let source = directory.file("restore.json")
+        let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = current
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        try WorkspaceDocumentCodec.encode(current).write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { current },
+            rollbackWriter: WorkspacePersistenceCorruptingExclusiveWriter()
+        )
+        _ = try await repository.load()
+        let prepared = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+        let beforeMain = try Data(contentsOf: main)
+
+        await #expect(throws: WorkspacePersistenceError.rollbackWriteFailed) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+        #expect(try Data(contentsOf: main) == beforeMain)
+        #expect(try Data(contentsOf: prepared.rollbackURL) != beforeMain)
+    }
+
+    @Test func forgedPreparedRestorePathCannotOverwriteItsVictim() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("main.json")
+        let source = directory.file("restore.json")
+        let victim = directory.file("victim.json")
+        let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = current
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        try WorkspaceDocumentCodec.encode(current).write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        try Data("victim bytes".utf8).write(to: victim)
+        let repository = JSONWorkspaceRepository(documentURL: main, seed: { current })
+        _ = try await repository.load()
+        let issued = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+        let forged = PreparedWorkspaceRestore(
+            rawSourceData: issued.rawSourceData,
+            provenance: issued.provenance,
+            content: issued.content,
+            sourceRevisionHighWatermark: issued.sourceRevisionHighWatermark,
+            sourceNoteRevisions: issued.sourceNoteRevisions,
+            rollbackURL: victim,
+            capabilityID: issued.capabilityID
+        )
+        let beforeMain = try Data(contentsOf: main)
+
+        await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+            _ = try await repository.commitRestore(forged, state: restored)
+        }
+        #expect(try Data(contentsOf: victim) == Data("victim bytes".utf8))
+        #expect(try Data(contentsOf: main) == beforeMain)
+    }
+
+    @Test func sourceChangedDuringRestoreCASKeepsTheCooperatingMainBytes() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("main.json")
+        let source = directory.file("restore.json")
+        let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = current
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        try WorkspaceDocumentCodec.encode(current).write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let beforeMain = try Data(contentsOf: main)
+        let changed = Data("cooperating restore writer".utf8)
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { current },
+            mainFileWriter: WorkspacePersistenceMutatingMainWriter {
+                _ = try FoundationMainFileCompareAndReplaceWriter().replaceIfSHA256Matches(
+                    expectedSHA256: WorkspacePersistenceFixtures.sha256(beforeMain),
+                    candidate: changed,
+                    at: main
+                )
+            }
+        )
+        _ = try await repository.load()
+        let prepared = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+
+        await #expect(throws: WorkspacePersistenceError.sourceChanged) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+        #expect(try Data(contentsOf: main) == changed)
+        #expect(try Data(contentsOf: prepared.rollbackURL) == beforeMain)
+    }
+
+    @Test func successfulRestoreCapabilityIsSingleUse() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("main.json")
+        let source = directory.file("restore.json")
+        let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var restored = current
+        restored.revision = 2
+        restored.notes[restored.notes.keys.first!]!.revision = 2
+        try WorkspaceDocumentCodec.encode(current).write(to: main)
+        try WorkspaceDocumentCodec.encode(restored).write(to: source)
+        let repository = JSONWorkspaceRepository(documentURL: main, seed: { current })
+        _ = try await repository.load()
+        let prepared = try await repository.prepareRestore(.init(sourceURL: source, rollbackDirectoryURL: directory.url))
+        _ = try await repository.commitRestore(prepared, state: restored)
+        let afterFirst = try Data(contentsOf: main)
+
+        await #expect(throws: WorkspacePersistenceError.invalidRestoreCapability) {
+            _ = try await repository.commitRestore(prepared, state: restored)
+        }
+        #expect(try Data(contentsOf: main) == afterFirst)
+    }
+}
+
+struct WorkspacePersistenceCorruptingExclusiveWriter: ExclusiveFileWriting {
+    func createExclusively(data: Data, at destination: URL) throws {
+        try FoundationExclusiveFileWriter().createExclusively(data: data, at: destination)
+        try Data("corrupted rollback".utf8).write(to: destination)
     }
 }

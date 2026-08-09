@@ -1,3 +1,4 @@
+import CalendarDomain
 import Foundation
 import Testing
 @testable import CalendarPersistence
@@ -59,6 +60,180 @@ struct DraftJournalRepositoryTests {
             _ = try await DraftJournalRepository(fileURL: url).current()
         }
     }
+
+    @Test func receiptWithOnlyPersistedRevisionChangedCannotReplaceMatchingReceipt() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let entry = try WorkspacePersistenceFixtures.draftEntry(generation: 8)
+        let correct = PersistedDraftReceipt(
+            noteID: entry.noteID,
+            draftGeneration: entry.draftGeneration,
+            noteSnapshotChecksum: entry.noteSnapshotChecksum,
+            persistedNoteRevision: 8
+        )
+        let wrongRevision = PersistedDraftReceipt(
+            noteID: entry.noteID,
+            draftGeneration: entry.draftGeneration,
+            noteSnapshotChecksum: entry.noteSnapshotChecksum,
+            persistedNoteRevision: 9
+        )
+        let journal = DraftJournalRepository(fileURL: directory.file("journal.json"))
+        try await journal.persist(entry)
+        try await journal.record(correct)
+        try await journal.record(wrongRevision)
+
+        #expect(try await journal.current()?.savedReceipt == correct)
+    }
+
+    @Test func everyReceiptFieldMustMatchBeforeTheFirstReceiptBecomesDurable() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let entry = try WorkspacePersistenceFixtures.draftEntry(generation: 10)
+        let invalidReceipts = [
+            PersistedDraftReceipt(
+                noteID: NoteID(),
+                draftGeneration: entry.draftGeneration,
+                noteSnapshotChecksum: entry.noteSnapshotChecksum,
+                persistedNoteRevision: entry.noteSnapshot.revision
+            ),
+            PersistedDraftReceipt(
+                noteID: entry.noteID,
+                draftGeneration: entry.draftGeneration + 1,
+                noteSnapshotChecksum: entry.noteSnapshotChecksum,
+                persistedNoteRevision: entry.noteSnapshot.revision
+            ),
+            PersistedDraftReceipt(
+                noteID: entry.noteID,
+                draftGeneration: entry.draftGeneration,
+                noteSnapshotChecksum: "wrong-checksum",
+                persistedNoteRevision: entry.noteSnapshot.revision
+            ),
+            PersistedDraftReceipt(
+                noteID: entry.noteID,
+                draftGeneration: entry.draftGeneration,
+                noteSnapshotChecksum: entry.noteSnapshotChecksum,
+                persistedNoteRevision: entry.noteSnapshot.revision + 1
+            )
+        ]
+
+        for (index, receipt) in invalidReceipts.enumerated() {
+            let journal = DraftJournalRepository(fileURL: directory.file("journal-\(index).json"))
+            try await journal.persist(entry)
+            try await journal.record(receipt)
+            #expect(try await journal.current()?.savedReceipt == nil)
+        }
+    }
+
+    @Test func journalClearFailureLeavesDurableReceiptForRestartReconciliation() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let writer = WorkspacePersistenceFailOnceWriter()
+        let url = directory.file("journal.json")
+        let entry = try WorkspacePersistenceFixtures.draftEntry(generation: 9)
+        let receipt = PersistedDraftReceipt(
+            noteID: entry.noteID,
+            draftGeneration: entry.draftGeneration,
+            noteSnapshotChecksum: entry.noteSnapshotChecksum,
+            persistedNoteRevision: 9
+        )
+        let journal = DraftJournalRepository(fileURL: url, writer: writer)
+        try await journal.persist(entry)
+        try await journal.record(receipt)
+        writer.failNextWrite = true
+
+        await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
+            try await journal.clear(ifMatching: receipt)
+        }
+        #expect(try await DraftJournalRepository(fileURL: url).current()?.savedReceipt == receipt)
+    }
+
+    @Test func unrelatedCalendarSavePreservesReceiptAndTitleOnlyDraftRejectsTheStaleReceipt() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let entry = try WorkspacePersistenceFixtures.draftEntry(generation: 11)
+        let receipt = PersistedDraftReceipt(
+            noteID: entry.noteID,
+            draftGeneration: entry.draftGeneration,
+            noteSnapshotChecksum: entry.noteSnapshotChecksum,
+            persistedNoteRevision: entry.noteSnapshot.revision
+        )
+        let calendarJournalURL = directory.file("calendar-journal.json")
+        let calendarJournal = DraftJournalRepository(fileURL: calendarJournalURL)
+        try await calendarJournal.persist(entry)
+        try await calendarJournal.record(receipt)
+
+        let initial = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        var calendarOnly = initial
+        calendarOnly.revision = 2
+        let unrelatedCategoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000599")!
+        calendarOnly.calendar.categories[unrelatedCategoryID] = .init(
+            id: unrelatedCategoryID,
+            name: "不相关日历更新",
+            colorHex: "#336699",
+            sortIndex: 1,
+            createdAt: Date(timeIntervalSince1970: 0),
+            updatedAt: Date(timeIntervalSince1970: 0)
+        )
+        let repository = JSONWorkspaceRepository(
+            documentURL: directory.file("calendar-v1.json"),
+            seed: { initial }
+        )
+        _ = try await repository.load()
+        _ = try await repository.save(calendarOnly)
+        #expect(try await DraftJournalRepository(fileURL: calendarJournalURL).current()?.savedReceipt == receipt)
+
+        var changedNote = entry.noteSnapshot
+        changedNote.title = "仅标题变化"
+        changedNote.revision += 1
+        let changedChecksum = try WorkspaceChecksum.noteSnapshotChecksum(changedNote)
+        let unsigned = DraftJournalEntry(
+            noteID: changedNote.id,
+            baseWorkspaceRevision: entry.baseWorkspaceRevision,
+            baseNoteRevision: entry.baseNoteRevision,
+            draftGeneration: entry.draftGeneration,
+            noteSnapshot: changedNote,
+            updatedAt: entry.updatedAt,
+            noteSnapshotChecksum: changedChecksum,
+            journalChecksum: ""
+        )
+        let titleOnlyEntry = DraftJournalEntry(
+            noteID: unsigned.noteID,
+            baseWorkspaceRevision: unsigned.baseWorkspaceRevision,
+            baseNoteRevision: unsigned.baseNoteRevision,
+            draftGeneration: unsigned.draftGeneration,
+            noteSnapshot: unsigned.noteSnapshot,
+            updatedAt: unsigned.updatedAt,
+            noteSnapshotChecksum: unsigned.noteSnapshotChecksum,
+            journalChecksum: try DraftJournal.entryChecksum(for: unsigned)
+        )
+        let titleJournal = DraftJournalRepository(fileURL: directory.file("title-journal.json"))
+        try await titleJournal.persist(entry)
+        try await titleJournal.persist(titleOnlyEntry)
+        try await titleJournal.record(receipt)
+
+        let titleRecord = try #require(try await titleJournal.current())
+        #expect(titleRecord.entry == titleOnlyEntry)
+        #expect(titleRecord.savedReceipt == nil)
+    }
+}
+
+final class WorkspacePersistenceFailOnceWriter: AtomicFileWriting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var shouldFail = false
+
+    var failNextWrite: Bool {
+        get { lock.withLock { shouldFail } }
+        set { lock.withLock { shouldFail = newValue } }
+    }
+
+    func replaceAtomically(data: Data, at destination: URL) throws {
+        let fails = lock.withLock {
+            defer { shouldFail = false }
+            return shouldFail
+        }
+        if fails { throw WorkspacePersistenceInjectedFailure.requested }
+        try FoundationAtomicFileWriter().replaceAtomically(data: data, at: destination)
+    }
 }
 
 extension WorkspacePersistenceFixtures {
@@ -70,6 +245,31 @@ extension WorkspacePersistenceFixtures {
             baseWorkspaceRevision: 0,
             baseNoteRevision: 0,
             draftGeneration: generation,
+            noteSnapshot: note,
+            updatedAt: Date(timeIntervalSince1970: 0),
+            noteSnapshotChecksum: checksum,
+            journalChecksum: ""
+        )
+        return DraftJournalEntry(
+            noteID: unsigned.noteID,
+            baseWorkspaceRevision: unsigned.baseWorkspaceRevision,
+            baseNoteRevision: unsigned.baseNoteRevision,
+            draftGeneration: unsigned.draftGeneration,
+            noteSnapshot: unsigned.noteSnapshot,
+            updatedAt: unsigned.updatedAt,
+            noteSnapshotChecksum: unsigned.noteSnapshotChecksum,
+            journalChecksum: try DraftJournal.entryChecksum(for: unsigned)
+        )
+    }
+
+    static func multiMarkDraftEntry() throws -> DraftJournalEntry {
+        let note = try workspaceWithMultiMarkNote().notes.values.first!
+        let checksum = try WorkspaceChecksum.noteSnapshotChecksum(note)
+        let unsigned = DraftJournalEntry(
+            noteID: note.id,
+            baseWorkspaceRevision: 1,
+            baseNoteRevision: 1,
+            draftGeneration: 10,
             noteSnapshot: note,
             updatedAt: Date(timeIntervalSince1970: 0),
             noteSnapshotChecksum: checksum,

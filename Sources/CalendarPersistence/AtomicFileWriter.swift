@@ -55,6 +55,27 @@ public protocol MainFileCompareAndReplaceWriting: Sendable {
     ) throws -> MainFileCompareAndReplaceResult
 }
 
+public protocol ExclusiveFileWriting: Sendable {
+    func createExclusively(data: Data, at destination: URL) throws
+}
+
+public struct FoundationExclusiveFileWriter: ExclusiveFileWriting {
+    public init() {}
+
+    public func createExclusively(data: Data, at destination: URL) throws {
+        let descriptor = open(destination.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { throw CocoaError(.fileWriteFileExists) }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+        defer { _ = close(descriptor) }
+        do {
+            try handle.write(contentsOf: data)
+            try handle.synchronize()
+        } catch {
+            throw error
+        }
+    }
+}
+
 /// This lock/CAS protocol coordinates Jelly processes and other writers that use this type.
 /// It cannot make claims about a process that ignores both the advisory lock and file protocol.
 public struct FoundationMainFileCompareAndReplaceWriter: MainFileCompareAndReplaceWriting {
@@ -92,17 +113,52 @@ public struct FoundationMainFileCompareAndReplaceWriter: MainFileCompareAndRepla
         for destination: URL,
         _ body: () throws -> Result
     ) throws -> Result {
-        let lockURL = destination.deletingLastPathComponent()
-            .appendingPathComponent(".\(destination.lastPathComponent).jelly.lock")
-        let descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
-        guard descriptor >= 0 else { throw CocoaError(.fileLocking) }
-        defer { _ = close(descriptor) }
-        guard flock(descriptor, LOCK_EX) == 0 else { throw CocoaError(.fileLocking) }
-        defer { _ = flock(descriptor, LOCK_UN) }
-        return try body()
+        try withJellyAdvisoryLock(for: destination, body)
     }
 }
 
 func persistenceSHA256(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+}
+
+func dataReadingNoFollow(at url: URL) throws -> Data {
+    let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW)
+    guard descriptor >= 0 else { throw CocoaError(.fileReadNoSuchFile) }
+    defer { _ = close(descriptor) }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+    return try handle.readToEnd() ?? Data()
+}
+
+func withJellyAdvisoryLock<Result>(
+    for protectedURL: URL,
+    _ body: () throws -> Result
+) throws -> Result {
+    let localLock = JellyProcessLockRegistry.shared.lock(for: protectedURL)
+    localLock.lock()
+    defer { localLock.unlock() }
+    let lockURL = protectedURL.deletingLastPathComponent()
+        .appendingPathComponent(".\(protectedURL.lastPathComponent).jelly.lock")
+    let descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+    guard descriptor >= 0 else { throw CocoaError(.fileLocking) }
+    defer { _ = close(descriptor) }
+    guard flock(descriptor, LOCK_EX) == 0 else { throw CocoaError(.fileLocking) }
+    defer { _ = flock(descriptor, LOCK_UN) }
+    return try body()
+}
+
+private final class JellyProcessLockRegistry: @unchecked Sendable {
+    static let shared = JellyProcessLockRegistry()
+
+    private let registryLock = NSLock()
+    private var locks: [String: NSLock] = [:]
+
+    func lock(for url: URL) -> NSLock {
+        registryLock.withLock {
+            let key = url.standardizedFileURL.path
+            if let existing = locks[key] { return existing }
+            let created = NSLock()
+            locks[key] = created
+            return created
+        }
+    }
 }

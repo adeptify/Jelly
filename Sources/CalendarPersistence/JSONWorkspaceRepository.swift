@@ -11,8 +11,10 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
     private let seed: @Sendable () -> WorkspaceState
     private let manifestStore: RecoveryManifestStore
     private let atomicWriter: any AtomicFileWriting
+    private let rollbackWriter: any ExclusiveFileWriting
     private let mainFileWriter: any MainFileCompareAndReplaceWriting
     private var loadedSource: LoadedSource = .absent
+    private var pendingRestores: [UUID: PreparedWorkspaceRestore] = [:]
 
     public init(
         documentURL: URL,
@@ -20,12 +22,14 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         snapshotDirectoryURL: URL? = nil,
         recoveryManifestURL: URL? = nil,
         atomicWriter: any AtomicFileWriting = FoundationAtomicFileWriter(),
-        mainFileWriter: any MainFileCompareAndReplaceWriting = FoundationMainFileCompareAndReplaceWriter()
+        mainFileWriter: any MainFileCompareAndReplaceWriting = FoundationMainFileCompareAndReplaceWriter(),
+        rollbackWriter: any ExclusiveFileWriting = FoundationExclusiveFileWriter()
     ) {
         self.documentURL = documentURL
         self.seed = seed
         self.atomicWriter = atomicWriter
         self.mainFileWriter = mainFileWriter
+        self.rollbackWriter = rollbackWriter
         let parent = documentURL.deletingLastPathComponent()
         manifestStore = RecoveryManifestStore(
             manifestURL: recoveryManifestURL ?? parent.appendingPathComponent("calendar-v1.recovery-manifest.json"),
@@ -113,7 +117,8 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         guard Set(revisions.keys) == Set(content.notes.keys) else {
             throw WorkspacePersistenceError.restoreBindingMismatch
         }
-        return PreparedWorkspaceRestore(
+        let capabilityID = UUID()
+        let prepared = PreparedWorkspaceRestore(
             rawSourceData: rawData,
             provenance: decoded.provenance,
             content: content,
@@ -121,24 +126,30 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
             sourceNoteRevisions: revisions,
             rollbackURL: request.rollbackDirectoryURL.appendingPathComponent(
                 "workspace-rollback-\(UUID().uuidString).json"
-            )
+            ),
+            capabilityID: capabilityID
         )
+        pendingRestores[capabilityID] = prepared
+        return prepared
     }
 
     public func commitRestore(
         _ prepared: PreparedWorkspaceRestore,
         state: WorkspaceState
     ) throws -> WorkspaceSaveReceipt {
-        guard prepared.provenance.sourceBytesSHA256 == persistenceSHA256(prepared.rawSourceData),
-              prepared.provenance.sourceByteCount == prepared.rawSourceData.count,
-              Set(prepared.sourceNoteRevisions.keys) == Set(prepared.content.notes.keys),
-              WorkspaceContentSnapshot(state: state) == prepared.content
+        guard let issued = pendingRestores[prepared.capabilityID], issued == prepared else {
+            throw WorkspacePersistenceError.invalidRestoreCapability
+        }
+        guard issued.provenance.sourceBytesSHA256 == persistenceSHA256(issued.rawSourceData),
+              issued.provenance.sourceByteCount == issued.rawSourceData.count,
+              Set(issued.sourceNoteRevisions.keys) == Set(issued.content.notes.keys),
+              WorkspaceContentSnapshot(state: state) == issued.content
         else { throw WorkspacePersistenceError.restoreBindingMismatch }
-        let verifiedPrepared = try WorkspaceDocumentCodec.decode(prepared.rawSourceData)
-        guard verifiedPrepared.provenance == prepared.provenance,
-              WorkspaceContentSnapshot(state: verifiedPrepared.state) == prepared.content,
-              verifiedPrepared.state.revision == prepared.sourceRevisionHighWatermark,
-              verifiedPrepared.state.notes.mapValues(\.revision) == prepared.sourceNoteRevisions
+        let verifiedPrepared = try WorkspaceDocumentCodec.decode(issued.rawSourceData)
+        guard verifiedPrepared.provenance == issued.provenance,
+              WorkspaceContentSnapshot(state: verifiedPrepared.state) == issued.content,
+              verifiedPrepared.state.revision == issued.sourceRevisionHighWatermark,
+              verifiedPrepared.state.notes.mapValues(\.revision) == issued.sourceNoteRevisions
         else { throw WorkspacePersistenceError.restoreBindingMismatch }
         do {
             try WorkspaceValidator.validate(state)
@@ -152,7 +163,7 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         guard let current = try? Data(contentsOf: documentURL), current == rawData else {
             throw WorkspacePersistenceError.sourceChanged
         }
-        try writeVerifiedRollback(rawData, to: prepared.rollbackURL)
+        try writeVerifiedRollback(rawData, to: issued.rollbackURL)
         if provenance.sourceSchema < WorkspaceDocument.currentSchemaVersion {
             try registerMigrationSnapshot(rawData: rawData, provenance: provenance)
         }
@@ -165,6 +176,7 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         case .replaced:
             try replaceLoadedSourceWithReadback(candidate)
         }
+        pendingRestores[prepared.capabilityID] = nil
         return WorkspaceSaveReceipt(workspaceRevision: state.revision, persistedDraft: nil)
     }
 
@@ -250,8 +262,8 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
                 at: url.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
-            try atomicWriter.replaceAtomically(data: data, at: url)
-            let readback = try Data(contentsOf: url)
+            try rollbackWriter.createExclusively(data: data, at: url)
+            let readback = try dataReadingNoFollow(at: url)
             guard readback.count == data.count, persistenceSHA256(readback) == persistenceSHA256(data) else {
                 throw WorkspacePersistenceError.rollbackWriteFailed
             }
