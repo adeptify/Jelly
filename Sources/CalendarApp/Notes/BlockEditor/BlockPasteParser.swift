@@ -1,6 +1,20 @@
 import Foundation
 import WorkspaceDomain
 
+enum BlockURLValidator {
+    static func isValid(_ url: URL?) -> Bool {
+        guard let url else { return true }
+        guard url.scheme != nil,
+              url.host != nil,
+              let decoded = url.absoluteString.removingPercentEncoding else {
+            return false
+        }
+        return !decoded.unicodeScalars.contains { scalar in
+            scalar.value < 32 || scalar.value == 127
+        }
+    }
+}
+
 enum BlockPasteParser: BlockPasteParsing {
     static func parse(_ payload: BlockPastePayload) throws -> ParsedBlockPastePayload {
         switch payload {
@@ -29,7 +43,7 @@ enum BlockPasteParser: BlockPasteParsing {
 
         if block.inlineContent.spans.contains(where: { span in
             guard let url = span.linkURL else { return false }
-            return !isValid(url)
+            return !BlockURLValidator.isValid(url)
         }) {
             throw BlockPasteParserError.invalidLink(index: index)
         }
@@ -58,7 +72,7 @@ enum BlockPasteParser: BlockPasteParsing {
             }
         case .link:
             guard block.inlineContent.spans.contains(where: { span in
-                span.linkURL.map(isValid) == true
+                span.linkURL.map { BlockURLValidator.isValid($0) } == true
             }) else {
                 throw BlockPasteParserError.invalidLink(index: index)
             }
@@ -78,12 +92,6 @@ enum BlockPasteParser: BlockPasteParsing {
             true
         case .paragraph, .heading1, .heading2, .heading3, .quote, .code, .divider, .link:
             false
-        }
-    }
-
-    private static func isValid(_ url: URL) -> Bool {
-        url.scheme != nil && url.host != nil && !url.absoluteString.unicodeScalars.contains { scalar in
-            scalar.value < 32 || scalar.value == 127
         }
     }
 

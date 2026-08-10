@@ -70,7 +70,7 @@ enum BlockInputReducer {
         switch selection {
         case let .text(anchor, focus, preferredColumn, typingAttributes):
             guard preferredColumn.map({ $0 >= 0 }) ?? true,
-                  isValid(typingAttributes.linkURL),
+                  BlockURLValidator.isValid(typingAttributes.linkURL),
                   validPosition(anchor, in: document),
                   validPosition(focus, in: document) else {
                 throw BlockInputError.invalidSelection
@@ -270,18 +270,7 @@ private extension BlockDocument {
 
 private extension BlockTypingAttributes {
     var validated: BlockTypingAttributes {
-        .init(marks: marks, linkURL: ReductionContext.isValid(linkURL) ? linkURL : nil)
-    }
-}
-
-private extension ReductionContext {
-    static func isValid(_ url: URL?) -> Bool {
-        guard let url else { return true }
-        let serialized = url.absoluteString
-        let decoded = serialized.removingPercentEncoding ?? serialized
-        return url.scheme != nil && url.host != nil && !decoded.unicodeScalars.contains { scalar in
-            scalar.value < 32 || scalar.value == 127
-        }
+        .init(marks: marks, linkURL: BlockURLValidator.isValid(linkURL) ? linkURL : nil)
     }
 }
 
@@ -663,7 +652,7 @@ private extension ReductionContext {
     }
 
     mutating func setLink(_ url: URL?) throws -> BlockInputResult {
-        guard Self.isValid(url) else { throw BlockInputError.invalidLink }
+        guard BlockURLValidator.isValid(url) else { throw BlockInputError.invalidLink }
         guard case let .text(anchor, focus, _, attributes) = selection,
               let range = normalizedTextRange() else { return noChange(.unsupportedBlockKind) }
         guard document.blocks[range.startIndex].supportsInlineFormatting else {
@@ -988,7 +977,33 @@ private extension ReductionContext {
             return noChange(.unsupportedBlockKind)
         }
         let block = document.blocks[blockIndex]
-        guard block.kind != .divider else { return noChange(.textSystemOwnsMovement) }
+        if block.kind == .divider {
+            let sourceColumn = 0
+            let next: BlockTextPosition
+            switch direction {
+            case .up:
+                guard blockIndex > 0 else { return noChange(.documentBoundary) }
+                let previous = document.blocks[blockIndex - 1]
+                let target = logicalLines(in: Array(previous.text)).last!
+                next = .init(
+                    blockID: previous.id,
+                    graphemeOffset: previous.kind == .divider ? 0 : target.end
+                )
+            case .down:
+                guard blockIndex + 1 < document.blocks.count else { return noChange(.documentBoundary) }
+                let following = document.blocks[blockIndex + 1]
+                next = .init(
+                    blockID: following.id,
+                    graphemeOffset: 0
+                )
+            }
+            return selectionResult(.text(
+                anchor: extending ? anchor : next,
+                focus: next,
+                preferredColumn: sourceColumn,
+                typingAttributes: document.attributes(at: next, fallback: typingAttributes())
+            ))
+        }
         let characters = Array(block.text)
         let lines = logicalLines(in: characters)
         guard let lineIndex = lines.firstIndex(where: { focus.graphemeOffset >= $0.start && focus.graphemeOffset <= $0.end }) else {
@@ -1325,10 +1340,6 @@ private extension ReductionContext {
     }
 }
 
-private extension BlockInputReducer {
-    static func isValid(_ url: URL?) -> Bool { ReductionContext.isValid(url) }
-}
-
 private extension InlineContent {
     func span(containingGrapheme target: Int) -> InlineSpan? {
         guard target >= 0 else { return nil }
@@ -1381,7 +1392,7 @@ private extension InlineContent {
     var containsValidLink: Bool {
         spans.contains { span in
             guard let url = span.linkURL else { return false }
-            return ReductionContext.isValid(url)
+            return BlockURLValidator.isValid(url)
         }
     }
 

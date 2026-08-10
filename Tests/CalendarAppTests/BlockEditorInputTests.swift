@@ -446,6 +446,58 @@ struct BlockEditorInputTests {
         #expect(removed.undo == .atomic(.link))
     }
 
+    @Test func percentEncodedControlsRejectReducerParserAndRichPasteBeforeAnyIDIsConsumed() throws {
+        let id = blockID(122), next = blockID(123)
+        let document = doc([block(id, .paragraph, "甲乙")])
+        let selection = textSelection(id, 1, id, 1)
+        let controls = [
+            URL(string: "https://example.com/%01")!,
+            URL(string: "https://example.com/%00%FF")!
+        ]
+
+        for url in controls {
+            #expect(throws: BlockInputError.invalidLink) {
+                try reduce(document, selection, .setLink(url))
+            }
+
+            let malformedRich = BlockPastePayload.richText(blocks: [
+                .init(
+                    kind: .paragraph,
+                    inlineContent: .init(spans: [.init(text: "坏", linkURL: url)]),
+                    indentLevel: 0,
+                    codeInfoString: nil
+                )
+            ], fallbackPlainText: "丙\n丁")
+            #expect(throws: BlockPasteParserError.invalidLink(index: 0)) {
+                try BlockPasteParser.parse(malformedRich)
+            }
+
+            let pasted = try reduce(document, selection, .replaceSelection(malformedRich), ids: [next])
+            #expect(pasted == .init(
+                document: doc([
+                    DocumentBlock(
+                        id: id,
+                        kind: .paragraph,
+                        inlineContent: .init(spans: [.init(text: "甲"), .init(text: "丙")]),
+                        taskState: nil,
+                        indentLevel: 0
+                    ),
+                    DocumentBlock(
+                        id: next,
+                        kind: .paragraph,
+                        inlineContent: .init(spans: [.init(text: "丁"), .init(text: "乙")]),
+                        taskState: nil,
+                        indentLevel: 0
+                    )
+                ]),
+                selection: caret(next, 1),
+                mutation: .document,
+                effect: .handled,
+                undo: .atomic(.paste)
+            ))
+        }
+    }
+
     @Test func collapsedFormattingChangesOnlyTypingAttributes() throws {
         let id = blockID(130)
         let document = doc([block(id, .paragraph, "甲")])
@@ -1271,8 +1323,37 @@ struct MovementExactFixture: Sendable, CustomTestStringConvertible {
             typingAttributes: .init(marks: [], linkURL: exactLinkURL)
         )
         let horizontalCross = caret(a, 2)
-        let dividerDocument = doc([block(divider, .divider, "")])
-        let dividerSelection = caret(divider, 0)
+        let dividerPrevious = blockID(323), dividerFollowing = blockID(324)
+        let dividerDocument = doc([
+            DocumentBlock(
+                id: dividerPrevious,
+                kind: .paragraph,
+                inlineContent: .init(spans: [
+                    .init(text: "上界", marks: [.bold], linkURL: exactLinkURL)
+                ]),
+                taskState: nil,
+                indentLevel: 0
+            ),
+            block(divider, .divider, ""),
+            DocumentBlock(
+                id: dividerFollowing,
+                kind: .paragraph,
+                inlineContent: .init(spans: [
+                    .init(text: "下", marks: [.italic]),
+                    .init(text: "界")
+                ]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let dividerSelection = BlockEditorSelection.text(
+            anchor: .init(blockID: divider, graphemeOffset: 0),
+            focus: .init(blockID: divider, graphemeOffset: 0),
+            preferredColumn: nil,
+            typingAttributes: .init(marks: [.code], linkURL: nil)
+        )
+        let dividerOnlyDocument = doc([block(divider, .divider, "")])
+        let dividerOnlySelection = caret(divider, 0)
 
         return [
             moved(
@@ -1295,12 +1376,63 @@ struct MovementExactFixture: Sendable, CustomTestStringConvertible {
                 command: .moveVertical(.down, extending: false),
                 expected: exactNoChange(multiline, caret(a, 1), .textSystemOwnsMovement)
             ),
+            moved(
+                dividerDocument,
+                dividerSelection,
+                .moveVertical(.up, extending: false),
+                .text(
+                    anchor: .init(blockID: dividerPrevious, graphemeOffset: 2),
+                    focus: .init(blockID: dividerPrevious, graphemeOffset: 2),
+                    preferredColumn: 0,
+                    typingAttributes: .init(marks: [.bold], linkURL: exactLinkURL)
+                )
+            ),
+            moved(
+                dividerDocument,
+                dividerSelection,
+                .moveVertical(.down, extending: false),
+                .text(
+                    anchor: .init(blockID: dividerFollowing, graphemeOffset: 0),
+                    focus: .init(blockID: dividerFollowing, graphemeOffset: 0),
+                    preferredColumn: 0,
+                    typingAttributes: .init(marks: [.italic], linkURL: nil)
+                )
+            ),
+            moved(
+                dividerDocument,
+                dividerSelection,
+                .moveVertical(.up, extending: true),
+                .text(
+                    anchor: .init(blockID: divider, graphemeOffset: 0),
+                    focus: .init(blockID: dividerPrevious, graphemeOffset: 2),
+                    preferredColumn: 0,
+                    typingAttributes: .init(marks: [.bold], linkURL: exactLinkURL)
+                )
+            ),
+            moved(
+                dividerDocument,
+                dividerSelection,
+                .moveVertical(.down, extending: true),
+                .text(
+                    anchor: .init(blockID: divider, graphemeOffset: 0),
+                    focus: .init(blockID: dividerFollowing, graphemeOffset: 0),
+                    preferredColumn: 0,
+                    typingAttributes: .init(marks: [.italic], linkURL: nil)
+                )
+            ),
             .init(
-                label: "vertical-divider-defer",
-                document: dividerDocument,
-                selection: dividerSelection,
+                label: "vertical-divider-document-start",
+                document: dividerOnlyDocument,
+                selection: dividerOnlySelection,
                 command: .moveVertical(.up, extending: false),
-                expected: exactNoChange(dividerDocument, dividerSelection, .textSystemOwnsMovement)
+                expected: exactNoChange(dividerOnlyDocument, dividerOnlySelection, .documentBoundary)
+            ),
+            .init(
+                label: "vertical-divider-document-end",
+                document: dividerOnlyDocument,
+                selection: dividerOnlySelection,
+                command: .moveVertical(.down, extending: false),
+                expected: exactNoChange(dividerOnlyDocument, dividerOnlySelection, .documentBoundary)
             ),
             .init(
                 label: "vertical-document-start",

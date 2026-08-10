@@ -31,6 +31,9 @@ struct BlockEditorPurityGateTests {
         "@testable import WorkspaceDomain",
         "@_implementationOnly import WorkspaceDomain",
         "@preconcurrency import WorkspaceDomain",
+        "  import Foundation",
+        "import /* gap */ Foundation",
+        "@preconcurrency // keep\nimport WorkspaceDomain",
         "@_spi(FixtureSPI) import WorkspaceDomain",
         "@_weakLinked import WorkspaceDomain"
     ])

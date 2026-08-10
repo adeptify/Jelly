@@ -13,27 +13,40 @@ scan_file() {
     return 1
   fi
 
-  local canonical_source
-  if ! canonical_source=$(xcrun swift-format format "$file"); then
-    fail "Task 8 source cannot be parsed by swift-format: $file"
-    return 1
-  fi
-
   local syntax_tree
-  if ! syntax_tree=$(printf '%s\n' "$canonical_source" | xcrun swiftc -frontend -dump-parse - 2>&1); then
+  if ! syntax_tree=$(xcrun swiftc -frontend -dump-parse "$file" 2>&1); then
     fail "Task 8 source is not legal Swift: $file"
     printf '%s\n' "$syntax_tree" >&2
     return 1
   fi
 
-  local imports
-  imports=$(printf '%s\n' "$syntax_tree" | sed -nE 's/.*\(import_decl .* range=\[[^]]*:[0-9]+:([0-9]+) - .* module="([^"]+)".*/\1|\2/p')
-  local column
+  local json_tree
+  if ! json_tree=$(xcrun swiftc -frontend -dump-parse -dump-ast-format json "$file" 2>&1); then
+    fail "Task 8 source cannot expose import tokens: $file"
+    printf '%s\n' "$json_tree" >&2
+    return 1
+  fi
+  local item_count
+  if ! item_count=$(printf '%s' "$json_tree" | plutil -extract items raw -); then
+    fail "Task 8 import token output is not structured JSON: $file"
+    return 1
+  fi
+  local item_index=0
+  local start
   local module
-  while IFS='|' read -r column module; do
-    [[ -z "$module" ]] && continue
-    if [[ "$column" -ne 1 ]]; then
-      fail "Modified import '$module' in $file"
+  while [[ "$item_index" -lt "$item_count" ]]; do
+    local kind
+    if ! kind=$(printf '%s' "$json_tree" | plutil -extract "items.$item_index._kind" raw -); then
+      fail "Task 8 import token is missing its kind: $file"
+      return 1
+    fi
+    if [[ "$kind" != "import_decl" ]]; then
+      item_index=$((item_index + 1))
+      continue
+    fi
+    if ! start=$(printf '%s' "$json_tree" | plutil -extract "items.$item_index.range.start" raw -) ||
+       ! module=$(printf '%s' "$json_tree" | plutil -extract "items.$item_index.module_path.0" raw -); then
+      fail "Task 8 import token is missing its source position: $file"
       return 1
     fi
     case "$module" in
@@ -43,7 +56,35 @@ scan_file() {
         return 1
         ;;
     esac
-  done <<< "$imports"
+
+    local expected="import $module"
+    local expected_length=${#expected}
+    local source_slice
+    source_slice=$(LC_ALL=C tail -c +$((start + 1)) "$file" | head -c "$expected_length")
+    local next_byte
+    next_byte=$(LC_ALL=C dd if="$file" bs=1 skip=$((start + expected_length)) count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')
+    local previous_byte
+    previous_byte=""
+    if [[ "$start" -gt 0 ]]; then
+      previous_byte=$(LC_ALL=C dd if="$file" bs=1 skip=$((start - 1)) count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')
+    fi
+    if [[ "$source_slice" != "$expected" || ( "$start" -gt 0 && "$previous_byte" != "0a" ) || ( -n "$next_byte" && "$next_byte" != "0a" ) ]]; then
+      fail "Modified import '$module' in $file"
+      return 1
+    fi
+
+    if [[ "$start" -gt 0 ]]; then
+      local previous_line
+      previous_line=$(head -c "$start" "$file" | sed -n '$p' | sed 's/^[[:space:]]*//')
+      case "$previous_line" in
+        @*)
+          fail "Modified import '$module' in $file"
+          return 1
+          ;;
+      esac
+    fi
+    item_index=$((item_index + 1))
+  done
 
   if printf '%s\n' "$syntax_tree" | grep -E 'access_level=(public|open)([)[:space:]]|$)' >/dev/null; then
     fail "Public declaration in $file"
@@ -89,14 +130,13 @@ self_test() {
     for name in BlockInputReducer.swift BlockEditorSelection.swift BlockPasteParser.swift; do
       printf 'import Foundation\nstruct Fixture {}\n' > "$fixture_root/modified-$modified_index/$name"
     done
-    printf '%s\n' "$modified_import" \
+    printf '%b\n' "$modified_import" \
       >> "$fixture_root/modified-$modified_index/BlockInputReducer.swift"
     if ! xcrun swiftc \
-      -typecheck \
-      -package-name Jelly \
-      -I "$fixture_root" \
+      -frontend \
+      -parse \
       "$fixture_root/modified-$modified_index/BlockInputReducer.swift" >/dev/null 2>&1; then
-      fail "Self-test modified import is not legal Swift: $modified_import"
+      fail "Self-test modified import is not legal Swift syntax: $modified_import"
     fi
     if scan_directory "$fixture_root/modified-$modified_index" >/dev/null 2>&1; then
       fail "Self-test accepted modified import: $modified_import"
@@ -113,6 +153,9 @@ private import WorkspaceDomain
 @preconcurrency import WorkspaceDomain
 @_spi(FixtureSPI) import WorkspaceDomain
 @_weakLinked import WorkspaceDomain
+  import Foundation
+import /* gap */ Foundation
+@preconcurrency // keep\nimport WorkspaceDomain
 MODIFIED_IMPORTS
 
   local index=0
