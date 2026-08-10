@@ -1,5 +1,27 @@
 import SwiftUI
 
+struct WorkspaceNavigationCommandDescriptor: Equatable, Identifiable, Sendable {
+    let route: WorkspaceRoute
+    let title: String
+    let key: String
+
+    var id: WorkspaceRoute { route }
+}
+
+enum WorkspaceCommandComposition {
+    static func navigationDescriptors(
+        features: WorkspaceFeatures
+    ) -> [WorkspaceNavigationCommandDescriptor] {
+        WorkspaceRoute.visibleRoutes(features).map { route in
+            WorkspaceNavigationCommandDescriptor(
+                route: route,
+                title: route.railMetadata.name,
+                key: route.commandShortcutKey
+            )
+        }
+    }
+}
+
 struct WorkspaceCommands: Commands {
     @ObservedObject var routeState: WorkspaceRouteState
     @ObservedObject var newItemRouter: WorkspaceNewItemRouter
@@ -7,9 +29,10 @@ struct WorkspaceCommands: Commands {
 
     var body: some Commands {
         CommandMenu("导航") {
-            navigationCommand(.calendar, key: "1")
-            navigationCommand(.notes, key: "2")
-            navigationCommand(.inspiration, key: "3")
+            ForEach(WorkspaceCommandComposition.navigationDescriptors(features: features)) {
+                descriptor in
+                navigationCommand(descriptor)
+            }
         }
 
         CommandGroup(replacing: .newItem) {
@@ -38,11 +61,10 @@ struct WorkspaceCommands: Commands {
     }
 
     @ViewBuilder
-    private func navigationCommand(_ route: WorkspaceRoute, key: String) -> some View {
-        Button(route.railMetadata.name) {
-            _ = routeState.activate(route, features: features)
+    private func navigationCommand(_ descriptor: WorkspaceNavigationCommandDescriptor) -> some View {
+        Button(descriptor.title) {
+            _ = routeState.activate(descriptor.route, features: features)
         }
-        .keyboardShortcut(KeyEquivalent(Character(key)), modifiers: .command)
-        .disabled(!features.isEnabled(route))
+        .keyboardShortcut(KeyEquivalent(Character(descriptor.key)), modifiers: .command)
     }
 }

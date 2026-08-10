@@ -16,6 +16,29 @@ struct WorkspaceCommandRoutingTests {
         #expect(WorkspaceRoute.commandShortcut("4") == nil)
     }
 
+    @Test func navigationCommandCompositionConstructsEnabledRoutesOnly() {
+        let calendarOnly = WorkspaceCommandComposition.navigationDescriptors(
+            features: .calendarOnly
+        )
+        #expect(calendarOnly.map(\.route) == [.calendar])
+        #expect(calendarOnly.map(\.title) == ["日历"])
+        #expect(calendarOnly.map(\.key) == ["1"])
+
+        let calendarAndNotes = WorkspaceCommandComposition.navigationDescriptors(
+            features: .init(notes: true, inspiration: false)
+        )
+        #expect(calendarAndNotes.map(\.route) == [.calendar, .notes])
+        #expect(calendarAndNotes.map(\.title) == ["日历", "笔记"])
+        #expect(calendarAndNotes.map(\.key) == ["1", "2"])
+
+        let completeWorkspace = WorkspaceCommandComposition.navigationDescriptors(
+            features: .init(notes: true, inspiration: true)
+        )
+        #expect(completeWorkspace.map(\.route) == [.calendar, .notes, .inspiration])
+        #expect(completeWorkspace.map(\.title) == ["日历", "笔记", "灵感"])
+        #expect(completeWorkspace.map(\.key) == ["1", "2", "3"])
+    }
+
     @Test func disabledRoutesAreNotActivatableAndCommandNStaysCalendarScoped() {
         let preferences = SpyWorkspaceRoutePreferenceStore(initial: "calendar")
         let state = WorkspaceRouteState(features: .calendarOnly, preferences: preferences)

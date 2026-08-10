@@ -1576,7 +1576,8 @@ git diff --check
 ~~~zsh
 ./Scripts/build-app.sh
 codesign --verify --deep --strict dist/Jelly.app
-open -n --env "JELLY_ACCEPTANCE_DATA_DIRECTORY=$(mktemp -d /tmp/jelly-task7-gui.XXXXXX)" dist/Jelly.app
+acceptance_root="$(mktemp -d "$(getconf DARWIN_USER_TEMP_DIR)jelly-task7-gui.XXXXXX")"
+open -n --env "JELLY_ACCEPTANCE_DATA_DIRECTORY=$acceptance_root" dist/Jelly.app
 ~~~
 
 - [ ] Commit.

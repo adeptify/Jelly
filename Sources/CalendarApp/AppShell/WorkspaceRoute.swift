@@ -31,11 +31,14 @@ enum WorkspaceRoute: String, CaseIterable, Equatable, Hashable, Identifiable, Se
     }
 
     static func commandShortcut(_ key: String) -> WorkspaceRoute? {
-        switch key {
-        case "1": .calendar
-        case "2": .notes
-        case "3": .inspiration
-        default: nil
+        allCases.first { $0.commandShortcutKey == key }
+    }
+
+    var commandShortcutKey: String {
+        switch self {
+        case .calendar: "1"
+        case .notes: "2"
+        case .inspiration: "3"
         }
     }
 
