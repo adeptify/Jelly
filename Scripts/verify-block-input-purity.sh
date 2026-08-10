@@ -13,18 +13,29 @@ scan_file() {
     return 1
   fi
 
+  local canonical_source
+  if ! canonical_source=$(xcrun swift-format format "$file"); then
+    fail "Task 8 source cannot be parsed by swift-format: $file"
+    return 1
+  fi
+
   local syntax_tree
-  if ! syntax_tree=$(xcrun swiftc -frontend -dump-parse "$file" 2>&1); then
+  if ! syntax_tree=$(printf '%s\n' "$canonical_source" | xcrun swiftc -frontend -dump-parse - 2>&1); then
     fail "Task 8 source is not legal Swift: $file"
     printf '%s\n' "$syntax_tree" >&2
     return 1
   fi
 
   local imports
-  imports=$(printf '%s\n' "$syntax_tree" | sed -nE 's/.*\(import_decl .* module="([^"]+)".*/\1/p')
+  imports=$(printf '%s\n' "$syntax_tree" | sed -nE 's/.*\(import_decl .* range=\[[^]]*:[0-9]+:([0-9]+) - .* module="([^"]+)".*/\1|\2/p')
+  local column
   local module
-  while IFS= read -r module; do
+  while IFS='|' read -r column module; do
     [[ -z "$module" ]] && continue
+    if [[ "$column" -ne 1 ]]; then
+      fail "Modified import '$module' in $file"
+      return 1
+    fi
     case "$module" in
       Foundation|WorkspaceDomain) ;;
       *)
@@ -61,6 +72,48 @@ self_test() {
     printf 'import Foundation\nimport WorkspaceDomain\nstruct Fixture {}\n' > "$fixture_root/valid/$name"
   done
   scan_directory "$fixture_root/valid"
+
+  printf 'public struct FixtureExport { public init() {} }\n' > "$fixture_root/WorkspaceDomainFixture.swift"
+  xcrun swiftc \
+    -emit-module \
+    -enable-testing \
+    -module-name WorkspaceDomain \
+    "$fixture_root/WorkspaceDomainFixture.swift" \
+    -emit-module-path "$fixture_root/WorkspaceDomain.swiftmodule"
+
+  local modified_index=0
+  local modified_import
+  while IFS= read -r modified_import; do
+    modified_index=$((modified_index + 1))
+    mkdir -p "$fixture_root/modified-$modified_index"
+    for name in BlockInputReducer.swift BlockEditorSelection.swift BlockPasteParser.swift; do
+      printf 'import Foundation\nstruct Fixture {}\n' > "$fixture_root/modified-$modified_index/$name"
+    done
+    printf '%s\n' "$modified_import" \
+      >> "$fixture_root/modified-$modified_index/BlockInputReducer.swift"
+    if ! xcrun swiftc \
+      -typecheck \
+      -package-name Jelly \
+      -I "$fixture_root" \
+      "$fixture_root/modified-$modified_index/BlockInputReducer.swift" >/dev/null 2>&1; then
+      fail "Self-test modified import is not legal Swift: $modified_import"
+    fi
+    if scan_directory "$fixture_root/modified-$modified_index" >/dev/null 2>&1; then
+      fail "Self-test accepted modified import: $modified_import"
+    fi
+  done <<'MODIFIED_IMPORTS'
+public import WorkspaceDomain
+package import WorkspaceDomain
+internal import WorkspaceDomain
+fileprivate import WorkspaceDomain
+private import WorkspaceDomain
+@_exported import WorkspaceDomain
+@testable import WorkspaceDomain
+@_implementationOnly import WorkspaceDomain
+@preconcurrency import WorkspaceDomain
+@_spi(FixtureSPI) import WorkspaceDomain
+@_weakLinked import WorkspaceDomain
+MODIFIED_IMPORTS
 
   local index=0
   local invalid

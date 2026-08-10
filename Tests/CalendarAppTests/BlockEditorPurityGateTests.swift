@@ -21,7 +21,18 @@ struct BlockEditorPurityGateTests {
         "import Foundation\n@preconcurrency\nimport SwiftUI",
         "import Foundation\npublic\nstruct Leaked {}",
         "import Foundation\n@MainActor\nnonisolated public\nfunc leaked() {}",
-        "import Foundation\npublic /* comment */ struct Leaked {}"
+        "import Foundation\npublic /* comment */ struct Leaked {}",
+        "public import WorkspaceDomain",
+        "package import WorkspaceDomain",
+        "internal import WorkspaceDomain",
+        "fileprivate import WorkspaceDomain",
+        "private import WorkspaceDomain",
+        "@_exported import WorkspaceDomain",
+        "@testable import WorkspaceDomain",
+        "@_implementationOnly import WorkspaceDomain",
+        "@preconcurrency import WorkspaceDomain",
+        "@_spi(FixtureSPI) import WorkspaceDomain",
+        "@_weakLinked import WorkspaceDomain"
     ])
     func scannerRejectsLegalMultilineAndSemicolonBypasses(_ invalidSource: String) throws {
         let fixture = FileManager.default.temporaryDirectory

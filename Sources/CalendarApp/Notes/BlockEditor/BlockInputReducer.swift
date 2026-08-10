@@ -277,7 +277,9 @@ private extension BlockTypingAttributes {
 private extension ReductionContext {
     static func isValid(_ url: URL?) -> Bool {
         guard let url else { return true }
-        return url.scheme != nil && url.host != nil && !url.absoluteString.unicodeScalars.contains { scalar in
+        let serialized = url.absoluteString
+        let decoded = serialized.removingPercentEncoding ?? serialized
+        return url.scheme != nil && url.host != nil && !decoded.unicodeScalars.contains { scalar in
             scalar.value < 32 || scalar.value == 127
         }
     }

@@ -781,6 +781,157 @@ struct BlockEditorInputTests {
         #expect(result.undo == .atomic(.enter))
     }
 
+    @Test(arguments: SoftBreakExactFixture.all)
+    func softBreakEveryKindReturnsTheExactAtomicResult(_ fixture: SoftBreakExactFixture) throws {
+        #expect(
+            try reduce(fixture.document, fixture.selection, .softBreak) == fixture.expected,
+            Comment(rawValue: fixture.label)
+        )
+    }
+
+    @Test(arguments: BackspaceExactFixture.all)
+    func backspaceEveryKindReturnsTheExactBoundaryDeletionAndMergeResult(_ fixture: BackspaceExactFixture) throws {
+        #expect(
+            try reduce(fixture.document, fixture.selection, .backspace) == fixture.expected,
+            Comment(rawValue: fixture.label)
+        )
+    }
+
+    @Test(arguments: MovementExactFixture.all)
+    func movementBoundaryExtensionAndAffinityMatrixReturnsExactResults(_ fixture: MovementExactFixture) throws {
+        #expect(
+            try reduce(fixture.document, fixture.selection, fixture.command) == fixture.expected,
+            Comment(rawValue: fixture.label)
+        )
+    }
+
+    @Test(arguments: CrossBlockUnicodeExactFixture.all)
+    func crossBlockForwardAndReverseSelectionsPreserveEveryGrapheme(_ fixture: CrossBlockUnicodeExactFixture) throws {
+        #expect(
+            try reduce(fixture.document, fixture.selection, .deleteSelection) == fixture.expected,
+            Comment(rawValue: fixture.label)
+        )
+    }
+
+    @Test(arguments: BlockSelectionErrorFixture.all)
+    func blockSelectionsWithMissingStableIDsThrowExactErrors(_ fixture: BlockSelectionErrorFixture) {
+        do {
+            _ = try reduce(fixture.document, fixture.selection, .deleteSelection)
+            Issue.record("expected \(fixture.expectedError): \(fixture.label)")
+        } catch let error as BlockInputError {
+            #expect(error == fixture.expectedError, Comment(rawValue: fixture.label))
+        } catch {
+            Issue.record("unexpected error \(error): \(fixture.label)")
+        }
+    }
+
+    @Test(arguments: SpanBoundaryExactFixture.all)
+    func zeroLengthAndAdjacentEqualSpansSurviveExactEdits(_ fixture: SpanBoundaryExactFixture) throws {
+        #expect(
+            try reduce(fixture.document, fixture.selection, fixture.command) == fixture.expected,
+            Comment(rawValue: fixture.label)
+        )
+    }
+
+    @Test(arguments: IndentExactFixture.all)
+    func multiRootListAndCodeEndpointIndentationReturnsExactResults(_ fixture: IndentExactFixture) throws {
+        #expect(
+            try reduce(fixture.document, fixture.selection, fixture.command) == fixture.expected,
+            Comment(rawValue: fixture.label)
+        )
+    }
+
+    @Test(arguments: FormattingExactFixture.all)
+    func inlineFormattingAdditionRemovalDirectionAndAtomicityReturnsExactResults(_ fixture: FormattingExactFixture) throws {
+        #expect(
+            try reduce(fixture.document, fixture.selection, fixture.command) == fixture.expected,
+            Comment(rawValue: fixture.label)
+        )
+    }
+
+    @Test(arguments: InvalidLinkExactFixture.all)
+    func invalidLinkShapesThrowBeforeAnyMutation(_ fixture: InvalidLinkExactFixture) {
+        do {
+            _ = try reduce(fixture.document, fixture.selection, .setLink(fixture.url))
+            Issue.record("expected invalidLink: \(fixture.label)")
+        } catch let error as BlockInputError {
+            #expect(error == .invalidLink, Comment(rawValue: fixture.label))
+        } catch {
+            Issue.record("unexpected error \(error): \(fixture.label)")
+        }
+    }
+
+    @Test(arguments: DestructiveBlockExactFixture.all)
+    func destructiveBlockSelectionsUseTheExactClosureUnion(_ fixture: DestructiveBlockExactFixture) throws {
+        #expect(
+            try reduce(
+                fixture.document,
+                fixture.selection,
+                fixture.command,
+                ids: fixture.ids
+            ) == fixture.expected,
+            Comment(rawValue: fixture.label)
+        )
+    }
+
+    @Test(arguments: PasteMatrixExactFixture.all)
+    func everySelectionShapeAndPastePayloadHasExactBoundaryAndIDOwnership(_ fixture: PasteMatrixExactFixture) throws {
+        #expect(
+            try reduce(
+                fixture.document,
+                fixture.selection,
+                .replaceSelection(fixture.payload),
+                ids: fixture.ids
+            ) == fixture.expected,
+            Comment(rawValue: fixture.label)
+        )
+    }
+
+    @Test(arguments: DragOrderingExactFixture.all)
+    func multiRootDragNormalizesParameterOrderAndPreservesStableClosures(_ fixture: DragOrderingExactFixture) throws {
+        #expect(
+            try reduce(
+                fixture.document,
+                fixture.selection,
+                .moveBlockRoots(fixture.roots, before: fixture.target)
+            ) == fixture.expected,
+            Comment(rawValue: fixture.label)
+        )
+    }
+
+    @Test(arguments: ReductionOutcomeExactFixture.all)
+    func successNoChangeAndErrorOutcomesAreMutuallyExclusive(_ fixture: ReductionOutcomeExactFixture) {
+        do {
+            let result = try reduce(
+                fixture.document,
+                fixture.selection,
+                fixture.command,
+                ids: fixture.ids
+            )
+            #expect(fixture.expected == .result(result), Comment(rawValue: fixture.label))
+        } catch let error as BlockInputError {
+            #expect(fixture.expected == .error(error), Comment(rawValue: fixture.label))
+        } catch {
+            Issue.record("unexpected error \(error): \(fixture.label)")
+        }
+    }
+
+    @Test(arguments: MarkdownExactFixture.all)
+    func everyMarkdownPrefixAndRejectionReturnsTheExactResult(_ fixture: MarkdownExactFixture) throws {
+        #expect(
+            try reduce(fixture.document, fixture.selection, .applyMarkdownShortcut) == fixture.expected,
+            Comment(rawValue: fixture.label)
+        )
+    }
+
+    @Test(arguments: SlashExactFixture.all)
+    func slashConversionAndInvalidSelectionShapesReturnExactResults(_ fixture: SlashExactFixture) throws {
+        #expect(
+            try reduce(fixture.document, fixture.selection, .applySlashConversion(fixture.kind)) == fixture.expected,
+            Comment(rawValue: fixture.label)
+        )
+    }
+
     @Test func deterministicIDErrorsAreTypedAndCandidateValidationIsAtomic() throws {
         let id = blockID(190)
         let document = doc([block(id, .paragraph, "甲")])
@@ -868,8 +1019,1511 @@ struct EnterFixture: Sendable, CustomTestStringConvertible {
     }
 }
 
+struct SoftBreakExactFixture: Sendable, CustomTestStringConvertible {
+    let label: String
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let expected: BlockInputResult
+    var testDescription: String { label }
+
+    static let all: [SoftBreakExactFixture] = {
+        let id = blockID(300)
+        return allBlockKinds.flatMap { kind -> [SoftBreakExactFixture] in
+            let original = validBlock(
+                id,
+                kind,
+                kind == .divider ? "" : "甲乙",
+                completed: kind == .task ? exactCompletedDate : nil,
+                codeInfo: kind == .code ? "swift" : nil
+            )
+            let document = doc([original])
+            if kind == .divider {
+                let selection = caret(id, 0)
+                return [.init(
+                    label: "divider-unsupported",
+                    document: document,
+                    selection: selection,
+                    expected: exactNoChange(document, selection, .unsupportedBlockKind)
+                )]
+            }
+            let cases: [(String, BlockEditorSelection, Int, Int?)] = [
+                ("start", caret(id, 0), 0, nil),
+                ("middle", caret(id, 1), 1, nil),
+                ("end", caret(id, 2), 2, nil),
+                ("range", textSelection(id, 0, id, 1), 0, 1)
+            ]
+            return cases.map { name, selection, insertionOffset, deletedUpper in
+                let expectedBlock = exactSoftBreakBlock(
+                    id: id,
+                    kind: kind,
+                    insertionOffset: insertionOffset,
+                    deletedUpper: deletedUpper
+                )
+                let expectedDocument = doc([expectedBlock])
+                let position = BlockTextPosition(blockID: id, graphemeOffset: insertionOffset + 1)
+                let expectedSelection = BlockEditorSelection.text(
+                    anchor: position,
+                    focus: position,
+                    preferredColumn: nil,
+                    typingAttributes: .init(marks: [], linkURL: nil)
+                )
+                return .init(
+                    label: "\(kind)-\(name)",
+                    document: document,
+                    selection: selection,
+                    expected: .init(
+                        document: expectedDocument,
+                        selection: expectedSelection,
+                        mutation: .document,
+                        effect: .handled,
+                        undo: .atomic(.softBreak)
+                    )
+                )
+            }
+        }
+    }()
+}
+
+struct BackspaceExactFixture: Sendable, CustomTestStringConvertible {
+    let label: String
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let expected: BlockInputResult
+    var testDescription: String { label }
+
+    static let all: [BackspaceExactFixture] = {
+        let id = blockID(310), previous = blockID(311), divider = blockID(312)
+        return allBlockKinds.flatMap { kind -> [BackspaceExactFixture] in
+            if kind == .divider {
+                let document = doc([validBlock(id, .divider, "")])
+                let selection = caret(id, 0)
+                return [.init(
+                    label: "divider-empty-exit",
+                    document: document,
+                    selection: selection,
+                    expected: .init(
+                        document: doc([block(id, .paragraph, "")]),
+                        selection: caret(id, 0),
+                        mutation: .document,
+                        effect: .handled,
+                        undo: .atomic(.backspace)
+                    )
+                )]
+            }
+
+            let current = validBlock(
+                id,
+                kind,
+                "甲乙",
+                completed: kind == .task ? exactCompletedDate : nil,
+                codeInfo: kind == .code ? "swift" : nil
+            )
+            let single = doc([current])
+            let start = caret(id, 0)
+            let deletedBlock = exactBackspaceDeletedBlock(id: id, kind: kind)
+            let deletedDocument = doc([deletedBlock])
+            let deletedSelection = caret(
+                id,
+                0,
+                attributes: kind == .link
+                    ? .init(marks: [], linkURL: exactLinkURL)
+                    : .init(marks: [], linkURL: nil)
+            )
+            let deleteResult = BlockInputResult(
+                document: deletedDocument,
+                selection: deletedSelection,
+                mutation: .document,
+                effect: .handled,
+                undo: .atomic(.backspace)
+            )
+
+            let previousBlock = block(previous, .paragraph, "前")
+            let merged = exactMergedBlock(previous: previous, current: current)
+            let mergedDocument = doc([merged])
+            let mergedResult = BlockInputResult(
+                document: mergedDocument,
+                selection: caret(previous, 1),
+                mutation: .document,
+                effect: .handled,
+                undo: .atomic(.backspace)
+            )
+            let mergeDocument = doc([previousBlock, current])
+            let dividerDocument = doc([previousBlock, block(divider, .divider, ""), current])
+
+            return [
+                .init(
+                    label: "\(kind)-start",
+                    document: single,
+                    selection: start,
+                    expected: exactNoChange(single, start, .documentBoundary)
+                ),
+                .init(
+                    label: "\(kind)-middle",
+                    document: single,
+                    selection: caret(id, 1),
+                    expected: deleteResult
+                ),
+                .init(
+                    label: "\(kind)-range",
+                    document: single,
+                    selection: textSelection(id, 0, id, 1),
+                    expected: deleteResult
+                ),
+                .init(
+                    label: "\(kind)-merge",
+                    document: mergeDocument,
+                    selection: caret(id, 0),
+                    expected: mergedResult
+                ),
+                .init(
+                    label: "\(kind)-preceding-divider",
+                    document: dividerDocument,
+                    selection: caret(id, 0),
+                    expected: mergedResult
+                )
+            ]
+        }
+    }()
+}
+
+struct MovementExactFixture: Sendable, CustomTestStringConvertible {
+    let label: String
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let command: BlockInputCommand
+    let expected: BlockInputResult
+    var testDescription: String { label }
+
+    static let all: [MovementExactFixture] = {
+        let a = blockID(320), b = blockID(321), divider = blockID(322)
+        let multiline = doc([block(a, .paragraph, "abc\nx")])
+        let boldItalic = doc([
+            block(a, .paragraph, "xx"),
+            DocumentBlock(
+                id: b,
+                kind: .paragraph,
+                inlineContent: .init(spans: [
+                    .init(text: "甲", marks: [.bold]),
+                    .init(text: "乙丙", marks: [.italic])
+                ]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let linkDocument = doc([
+            DocumentBlock(
+                id: a,
+                kind: .paragraph,
+                inlineContent: .init(spans: [
+                    .init(text: "甲", linkURL: exactLinkURL),
+                    .init(text: "乙")
+                ]),
+                taskState: nil,
+                indentLevel: 0
+            ),
+            block(b, .paragraph, "丙")
+        ])
+
+        func moved(
+            _ document: BlockDocument,
+            _ selection: BlockEditorSelection,
+            _ command: BlockInputCommand,
+            _ expectedSelection: BlockEditorSelection
+        ) -> MovementExactFixture {
+            .init(
+                label: "\(command)-\(selection)",
+                document: document,
+                selection: selection,
+                command: command,
+                expected: .init(
+                    document: document,
+                    selection: expectedSelection,
+                    mutation: .selectionOnly,
+                    effect: .handled,
+                    undo: .none
+                )
+            )
+        }
+
+        let secondLineStart = BlockEditorSelection.text(
+            anchor: .init(blockID: a, graphemeOffset: 4),
+            focus: .init(blockID: a, graphemeOffset: 4),
+            preferredColumn: 2,
+            typingAttributes: .init(marks: [], linkURL: nil)
+        )
+        let firstLineEnd = caret(a, 3)
+        let extendingDown = BlockEditorSelection.text(
+            anchor: .init(blockID: a, graphemeOffset: 3),
+            focus: .init(blockID: a, graphemeOffset: 5),
+            preferredColumn: 3,
+            typingAttributes: .init(marks: [], linkURL: nil)
+        )
+        let verticalAffinity = BlockEditorSelection.text(
+            anchor: .init(blockID: b, graphemeOffset: 2),
+            focus: .init(blockID: b, graphemeOffset: 2),
+            preferredColumn: 2,
+            typingAttributes: .init(marks: [.italic], linkURL: nil)
+        )
+        let horizontalBackwardExtend = BlockEditorSelection.text(
+            anchor: .init(blockID: a, graphemeOffset: 2),
+            focus: .init(blockID: a, graphemeOffset: 1),
+            preferredColumn: nil,
+            typingAttributes: .init(marks: [], linkURL: exactLinkURL)
+        )
+        let horizontalCross = caret(a, 2)
+        let dividerDocument = doc([block(divider, .divider, "")])
+        let dividerSelection = caret(divider, 0)
+
+        return [
+            moved(
+                multiline,
+                secondLineStart,
+                .moveVertical(.up, extending: false),
+                .text(
+                    anchor: .init(blockID: a, graphemeOffset: 2),
+                    focus: .init(blockID: a, graphemeOffset: 2),
+                    preferredColumn: 2,
+                    typingAttributes: .init(marks: [], linkURL: nil)
+                )
+            ),
+            moved(multiline, firstLineEnd, .moveVertical(.down, extending: true), extendingDown),
+            moved(boldItalic, caret(a, 2), .moveVertical(.down, extending: false), verticalAffinity),
+            .init(
+                label: "vertical-internal-defer",
+                document: multiline,
+                selection: caret(a, 1),
+                command: .moveVertical(.down, extending: false),
+                expected: exactNoChange(multiline, caret(a, 1), .textSystemOwnsMovement)
+            ),
+            .init(
+                label: "vertical-divider-defer",
+                document: dividerDocument,
+                selection: dividerSelection,
+                command: .moveVertical(.up, extending: false),
+                expected: exactNoChange(dividerDocument, dividerSelection, .textSystemOwnsMovement)
+            ),
+            .init(
+                label: "vertical-document-start",
+                document: multiline,
+                selection: caret(a, 0),
+                command: .moveVertical(.up, extending: false),
+                expected: exactNoChange(multiline, caret(a, 0), .documentBoundary)
+            ),
+            .init(
+                label: "vertical-document-end",
+                document: multiline,
+                selection: caret(a, 5),
+                command: .moveVertical(.down, extending: false),
+                expected: exactNoChange(multiline, caret(a, 5), .documentBoundary)
+            ),
+            moved(linkDocument, horizontalCross, .moveHorizontal(.backward, extending: true), horizontalBackwardExtend),
+            moved(
+                linkDocument,
+                caret(b, 0),
+                .moveHorizontal(.backward, extending: false),
+                caret(a, 2)
+            ),
+            moved(
+                linkDocument,
+                caret(a, 0),
+                .moveHorizontal(.forward, extending: false),
+                caret(a, 1, attributes: .init(marks: [], linkURL: exactLinkURL))
+            ),
+            moved(
+                linkDocument,
+                caret(a, 2),
+                .moveHorizontal(.backward, extending: false),
+                caret(a, 1, attributes: .init(marks: [], linkURL: exactLinkURL))
+            )
+        ]
+    }()
+}
+
+struct CrossBlockUnicodeExactFixture: Sendable, CustomTestStringConvertible {
+    let label: String
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let expected: BlockInputResult
+    var testDescription: String { label }
+
+    static let all: [CrossBlockUnicodeExactFixture] = UnicodeFixture.all.flatMap { unicode -> [CrossBlockUnicodeExactFixture] in
+        let a = blockID(330), b = blockID(331)
+        let document = doc([
+            block(a, .paragraph, "前" + unicode.text),
+            block(b, .quote, unicode.text + "后")
+        ])
+        let expectedDocument = doc([DocumentBlock(
+            id: a,
+            kind: .paragraph,
+            inlineContent: .init(spans: [.init(text: "前"), .init(text: "后")]),
+            taskState: nil,
+            indentLevel: 0
+        )])
+        let expected = BlockInputResult(
+            document: expectedDocument,
+            selection: caret(a, 1),
+            mutation: .document,
+            effect: .handled,
+            undo: .atomic(.deletion)
+        )
+        return [
+            .init(
+                label: "\(unicode.label)-forward",
+                document: document,
+                selection: textSelection(a, 1, b, 1),
+                expected: expected
+            ),
+            .init(
+                label: "\(unicode.label)-reverse",
+                document: document,
+                selection: textSelection(b, 1, a, 1),
+                expected: expected
+            )
+        ]
+    }
+}
+
+struct BlockSelectionErrorFixture: Sendable, CustomTestStringConvertible {
+    let label: String
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let expectedError: BlockInputError
+    var testDescription: String { label }
+
+    static let all: [BlockSelectionErrorFixture] = {
+        let a = blockID(340), b = blockID(341), missing = blockID(999)
+        let document = doc([block(a, .paragraph, "甲"), block(b, .paragraph, "乙")])
+        return [
+            .init(label: "missing-anchor", document: document, selection: .blocks(anchor: missing, focus: a), expectedError: .invalidSelection),
+            .init(label: "missing-focus", document: document, selection: .blocks(anchor: a, focus: missing), expectedError: .invalidSelection),
+            .init(label: "both-missing", document: document, selection: .blocks(anchor: missing, focus: blockID(998)), expectedError: .invalidSelection)
+        ]
+    }()
+}
+
+struct SpanBoundaryExactFixture: Sendable, CustomTestStringConvertible {
+    let label: String
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let command: BlockInputCommand
+    let expected: BlockInputResult
+    var testDescription: String { label }
+
+    static let all: [SpanBoundaryExactFixture] = {
+        let id = blockID(350)
+        let zeroItalic = InlineSpan(text: "", marks: [.italic])
+        let zeroCode = InlineSpan(text: "", marks: [.code])
+        let document = doc([DocumentBlock(
+            id: id,
+            kind: .paragraph,
+            inlineContent: .init(spans: [
+                .init(text: "甲", marks: [.bold]),
+                zeroItalic,
+                .init(text: "乙", marks: [.bold]),
+                .init(text: "丙", marks: [.bold]),
+                zeroCode
+            ]),
+            taskState: nil,
+            indentLevel: 0
+        )])
+        let selection = textSelection(id, 1, id, 2)
+        let deletedDocument = doc([DocumentBlock(
+            id: id,
+            kind: .paragraph,
+            inlineContent: .init(spans: [
+                .init(text: "甲", marks: [.bold]), zeroItalic,
+                .init(text: "丙", marks: [.bold]), zeroCode
+            ]),
+            taskState: nil,
+            indentLevel: 0
+        )])
+        let linkedDocument = doc([DocumentBlock(
+            id: id,
+            kind: .paragraph,
+            inlineContent: .init(spans: [
+                .init(text: "甲", marks: [.bold]), zeroItalic,
+                .init(text: "乙", marks: [.bold], linkURL: exactLinkURL),
+                .init(text: "丙", marks: [.bold]), zeroCode
+            ]),
+            taskState: nil,
+            indentLevel: 0
+        )])
+        let pastedDocument = doc([DocumentBlock(
+            id: id,
+            kind: .paragraph,
+            inlineContent: .init(spans: [
+                .init(text: "甲", marks: [.bold]), zeroItalic,
+                .init(text: "中"),
+                .init(text: "丙", marks: [.bold]), zeroCode
+            ]),
+            taskState: nil,
+            indentLevel: 0
+        )])
+        return [
+            .init(
+                label: "delete",
+                document: document,
+                selection: selection,
+                command: .deleteSelection,
+                expected: .init(
+                    document: deletedDocument,
+                    selection: caret(id, 1, attributes: .init(marks: [.bold], linkURL: nil)),
+                    mutation: .document,
+                    effect: .handled,
+                    undo: .atomic(.deletion)
+                )
+            ),
+            .init(
+                label: "link",
+                document: document,
+                selection: selection,
+                command: .setLink(exactLinkURL),
+                expected: .init(
+                    document: linkedDocument,
+                    selection: caret(id, 1, attributes: .init(marks: [.bold], linkURL: nil)),
+                    mutation: .document,
+                    effect: .handled,
+                    undo: .atomic(.link)
+                )
+            ),
+            .init(
+                label: "paste",
+                document: document,
+                selection: selection,
+                command: .replaceSelection(.plainText("中")),
+                expected: .init(
+                    document: pastedDocument,
+                    selection: caret(id, 2),
+                    mutation: .document,
+                    effect: .handled,
+                    undo: .atomic(.paste)
+                )
+            )
+        ]
+    }()
+}
+
+struct IndentExactFixture: Sendable, CustomTestStringConvertible {
+    let label: String
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let command: BlockInputCommand
+    let expected: BlockInputResult
+    var testDescription: String { label }
+
+    static let all: [IndentExactFixture] = {
+        let parent = blockID(360), a = blockID(361), aChild = blockID(362)
+        let b = blockID(363), bChild = blockID(364)
+        let flat = doc([
+            block(parent, .bullet, "parent", indent: 0),
+            block(a, .ordered, "a", indent: 0),
+            block(aChild, .task, "a-child", indent: 1),
+            block(b, .bullet, "b", indent: 0),
+            block(bChild, .ordered, "b-child", indent: 1)
+        ])
+        let nested = doc([
+            block(parent, .bullet, "parent", indent: 0),
+            block(a, .ordered, "a", indent: 1),
+            block(aChild, .task, "a-child", indent: 2),
+            block(b, .bullet, "b", indent: 1),
+            block(bChild, .ordered, "b-child", indent: 2)
+        ])
+        let listSelection = BlockEditorSelection.blocks(anchor: a, focus: b)
+
+        let code = blockID(365)
+        let indentSource = doc([block(code, .code, "  a\n    b\n c", codeInfo: "swift")])
+        let indented = doc([block(code, .code, "      a\n        b\n c", codeInfo: "swift")])
+        let outdentSource = doc([block(code, .code, "    a\n  b\n c", codeInfo: "swift")])
+        let outdented = doc([block(code, .code, "a\nb\n c", codeInfo: "swift")])
+
+        func codeFixture(
+            _ label: String,
+            document: BlockDocument,
+            selection: BlockEditorSelection,
+            command: BlockInputCommand,
+            expectedDocument: BlockDocument,
+            expectedSelection: BlockEditorSelection
+        ) -> IndentExactFixture {
+            .init(
+                label: label,
+                document: document,
+                selection: selection,
+                command: command,
+                expected: .init(
+                    document: expectedDocument,
+                    selection: expectedSelection,
+                    mutation: .document,
+                    effect: .handled,
+                    undo: .atomic(.indentation)
+                )
+            )
+        }
+
+        return [
+            .init(
+                label: "multi-root-indent",
+                document: flat,
+                selection: listSelection,
+                command: .indent,
+                expected: .init(
+                    document: nested,
+                    selection: listSelection,
+                    mutation: .document,
+                    effect: .handled,
+                    undo: .atomic(.indentation)
+                )
+            ),
+            .init(
+                label: "multi-root-outdent",
+                document: nested,
+                selection: listSelection,
+                command: .outdent,
+                expected: .init(
+                    document: flat,
+                    selection: listSelection,
+                    mutation: .document,
+                    effect: .handled,
+                    undo: .atomic(.indentation)
+                )
+            ),
+            codeFixture(
+                "code-indent-forward-endpoint",
+                document: indentSource,
+                selection: textSelection(code, 1, code, 10),
+                command: .indent,
+                expectedDocument: indented,
+                expectedSelection: textSelection(code, 5, code, 18)
+            ),
+            codeFixture(
+                "code-indent-reverse-endpoint",
+                document: indentSource,
+                selection: textSelection(code, 10, code, 1),
+                command: .indent,
+                expectedDocument: indented,
+                expectedSelection: textSelection(code, 18, code, 5)
+            ),
+            codeFixture(
+                "code-outdent-forward-endpoint",
+                document: outdentSource,
+                selection: textSelection(code, 0, code, 10),
+                command: .outdent,
+                expectedDocument: outdented,
+                expectedSelection: textSelection(code, 0, code, 4)
+            ),
+            codeFixture(
+                "code-outdent-reverse-endpoint",
+                document: outdentSource,
+                selection: textSelection(code, 10, code, 0),
+                command: .outdent,
+                expectedDocument: outdented,
+                expectedSelection: textSelection(code, 4, code, 0)
+            )
+        ]
+    }()
+}
+
+struct FormattingExactFixture: Sendable, CustomTestStringConvertible {
+    let label: String
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let command: BlockInputCommand
+    let expected: BlockInputResult
+    var testDescription: String { label }
+
+    static let all: [FormattingExactFixture] = {
+        let a = blockID(370), b = blockID(371), c = blockID(372)
+        let addDocument = doc([DocumentBlock(
+            id: a,
+            kind: .paragraph,
+            inlineContent: .init(spans: [.init(text: "甲", marks: [.bold]), .init(text: "乙")]),
+            taskState: nil,
+            indentLevel: 0
+        )])
+        let addedDocument = doc([DocumentBlock(
+            id: a,
+            kind: .paragraph,
+            inlineContent: .init(spans: [.init(text: "甲", marks: [.bold]), .init(text: "乙", marks: [.bold])]),
+            taskState: nil,
+            indentLevel: 0
+        )])
+        let removedDocument = doc([DocumentBlock(
+            id: a,
+            kind: .paragraph,
+            inlineContent: .init(spans: [.init(text: "甲"), .init(text: "乙")]),
+            taskState: nil,
+            indentLevel: 0
+        )])
+        let crossDocument = doc([
+            DocumentBlock(
+                id: a,
+                kind: .paragraph,
+                inlineContent: .init(spans: [.init(text: "甲", marks: [.italic])]),
+                taskState: nil,
+                indentLevel: 0
+            ),
+            block(b, .quote, "乙")
+        ])
+        let crossExpected = doc([
+            DocumentBlock(
+                id: a,
+                kind: .paragraph,
+                inlineContent: .init(spans: [.init(text: "甲", marks: [.bold, .italic])]),
+                taskState: nil,
+                indentLevel: 0
+            ),
+            DocumentBlock(
+                id: b,
+                kind: .quote,
+                inlineContent: .init(spans: [.init(text: "乙", marks: [.bold])]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let mixed = doc([block(a, .paragraph, "甲"), block(b, .code, "code"), block(c, .paragraph, "乙")])
+        let mixedForward = textSelection(a, 0, c, 1)
+        let mixedReverse = textSelection(c, 1, a, 0)
+
+        let typingDocument = doc([block(a, .paragraph, "甲乙")])
+        let typingSelection = BlockEditorSelection.text(
+            anchor: .init(blockID: a, graphemeOffset: 1),
+            focus: .init(blockID: a, graphemeOffset: 1),
+            preferredColumn: 7,
+            typingAttributes: .init(marks: [.bold], linkURL: exactLinkURL)
+        )
+        let typedDocument = doc([DocumentBlock(
+            id: a,
+            kind: .paragraph,
+            inlineContent: .init(spans: [
+                .init(text: "甲"),
+                .init(text: "中", marks: [.bold], linkURL: exactLinkURL),
+                .init(text: "乙")
+            ]),
+            taskState: nil,
+            indentLevel: 0
+        )])
+        let linkedDocument = doc([DocumentBlock(
+            id: a,
+            kind: .paragraph,
+            inlineContent: .init(spans: [.init(text: "甲", linkURL: exactLinkURL), .init(text: "乙")]),
+            taskState: nil,
+            indentLevel: 0
+        )])
+
+        func documentResult(
+            _ label: String,
+            document: BlockDocument,
+            selection: BlockEditorSelection,
+            command: BlockInputCommand,
+            expectedDocument: BlockDocument,
+            expectedSelection: BlockEditorSelection,
+            undo: BlockUndoDirective
+        ) -> FormattingExactFixture {
+            .init(
+                label: label,
+                document: document,
+                selection: selection,
+                command: command,
+                expected: .init(
+                    document: expectedDocument,
+                    selection: expectedSelection,
+                    mutation: .document,
+                    effect: .handled,
+                    undo: undo
+                )
+            )
+        }
+
+        let addSelection = textSelection(a, 0, a, 2)
+        return [
+            documentResult(
+                "mark-add-when-not-all",
+                document: addDocument,
+                selection: addSelection,
+                command: .toggleInlineMark(.bold),
+                expectedDocument: addedDocument,
+                expectedSelection: caret(a, 0, attributes: .init(marks: [.bold], linkURL: nil)),
+                undo: .atomic(.formatting)
+            ),
+            documentResult(
+                "mark-remove-when-all",
+                document: addedDocument,
+                selection: addSelection,
+                command: .toggleInlineMark(.bold),
+                expectedDocument: removedDocument,
+                expectedSelection: caret(a, 0),
+                undo: .atomic(.formatting)
+            ),
+            documentResult(
+                "cross-block-forward",
+                document: crossDocument,
+                selection: textSelection(a, 0, b, 1),
+                command: .toggleInlineMark(.bold),
+                expectedDocument: crossExpected,
+                expectedSelection: caret(a, 0, attributes: .init(marks: [.bold, .italic], linkURL: nil)),
+                undo: .atomic(.formatting)
+            ),
+            documentResult(
+                "cross-block-reverse",
+                document: crossDocument,
+                selection: textSelection(b, 1, a, 0),
+                command: .toggleInlineMark(.bold),
+                expectedDocument: crossExpected,
+                expectedSelection: caret(a, 0, attributes: .init(marks: [.bold, .italic], linkURL: nil)),
+                undo: .atomic(.formatting)
+            ),
+            .init(
+                label: "mixed-code-mark-forward",
+                document: mixed,
+                selection: mixedForward,
+                command: .toggleInlineMark(.italic),
+                expected: exactNoChange(mixed, mixedForward, .unsupportedBlockKind)
+            ),
+            .init(
+                label: "mixed-code-link-reverse",
+                document: mixed,
+                selection: mixedReverse,
+                command: .setLink(exactLinkURL),
+                expected: exactNoChange(mixed, mixedReverse, .unsupportedBlockKind)
+            ),
+            documentResult(
+                "typing-attributes-insert",
+                document: typingDocument,
+                selection: typingSelection,
+                command: .insertText("中"),
+                expectedDocument: typedDocument,
+                expectedSelection: caret(a, 2, attributes: .init(marks: [.bold], linkURL: exactLinkURL)),
+                undo: .coalesceTyping(a)
+            ),
+            documentResult(
+                "link-caret-affinity-at-zero",
+                document: typingDocument,
+                selection: textSelection(a, 0, a, 1),
+                command: .setLink(exactLinkURL),
+                expectedDocument: linkedDocument,
+                expectedSelection: caret(a, 0, attributes: .init(marks: [], linkURL: exactLinkURL)),
+                undo: .atomic(.link)
+            )
+        ]
+    }()
+}
+
+struct InvalidLinkExactFixture: Sendable, CustomTestStringConvertible {
+    let label: String
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let url: URL
+    var testDescription: String { label }
+
+    static let all: [InvalidLinkExactFixture] = {
+        let id = blockID(380)
+        let document = doc([block(id, .paragraph, "甲")])
+        let selection = textSelection(id, 0, id, 1)
+        let control = "https://example.com/" + String(UnicodeScalar(1)!)
+        return [
+            .init(label: "relative", document: document, selection: selection, url: URL(string: "relative/path")!),
+            .init(label: "scheme-only", document: document, selection: selection, url: URL(string: "https:")!),
+            .init(label: "mailto", document: document, selection: selection, url: URL(string: "mailto:test@example.com")!),
+            .init(label: "control", document: document, selection: selection, url: URL(string: control)!)
+        ]
+    }()
+}
+
+struct DestructiveBlockExactFixture: Sendable, CustomTestStringConvertible {
+    let label: String
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let command: BlockInputCommand
+    let ids: [BlockID]
+    let expected: BlockInputResult
+    var testDescription: String { label }
+
+    static let all: [DestructiveBlockExactFixture] = {
+        let root = blockID(390), child = blockID(391), grandchild = blockID(392)
+        let later = blockID(393), laterChild = blockID(394), divider = blockID(395), tail = blockID(396)
+        let inserted = blockID(397)
+        let document = doc([
+            block(root, .bullet, "root", indent: 0),
+            block(child, .task, "child", indent: 1, completed: exactCompletedDate),
+            block(grandchild, .ordered, "grand", indent: 2),
+            block(later, .ordered, "later", indent: 0),
+            block(laterChild, .bullet, "later-child", indent: 1),
+            block(divider, .divider, ""),
+            block(tail, .paragraph, "tail")
+        ])
+        let forward = BlockEditorSelection.blocks(anchor: root, focus: later)
+        let reverse = BlockEditorSelection.blocks(anchor: later, focus: root)
+        let deletedDocument = doc([block(divider, .divider, ""), block(tail, .paragraph, "tail")])
+        let plainDocument = doc([
+            block(root, .paragraph, "甲"),
+            block(inserted, .paragraph, "乙"),
+            block(divider, .divider, ""),
+            block(tail, .paragraph, "tail")
+        ])
+
+        func destructive(
+            _ label: String,
+            selection: BlockEditorSelection,
+            command: BlockInputCommand,
+            ids: [BlockID] = [],
+            expectedDocument: BlockDocument,
+            expectedSelection: BlockEditorSelection,
+            undo: BlockUndoDirective
+        ) -> DestructiveBlockExactFixture {
+            .init(
+                label: label,
+                document: document,
+                selection: selection,
+                command: command,
+                ids: ids,
+                expected: .init(
+                    document: expectedDocument,
+                    selection: expectedSelection,
+                    mutation: .document,
+                    effect: .handled,
+                    undo: undo
+                )
+            )
+        }
+
+        let throughDividerForward = BlockEditorSelection.blocks(anchor: child, focus: divider)
+        let throughDividerReverse = BlockEditorSelection.blocks(anchor: divider, focus: child)
+        let rich = BlockPastePayload.richText(blocks: [
+            .init(kind: .quote, inlineContent: .plain("新"), indentLevel: 0, codeInfoString: nil)
+        ], fallbackPlainText: "新")
+        let richDocument = doc([
+            block(root, .bullet, "root", indent: 0),
+            block(child, .quote, "新"),
+            block(tail, .paragraph, "tail")
+        ])
+        let emptyRich = BlockPastePayload.richText(blocks: [], fallbackPlainText: "")
+        let emptyDocument = doc([block(root, .bullet, "root", indent: 0), block(tail, .paragraph, "tail")])
+
+        return [
+            destructive(
+                "delete-forward-multi-root-descendants",
+                selection: forward,
+                command: .deleteSelection,
+                expectedDocument: deletedDocument,
+                expectedSelection: caret(divider, 0),
+                undo: .atomic(.deletion)
+            ),
+            destructive(
+                "delete-reverse-multi-root-descendants",
+                selection: reverse,
+                command: .deleteSelection,
+                expectedDocument: deletedDocument,
+                expectedSelection: caret(divider, 0),
+                undo: .atomic(.deletion)
+            ),
+            destructive(
+                "plain-replacement-forward-multi-root",
+                selection: forward,
+                command: .replaceSelection(.plainText("甲\n乙")),
+                ids: [inserted],
+                expectedDocument: plainDocument,
+                expectedSelection: caret(inserted, 1),
+                undo: .atomic(.paste)
+            ),
+            destructive(
+                "plain-replacement-reverse-multi-root",
+                selection: reverse,
+                command: .replaceSelection(.plainText("甲\n乙")),
+                ids: [inserted],
+                expectedDocument: plainDocument,
+                expectedSelection: caret(inserted, 1),
+                undo: .atomic(.paste)
+            ),
+            destructive(
+                "rich-replacement-forward-through-divider",
+                selection: throughDividerForward,
+                command: .replaceSelection(rich),
+                expectedDocument: richDocument,
+                expectedSelection: caret(child, 1),
+                undo: .atomic(.paste)
+            ),
+            destructive(
+                "rich-replacement-reverse-through-divider",
+                selection: throughDividerReverse,
+                command: .replaceSelection(rich),
+                expectedDocument: richDocument,
+                expectedSelection: caret(child, 1),
+                undo: .atomic(.paste)
+            ),
+            destructive(
+                "empty-rich-removes-deduplicated-union",
+                selection: throughDividerForward,
+                command: .replaceSelection(emptyRich),
+                expectedDocument: emptyDocument,
+                expectedSelection: caret(tail, 0),
+                undo: .atomic(.paste)
+            )
+        ]
+    }()
+}
+
+struct PasteMatrixExactFixture: Sendable, CustomTestStringConvertible {
+    let label: String
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let payload: BlockPastePayload
+    let ids: [BlockID]
+    let expected: BlockInputResult
+    var testDescription: String { label }
+
+    static let all: [PasteMatrixExactFixture] = {
+        let a = blockID(400), b = blockID(401), tail = blockID(402)
+        let n1 = blockID(410), n2 = blockID(411), n3 = blockID(412)
+        let plain = BlockPastePayload.plainText("新\n次")
+        let rich = BlockPastePayload.richText(blocks: [
+            .init(kind: .task, inlineContent: .plain("新"), indentLevel: 0, codeInfoString: nil),
+            .init(kind: .divider, inlineContent: .plain(""), indentLevel: 0, codeInfoString: nil)
+        ], fallbackPlainText: "新\n")
+        let empty = BlockPastePayload.richText(blocks: [], fallbackPlainText: "")
+        let fallback = BlockPastePayload.richText(blocks: [
+            .init(kind: .link, inlineContent: .plain("bad"), indentLevel: 0, codeInfoString: nil)
+        ], fallbackPlainText: "回\n退")
+
+        func fixture(
+            _ label: String,
+            document: BlockDocument,
+            selection: BlockEditorSelection,
+            payload: BlockPastePayload,
+            ids: [BlockID] = [],
+            expectedDocument: BlockDocument,
+            expectedSelection: BlockEditorSelection,
+            mutation: BlockInputMutation = .document,
+            undo: BlockUndoDirective = .atomic(.paste)
+        ) -> PasteMatrixExactFixture {
+            .init(
+                label: label,
+                document: document,
+                selection: selection,
+                payload: payload,
+                ids: ids,
+                expected: .init(
+                    document: expectedDocument,
+                    selection: expectedSelection,
+                    mutation: mutation,
+                    effect: .handled,
+                    undo: undo
+                )
+            )
+        }
+
+        let collapsedDocument = doc([block(a, .task, "甲乙", completed: exactCompletedDate)])
+        let collapsed = caret(a, 1)
+        let collapsedPlain = doc([
+            DocumentBlock(
+                id: a,
+                kind: .task,
+                inlineContent: .init(spans: [.init(text: "甲"), .init(text: "新")]),
+                taskState: .init(completedAt: exactCompletedDate),
+                indentLevel: 0
+            ),
+            DocumentBlock(
+                id: n1,
+                kind: .paragraph,
+                inlineContent: .init(spans: [.init(text: "次"), .init(text: "乙")]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let collapsedFallback = doc([
+            DocumentBlock(
+                id: a,
+                kind: .task,
+                inlineContent: .init(spans: [.init(text: "甲"), .init(text: "回")]),
+                taskState: .init(completedAt: exactCompletedDate),
+                indentLevel: 0
+            ),
+            DocumentBlock(
+                id: n1,
+                kind: .paragraph,
+                inlineContent: .init(spans: [.init(text: "退"), .init(text: "乙")]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let collapsedRich = doc([
+            block(a, .task, "甲", completed: exactCompletedDate),
+            block(n1, .task, "新"),
+            block(n2, .divider, ""),
+            block(n3, .task, "乙")
+        ])
+
+        let sameDocument = doc([block(a, .task, "甲乙丙", completed: exactCompletedDate)])
+        let same = textSelection(a, 1, a, 2)
+        let samePlain = doc([
+            DocumentBlock(
+                id: a,
+                kind: .task,
+                inlineContent: .init(spans: [.init(text: "甲"), .init(text: "新")]),
+                taskState: .init(completedAt: exactCompletedDate),
+                indentLevel: 0
+            ),
+            DocumentBlock(
+                id: n1,
+                kind: .paragraph,
+                inlineContent: .init(spans: [.init(text: "次"), .init(text: "丙")]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let sameFallback = doc([
+            DocumentBlock(
+                id: a,
+                kind: .task,
+                inlineContent: .init(spans: [.init(text: "甲"), .init(text: "回")]),
+                taskState: .init(completedAt: exactCompletedDate),
+                indentLevel: 0
+            ),
+            DocumentBlock(
+                id: n1,
+                kind: .paragraph,
+                inlineContent: .init(spans: [.init(text: "退"), .init(text: "丙")]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let sameRich = doc([
+            block(a, .task, "甲", completed: exactCompletedDate),
+            block(n1, .task, "新"),
+            block(n2, .divider, ""),
+            block(n3, .task, "丙")
+        ])
+        let sameEmpty = doc([DocumentBlock(
+            id: a,
+            kind: .task,
+            inlineContent: .init(spans: [.init(text: "甲"), .init(text: "丙")]),
+            taskState: .init(completedAt: exactCompletedDate),
+            indentLevel: 0
+        )])
+
+        let crossDocument = doc([
+            block(a, .task, "甲乙", completed: exactCompletedDate),
+            block(b, .paragraph, "丙丁")
+        ])
+        let cross = textSelection(a, 1, b, 1)
+        let crossPlain = doc([
+            DocumentBlock(
+                id: a,
+                kind: .task,
+                inlineContent: .init(spans: [.init(text: "甲"), .init(text: "新")]),
+                taskState: .init(completedAt: exactCompletedDate),
+                indentLevel: 0
+            ),
+            DocumentBlock(
+                id: n1,
+                kind: .paragraph,
+                inlineContent: .init(spans: [.init(text: "次"), .init(text: "丁")]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let crossFallback = doc([
+            DocumentBlock(
+                id: a,
+                kind: .task,
+                inlineContent: .init(spans: [.init(text: "甲"), .init(text: "回")]),
+                taskState: .init(completedAt: exactCompletedDate),
+                indentLevel: 0
+            ),
+            DocumentBlock(
+                id: n1,
+                kind: .paragraph,
+                inlineContent: .init(spans: [.init(text: "退"), .init(text: "丁")]),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let crossRich = doc([
+            block(a, .task, "甲", completed: exactCompletedDate),
+            block(n1, .task, "新"),
+            block(n2, .divider, ""),
+            block(b, .paragraph, "丁")
+        ])
+        let crossEmpty = doc([DocumentBlock(
+            id: a,
+            kind: .task,
+            inlineContent: .init(spans: [.init(text: "甲"), .init(text: "丁")]),
+            taskState: .init(completedAt: exactCompletedDate),
+            indentLevel: 0
+        )])
+
+        let blockDocument = doc([
+            block(a, .task, "根", completed: exactCompletedDate),
+            block(b, .task, "子", indent: 1, completed: exactCompletedDate),
+            block(tail, .paragraph, "尾")
+        ])
+        let blocks = BlockEditorSelection.blocks(anchor: a, focus: a)
+        let blockPlain = doc([block(a, .paragraph, "新"), block(n1, .paragraph, "次"), block(tail, .paragraph, "尾")])
+        let blockFallback = doc([block(a, .paragraph, "回"), block(n1, .paragraph, "退"), block(tail, .paragraph, "尾")])
+        let blockRich = doc([block(a, .task, "新"), block(n1, .divider, ""), block(tail, .paragraph, "尾")])
+        let blockEmpty = doc([block(tail, .paragraph, "尾")])
+
+        return [
+            fixture("collapsed-plain", document: collapsedDocument, selection: collapsed, payload: plain, ids: [n1], expectedDocument: collapsedPlain, expectedSelection: caret(n1, 1)),
+            fixture("collapsed-rich", document: collapsedDocument, selection: collapsed, payload: rich, ids: [n1, n2, n3], expectedDocument: collapsedRich, expectedSelection: caret(n2, 0)),
+            fixture(
+                "collapsed-empty",
+                document: collapsedDocument,
+                selection: collapsed,
+                payload: empty,
+                expectedDocument: collapsedDocument,
+                expectedSelection: collapsed,
+                mutation: .none(.emptySelection),
+                undo: .none
+            ),
+            fixture("collapsed-fallback", document: collapsedDocument, selection: collapsed, payload: fallback, ids: [n1], expectedDocument: collapsedFallback, expectedSelection: caret(n1, 1)),
+
+            fixture("same-plain", document: sameDocument, selection: same, payload: plain, ids: [n1], expectedDocument: samePlain, expectedSelection: caret(n1, 1)),
+            fixture("same-rich", document: sameDocument, selection: same, payload: rich, ids: [n1, n2, n3], expectedDocument: sameRich, expectedSelection: caret(n2, 0)),
+            fixture("same-empty", document: sameDocument, selection: same, payload: empty, expectedDocument: sameEmpty, expectedSelection: caret(a, 1), undo: .atomic(.paste)),
+            fixture("same-fallback", document: sameDocument, selection: same, payload: fallback, ids: [n1], expectedDocument: sameFallback, expectedSelection: caret(n1, 1)),
+
+            fixture("cross-plain", document: crossDocument, selection: cross, payload: plain, ids: [n1], expectedDocument: crossPlain, expectedSelection: caret(n1, 1)),
+            fixture("cross-rich", document: crossDocument, selection: cross, payload: rich, ids: [n1, n2], expectedDocument: crossRich, expectedSelection: caret(n2, 0)),
+            fixture("cross-empty", document: crossDocument, selection: cross, payload: empty, expectedDocument: crossEmpty, expectedSelection: caret(a, 1), undo: .atomic(.paste)),
+            fixture("cross-fallback", document: crossDocument, selection: cross, payload: fallback, ids: [n1], expectedDocument: crossFallback, expectedSelection: caret(n1, 1)),
+
+            fixture("blocks-plain", document: blockDocument, selection: blocks, payload: plain, ids: [n1], expectedDocument: blockPlain, expectedSelection: caret(n1, 1)),
+            fixture("blocks-rich", document: blockDocument, selection: blocks, payload: rich, ids: [n1], expectedDocument: blockRich, expectedSelection: caret(n1, 0)),
+            fixture("blocks-empty", document: blockDocument, selection: blocks, payload: empty, expectedDocument: blockEmpty, expectedSelection: caret(tail, 0), undo: .atomic(.paste)),
+            fixture("blocks-fallback", document: blockDocument, selection: blocks, payload: fallback, ids: [n1], expectedDocument: blockFallback, expectedSelection: caret(n1, 1))
+        ]
+    }()
+}
+
+struct DragOrderingExactFixture: Sendable, CustomTestStringConvertible {
+    let label: String
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let roots: [BlockID]
+    let target: BlockID?
+    let expected: BlockInputResult
+    var testDescription: String { label }
+
+    static let all: [DragOrderingExactFixture] = {
+        let first = blockID(420), a = blockID(421), aChild = blockID(422)
+        let b = blockID(423), bChild = blockID(424), tail = blockID(425)
+        let document = doc([
+            block(first, .paragraph, "first"),
+            block(a, .bullet, "a", indent: 0),
+            block(aChild, .task, "a-child", indent: 1, completed: exactCompletedDate),
+            block(b, .ordered, "b", indent: 0),
+            block(bChild, .bullet, "b-child", indent: 1),
+            block(tail, .quote, "tail")
+        ])
+        let expectedDocument = doc([
+            block(a, .bullet, "a", indent: 0),
+            block(aChild, .task, "a-child", indent: 1, completed: exactCompletedDate),
+            block(b, .ordered, "b", indent: 0),
+            block(bChild, .bullet, "b-child", indent: 1),
+            block(first, .paragraph, "first"),
+            block(tail, .quote, "tail")
+        ])
+        let selection = BlockEditorSelection.text(
+            anchor: .init(blockID: tail, graphemeOffset: 3),
+            focus: .init(blockID: tail, graphemeOffset: 1),
+            preferredColumn: 7,
+            typingAttributes: .init(marks: [.italic], linkURL: nil)
+        )
+        let expectedSelection = BlockEditorSelection.text(
+            anchor: .init(blockID: tail, graphemeOffset: 3),
+            focus: .init(blockID: tail, graphemeOffset: 1),
+            preferredColumn: nil,
+            typingAttributes: .init(marks: [.italic], linkURL: nil)
+        )
+        let expected = BlockInputResult(
+            document: expectedDocument,
+            selection: expectedSelection,
+            mutation: .document,
+            effect: .handled,
+            undo: .atomic(.drag)
+        )
+        return [
+            .init(label: "reverse-roots", document: document, selection: selection, roots: [b, a], target: first, expected: expected),
+            .init(label: "descendants-before-roots", document: document, selection: selection, roots: [bChild, b, aChild, a], target: first, expected: expected),
+            .init(label: "interleaved-parameters", document: document, selection: selection, roots: [aChild, b, a, bChild], target: first, expected: expected)
+        ]
+    }()
+}
+
+enum ReductionOutcomeExpectation: Equatable, Sendable {
+    case result(BlockInputResult)
+    case error(BlockInputError)
+}
+
+struct ReductionOutcomeExactFixture: Sendable, CustomTestStringConvertible {
+    let label: String
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let command: BlockInputCommand
+    let ids: [BlockID]
+    let expected: ReductionOutcomeExpectation
+    var testDescription: String { label }
+
+    static let all: [ReductionOutcomeExactFixture] = {
+        let id = blockID(430)
+        let document = doc([block(id, .paragraph, "甲")])
+        let inserted = doc([DocumentBlock(
+            id: id,
+            kind: .paragraph,
+            inlineContent: .init(spans: [.init(text: "甲"), .init(text: "乙")]),
+            taskState: nil,
+            indentLevel: 0
+        )])
+        let collapsed = caret(id, 1)
+        return [
+            .init(
+                label: "success",
+                document: document,
+                selection: collapsed,
+                command: .insertText("乙"),
+                ids: [],
+                expected: .result(.init(
+                    document: inserted,
+                    selection: caret(id, 2),
+                    mutation: .document,
+                    effect: .handled,
+                    undo: .coalesceTyping(id)
+                ))
+            ),
+            .init(
+                label: "no-change",
+                document: document,
+                selection: collapsed,
+                command: .deleteSelection,
+                ids: [],
+                expected: .result(exactNoChange(document, collapsed, .emptySelection))
+            ),
+            .init(
+                label: "error",
+                document: document,
+                selection: collapsed,
+                command: .enter,
+                ids: [],
+                expected: .error(.insufficientBlockIDs)
+            )
+        ]
+    }()
+}
+
+struct MarkdownExactFixture: Sendable, CustomTestStringConvertible {
+    let label: String
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let expected: BlockInputResult
+    var testDescription: String { label }
+
+    static let all: [MarkdownExactFixture] = {
+        let id = blockID(440)
+        let conversions: [(String, BlockKind, String?)] = [
+            ("# ", .heading1, nil),
+            ("## ", .heading2, nil),
+            ("### ", .heading3, nil),
+            ("- ", .bullet, nil),
+            ("* ", .bullet, nil),
+            ("1. ", .ordered, nil),
+            ("[] ", .task, nil),
+            ("[ ] ", .task, nil),
+            ("> ", .quote, nil),
+            ("``` ", .code, nil),
+            ("```swift ", .code, "swift")
+        ]
+        var fixtures = conversions.map { prefix, kind, codeInfo -> MarkdownExactFixture in
+            let document = doc([block(id, .paragraph, prefix + "正文")])
+            return .init(
+                label: "recognized-\(String(describing: kind))-\(prefix.debugDescription)",
+                document: document,
+                selection: caret(id, prefix.count),
+                expected: .init(
+                    document: doc([block(id, kind, "正文", codeInfo: codeInfo)]),
+                    selection: caret(id, 0),
+                    mutation: .document,
+                    effect: .handled,
+                    undo: .atomic(.conversion)
+                )
+            )
+        }
+        let rejections: [(String, BlockDocument, BlockEditorSelection)] = [
+            ("partial", doc([block(id, .paragraph, "#")]), caret(id, 1)),
+            ("unrecognized", doc([block(id, .paragraph, "#### ")]), caret(id, 5)),
+            ("nonleading", doc([block(id, .paragraph, "x# ")]), caret(id, 3)),
+            ("caret-before-complete-prefix", doc([block(id, .paragraph, "# 正文")]), caret(id, 1)),
+            ("noncollapsed", doc([block(id, .paragraph, "# 正文")]), textSelection(id, 0, id, 2)),
+            ("nonparagraph", doc([block(id, .heading1, "# ")]), caret(id, 2))
+        ]
+        fixtures.append(contentsOf: rejections.map { label, document, selection in
+            .init(
+                label: label,
+                document: document,
+                selection: selection,
+                expected: exactNoChange(document, selection, .samePosition)
+            )
+        })
+        return fixtures
+    }()
+}
+
+struct SlashExactFixture: Sendable, CustomTestStringConvertible {
+    let label: String
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let kind: BlockKind
+    let expected: BlockInputResult
+    var testDescription: String { label }
+
+    static let all: [SlashExactFixture] = {
+        let id = blockID(450)
+        let kinds = allBlockKinds.filter { $0 != .link }
+        var fixtures = kinds.map { kind -> SlashExactFixture in
+            let document = doc([block(id, .paragraph, "/cmd")])
+            let expectedBlock: DocumentBlock
+            if kind == .code || kind == .divider {
+                expectedBlock = block(id, kind, "")
+            } else {
+                expectedBlock = DocumentBlock(
+                    id: id,
+                    kind: kind,
+                    inlineContent: .init(spans: []),
+                    taskState: kind == .task ? .init(completedAt: nil) : nil,
+                    indentLevel: 0
+                )
+            }
+            return .init(
+                label: "success-\(kind)",
+                document: document,
+                selection: caret(id, 4),
+                kind: kind,
+                expected: .init(
+                    document: doc([expectedBlock]),
+                    selection: caret(id, 0),
+                    mutation: .document,
+                    effect: .handled,
+                    undo: .atomic(.conversion)
+                )
+            )
+        }
+        let linkDocument = doc([DocumentBlock(
+            id: id,
+            kind: .paragraph,
+            inlineContent: .init(spans: [
+                .init(text: "/"),
+                .init(text: "链接", linkURL: exactLinkURL)
+            ]),
+            taskState: nil,
+            indentLevel: 0
+        )])
+        fixtures.append(.init(
+            label: "success-link",
+            document: linkDocument,
+            selection: caret(id, 1),
+            kind: .link,
+            expected: .init(
+                document: doc([DocumentBlock(
+                    id: id,
+                    kind: .link,
+                    inlineContent: .init(spans: [.init(text: "链接", linkURL: exactLinkURL)]),
+                    taskState: nil,
+                    indentLevel: 0
+                )]),
+                selection: caret(id, 0, attributes: .init(marks: [], linkURL: exactLinkURL)),
+                mutation: .document,
+                effect: .handled,
+                undo: .atomic(.conversion)
+            )
+        ))
+
+        let noSlash = doc([block(id, .paragraph, "cmd")])
+        let nonleading = doc([block(id, .paragraph, "x/cmd")])
+        let noncollapsed = doc([block(id, .paragraph, "/cmd")])
+        let emptyLink = doc([block(id, .paragraph, "/link")])
+        let noSlashSelection = caret(id, 3)
+        let nonleadingSelection = caret(id, 5)
+        let range = textSelection(id, 0, id, 4)
+        let blockSelection = BlockEditorSelection.blocks(anchor: id, focus: id)
+        fixtures.append(contentsOf: [
+            .init(label: "no-slash", document: noSlash, selection: noSlashSelection, kind: .task, expected: exactNoChange(noSlash, noSlashSelection, .samePosition)),
+            .init(label: "nonleading", document: nonleading, selection: nonleadingSelection, kind: .task, expected: exactNoChange(nonleading, nonleadingSelection, .samePosition)),
+            .init(label: "noncollapsed", document: noncollapsed, selection: range, kind: .task, expected: exactNoChange(noncollapsed, range, .unsupportedBlockKind)),
+            .init(label: "block-selection", document: noncollapsed, selection: blockSelection, kind: .task, expected: exactNoChange(noncollapsed, blockSelection, .unsupportedBlockKind)),
+            .init(label: "empty-link", document: emptyLink, selection: caret(id, 5), kind: .link, expected: exactNoChange(emptyLink, caret(id, 5), .unsupportedBlockKind))
+        ])
+        return fixtures
+    }()
+}
+
 private func blockID(_ value: Int) -> BlockID {
     BlockID(UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", value))!)
+}
+
+private let exactLinkURL = URL(string: "https://example.com/block")!
+private let exactCompletedDate = Date(timeIntervalSince1970: 12_345)
+
+private func exactNoChange(
+    _ document: BlockDocument,
+    _ selection: BlockEditorSelection,
+    _ reason: BlockInputNoChangeReason
+) -> BlockInputResult {
+    .init(
+        document: document,
+        selection: selection,
+        mutation: .none(reason),
+        effect: .handled,
+        undo: .none
+    )
+}
+
+private func exactSoftBreakBlock(
+    id: BlockID,
+    kind: BlockKind,
+    insertionOffset: Int,
+    deletedUpper: Int?
+) -> DocumentBlock {
+    let source = Array("甲乙")
+    let upper = deletedUpper ?? insertionOffset
+    let left = String(source[..<insertionOffset])
+    let right = String(source[upper...])
+    let originalURL = kind == .link ? exactLinkURL : nil
+    var spans: [InlineSpan] = []
+    if !left.isEmpty { spans.append(.init(text: left, linkURL: originalURL)) }
+    spans.append(.init(text: "\n"))
+    if !right.isEmpty { spans.append(.init(text: right, linkURL: originalURL)) }
+    let content = kind == .code
+        ? InlineContent.plain(left + "\n" + right)
+        : InlineContent(spans: spans)
+    return .init(
+        id: id,
+        kind: kind,
+        inlineContent: content,
+        taskState: kind == .task ? .init(completedAt: exactCompletedDate) : nil,
+        indentLevel: 0,
+        codeInfoString: kind == .code ? "swift" : nil
+    )
+}
+
+private func exactBackspaceDeletedBlock(id: BlockID, kind: BlockKind) -> DocumentBlock {
+    .init(
+        id: id,
+        kind: kind,
+        inlineContent: kind == .code
+            ? .plain("乙")
+            : .init(spans: [.init(text: "乙", linkURL: kind == .link ? exactLinkURL : nil)]),
+        taskState: kind == .task ? .init(completedAt: exactCompletedDate) : nil,
+        indentLevel: 0,
+        codeInfoString: kind == .code ? "swift" : nil
+    )
+}
+
+private func exactMergedBlock(previous: BlockID, current: DocumentBlock) -> DocumentBlock {
+    .init(
+        id: previous,
+        kind: .paragraph,
+        inlineContent: .init(spans: [.init(text: "前")] + current.inlineContent.spans),
+        taskState: nil,
+        indentLevel: 0
+    )
 }
 
 private func block(
