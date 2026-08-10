@@ -1595,12 +1595,204 @@ git commit -m "feat(app): 增加工作空间导航外壳"
 - Create: Sources/CalendarApp/Notes/BlockEditor/BlockEditorSelection.swift
 - Create: Sources/CalendarApp/Notes/BlockEditor/BlockPasteParser.swift
 - Create: Tests/CalendarAppTests/BlockEditorInputTests.swift
+- Create: Tests/CalendarAppTests/BlockEditorPurityGateTests.swift
+- Create: Scripts/verify-block-input-purity.sh
 
 **Produces:** UI-independent commands for Enter, Shift-Enter, Backspace, Tab, Shift-Tab, arrows, slash conversion, paste, multi-block deletion and drag reorder.
 
 **Consumes:** WorkspaceDomain BlockDocument and BlockDocumentValidator.
 
-- [ ] Write RED table tests for the full keyboard matrix in specification §5.2, including empty-list exit, empty heading to paragraph, start-of-block merge, list/task 0...3 parent validation, code-block text indentation, up/down preferred column, Markdown prefix shortcuts, inline formatting across selection, multi-block copy/cut/delete, root-plus-descendant drag, Chinese marked-text guard and undo grouping boundaries.
+- [ ] Keep all Task 8 production types `internal` to CalendarApp and test them through `@testable import CalendarApp`. The three pure implementation files may import only `Foundation` and `WorkspaceDomain`; they must not import AppKit or SwiftUI. Do not depend on WorkspaceDomain's internal `supportsIndentation`, `isEmpty`, `canonicalCodeInfoString` or local-validator helpers: use exhaustive Task 8 switches/helpers over the public model. Task 9 alone owns AppKit `NSRange` and `NSAttributedString` adaptation.
+
+- [ ] Define a direction-preserving, grapheme-based selection contract. Reducer offsets count extended grapheme clusters, never UTF-16 code units. A divider accepts only offset zero. Anchor/focus direction is preserved in the value; commands derive a normalized range from current document order without rewriting the stored direction. Pointer selection and every edit or horizontal move clear `preferredColumn`; consecutive vertical moves preserve it.
+
+~~~swift
+struct BlockTextPosition: Equatable, Sendable {
+    let blockID: BlockID
+    let graphemeOffset: Int
+}
+
+struct BlockTypingAttributes: Equatable, Sendable {
+    var marks: Set<InlineMark>
+    var linkURL: URL?
+}
+
+enum BlockEditorSelection: Equatable, Sendable {
+    case text(
+        anchor: BlockTextPosition,
+        focus: BlockTextPosition,
+        preferredColumn: Int?,
+        typingAttributes: BlockTypingAttributes
+    )
+    case blocks(anchor: BlockID, focus: BlockID)
+}
+~~~
+
+- [ ] Define the complete command, environment, result, clipboard and typed-error interfaces before production behavior. `BlockIDSource.fixed` is consumed deterministically inside one reduce call; every inserted or fallback Block receives the next ID. Exhausted IDs, duplicate supplied IDs or collision with an existing Block ID throw before publishing any candidate. Never call `BlockDocument.empty()` from the reducer.
+
+~~~swift
+enum BlockHorizontalDirection: Equatable, Sendable { case backward, forward }
+enum BlockVerticalDirection: Equatable, Sendable { case up, down }
+
+enum BlockInputCommand: Equatable, Sendable {
+    case insertText(String)
+    case enter
+    case softBreak
+    case backspace
+    case indent
+    case outdent
+    case moveHorizontal(BlockHorizontalDirection, extending: Bool)
+    case moveVertical(BlockVerticalDirection, extending: Bool)
+    case convert(BlockKind)
+    case applyMarkdownShortcut
+    case applySlashConversion(BlockKind)
+    case toggleInlineMark(InlineMark)
+    case setLink(URL?)
+    case copySelection
+    case cutSelection
+    case replaceSelection(BlockPastePayload)
+    case deleteSelection
+    case moveBlockRoots([BlockID], before: BlockID?)
+}
+
+struct BlockInputEnvironment: Sendable {
+    let isComposingText: Bool
+    let idSource: BlockIDSource
+}
+
+enum BlockInputMutation: Equatable, Sendable {
+    case none(BlockInputNoChangeReason)
+    case selectionOnly
+    case document
+}
+
+enum BlockInputNoChangeReason: Equatable, Sendable {
+    case composingText
+    case documentBoundary
+    case textSystemOwnsMovement
+    case unsupportedBlockKind
+    case emptySelection
+    case missingListParent
+    case indentationLimit
+    case samePosition
+}
+
+enum BlockInputEffect: Equatable, Sendable {
+    case handled
+    case deferToTextSystem
+    case writeClipboard(BlockClipboardPayload)
+}
+
+enum BlockUndoDirective: Equatable, Sendable {
+    case none
+    case breakCoalescing
+    case coalesceTyping(BlockID)
+    case atomic(BlockUndoAction)
+}
+
+enum BlockUndoAction: Equatable, Sendable {
+    case enter
+    case softBreak
+    case backspace
+    case indentation
+    case conversion
+    case formatting
+    case link
+    case cut
+    case paste
+    case deletion
+    case drag
+}
+
+struct BlockInputResult: Equatable, Sendable {
+    let document: BlockDocument
+    let selection: BlockEditorSelection
+    let mutation: BlockInputMutation
+    let effect: BlockInputEffect
+    let undo: BlockUndoDirective
+}
+
+enum BlockInputError: Error, Equatable, Sendable {
+    case invalidInputDocument
+    case invalidSelection
+    case insufficientBlockIDs
+    case duplicateBlockID(BlockID)
+    case invalidLink
+    case invalidMove
+    case invalidCandidate
+}
+~~~
+
+`BlockInputEffect.handled` means the key/command was consumed and has no external side effect. Every non-composition no-change returns `.handled`; composition defer returns `.deferToTextSystem`; copy/cut return `.writeClipboard`. A thrown `BlockInputError` returns no `BlockInputResult` at all.
+
+- [ ] Define Task 8's AppKit-free paste and clipboard values. Payloads never contain Block IDs, fonts, colors, paragraph styles or completion timestamps. Task 9 converts `NSAttributedString` into these values; unsupported attributes lose styling only, never characters. A pasted task always starts with `completedAt == nil`.
+
+~~~swift
+enum BlockPastePayload: Equatable, Sendable {
+    case plainText(String)
+    case richText(blocks: [BlockPasteBlock], fallbackPlainText: String)
+}
+
+struct BlockPasteBlock: Equatable, Sendable {
+    let kind: BlockKind
+    let inlineContent: InlineContent
+    let indentLevel: Int
+    let codeInfoString: String?
+}
+
+struct BlockClipboardPayload: Equatable, Sendable {
+    let plainText: String
+    let richBlocks: [BlockPasteBlock]
+}
+
+enum ParsedBlockPastePayload: Equatable, Sendable {
+    case plainLines([String])
+    case richBlocks([BlockPasteBlock])
+}
+
+enum BlockPasteParserError: Error, Equatable, Sendable {
+    case invalidBlock(index: Int)
+    case invalidIndent(index: Int)
+    case invalidLink(index: Int)
+    case invalidCodeInfo(index: Int)
+}
+
+protocol BlockPasteParsing {
+    static func parse(_ payload: BlockPastePayload) throws -> ParsedBlockPastePayload
+}
+~~~
+
+`BlockPasteParser` is an internal namespace that conforms to `BlockPasteParsing` with a complete implementation in `BlockPasteParser.swift`; do not land the illegal body-less enum declaration shown in the rejected Gate. Plain text parsing cannot fail. Rich parsing is all-or-nothing and reports the first indexed `BlockPasteParserError`; the reducer catches any rich parse/validation error and reparses the exact `fallbackPlainText` as plain text, without consuming IDs or publishing a partial rich candidate. A fallback candidate that cannot validate throws `BlockInputError.invalidCandidate`.
+
+- [ ] Write RED selection and Unicode tables before production code. A text position's offset is measured over the grapheme sequence of the Block's concatenated span text; mapping back to spans preserves original span boundaries, including adjacent equal and zero-length spans. Cover same-Block and cross-Block forward/reverse text selections, Block selection, missing IDs, negative/out-of-range offsets, collapsed typing attributes and preferred-column reset/preservation. Repeat split, delete, format, link and paste with ASCII, Chinese, `e` plus combining acute, flag emoji, skin-tone emoji and a ZWJ family. Task 8 itself must expose no `NSRange`; Task 9 owns the hosted UTF-16 bridge matrix specified below.
+
+- [ ] Write RED `Enter`/`softBreak`/`Backspace` tables for every Block kind, empty/nonempty content, collapsed caret at start/middle/end and nonempty selection. Lock these behaviors:
+  - paragraph splits to paragraph; headings keep the left heading and create a right paragraph, while an empty heading changes its existing ID to paragraph without allocating an ID;
+  - bullet/ordered/task split to the same kind and indent, with a new task `completedAt == nil`; an empty list/task changes its existing ID to paragraph; a task retains `completedAt` only while that same Block remains task, and every conversion away clears it;
+  - a nonempty quote splits to quote, while an empty quote changes its existing ID to paragraph;
+  - Enter in code follows the authoritative §5.2 rule and splits into two code Blocks: the left preserves its ID, the right consumes one ID, both inherit the exact canonical `codeInfoString`, and task state remains nil. SoftBreak alone inserts `\n` into the same code Block and allocates no ID; code Tab/Shift-Tab behavior is tested separately;
+  - a link split keeps the left as link only if its remaining spans still contain a valid URL, otherwise changes it to paragraph; the right side is paragraph. Empty link becomes paragraph. Divider Enter inserts one empty paragraph after the divider and selects it;
+  - softBreak inserts `\n` only into text-capable Blocks and is a typed no-change for divider;
+  - Backspace with a nonempty selection delegates to the atomic delete rule; inside content it deletes exactly one preceding grapheme. At offset zero, an empty special Block first changes its existing ID to paragraph and clears task/code/link-only metadata; a first paragraph is no-change; otherwise merge into the previous text-capable Block, or remove an immediately preceding divider before retrying the merge position. No path may split a grapheme or leave an invalid local Block.
+
+- [ ] Write RED indentation and movement tables. List/task indent is clamped to 0...3 and may increase only when the preceding continuous list group contains a valid parent at the target level; outdent and indent move each selected root with all of its consecutive descendants. Mixed list kinds still use structural level, not visual marker equality. In code, Tab inserts four spaces at each selected logical line and Shift-Tab removes at most four leading spaces per selected logical line without changing `indentLevel`; other kinds are typed no-change. Horizontal movement crosses Block boundaries without leaving the document. With a nonempty text selection and `extending == false`, backward collapses to normalized start and forward to normalized end without an extra grapheme step; `extending == true` keeps the original anchor and advances only focus. Vertical movement stays deferred to the text system inside an internal logical line and only crosses Blocks at a logical boundary. On the first reducer-owned vertical move with `preferredColumn == nil`, record the source caret's logical-line grapheme column before clamping to the target line; consecutive up/down moves retain that original column, including long→short→long, while horizontal movement, edit and pointer selection clear it. Document edges are typed no-change. After any collapsed movement, typing attributes are derived from the character immediately before the caret, otherwise the character immediately after it, otherwise the pre-move typing attributes for an empty Block. A moved or collapsed selection never keeps an invalid link URL.
+
+- [ ] Write RED Markdown/IME tables. While `environment.isComposingText` is true, `insertText`, Enter, softBreak, Backspace, shortcut/slash conversion and structural arrow commands return the unchanged document/selection with `.none(.composingText)`, `.deferToTextSystem` and `.none` undo. After composition commits, Task 9 sends the complete replacement as one `.insertText`. Supported Markdown prefixes are exactly `# `, `## `, `### `, `- `, `* `, `1. `, `[] `, `[ ] `, `> ` and triple-backtick plus optional code info; conversion removes only the recognized prefix, preserves the Block ID, is disabled outside a leading collapsed paragraph caret and never fires for a partial/unrecognized prefix. Slash conversion is an explicit confirmed command; Escape is handled by Task 9 and leaves the slash query text unchanged.
+
+- [ ] Write RED inline/link and typing-attribute tables before implementation. Toggle adds the mark to the whole normalized selection unless every covered character already has it, in which case it removes it. Split spans only at selection boundaries; preserve all out-of-selection spans, adjacent equal spans and zero-length spans exactly. Collapsed selection changes typing attributes only. A collapsed `.insertText` creates/replaces text with the current typing marks/link, then keeps those attributes for subsequent coalesced typing; a range replacement uses the selection's typing attributes for all inserted text. `setLink(nil)` preserves text; when a link Block loses its final URL, change that Block's existing ID to paragraph. Match WorkspaceDomain validation exactly: a non-nil link is valid only when `scheme != nil && host != nil`; relative, scheme-only, `mailto:` and control-character values are rejected before mutation. Code/divider and any range crossing an unsupported kind must be a whole-command typed no-change, never partial formatting. Forward and reverse ranges produce the same document and leave a collapsed caret at normalized start with attributes derived by the caret-affinity rule above.
+
+- [ ] Write RED copy/cut/delete/paste tables. Copy emits `.writeClipboard` and no document mutation/undo; clipboard payloads contain no IDs. A collapsed text selection returns `.none(.emptySelection)`. A Block selection normalizes its inclusive anchor/focus range, and copy/cut/delete operate on those complete Blocks; cut and delete also include each selected list root's consecutive descendants exactly once. Cut emits one clipboard effect, one document mutation and one atomic undo. Cross-Block text deletion preserves the prefix of normalized start plus suffix of normalized end in the start Block, removes covered Blocks, and leaves one collapsed caret there. If the operation removes every Block, consume one injected ID and create exactly one empty paragraph. Plain text paste is not parsed as Markdown: normalize CRLF/CR to LF, insert the first segment at the selection start, create a paragraph per subsequent physical line including leading/trailing/consecutive empty segments, and append the replaced end suffix to the final inserted Block.
+
+- [ ] Lock rich replacement as a deterministic block splice rather than guessing inline structure:
+  - Task 9 writes a private Jelly pasteboard type containing encoded `BlockClipboardPayload` for same-app copy/cut. External `NSAttributedString` has no Block structure: split its exact string on normalized physical newlines into paragraph `BlockPasteBlock`s, keep only supported inline marks/links, set indent zero/code info nil, and pass the full original string as `fallbackPlainText`. Unsupported attributes lose style only. If the custom payload cannot decode or any rich block fails validation, use its complete plain pasteboard string as `.plainText`; never invent heading/list/task/code structure from fonts or paragraphs.
+  - For a text selection, first derive the untouched prefix of the start Block and suffix of the end Block without publishing. Across different Blocks, each nonempty original boundary fragment retains its own original Block ID. Within one Block, the sole nonempty original fragment retains that Block's ID; when both prefix and suffix are nonempty, prefix retains the original ID and suffix consumes a fresh ID. Each retained-ID fragment keeps original kind/metadata when locally valid, otherwise a link fragment downgrades to paragraph. Any task fragment assigned a fresh ID has `completedAt == nil`; only the fragment retaining the original task ID may retain its prior completion. Insert the validated rich blocks between the fragments. Every pasted Block gets a fresh ID except when both boundary fragments are empty, in which case the first pasted Block reuses the start Block ID; pasted task `completedAt` is always nil. Empty prefix/suffix fragments are omitted. If there are no pasted blocks, use the ordinary delete-selection rule; a collapsed empty payload is `.none(.emptySelection)`. RED includes same-Block offset-zero partial replacement of a completed task, both-boundary split and exact ID/completion ownership.
+  - For a Block selection, remove its normalized complete roots/descendants, reuse the first removed root ID for the first pasted Block, allocate IDs for the remainder, and create the injected empty-paragraph fallback when the rich list is empty. Code/divider/link are inserted as complete validated Blocks and are never merged with boundary text. Exact ID consumption is asserted for collapsed, same-Block range, cross-Block range, Block selection, empty payload and fallback-to-plain paths.
+
+- [ ] Write RED stable-ID drag tables. `.moveBlockRoots([BlockID], before: BlockID?)` treats a root's descendants as the immediately following Blocks while `indentLevel > root.indentLevel`; passing both root and descendant deduplicates the descendant, while passing the same root twice throws `invalidMove`. Normalize distinct selected roots into current document order before moving, regardless of parameter order, and preserve IDs/content/order within each moved closure. `nil` means document end. Missing roots or target and any move whose resulting parent structure is invalid throw `invalidMove`. A target inside a moved closure or a move producing the existing order returns `.none(.samePosition)`, `effect == .handled` and `.none` undo. Every thrown failure keeps the input and selection exact, consumes no IDs and produces no result; every no-change has `.handled` as the explicit no-external-side-effect value.
+
+- [ ] Write RED atomicity and undo tables. Reduction order is: validate input document; validate selection IDs/grapheme offsets; build a local candidate using injected IDs; enforce `candidate.blocks` is nonempty and make the full-deletion path create its one empty paragraph fallback; run `BlockDocumentValidator`; only then return effects/undo/callback-worthy mutation. Do not require every otherwise-valid document to contain a paragraph. Any failure returns no candidate/effect/undo. Consecutive plain inserts in the same Block use `.coalesceTyping(blockID)`; structural edit, cut, paste, format and drag each use one `.atomic`; selection-only motion uses `.none`; copy/defer/no-change uses `.none` and cannot trigger Task 9's document callback.
+
+- [ ] Write `Scripts/verify-block-input-purity.sh` before production code. It enumerates every `import` in the three Task 8 files and permits only exact `Foundation` and `WorkspaceDomain`, including rejecting indented or `@preconcurrency import AppKit`, `SwiftUI`, `CalendarDomain` and submodule imports. It also rejects any `public` declaration regardless of leading whitespace or declaration attributes. `--self-test` creates disposable fixtures proving one valid case passes and each forbidden import/public spelling fails; `BlockEditorPurityGateTests` runs the self-test and a real-source scan. The script must be executable.
 
 ~~~swift
 @Test(arguments: BlockInputFixture.keyboardMatrix)
@@ -1608,70 +1800,52 @@ func keyboardMatrix(_ fixture: BlockInputFixture) throws {
     let result = try BlockInputReducer.reduce(
         fixture.document,
         selection: fixture.selection,
-        command: fixture.command
+        command: fixture.command,
+        environment: fixture.environment
     )
-    #expect(result.document == fixture.expectedDocument)
-    #expect(result.selection == fixture.expectedSelection)
+    #expect(result == fixture.expectedResult)
 }
 
 @Test func returnDuringMarkedTextDoesNotSplitBlock() throws {
     let result = try BlockInputReducer.reduce(
         document,
         selection: selection,
-        command: .enter(isComposingText: true)
+        command: .enter,
+        environment: .init(isComposingText: true, idSource: .fixed([]))
     )
+    #expect(result.document == document)
     #expect(result.effect == .deferToTextSystem)
+    #expect(result.undo == .none)
 }
 ~~~
 
-- [ ] Run RED.
+- [ ] Run the complete RED suite and record behavior failures, not test-fixture compilation mistakes. Do not create production files until the RED command fails only because the Task 8 APIs/behavior are absent.
 
 ~~~zsh
 ./Scripts/test.sh --filter CalendarAppTests.BlockEditorInputTests
+./Scripts/test.sh --filter CalendarAppTests.BlockEditorPurityGateTests
 ~~~
 
-- [ ] Define an exhaustive command/result interface.
+- [ ] Implement the minimum pure selection utilities, deterministic ID generator, inline span slicer, a complete `BlockPasteParser: BlockPasteParsing` and exhaustive BlockInputReducer needed to turn the tables GREEN. Preserve existing Block IDs for content edits and allocate only for inserted/fallback Blocks. Task 9 must be able to dispatch every committed edit through this reducer and emit exactly one document callback only for `.document`. After the public-shaped Task 8 interfaces compile, run `swift build --target CalendarApp` before filling behavior so an illegal declaration or inaccessible WorkspaceDomain helper cannot hide behind later test failures.
 
-~~~swift
-enum BlockInputCommand: Equatable {
-    case enter(isComposingText: Bool)
-    case softBreak
-    case backspace
-    case indent
-    case outdent
-    case moveUp
-    case moveDown
-    case convert(BlockKind)
-    case applyMarkdownShortcut(prefix: String, isComposingText: Bool)
-    case toggleInlineMark(InlineMark)
-    case setLink(URL?)
-    case replaceSelection(BlockPastePayload)
-    case deleteSelection
-    case moveBlocks(IndexSet, before: Int)
-}
-
-struct BlockInputResult: Equatable {
-    let document: BlockDocument
-    let selection: BlockEditorSelection
-    let undoGroup: BlockUndoGroup
-    let effect: BlockInputEffect
-}
-~~~
-
-- [ ] Implement every transition as pure data transformation followed by BlockDocumentValidator. Preserve existing Block IDs for content edits, allocate IDs only for inserted blocks, and preserve task completedAt only while a task remains a task.
-- [ ] toggleInlineMark and setLink operate on the supported inline spans across the current text selection; collapsed selections update typing attributes without rewriting unrelated spans. Clearing a link preserves its text.
-- [ ] Implement BlockPasteParser for plain text and supported NSAttributedString semantics; unsupported styling becomes plain inline text without dropping characters.
-- [ ] Run GREEN and repeat each table with Chinese and emoji grapheme clusters.
+- [ ] Run focused GREEN, WorkspaceDomain regression and the complete repository suite; verify no AppKit/SwiftUI import entered the three pure files and no Task 8 type became public.
 
 ~~~zsh
 ./Scripts/test.sh --filter CalendarAppTests.BlockEditorInputTests
+./Scripts/test.sh --filter CalendarAppTests.BlockEditorPurityGateTests
+./Scripts/test.sh --filter WorkspaceDomainTests
+./Scripts/test.sh
+sh Scripts/verify-block-input-purity.sh --self-test
+sh Scripts/verify-block-input-purity.sh Sources/CalendarApp/Notes/BlockEditor
 git diff --check
 ~~~
+
+- [ ] Request fresh Sol xhigh review focused on selection direction, grapheme safety, exhaustive kind tables, ID/validator atomicity, inline span preservation, paste fidelity, stable-ID drag, undo directives and Task 9 bridge readiness. Fix every Critical/Important finding and rerun the full Task 8 gates.
 
 - [ ] Commit.
 
 ~~~zsh
-git add Sources/CalendarApp/Notes/BlockEditor Tests/CalendarAppTests/BlockEditorInputTests.swift
+git add Sources/CalendarApp/Notes/BlockEditor Tests/CalendarAppTests/BlockEditorInputTests.swift Tests/CalendarAppTests/BlockEditorPurityGateTests.swift Scripts/verify-block-input-purity.sh
 git commit -m "feat(notes): 锁定 Block 编辑输入状态机"
 ~~~
 
@@ -1694,7 +1868,46 @@ git commit -m "feat(notes): 锁定 Block 编辑输入状态机"
 
 **Consumes:** Task 8 state machine, Workspace focus registry and BlockDocument.
 
-- [ ] Write RED hosted AppKit tests proving delegate command routing, marked-text behavior, selection mapping, cross-block copy/cut/delete/format/link, paste conversion, slash keyboard navigation, drag reorder, focus registry registration/removal and uninterrupted UndoManager grouping across autosave callbacks.
+- [ ] Write RED hosted AppKit tests proving delegate command routing, marked-text behavior, selection mapping, cross-block copy/cut/delete/format/link, paste conversion, slash keyboard navigation, drag reorder, focus registry registration/removal and uninterrupted UndoManager grouping across autosave callbacks. The selection bridge table must round-trip Task 8 grapheme offsets to AppKit UTF-16 ranges for ASCII, Chinese, combining marks, flags, skin-tone emoji and ZWJ families; an `NSRange` boundary inside a grapheme is rejected as a typed bridge error rather than floored or clamped. The paste adapter must project supported `NSAttributedString` marks/links to `BlockPastePayload` and preserve all characters while dropping unsupported style.
+
+- [ ] Define the bridge API before implementing AppKit delegates. Both endpoints validate the Block ID and range against the current document; an `NSRange` is accepted only when `location` and `upperBound` are exact grapheme boundaries in the same Block. Cross-Block ranges are represented by two separately validated positions, never a synthetic global UTF-16 range.
+
+~~~swift
+enum BlockEditorBridgeError: Error, Equatable, Sendable {
+    case missingBlock(BlockID)
+    case negativeUTF16Offset
+    case utf16OffsetOutOfRange
+    case midGraphemeBoundary
+}
+
+struct BlockTextRange: Equatable, Sendable {
+    let start: BlockTextPosition
+    let end: BlockTextPosition
+}
+
+protocol BlockSelectionBridging {
+    static func graphemePosition(
+        blockID: BlockID,
+        utf16Offset: Int,
+        document: BlockDocument
+    ) throws -> BlockTextPosition
+
+    static func utf16Offset(
+        position: BlockTextPosition,
+        document: BlockDocument
+    ) throws -> Int
+
+    static func graphemeRange(
+        blockID: BlockID,
+        nsRange: NSRange,
+        document: BlockDocument
+    ) throws -> BlockTextRange
+}
+~~~
+
+`BlockSelectionBridge` is the complete internal `BlockSelectionBridging` implementation in `BlockSelectionController.swift`; the protocol snippet is intentionally legal Swift and contains no body-less enum methods. `graphemeRange` rejects negative location/length, integer overflow, an upper bound past the same Block and either endpoint inside a grapheme, then returns positions with the same requested `blockID` atomically.
+
+- [ ] Register one private Jelly pasteboard UTI for encoded `BlockClipboardPayload`. Prefer that payload only after complete decode and validation; otherwise read the pasteboard's full plain string. External `NSAttributedString` may supply only paragraph blocks with supported bold/italic/inline-code/link spans, zero indent and nil code info. It must never infer heading/list/task/quote/code/divider/link-Block kind from font, paragraph style or attachment. Unsupported attributes fall back to unstyled characters and every adapter result carries the exact plain string for Task 8 fallback.
 
 ~~~swift
 @MainActor
