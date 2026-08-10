@@ -28,6 +28,19 @@ scan_file() {
     fail "Task 8 source must begin with the exact two-import header: $file"
     return 1
   fi
+
+  # These three files are a closed internal surface. Conservatively rejecting
+  # tokens in comments and strings is intentional: it keeps inactive #if
+  # branches out of scope without relying on the compiler's active AST.
+  local remainder_start=$(( ${#required_prefix} + 1 ))
+  if LC_ALL=C tail -c +"$remainder_start" "$file" | grep -Eq '(^|[^[:alnum:]_])import([^[:alnum:]_]|$)'; then
+    fail "Forbidden import token after exact header: $file"
+    return 1
+  fi
+  if LC_ALL=C grep -Eq '(^|[^[:alnum:]_])(public|open)([^[:alnum:]_]|$)' "$file"; then
+    fail "Forbidden public/open token in Task 8 source: $file"
+    return 1
+  fi
 }
 
 scan_directory() {
@@ -90,9 +103,9 @@ scan_directory() {
       return 1
     fi
 
-    # dump-ast includes imports nested in conditional compilation blocks. Only
-    # actual import_decl nodes are considered, so comments and string literals
-    # cannot masquerade as imports.
+    # This is only a cross-check of the compiler's active view. The raw token
+    # gate above is the safety proof for inactive #if branches; here, actual
+    # import_decl nodes keep comments and strings out of the active check.
     local imports
     imports=$(printf '%s\n' "$syntax_tree" | sed -nE 's/^[[:space:]]*\(import_decl .* module="([^"]+)"\)$/\1/p')
     if [[ "$imports" != "$expected_imports" ]]; then
@@ -100,10 +113,6 @@ scan_directory() {
       return 1
     fi
 
-    if printf '%s\n' "$syntax_tree" | grep -E 'access=(public|open)([)[:space:]]|$)' >/dev/null; then
-      fail "Public declaration in $directory/$name"
-      return 1
-    fi
   done
   return 0
 }
@@ -163,6 +172,7 @@ self_test() {
   local BLOCK_INPUT_PURITY_MODULE_PATH="$fixture_root"
   write_fixture_headers "$fixture_root/valid"
   append_fixture_declarations "$fixture_root/valid"
+  printf 'let reopen = false\n' >> "$fixture_root/valid/BlockInputReducer.swift"
   typecheck_fixture "$fixture_root/valid"
   scan_directory "$fixture_root/valid"
 
@@ -200,7 +210,7 @@ public\n// keep\nimport WorkspaceDomain
 @preconcurrency\n\nimport WorkspaceDomain
 HEADER_ATTACKS
 
-  # These begin with the exact header, proving recursive AST import checking.
+  # These begin with the exact header, proving raw source import checking.
   local ast_import_index=0
   local ast_import_attack
   while IFS= read -r ast_import_attack; do
@@ -213,15 +223,18 @@ HEADER_ATTACKS
       fail "Self-test AST import attack is not legal Swift: $ast_import_attack"
       return 1
     fi
-    assert_fixture_is_rejected_at "$directory" "imports must be exactly Foundation then WorkspaceDomain" || return 1
+    assert_fixture_is_rejected_at "$directory" "Forbidden import token after exact header" || return 1
   done <<'AST_IMPORT_ATTACKS'
 import AppKit
 @preconcurrency import AppKit
 import Foundation; import AppKit
 #if os(macOS)\nimport AppKit\n#endif
+#if os(iOS)\nimport AppKit\n#endif
+#if canImport(UIKit)\nimport UIKit\n#endif
+#if os(macOS)\nlet currentPlatform = true\n#else\nimport AppKit\n#endif
 AST_IMPORT_ATTACKS
 
-  # These begin with the exact header and prove public/open AST inspection.
+  # These begin with the exact header and prove public/open source checking.
   local public_index=0
   local public_attack
   while IFS= read -r public_attack; do
@@ -234,7 +247,7 @@ AST_IMPORT_ATTACKS
       fail "Self-test public declaration attack is not legal Swift: $public_attack"
       return 1
     fi
-    assert_fixture_is_rejected_at "$directory" "Public declaration" || return 1
+    assert_fixture_is_rejected_at "$directory" "Forbidden public/open token" || return 1
   done <<'PUBLIC_DECLARATION_ATTACKS'
 public struct Leaked {}
   public enum Leaked {}
@@ -245,6 +258,8 @@ final public class Leaked {}
 public\nstruct Leaked {}
 @MainActor\npublic\nfunc leaked() {}
 public /* comment */ struct Leaked {}
+public extension String {}
+@available(macOS 14, *) public extension String {}
 PUBLIC_DECLARATION_ATTACKS
 
   printf '%s\n' "Block input purity self-test passed"

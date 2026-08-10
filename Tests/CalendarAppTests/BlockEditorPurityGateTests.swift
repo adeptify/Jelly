@@ -45,9 +45,12 @@ struct BlockEditorPurityGateTests {
         "import AppKit",
         "@preconcurrency import AppKit",
         "import Foundation; import AppKit",
-        "#if os(macOS)\nimport AppKit\n#endif"
+        "#if os(macOS)\nimport AppKit\n#endif",
+        "#if os(iOS)\nimport AppKit\n#endif",
+        "#if canImport(UIKit)\nimport UIKit\n#endif",
+        "#if os(macOS)\nlet currentPlatform = true\n#else\nimport AppKit\n#endif"
     ])
-    func scannerRejectsExtraImportsFromRecursiveAST(_ extraImport: String) throws {
+    func scannerRejectsExtraImportsFromRawSource(_ extraImport: String) throws {
         let source = """
         import Foundation
         import WorkspaceDomain
@@ -57,16 +60,18 @@ struct BlockEditorPurityGateTests {
         """
         let result = try scanFixture(reducerSource: source)
         #expect(result.status != 0, Comment(rawValue: "scanner accepted:\n\(extraImport)\n\(result.output)"))
-        #expect(result.output.contains("imports must be exactly Foundation then WorkspaceDomain"))
+        #expect(result.output.contains("Forbidden import token after exact header"))
     }
 
     @Test(arguments: [
         "public struct Leaked {}",
         "open class Leaked {}",
         "@MainActor\npublic\nfunc leaked() {}",
-        "public /* comment */ struct Leaked {}"
+        "public /* comment */ struct Leaked {}",
+        "public extension String {}",
+        "@available(macOS 14, *) public extension String {}"
     ])
-    func scannerRejectsPublicDeclarationsFromAST(_ declaration: String) throws {
+    func scannerRejectsPublicDeclarationsFromSourceTokens(_ declaration: String) throws {
         let source = """
         import Foundation
         import WorkspaceDomain
@@ -76,7 +81,7 @@ struct BlockEditorPurityGateTests {
         """
         let result = try scanFixture(reducerSource: source)
         #expect(result.status != 0, Comment(rawValue: "scanner accepted:\n\(declaration)\n\(result.output)"))
-        #expect(result.output.contains("Public declaration"))
+        #expect(result.output.contains("Forbidden public/open token"))
     }
 
     private func scanFixture(reducerSource: String) throws -> (status: Int32, output: String) {
