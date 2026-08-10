@@ -492,7 +492,7 @@ struct BlockEditorAccessibilityTests {
         #expect(fixture.session.isComposing == false)
     }
 
-    @Test func anyPresentInvalidPrivatePayloadUsesOnlyCompleteStringAndNeverConflictingRTF() throws {
+    @Test func anyPresentInvalidPrivatePayloadUsesCompleteAppKitStringWithoutApplyingRichData() throws {
         let board = NSPasteboard.withUniqueName()
         let adapter = BlockPasteboardAdapter(pasteboard: board)
         let rtfSource = NSAttributedString(string: "CONFLICTING RTF")
@@ -516,6 +516,10 @@ struct BlockEditorAccessibilityTests {
         board.clearContents()
         _ = board.setData(Data("not json".utf8), forType: BlockPasteboardAdapter.privateType)
         _ = board.setData(rtf, forType: .rtf)
+        #expect(adapter.readPayload() == .plainText("CONFLICTING RTF"))
+
+        board.clearContents()
+        _ = board.setData(Data("not json".utf8), forType: BlockPasteboardAdapter.privateType)
         #expect(adapter.readPayload() == nil)
 
         let sameItem = NSPasteboardItem()
@@ -534,6 +538,22 @@ struct BlockEditorAccessibilityTests {
         #expect(board.writeObjects([stringAfterRTF]))
         #expect(adapter.readPayload() == .plainText("STRING AFTER RTF"))
 
+        let sameTextAfterRTF = NSPasteboardItem()
+        sameTextAfterRTF.setData(Data("not json".utf8), forType: BlockPasteboardAdapter.privateType)
+        sameTextAfterRTF.setData(rtf, forType: .rtf)
+        sameTextAfterRTF.setString("CONFLICTING RTF", forType: .string)
+        board.clearContents()
+        #expect(board.writeObjects([sameTextAfterRTF]))
+        #expect(adapter.readPayload() == .plainText("CONFLICTING RTF"))
+
+        let explicitStringBesideBrokenRTF = NSPasteboardItem()
+        explicitStringBesideBrokenRTF.setData(Data("not json".utf8), forType: BlockPasteboardAdapter.privateType)
+        explicitStringBesideBrokenRTF.setData(Data("broken rtf".utf8), forType: .rtf)
+        explicitStringBesideBrokenRTF.setString("EXPLICIT STRING", forType: .string)
+        board.clearContents()
+        #expect(board.writeObjects([explicitStringBesideBrokenRTF]))
+        #expect(adapter.readPayload() == .plainText("EXPLICIT STRING"))
+
         for privateFirst in [true, false] {
             let privateItem = NSPasteboardItem()
             privateItem.setData(Data("not json".utf8), forType: BlockPasteboardAdapter.privateType)
@@ -542,7 +562,13 @@ struct BlockEditorAccessibilityTests {
             stringItem.setString(privateFirst ? "PRIVATE FIRST" : "STRING FIRST", forType: .string)
             board.clearContents()
             #expect(board.writeObjects(privateFirst ? [privateItem, stringItem] : [stringItem, privateItem]))
-            #expect(adapter.readPayload() == .plainText(privateFirst ? "PRIVATE FIRST" : "STRING FIRST"))
+            #expect(
+                adapter.readPayload() == .plainText(
+                    privateFirst
+                        ? "CONFLICTING RTF\nPRIVATE FIRST"
+                        : "STRING FIRST\nCONFLICTING RTF"
+                )
+            )
         }
     }
 
