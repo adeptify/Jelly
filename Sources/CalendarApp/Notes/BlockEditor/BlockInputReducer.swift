@@ -202,11 +202,14 @@ private struct ReductionContext {
         let lower = min(ai, fi)
         var upper = max(ai, fi)
         if expandDescendants {
-            var cursor = upper + 1
-            let level = document.blocks[upper].indentLevel
-            while cursor < document.blocks.count, document.blocks[cursor].indentLevel > level {
-                upper = cursor
-                cursor += 1
+            let selectedUpper = upper
+            for root in lower...selectedUpper {
+                var cursor = root + 1
+                let level = document.blocks[root].indentLevel
+                while cursor < document.blocks.count, document.blocks[cursor].indentLevel > level {
+                    upper = max(upper, cursor)
+                    cursor += 1
+                }
             }
         }
         return lower...upper
@@ -341,7 +344,8 @@ private extension ReductionContext {
         }
         guard block.isTextCapable else { return noChange(.unsupportedBlockKind) }
         if block.text.isEmpty, Self.exitsToParagraphOnEmptyEnter(block.kind) {
-            block = Self.makeBlock(id: block.id, kind: .paragraph, content: block.inlineContent)
+            let content: InlineContent = block.kind == .link ? .plain("") : block.inlineContent
+            block = Self.makeBlock(id: block.id, kind: .paragraph, content: content)
             candidate.blocks[index] = block
             return try documentResult(candidate, selection: plainCaret(block.id, 0), undo: .atomic(.enter))
         }
@@ -524,7 +528,7 @@ private extension ReductionContext {
     }
 
     func copySelection() -> BlockInputResult {
-        guard let payload = clipboardPayload() else { return noChange(.emptySelection) }
+        guard let payload = clipboardPayload(expandBlockDescendants: false) else { return noChange(.emptySelection) }
         return .init(
             document: document,
             selection: selection,
@@ -535,7 +539,7 @@ private extension ReductionContext {
     }
 
     mutating func cutSelection() throws -> BlockInputResult {
-        guard let payload = clipboardPayload() else { return noChange(.emptySelection) }
+        guard let payload = clipboardPayload(expandBlockDescendants: true) else { return noChange(.emptySelection) }
         let deleted = try deletionCandidate(requireNonemptySelection: true)
         return try documentResult(
             deleted.document,
@@ -545,10 +549,10 @@ private extension ReductionContext {
         )
     }
 
-    func clipboardPayload() -> BlockClipboardPayload? {
+    func clipboardPayload(expandBlockDescendants: Bool) -> BlockClipboardPayload? {
         switch selection {
         case .blocks:
-            guard let range = selectedBlockRange(expandDescendants: true) else { return nil }
+            guard let range = selectedBlockRange(expandDescendants: expandBlockDescendants) else { return nil }
             let blocks = Array(document.blocks[range])
             return .init(
                 plainText: blocks.map(\.text).joined(separator: "\n"),
@@ -626,6 +630,9 @@ private extension ReductionContext {
     mutating func toggle(_ mark: InlineMark) throws -> BlockInputResult {
         guard case let .text(anchor, focus, _, attributes) = selection,
               let range = normalizedTextRange() else { return noChange(.unsupportedBlockKind) }
+        guard document.blocks[range.startIndex].supportsInlineFormatting else {
+            return noChange(.unsupportedBlockKind)
+        }
         if range.isCollapsed {
             var updated = attributes
             if updated.marks.contains(mark) { updated.marks.remove(mark) } else { updated.marks.insert(mark) }
@@ -657,6 +664,9 @@ private extension ReductionContext {
         guard Self.isValid(url) else { throw BlockInputError.invalidLink }
         guard case let .text(anchor, focus, _, attributes) = selection,
               let range = normalizedTextRange() else { return noChange(.unsupportedBlockKind) }
+        guard document.blocks[range.startIndex].supportsInlineFormatting else {
+            return noChange(.unsupportedBlockKind)
+        }
         if range.isCollapsed {
             var updated = attributes
             updated.linkURL = url
@@ -803,7 +813,10 @@ private extension ReductionContext {
             return noChange(.unsupportedBlockKind)
         }
         if delta > 0 {
-            guard roots.allSatisfy({ document.blocks[$0].indentLevel < 3 }) else {
+            guard roots.allSatisfy({ root in
+                let end = descendantEnd(of: root, in: document.blocks)
+                return document.blocks[root...end].allSatisfy { $0.indentLevel < 3 }
+            }) else {
                 return noChange(.indentationLimit)
             }
             for root in roots {
@@ -837,8 +850,7 @@ private extension ReductionContext {
         }
         guard !selected.isEmpty else { return noChange(.samePosition) }
         var lineStrings = lines.map { String(characters[$0.start..<$0.end]) }
-        var anchorDelta = 0
-        var focusDelta = 0
+        var changes: [(line: LogicalLine, delta: Int, removed: Int)] = []
         guard case let .text(anchor, focus, _, attributes) = selection else { throw BlockInputError.invalidSelection }
         for index in selected {
             let line = lines[index]
@@ -846,13 +858,13 @@ private extension ReductionContext {
             if delta > 0 {
                 lineStrings[index] = "    " + lineStrings[index]
                 change = 4
+                changes.append((line, change, 0))
             } else {
                 let removable = min(4, lineStrings[index].prefix(while: { $0 == " " }).count)
                 lineStrings[index].removeFirst(removable)
                 change = -removable
+                changes.append((line, change, removable))
             }
-            if line.start <= anchor.graphemeOffset { anchorDelta += change }
-            if line.start <= focus.graphemeOffset { focusDelta += change }
         }
         let newText = lineStrings.joined(separator: "\n")
         guard newText != block.text else { return noChange(.indentationLimit) }
@@ -863,12 +875,31 @@ private extension ReductionContext {
             codeInfo: block.codeInfoString
         )
         let newSelection = BlockEditorSelection.text(
-            anchor: .init(blockID: anchor.blockID, graphemeOffset: max(0, anchor.graphemeOffset + anchorDelta)),
-            focus: .init(blockID: focus.blockID, graphemeOffset: max(0, focus.graphemeOffset + focusDelta)),
+            anchor: .init(blockID: anchor.blockID, graphemeOffset: mappedCodeOffset(anchor.graphemeOffset, changes: changes)),
+            focus: .init(blockID: focus.blockID, graphemeOffset: mappedCodeOffset(focus.graphemeOffset, changes: changes)),
             preferredColumn: nil,
             typingAttributes: attributes
         )
         return try documentResult(candidate, selection: newSelection, undo: .atomic(.indentation))
+    }
+
+    func mappedCodeOffset(
+        _ offset: Int,
+        changes: [(line: LogicalLine, delta: Int, removed: Int)]
+    ) -> Int {
+        var mapped = offset
+        for change in changes {
+            if offset > change.line.end {
+                mapped += change.delta
+            } else if offset >= change.line.start {
+                if change.delta > 0 {
+                    mapped += change.delta
+                } else {
+                    mapped -= min(change.removed, offset - change.line.start)
+                }
+            }
+        }
+        return max(0, mapped)
     }
 
     func selectedRootIndices() -> [Int] {
@@ -1028,23 +1059,36 @@ private func logicalLines(in characters: [Character]) -> [LogicalLine] {
 
 private extension ReductionContext {
     mutating func replaceSelection(_ payload: BlockPastePayload) throws -> BlockInputResult {
-        let parsed: ParsedBlockPastePayload
         switch payload {
         case .plainText:
-            parsed = try BlockPasteParser.parse(payload)
+            guard case let .plainLines(lines) = try BlockPasteParser.parse(payload) else {
+                throw BlockInputError.invalidCandidate
+            }
+            return try replaceWithPlainLines(lines)
         case let .richText(_, fallback):
+            let richBlocks: [BlockPasteBlock]
             do {
-                parsed = try BlockPasteParser.parse(payload)
+                guard case let .richBlocks(blocks) = try BlockPasteParser.parse(payload) else {
+                    throw BlockInputError.invalidCandidate
+                }
+                richBlocks = blocks
             } catch {
-                parsed = try BlockPasteParser.parse(.plainText(fallback))
+                return try replaceWithFallbackPlainText(fallback)
+            }
+            var richAttempt = self
+            do {
+                return try richAttempt.replaceWithRichBlocks(richBlocks)
+            } catch BlockInputError.invalidCandidate {
+                return try replaceWithFallbackPlainText(fallback)
             }
         }
-        switch parsed {
-        case let .plainLines(lines):
-            return try replaceWithPlainLines(lines)
-        case let .richBlocks(blocks):
-            return try replaceWithRichBlocks(blocks)
+    }
+
+    mutating func replaceWithFallbackPlainText(_ fallback: String) throws -> BlockInputResult {
+        guard case let .plainLines(lines) = try BlockPasteParser.parse(.plainText(fallback)) else {
+            throw BlockInputError.invalidCandidate
         }
+        return try replaceWithPlainLines(lines)
     }
 
     mutating func replaceWithPlainLines(_ lines: [String]) throws -> BlockInputResult {

@@ -32,17 +32,23 @@ struct BlockEditorInputTests {
         let selected = textSelection(id, 0, id, 1)
         let deleted = try reduce(document, selected, .deleteSelection)
         #expect(text(deleted.document.blocks[0]) == fixture.text)
+        let reverseSelected = textSelection(id, 1, id, 0)
+        #expect(try reduce(document, reverseSelected, .deleteSelection) == deleted)
 
         let formatted = try reduce(document, selected, .toggleInlineMark(.bold))
         #expect(formatted.document.blocks[0].inlineContent.spans.first(where: { !$0.text.isEmpty })?.marks == [.bold])
+        #expect(try reduce(document, reverseSelected, .toggleInlineMark(.bold)) == formatted)
 
         let url = URL(string: "https://example.com/unicode")!
         let linked = try reduce(document, selected, .setLink(url))
         #expect(linked.document.blocks[0].inlineContent.spans.first(where: { !$0.text.isEmpty })?.linkURL == url)
+        #expect(try reduce(document, reverseSelected, .setLink(url)) == linked)
 
         let pasted = try reduce(document, caret(id, 1), .replaceSelection(.plainText(fixture.text)))
         #expect(text(pasted.document.blocks[0]) == fixture.text + fixture.text + fixture.text)
         #expect(pasted.selection == caret(id, 2, attributes: attributesAt(pasted.document, id, 2)))
+        let replacedForward = try reduce(document, selected, .replaceSelection(.plainText(fixture.text)))
+        #expect(try reduce(document, reverseSelected, .replaceSelection(.plainText(fixture.text))) == replacedForward)
     }
 
     @Test func directionAndOriginalSpanBoundariesSurviveFormatting() throws {
@@ -68,8 +74,12 @@ struct BlockEditorInputTests {
         let result = try reduce(document, reverse, .toggleInlineMark(.italic))
         #expect(result.mutation == .document)
         #expect(result.selection == caret(id, 1, attributes: attributesAt(result.document, id, 1)))
-        #expect(result.document.blocks[0].inlineContent.spans.contains(zero))
-        #expect(result.document.blocks[0].inlineContent.spans.first?.marks == [.bold])
+        #expect(result.document.blocks[0].inlineContent == .init(spans: [
+            .init(text: "甲", marks: [.bold]),
+            zero,
+            .init(text: "乙", marks: [.bold, .italic]),
+            .init(text: "丙", marks: [.italic])
+        ]))
         #expect(result.undo == .atomic(.formatting))
     }
 
@@ -112,11 +122,7 @@ struct BlockEditorInputTests {
             for offset in 0...2 {
                 let original = validBlock(id, kind, "甲乙", completed: .distantPast, codeInfo: kind == .code ? "swift" : nil)
                 let result = try reduce(doc([original]), caret(id, offset), .enter, ids: [next])
-                #expect(result.document.blocks.count == 2, Comment(rawValue: "kind=\(kind) offset=\(offset)"))
-                #expect(result.document.blocks[0].id == id)
-                #expect(result.document.blocks[1].id == next)
-                #expect(text(result.document.blocks[0]).count == offset)
-                #expect(text(result.document.blocks[1]).count == 2 - offset)
+                #expect(result == expectedEnterResult(kind: kind, id: id, next: next, offset: offset), Comment(rawValue: "kind=\(kind) offset=\(offset)"))
             }
 
             let empty = try reduce(
@@ -126,10 +132,34 @@ struct BlockEditorInputTests {
                 ids: [next]
             )
             if [.heading1, .heading2, .heading3, .bullet, .ordered, .task, .quote, .link].contains(kind) {
-                #expect(empty.document.blocks.map(\.kind) == [.paragraph], Comment(rawValue: "empty kind=\(kind)"))
-                #expect(empty.document.blocks[0].id == id)
+                #expect(empty == .init(
+                    document: doc([block(id, .paragraph, "")]),
+                    selection: caret(id, 0),
+                    mutation: .document,
+                    effect: .handled,
+                    undo: .atomic(.enter)
+                ), Comment(rawValue: "empty kind=\(kind)"))
+            } else if kind == .paragraph {
+                #expect(empty == .init(
+                    document: doc([
+                        block(id, .paragraph, ""),
+                        DocumentBlock(id: next, kind: .paragraph, inlineContent: .init(spans: []), taskState: nil, indentLevel: 0)
+                    ]),
+                    selection: caret(next, 0),
+                    mutation: .document,
+                    effect: .handled,
+                    undo: .atomic(.enter)
+                ))
+            } else if kind == .code {
+                #expect(empty == .init(
+                    document: doc([block(id, .code, "", codeInfo: "swift"), block(next, .code, "", codeInfo: "swift")]),
+                    selection: caret(next, 0),
+                    mutation: .document,
+                    effect: .handled,
+                    undo: .atomic(.enter)
+                ))
             } else {
-                #expect(empty.document.blocks.count == 2, Comment(rawValue: "empty kind=\(kind)"))
+                Issue.record("unexpected empty kind \(kind)")
             }
         }
     }
@@ -140,9 +170,16 @@ struct BlockEditorInputTests {
             let id = blockID(251)
             let document = doc([validBlock(id, kind, "甲", codeInfo: kind == .code ? "swift" : nil)])
             let result = try reduce(document, textSelection(id, 0, id, 1), .enter, ids: [fallback, next])
-            #expect(result.document.blocks.map(\.id) == [fallback, next], Comment(rawValue: "kind=\(kind)"))
-            #expect(result.document.blocks.map(\.kind) == [.paragraph, .paragraph])
-            #expect(result.undo == .atomic(.enter))
+            #expect(result == .init(
+                document: doc([
+                    block(fallback, .paragraph, ""),
+                    DocumentBlock(id: next, kind: .paragraph, inlineContent: .init(spans: []), taskState: nil, indentLevel: 0)
+                ]),
+                selection: caret(next, 0),
+                mutation: .document,
+                effect: .handled,
+                undo: .atomic(.enter)
+            ), Comment(rawValue: "kind=\(kind)"))
         }
     }
 
@@ -287,6 +324,26 @@ struct BlockEditorInputTests {
         #expect(result.document.blocks.map(\.id) == [id, next])
     }
 
+    @Test func validatorRejectedRichCandidateFallsBackBeforeConsumingAnyID() throws {
+        let id = blockID(82), fallbackID = blockID(83)
+        let payload = BlockPastePayload.richText(blocks: [
+            .init(kind: .bullet, inlineContent: .plain("orphan"), indentLevel: 1, codeInfoString: nil)
+        ], fallbackPlainText: "\n原样")
+        let result = try reduce(
+            doc([block(id, .paragraph, "前缀")]),
+            caret(id, 2),
+            .replaceSelection(payload),
+            ids: [fallbackID]
+        )
+
+        #expect(result.document == doc([
+            block(id, .paragraph, "前缀"),
+            block(fallbackID, .paragraph, "原样")
+        ]))
+        #expect(result.selection == caret(fallbackID, 2, attributes: attributesAt(result.document, fallbackID, 2)))
+        #expect(result.undo == .atomic(.paste))
+    }
+
     @Test func richSameBlockReplacementOwnsIDsAndTaskCompletionDeterministically() throws {
         let id = blockID(90), pasted = blockID(91), suffix = blockID(92)
         let completed = Date(timeIntervalSince1970: 10)
@@ -399,6 +456,25 @@ struct BlockEditorInputTests {
         #expect(result.undo == .none)
     }
 
+    @Test func collapsedFormattingIsRejectedAtomicallyForCodeAndDivider() throws {
+        let url = URL(string: "https://example.com/rejected")!
+        for (kind, value) in [(BlockKind.code, "code"), (.divider, "")] {
+            let id = blockID(131)
+            let document = doc([validBlock(id, kind, value)])
+            let selection = caret(id, 0)
+            for command in [BlockInputCommand.toggleInlineMark(.bold), .setLink(url), .setLink(nil)] {
+                let result = try reduce(document, selection, command)
+                #expect(result == .init(
+                    document: document,
+                    selection: selection,
+                    mutation: .none(.unsupportedBlockKind),
+                    effect: .handled,
+                    undo: .none
+                ), Comment(rawValue: "kind=\(kind) command=\(command)"))
+            }
+        }
+    }
+
     @Test func horizontalMovementCollapsesRangesAndClearsPreferredColumn() throws {
         let a = blockID(140), b = blockID(141)
         let document = doc([block(a, .paragraph, "甲"), block(b, .paragraph, "乙")])
@@ -414,6 +490,64 @@ struct BlockEditorInputTests {
         #expect(forward.selection == caret(b, 1, attributes: attributesAt(document, b, 1)))
         #expect(forward.mutation == .selectionOnly)
         #expect(forward.undo == .none)
+    }
+
+    @Test func movementExtensionBoundsAndAffinityReturnExactResults() throws {
+        let a = blockID(142), b = blockID(143)
+        let document = doc([
+            DocumentBlock(
+                id: a,
+                kind: .paragraph,
+                inlineContent: .init(spans: [
+                    .init(text: "甲", marks: [.bold]),
+                    .init(text: "乙", marks: [.italic])
+                ]),
+                taskState: nil,
+                indentLevel: 0
+            ),
+            block(b, .paragraph, "丙")
+        ])
+        let start = caret(a, 0)
+        let first = try reduce(document, start, .moveHorizontal(.forward, extending: true))
+        #expect(first == .init(
+            document: document,
+            selection: .text(
+                anchor: .init(blockID: a, graphemeOffset: 0),
+                focus: .init(blockID: a, graphemeOffset: 1),
+                preferredColumn: nil,
+                typingAttributes: .init(marks: [.bold], linkURL: nil)
+            ),
+            mutation: .selectionOnly,
+            effect: .handled,
+            undo: .none
+        ))
+        let second = try reduce(document, first.selection, .moveHorizontal(.forward, extending: true))
+        #expect(second.selection == .text(
+            anchor: .init(blockID: a, graphemeOffset: 0),
+            focus: .init(blockID: a, graphemeOffset: 2),
+            preferredColumn: nil,
+            typingAttributes: .init(marks: [.italic], linkURL: nil)
+        ))
+        let across = try reduce(document, caret(a, 2), .moveHorizontal(.forward, extending: false))
+        #expect(across.selection == caret(b, 0, attributes: attributesAt(document, b, 0)))
+
+        let leftBoundary = try reduce(document, start, .moveHorizontal(.backward, extending: false))
+        #expect(leftBoundary == .init(
+            document: document,
+            selection: start,
+            mutation: .none(.documentBoundary),
+            effect: .handled,
+            undo: .none
+        ))
+        let end = caret(b, 1)
+        let rightBoundary = try reduce(document, end, .moveHorizontal(.forward, extending: false))
+        #expect(rightBoundary == .init(
+            document: document,
+            selection: end,
+            mutation: .none(.documentBoundary),
+            effect: .handled,
+            undo: .none
+        ))
     }
 
     @Test func verticalMovementKeepsOriginalPreferredColumnAcrossShortLine() throws {
@@ -451,6 +585,53 @@ struct BlockEditorInputTests {
         #expect(unchanged.mutation == .none(.missingListParent))
     }
 
+    @Test func listDepthAndClosureMatrixIsAtomicAtEveryBoundary() throws {
+        let level0 = blockID(163), level1 = blockID(164), peerLevel2 = blockID(167)
+        let level2 = blockID(165), level3 = blockID(166)
+        let document = doc([
+            block(level0, .bullet, "0", indent: 0),
+            block(level1, .ordered, "1", indent: 1),
+            block(peerLevel2, .bullet, "peer", indent: 2),
+            block(level2, .task, "2", indent: 2),
+            block(level3, .bullet, "3", indent: 3)
+        ])
+        let level2Selection = BlockEditorSelection.blocks(anchor: level2, focus: level2)
+        let blocked = try reduce(document, level2Selection, .indent)
+        #expect(blocked == .init(
+            document: document,
+            selection: level2Selection,
+            mutation: .none(.indentationLimit),
+            effect: .handled,
+            undo: .none
+        ))
+
+        let level1Selection = BlockEditorSelection.blocks(anchor: level1, focus: level1)
+        let outdented = try reduce(document, level1Selection, .outdent)
+        #expect(outdented == .init(
+            document: doc([
+                block(level0, .bullet, "0", indent: 0),
+                block(level1, .ordered, "1", indent: 0),
+                block(peerLevel2, .bullet, "peer", indent: 1),
+                block(level2, .task, "2", indent: 1),
+                block(level3, .bullet, "3", indent: 2)
+            ]),
+            selection: level1Selection,
+            mutation: .document,
+            effect: .handled,
+            undo: .atomic(.indentation)
+        ))
+
+        let rootSelection = BlockEditorSelection.blocks(anchor: level0, focus: level0)
+        let rootOutdent = try reduce(document, rootSelection, .outdent)
+        #expect(rootOutdent == .init(
+            document: document,
+            selection: rootSelection,
+            mutation: .none(.indentationLimit),
+            effect: .handled,
+            undo: .none
+        ))
+    }
+
     @Test func codeIndentAndOutdentOperateOnSelectedLogicalLines() throws {
         let id = blockID(170)
         let document = doc([block(id, .code, "a\n  b\nc")])
@@ -458,6 +639,15 @@ struct BlockEditorInputTests {
         #expect(text(indented.document.blocks[0]) == "    a\n      b\nc")
         let outdented = try reduce(indented.document, indented.selection, .outdent)
         #expect(text(outdented.document.blocks[0]) == "a\n  b\nc")
+    }
+
+    @Test func codeOutdentAtLaterLineStartKeepsCaretAtThatLineStart() throws {
+        let id = blockID(171)
+        let document = doc([block(id, .code, "a\n    b")])
+        let result = try reduce(document, caret(id, 2), .outdent)
+        #expect(result.document == doc([block(id, .code, "a\nb")]))
+        #expect(result.selection == caret(id, 2))
+        #expect(result.undo == .atomic(.indentation))
     }
 
     @Test func stableIDDragMovesRootClosuresAndDeduplicatesDescendants() throws {
@@ -478,6 +668,117 @@ struct BlockEditorInputTests {
         let same = try reduce(document, caret(b, 0), .moveBlockRoots([a], before: b))
         #expect(same.mutation == .none(.samePosition))
         #expect(same.undo == .none)
+
+        let targetInsideClosure = try reduce(document, caret(b, 0), .moveBlockRoots([a], before: child))
+        #expect(targetInsideClosure == .init(
+            document: document,
+            selection: caret(b, 0),
+            mutation: .none(.samePosition),
+            effect: .handled,
+            undo: .none
+        ))
+        #expect(throws: BlockInputError.invalidMove) {
+            try reduce(document, caret(b, 0), .moveBlockRoots([blockID(999)], before: nil))
+        }
+        #expect(throws: BlockInputError.invalidMove) {
+            try reduce(document, caret(b, 0), .moveBlockRoots([a], before: blockID(998)))
+        }
+        #expect(throws: BlockInputError.invalidMove) {
+            try reduce(document, caret(b, 0), .moveBlockRoots([child], before: nil))
+        }
+    }
+
+    @Test func blockSelectionFromRootToFirstChildDeletesTheRootsEntireClosure() throws {
+        let root = blockID(184), firstChild = blockID(185), grandchild = blockID(186)
+        let laterChild = blockID(187), following = blockID(188)
+        let document = doc([
+            block(root, .bullet, "root", indent: 0),
+            block(firstChild, .bullet, "first", indent: 1),
+            block(grandchild, .task, "grandchild", indent: 2),
+            block(laterChild, .ordered, "later", indent: 1),
+            block(following, .paragraph, "following")
+        ])
+        let selection = BlockEditorSelection.blocks(anchor: root, focus: firstChild)
+        let result = try reduce(document, selection, .deleteSelection)
+        #expect(result.document == doc([block(following, .paragraph, "following")]))
+        #expect(result.selection == caret(following, 0))
+        #expect(result.undo == .atomic(.deletion))
+    }
+
+    @Test func blockCopyIsInclusiveWhileCutUsesDeduplicatedClosureUnion() throws {
+        let root = blockID(194), firstChild = blockID(195), grandchild = blockID(196)
+        let laterChild = blockID(197), laterGrandchild = blockID(198), divider = blockID(199)
+        let document = doc([
+            block(root, .bullet, "root", indent: 0),
+            block(firstChild, .ordered, "first", indent: 1),
+            block(grandchild, .task, "grand", indent: 2),
+            block(laterChild, .bullet, "later", indent: 1),
+            block(laterGrandchild, .ordered, "later-grand", indent: 2),
+            block(divider, .divider, "")
+        ])
+        let reverseRootToChild = BlockEditorSelection.blocks(anchor: firstChild, focus: root)
+        let copied = try reduce(document, reverseRootToChild, .copySelection)
+        #expect(copied == .init(
+            document: document,
+            selection: reverseRootToChild,
+            mutation: .none(.samePosition),
+            effect: .writeClipboard(.init(
+                plainText: "root\nfirst",
+                richBlocks: [
+                    .init(kind: .bullet, inlineContent: .plain("root"), indentLevel: 0, codeInfoString: nil),
+                    .init(kind: .ordered, inlineContent: .plain("first"), indentLevel: 1, codeInfoString: nil)
+                ]
+            )),
+            undo: .none
+        ))
+
+        let cut = try reduce(document, reverseRootToChild, .cutSelection)
+        #expect(cut.document == doc([block(divider, .divider, "")]))
+        #expect(cut.effect == .writeClipboard(.init(
+            plainText: "root\nfirst\ngrand\nlater\nlater-grand",
+            richBlocks: [
+                .init(kind: .bullet, inlineContent: .plain("root"), indentLevel: 0, codeInfoString: nil),
+                .init(kind: .ordered, inlineContent: .plain("first"), indentLevel: 1, codeInfoString: nil),
+                .init(kind: .task, inlineContent: .plain("grand"), indentLevel: 2, codeInfoString: nil),
+                .init(kind: .bullet, inlineContent: .plain("later"), indentLevel: 1, codeInfoString: nil),
+                .init(kind: .ordered, inlineContent: .plain("later-grand"), indentLevel: 2, codeInfoString: nil)
+            ]
+        )))
+        #expect(cut.selection == caret(divider, 0))
+        #expect(cut.mutation == .document)
+        #expect(cut.undo == .atomic(.cut))
+
+        let multiRoot = BlockEditorSelection.blocks(anchor: firstChild, focus: laterChild)
+        let multiCut = try reduce(document, multiRoot, .cutSelection)
+        #expect(multiCut.document == doc([
+            block(root, .bullet, "root", indent: 0),
+            block(divider, .divider, "")
+        ]))
+        #expect(multiCut.effect == .writeClipboard(.init(
+            plainText: "first\ngrand\nlater\nlater-grand",
+            richBlocks: [
+                .init(kind: .ordered, inlineContent: .plain("first"), indentLevel: 1, codeInfoString: nil),
+                .init(kind: .task, inlineContent: .plain("grand"), indentLevel: 2, codeInfoString: nil),
+                .init(kind: .bullet, inlineContent: .plain("later"), indentLevel: 1, codeInfoString: nil),
+                .init(kind: .ordered, inlineContent: .plain("later-grand"), indentLevel: 2, codeInfoString: nil)
+            ]
+        )))
+
+        let dividerSelection = BlockEditorSelection.blocks(anchor: divider, focus: divider)
+        let dividerCopy = try reduce(document, dividerSelection, .copySelection)
+        #expect(dividerCopy.effect == .writeClipboard(.init(
+            plainText: "",
+            richBlocks: [.init(kind: .divider, inlineContent: .plain(""), indentLevel: 0, codeInfoString: nil)]
+        )))
+    }
+
+    @Test func emptyLinkEnterClearsZeroLengthURLMetadataWhenDowngrading() throws {
+        let id = blockID(189)
+        let document = doc([validBlock(id, .link, "")])
+        let result = try reduce(document, caret(id, 0), .enter)
+        #expect(result.document == doc([block(id, .paragraph, "")]))
+        #expect(result.selection == caret(id, 0))
+        #expect(result.undo == .atomic(.enter))
     }
 
     @Test func deterministicIDErrorsAreTypedAndCandidateValidationIsAtomic() throws {
@@ -593,6 +894,49 @@ private let allBlockKinds: [BlockKind] = [
     .paragraph, .heading1, .heading2, .heading3, .bullet, .ordered,
     .task, .quote, .code, .divider, .link
 ]
+
+private func expectedEnterResult(kind: BlockKind, id: BlockID, next: BlockID, offset: Int) -> BlockInputResult {
+    let source = Array("甲乙")
+    let leftText = String(source[..<offset])
+    let rightText = String(source[offset...])
+    let linkURL = URL(string: "https://example.com/block")!
+
+    func fragment(_ value: String, linked: Bool = false, canonicalEmpty: Bool = false) -> InlineContent {
+        if value.isEmpty, !canonicalEmpty { return .init(spans: []) }
+        return .init(spans: [.init(text: value, linkURL: linked ? linkURL : nil)])
+    }
+
+    let leftKind: BlockKind = kind == .link && leftText.isEmpty ? .paragraph : kind
+    let rightKind: BlockKind
+    switch kind {
+    case .heading1, .heading2, .heading3, .link: rightKind = .paragraph
+    case .paragraph, .bullet, .ordered, .task, .quote, .code: rightKind = kind
+    case .divider: rightKind = .paragraph
+    }
+    let left = DocumentBlock(
+        id: id,
+        kind: leftKind,
+        inlineContent: fragment(leftText, linked: leftKind == .link, canonicalEmpty: leftKind == .code),
+        taskState: leftKind == .task ? .init(completedAt: .distantPast) : nil,
+        indentLevel: 0,
+        codeInfoString: leftKind == .code ? "swift" : nil
+    )
+    let right = DocumentBlock(
+        id: next,
+        kind: rightKind,
+        inlineContent: fragment(rightText, linked: kind == .link && !rightText.isEmpty, canonicalEmpty: rightKind == .code),
+        taskState: rightKind == .task ? .init(completedAt: nil) : nil,
+        indentLevel: 0,
+        codeInfoString: rightKind == .code ? "swift" : nil
+    )
+    return .init(
+        document: doc([left, right]),
+        selection: caret(next, 0),
+        mutation: .document,
+        effect: .handled,
+        undo: .atomic(.enter)
+    )
+}
 
 private func validBlock(
     _ id: BlockID,

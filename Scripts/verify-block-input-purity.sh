@@ -13,8 +13,15 @@ scan_file() {
     return 1
   fi
 
+  local syntax_tree
+  if ! syntax_tree=$(xcrun swiftc -frontend -dump-parse "$file" 2>&1); then
+    fail "Task 8 source is not legal Swift: $file"
+    printf '%s\n' "$syntax_tree" >&2
+    return 1
+  fi
+
   local imports
-  imports=$(sed -nE 's/^[[:space:]]*(@[A-Za-z_][A-Za-z0-9_]*(\([^)]*\))?[[:space:]]+)*import[[:space:]]+([^[:space:];]+).*$/\3/p' "$file")
+  imports=$(printf '%s\n' "$syntax_tree" | sed -nE 's/.*\(import_decl .* module="([^"]+)".*/\1/p')
   local module
   while IFS= read -r module; do
     [[ -z "$module" ]] && continue
@@ -27,7 +34,7 @@ scan_file() {
     esac
   done <<< "$imports"
 
-  if grep -En '^[[:space:]]*([^/]*[[:space:]])?(public|open)[[:space:]]+((final|nonisolated|static|override|required|convenience|mutating|nonmutating)[[:space:]]+)*(struct|class|enum|protocol|actor|func|var|let|init|subscript|typealias)([[:space:](<]|$)' "$file" >/dev/null; then
+  if printf '%s\n' "$syntax_tree" | grep -E 'access_level=(public|open)([)[:space:]]|$)' >/dev/null; then
     fail "Public declaration in $file"
     return 1
   fi
@@ -63,7 +70,10 @@ self_test() {
     for name in BlockInputReducer.swift BlockEditorSelection.swift BlockPasteParser.swift; do
       printf 'import Foundation\nstruct Fixture {}\n' > "$fixture_root/invalid-$index/$name"
     done
-    printf '%s\n' "$invalid" >> "$fixture_root/invalid-$index/BlockInputReducer.swift"
+    printf '%b\n' "$invalid" >> "$fixture_root/invalid-$index/BlockInputReducer.swift"
+    if ! xcrun swiftc -frontend -parse "$fixture_root/invalid-$index/BlockInputReducer.swift" >/dev/null 2>&1; then
+      fail "Self-test fixture is not legal Swift: $invalid"
+    fi
     if scan_directory "$fixture_root/invalid-$index" >/dev/null 2>&1; then
       fail "Self-test accepted forbidden spelling: $invalid"
     fi
@@ -79,6 +89,10 @@ public struct Leaked {}
 open class Leaked {}
 final public class Leaked {}
 @MainActor nonisolated public func leaked() {}
+import Foundation; import AppKit
+public\nstruct Leaked {}
+@MainActor\nnonisolated public\nfunc leaked() {}
+public /* comment */ struct Leaked {}
 INVALID_CASES
 
   printf '%s\n' "Block input purity self-test passed"
