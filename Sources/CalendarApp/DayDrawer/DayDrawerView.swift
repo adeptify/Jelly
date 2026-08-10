@@ -74,7 +74,6 @@ struct DayDrawerView: View {
             Button("新建事项") {
                 onQuickCreate(model.quickCreateDate)
             }
-            .keyboardShortcut("n", modifiers: [.command])
 
             if let actionError {
                 VStack(alignment: .leading, spacing: 6) {

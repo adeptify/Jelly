@@ -221,6 +221,8 @@ private final class MainActorNextLayoutDeferrer: WeekStreamAutoScrollDeferrer {
 
 struct MonthView: View {
     let store: WorkspaceStore
+    private let newItemRequest: WorkspaceNewItemRequest?
+    private let consumeNewItemRequest: ((UUID, WorkspaceRoute) -> WorkspaceNewItemRequest?)?
     private let todayRefreshPolicy: MonthViewTodayRefreshPolicy
     private let todayRefreshController: MonthViewTodayRefreshController
     @Environment(\.scenePhase) private var scenePhase
@@ -268,9 +270,13 @@ struct MonthView: View {
 
     init(
         store: WorkspaceStore,
-        todayRefreshPolicy: MonthViewTodayRefreshPolicy = .live
+        todayRefreshPolicy: MonthViewTodayRefreshPolicy = .live,
+        newItemRequest: WorkspaceNewItemRequest? = nil,
+        consumeNewItemRequest: ((UUID, WorkspaceRoute) -> WorkspaceNewItemRequest?)? = nil
     ) {
         self.store = store
+        self.newItemRequest = newItemRequest
+        self.consumeNewItemRequest = consumeNewItemRequest
         self.todayRefreshPolicy = todayRefreshPolicy
         todayRefreshController = MonthViewTodayRefreshController(policy: todayRefreshPolicy)
         let initialWeekStream = MonthViewInitialWeekStream(today: todayRefreshPolicy.today)
@@ -395,6 +401,10 @@ struct MonthView: View {
             .onAppear {
                 hiddenCategoryIDs = CategoryFilterView.decode(storedHiddenCategoryIDs)
                 refreshProjection()
+                consumeCalendarNewItemRequest(newItemRequest)
+            }
+            .onChange(of: newItemRequest) { _, request in
+                consumeCalendarNewItemRequest(request)
             }
             .onReceive(NotificationCenter.default.publisher(
                 for: MonthViewTodayRefreshPolicy.calendarDayChangedNotification
@@ -972,6 +982,26 @@ struct MonthView: View {
                 openEditor(for: item)
             }
         }
+    }
+
+    private func consumeCalendarNewItemRequest(_ request: WorkspaceNewItemRequest?) {
+        guard let request,
+              request.route == .calendar,
+              consumeNewItemRequest?(request.id, .calendar) != nil
+        else {
+            return
+        }
+
+        guard let date = CalendarNewItemRequestPolicy.resolve(
+            dayDrawerDate: selectedDayDrawerDate,
+            selectedDate: model.selectedDate,
+            today: model.today,
+            isQuickCreatePresented: quickCreatePresentation != nil,
+            isItemEditorPresented: editorSession != nil
+        ) else {
+            return
+        }
+        openQuickCreate(on: date)
     }
 
     private func openEditor(for item: ProjectedItem) {

@@ -15,11 +15,18 @@ enum CalendarAppCommandPolicy {
 @main
 struct PersonalCalendarApp: App {
     @State private var environment: AppEnvironment
+    @StateObject private var routeState: WorkspaceRouteState
+    @StateObject private var newItemRouter: WorkspaceNewItemRouter
     @AppStorage(CalendarAppearancePreference.storageKey)
     private var appearancePreferenceRaw = CalendarAppearancePreference.light.rawValue
 
     init() {
-        _environment = State(initialValue: .liveOrTerminate())
+        let initialEnvironment = AppEnvironment.liveOrTerminate()
+        _environment = State(initialValue: initialEnvironment)
+        _routeState = StateObject(wrappedValue: WorkspaceRouteState(
+            features: initialEnvironment.features
+        ))
+        _newItemRouter = StateObject(wrappedValue: WorkspaceNewItemRouter())
     }
 
     private var appearancePreference: CalendarAppearancePreference {
@@ -28,8 +35,12 @@ struct PersonalCalendarApp: App {
 
     var body: some Scene {
         Window("Jelly", id: "main-calendar") {
-            MonthView(store: environment.store)
-                .frame(minWidth: 1044, minHeight: 680)
+            AppShellView(
+                store: environment.store,
+                features: environment.features,
+                routeState: routeState,
+                newItemRouter: newItemRouter
+            )
                 .preferredColorScheme(appearancePreference.preferredColorScheme)
                 .task { await environment.store.load() }
                 .onAppear { CalendarAppearancePreference.applyToApplication(appearancePreference) }
@@ -39,7 +50,13 @@ struct PersonalCalendarApp: App {
                 }
         }
         .defaultSize(width: 1180, height: 820)
+        .windowResizability(.contentMinSize)
         .commands {
+            WorkspaceCommands(
+                routeState: routeState,
+                newItemRouter: newItemRouter,
+                features: environment.features
+            )
             CalendarUndoCommands(store: environment.store)
             if CalendarAppCommandPolicy.installsBackupCommands(in: .mainCalendar) {
                 BackupCommands(store: environment.store, rollbackDirectory: environment.dataURLs.rollbackDirectory)

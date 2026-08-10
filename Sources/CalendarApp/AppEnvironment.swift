@@ -7,6 +7,9 @@ import WorkspaceDomain
 struct AppEnvironment {
     let store: WorkspaceStore
     let dataURLs: AppDataURLs
+    /// The production application stays calendar-only until a module has its
+    /// complete real loop. Feature state is deliberately not user preference data.
+    let features: WorkspaceFeatures
 
     static func live(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -28,7 +31,8 @@ struct AppEnvironment {
         let journal = DraftJournalRepository(fileURL: dataURLs.draftJournal)
         return AppEnvironment(
             store: WorkspaceStore(initialState: seed, repository: repository, journal: journal),
-            dataURLs: dataURLs
+            dataURLs: dataURLs,
+            features: .production
         )
     }
 
