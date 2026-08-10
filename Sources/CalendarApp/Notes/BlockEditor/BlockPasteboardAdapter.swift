@@ -44,12 +44,18 @@ final class BlockPasteboardAdapter {
     }
 
     func readPayload() -> BlockPastePayload? {
-        if let data = pasteboard.data(forType: Self.privateType),
-           let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
-           envelope.version == Envelope.version,
-           let payload = envelope.payload,
-           (try? BlockPasteParser.parse(payload)) != nil {
-            return payload
+        if let data = pasteboard.data(forType: Self.privateType) {
+            if let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
+               envelope.version == Envelope.version,
+               let payload = envelope.payload,
+               (try? BlockPasteParser.parse(payload)) != nil {
+                return payload
+            }
+            let types = pasteboard.types ?? []
+            guard let stringIndex = types.firstIndex(of: .string),
+                  let privateIndex = types.firstIndex(of: Self.privateType),
+                  stringIndex < privateIndex else { return nil }
+            return pasteboard.string(forType: .string).map(BlockPastePayload.plainText)
         }
         if let rtf = pasteboard.data(forType: .rtf),
            let attributed = try? NSAttributedString(
@@ -107,8 +113,23 @@ final class BlockPasteboardAdapter {
         if (attributes[NSAttributedString.Key("com.adeptify.jelly.inline-code")] as? Bool) == true {
             marks.insert(.code)
         }
-        let link = (attributes[.link] as? URL).flatMap { BlockURLValidator.isValid($0) ? $0 : nil }
+        let link = normalizedURL(attributes[.link]).flatMap { BlockURLValidator.isValid($0) ? $0 : nil }
         return .init(text: "", marks: marks, linkURL: link)
+    }
+
+    private static func normalizedURL(_ value: Any?) -> URL? {
+        switch value {
+        case let url as URL:
+            return url
+        case let url as NSURL:
+            return url as URL
+        case let value as String:
+            return URL(string: value)
+        case let value as NSString:
+            return URL(string: value as String)
+        default:
+            return nil
+        }
     }
 
     private static func append(_ text: String, style: InlineSpan, to lines: inout [[InlineSpan]]) {

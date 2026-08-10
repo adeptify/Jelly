@@ -103,6 +103,10 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         focusRegistry.register(undoManager, ownerID: hostToken)
     }
 
+    func blur(hostToken: UUID) {
+        focusRegistry.clear(ownerID: hostToken)
+    }
+
     func dispatch(_ command: BlockInputCommand) throws -> BlockEditorDispatchOutcome {
         let result = try BlockInputReducer.reduce(
             document,
@@ -123,15 +127,42 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         defer { isProjecting = false }
         for lease in hosts.values {
             guard let view = lease.textView else { continue }
-            let text = document.blocks.first(where: { $0.id == lease.blockID }).map(Self.text) ?? ""
+            guard let block = document.blocks.first(where: { $0.id == lease.blockID }) else { continue }
+            let text = Self.text(block)
             let range = BlockSelectionController(selection: selection).projectedRange(for: lease.blockID, document: document)
                 ?? .init(location: text.utf16.count, length: 0)
             view.applyAuthoritativeProjection(
-                text: text,
+                block: block,
                 selectedRange: range,
                 isSelected: isSelectionIncluding(blockID: lease.blockID)
             )
         }
+    }
+
+    var showsInlineFormattingControls: Bool {
+        guard let range = normalizedFormattingRange(), range.start != range.end else { return false }
+        return document.blocks[range.lowerIndex...range.upperIndex].allSatisfy {
+            $0.kind != .code && $0.kind != .divider
+        }
+    }
+
+    var selectionContainsLink: Bool {
+        guard let range = normalizedFormattingRange(), range.start != range.end else { return false }
+        for index in range.lowerIndex...range.upperIndex {
+            let block = document.blocks[index]
+            let lower = index == range.lowerIndex ? range.start.graphemeOffset : 0
+            let upper = index == range.upperIndex ? range.end.graphemeOffset : Self.text(block).count
+            var cursor = 0
+            for span in block.inlineContent.spans {
+                let spanEnd = cursor + span.text.count
+                if upper > cursor, lower < spanEnd,
+                   let link = span.linkURL, BlockURLValidator.isValid(link) {
+                    return true
+                }
+                cursor = spanEnd
+            }
+        }
+        return false
     }
 
     @discardableResult
@@ -161,7 +192,7 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         terminalComposition = .init(token: baseline.token, hostToken: hostToken, value: value)
         document = baseline.document
         applySelection(baseline.replacementSelection, incrementingRevision: false, project: false)
-        do { _ = try dispatch(.insertText(value)) } catch { projectAuthoritativeState() }
+        do { _ = try dispatch(.insertTextApplyingMarkdownShortcut(value)) } catch { projectAuthoritativeState() }
     }
 
     func cancelComposition(hostToken: UUID, terminalValue: String? = nil) {
@@ -226,7 +257,7 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         guard isActiveHost(hostToken),
               let selected = compositionSelection(blockID: blockID, replacementRange: replacementRange) else { return false }
         applySelection(selected, incrementingRevision: false, project: false)
-        do { return try dispatch(.insertText(value)).commandHandled } catch { return false }
+        do { return try dispatch(.insertTextApplyingMarkdownShortcut(value)).commandHandled } catch { return false }
     }
 
     func beginNativeInputEvent(hostToken: UUID) {
@@ -251,7 +282,7 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
     }
 
     func updateNativeSelection(blockID: BlockID, range: NSRange, hostToken: UUID) {
-        guard composition == nil, hosts[hostToken]?.blockID == blockID,
+        guard composition == nil, isActiveHost(hostToken), hosts[hostToken]?.blockID == blockID,
               let bridged = try? BlockSelectionBridge.graphemeRange(blockID: blockID, nsRange: range, document: document) else {
             return
         }
@@ -317,6 +348,15 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         return true
     }
 
+    /// Auxiliary controls temporarily become first responder while they run.
+    /// Always restore the authoritative selection endpoint afterwards so the
+    /// editor's UndoManager remains the focused command owner, including when
+    /// a modal action is cancelled without producing a reducer mutation.
+    func performAuxiliaryControlAction(_ action: () -> Void) {
+        action()
+        focusSelectionEndpoint()
+    }
+
     @discardableResult
     func extendPointerSelection(atWindowPoint point: NSPoint, in window: NSWindow?) -> Bool {
         guard let window else { return false }
@@ -354,6 +394,7 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         case (.selectionOnly, .handled, .none):
             closeTypingCoalescing()
             applySelection(result.selection, incrementingRevision: true, project: true)
+            focusSelectionEndpoint()
             return .init(result: result, commandHandled: true)
         case let (.document, .handled, .coalesceTyping(blockID)):
             let before = Snapshot(document: document, selection: selection)
@@ -421,6 +462,7 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
     }
 
     private func restoreTyping(_ record: TypingUndoRecord) {
+        closeTypingCoalescing()
         let inverse = Snapshot(document: document, selection: selection)
         applyDocument(record.before)
         undoManager.registerUndo(withTarget: self) { target in
@@ -430,6 +472,7 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
     }
 
     private func restore(snapshot: Snapshot, inverse: Snapshot) {
+        closeTypingCoalescing()
         applyDocument(snapshot)
         undoManager.registerUndo(withTarget: self) { target in
             target.restore(snapshot: inverse, inverse: snapshot)
@@ -486,7 +529,7 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         let range: BlockTextRange
         if replacementRange.location == NSNotFound {
             guard case let .text(anchor, focus, _, _) = selection,
-                  anchor.blockID == blockID, focus.blockID == blockID else { return nil }
+                  focus.blockID == blockID else { return nil }
             range = .init(start: anchor, end: focus)
         } else {
             guard let bridged = try? BlockSelectionBridge.graphemeRange(
@@ -502,6 +545,21 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
 
     private static func text(_ block: DocumentBlock) -> String { block.inlineContent.spans.map(\.text).joined() }
 
+    private func normalizedFormattingRange() -> (
+        lowerIndex: Int,
+        upperIndex: Int,
+        start: BlockTextPosition,
+        end: BlockTextPosition
+    )? {
+        guard case let .text(anchor, focus, _, _) = selection,
+              let anchorIndex = document.blocks.firstIndex(where: { $0.id == anchor.blockID }),
+              let focusIndex = document.blocks.firstIndex(where: { $0.id == focus.blockID }) else { return nil }
+        if anchorIndex < focusIndex || (anchorIndex == focusIndex && anchor.graphemeOffset <= focus.graphemeOffset) {
+            return (anchorIndex, focusIndex, anchor, focus)
+        }
+        return (focusIndex, anchorIndex, focus, anchor)
+    }
+
     private func isAttached(position: BlockTextPosition, hostToken: UUID) -> Bool {
         guard isActiveHost(hostToken), hosts[hostToken]?.blockID == position.blockID else { return false }
         return (try? BlockSelectionBridge.utf16Offset(position: position, document: document)) != nil
@@ -509,6 +567,7 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
 
     private func applySyntheticSelection() {
         applySelection(selectionController.selection, incrementingRevision: true, project: true)
+        focusSelectionEndpoint()
     }
 
     private func applySelection(_ newSelection: BlockEditorSelection, incrementingRevision: Bool, project: Bool) {
@@ -517,6 +576,15 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         if incrementingRevision { editorRevision &+= 1 }
         refreshSlashMenu()
         if project { projectAuthoritativeState() }
+    }
+
+    private func focusSelectionEndpoint() {
+        guard case let .text(_, focus, _, _) = selection,
+              let token = activeHostTokens[focus.blockID],
+              let view = hosts[token]?.textView,
+              let window = view.window,
+              window.firstResponder !== view else { return }
+        _ = window.makeFirstResponder(view)
     }
 
     private func isActiveHost(_ hostToken: UUID) -> Bool {

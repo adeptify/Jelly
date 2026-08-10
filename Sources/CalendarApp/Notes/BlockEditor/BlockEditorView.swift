@@ -4,7 +4,12 @@ import WorkspaceDomain
 
 @MainActor
 struct BlockEditorView: View {
-    @StateObject private var session: BlockEditorSession
+    private let key: BlockEditorKey
+    private let initialDocument: BlockDocument
+    private let initialSelection: BlockEditorSelection
+    private let focusRegistry: EditorFocusRegistry
+    private let onDocumentChange: (BlockDocument) -> Void
+    private let requestLinkURL: () -> URL?
 
     init(
         noteID: NoteID,
@@ -12,20 +17,64 @@ struct BlockEditorView: View {
         initialDocument: BlockDocument,
         initialSelection: BlockEditorSelection,
         focusRegistry: EditorFocusRegistry,
-        onDocumentChange: @escaping (BlockDocument) -> Void
+        onDocumentChange: @escaping (BlockDocument) -> Void,
+        requestLinkURL: @escaping () -> URL? = { BlockLinkPrompt.requestURL() }
+    ) {
+        key = .init(noteID: noteID, editSessionID: editSessionID)
+        self.initialDocument = initialDocument
+        self.initialSelection = initialSelection
+        self.focusRegistry = focusRegistry
+        self.onDocumentChange = onDocumentChange
+        self.requestLinkURL = requestLinkURL
+    }
+
+    var body: some View {
+        BlockEditorSessionHost(
+            key: key,
+            initialDocument: initialDocument,
+            initialSelection: initialSelection,
+            focusRegistry: focusRegistry,
+            onDocumentChange: onDocumentChange,
+            requestLinkURL: requestLinkURL
+        )
+        .id(key)
+    }
+}
+
+private struct BlockEditorKey: Hashable {
+    let noteID: NoteID
+    let editSessionID: UUID
+}
+
+@MainActor
+private struct BlockEditorSessionHost: View {
+    @StateObject private var session: BlockEditorSession
+    private let requestLinkURL: () -> URL?
+
+    init(
+        key: BlockEditorKey,
+        initialDocument: BlockDocument,
+        initialSelection: BlockEditorSelection,
+        focusRegistry: EditorFocusRegistry,
+        onDocumentChange: @escaping (BlockDocument) -> Void,
+        requestLinkURL: @escaping () -> URL?
     ) {
         _session = StateObject(wrappedValue: BlockEditorSession(
-            noteID: noteID,
-            editSessionID: editSessionID,
+            noteID: key.noteID,
+            editSessionID: key.editSessionID,
             initialDocument: initialDocument,
             initialSelection: initialSelection,
             focusRegistry: focusRegistry,
             onDocumentChange: onDocumentChange
         ))
+        self.requestLinkURL = requestLinkURL
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
+            if session.showsInlineFormattingControls {
+                BlockFormattingControls(session: session, requestLinkURL: requestLinkURL)
+            }
             ForEach(Array(session.document.blocks.enumerated()), id: \.element.id) { index, block in
                 let dragHandler = BlockDragDropHandler(session: session)
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -37,7 +86,7 @@ struct BlockEditorView: View {
                         dragHandler: dragHandler
                     )
                     BlockEditorTextViewRepresentable(blockID: block.id, session: session)
-                        .frame(minHeight: block.kind == .divider ? 22 : 26)
+                        .frame(minHeight: rowHeight(for: block.kind))
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier(block.id.rawValue.uuidString)
                 }
@@ -65,6 +114,123 @@ struct BlockEditorView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("结构化笔记编辑器")
+    }
+
+    private func rowHeight(for kind: BlockKind) -> CGFloat {
+        switch kind {
+        case .heading1: 38
+        case .heading2: 34
+        case .heading3: 30
+        case .divider: 22
+        case .paragraph, .bullet, .ordered, .task, .quote, .code, .link: 26
+        }
+    }
+}
+
+private struct BlockFormattingControls: View {
+    @ObservedObject var session: BlockEditorSession
+    let requestLinkURL: () -> URL?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            formattingButton("B", identifier: "block-format-bold", help: "粗体") {
+                _ = session.dispatchTextCommand(.toggleInlineMark(.bold))
+            }
+            formattingButton("I", identifier: "block-format-italic", help: "斜体") {
+                _ = session.dispatchTextCommand(.toggleInlineMark(.italic))
+            }
+            formattingButton("</>", identifier: "block-format-code", help: "行内代码") {
+                _ = session.dispatchTextCommand(.toggleInlineMark(.code))
+            }
+            formattingButton("Link", identifier: "block-format-link", help: "添加或移除链接") {
+                toggleLink()
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("文本格式")
+    }
+
+    private func formattingButton(
+        _ title: String,
+        identifier: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        BlockFormattingButtonRepresentable(
+            title: title,
+            identifier: identifier,
+            help: help,
+            action: { session.performAuxiliaryControlAction(action) }
+        )
+        .frame(minWidth: 30, minHeight: 24)
+    }
+
+    private func toggleLink() {
+        if session.selectionContainsLink {
+            _ = session.dispatchTextCommand(.setLink(nil))
+            return
+        }
+        if let clipboardValue = NSPasteboard.general.string(forType: .string),
+           let clipboardURL = URL(string: clipboardValue),
+           BlockURLValidator.isValid(clipboardURL) {
+            _ = session.dispatchTextCommand(.setLink(clipboardURL))
+            return
+        }
+        guard let url = requestLinkURL(),
+              BlockURLValidator.isValid(url) else { return }
+        _ = session.dispatchTextCommand(.setLink(url))
+    }
+}
+
+@MainActor
+private enum BlockLinkPrompt {
+    static func requestURL() -> URL? {
+        let field = NSTextField(string: "https://")
+        field.frame = .init(x: 0, y: 0, width: 280, height: 24)
+        let alert = NSAlert()
+        alert.messageText = "添加链接"
+        alert.informativeText = "输入所选文本要打开的完整网址。"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "应用")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return URL(string: field.stringValue)
+    }
+}
+
+private struct BlockFormattingButtonRepresentable: NSViewRepresentable {
+    let title: String
+    let identifier: String
+    let help: String
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.performAction))
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.toolTip = help
+        button.setAccessibilityIdentifier(identifier)
+        return button
+    }
+
+    func updateNSView(_ nsView: NSButton, context: Context) {
+        nsView.title = title
+        nsView.toolTip = help
+        nsView.setAccessibilityIdentifier(identifier)
+        context.coordinator.action = action
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var action: () -> Void
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+
+        @objc func performAction() { action() }
     }
 }
 
@@ -212,9 +378,10 @@ final class BlockSelectionHandleView: NSView, NSDraggingSource {
     }
 
     private func move(by delta: Int) -> Bool {
-        guard let blockID, let session else { return false }
-        if delta < 0 { return BlockDragCoordinator(session: session).moveUp(roots: [blockID]) }
-        return BlockDragCoordinator(session: session).moveDown(roots: [blockID])
+        guard let blockID, let session, let dragHandler else { return false }
+        let roots = dragHandler.dragRoots(startingAt: blockID)
+        if delta < 0 { return BlockDragCoordinator(session: session).moveUp(roots: roots) }
+        return BlockDragCoordinator(session: session).moveDown(roots: roots)
     }
 }
 
@@ -238,6 +405,6 @@ struct BlockAccessibilityDescriptor {
 
     var identifier: String { blockID.rawValue.uuidString }
     var positionAnnouncement: String { "第 \(index + 1) 项，共 \(totalCount) 项" }
-    var role: NSAccessibility.Role { .textArea }
+    var role: NSAccessibility.Role { kind == .divider ? .splitter : .textArea }
     var reorderActions: [String] { ["Move Up", "Move Down"] }
 }

@@ -8,8 +8,11 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
     private var blockID: BlockID?
     private var hostToken: UUID?
     private var applyingProjection = false
+    private var executingComposingTextSystemCommand = false
     private var markedCandidate: String?
     private var markedCompositionToken: UInt?
+    private var projectedKind: BlockKind = .paragraph
+    private var projectedTaskCompleted = false
     private(set) var projectedAccessibilitySelected = false
     // NSTextContainer does not keep the legacy text system alive by itself.
     // The host must retain this chain for the lifetime of the native view.
@@ -53,7 +56,7 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     private func configure() {
-        isRichText = false
+        isRichText = true
         allowsUndo = false // The session has the one authoritative UndoManager.
         drawsBackground = false
         isHorizontallyResizable = false
@@ -87,20 +90,178 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func applyAuthoritativeProjection(text: String, selectedRange: NSRange, isSelected: Bool = false) {
+        projectedKind = .paragraph
+        projectedTaskCompleted = false
+        applyAuthoritativeProjection(
+            attributedString: NSAttributedString(string: text),
+            selectedRange: selectedRange,
+            isSelected: isSelected,
+            accessibilityRole: .textArea
+        )
+    }
+
+    func applyAuthoritativeProjection(block: DocumentBlock, selectedRange: NSRange, isSelected: Bool = false) {
+        projectedKind = block.kind
+        projectedTaskCompleted = block.taskState?.completedAt != nil
+        let attributed = NSMutableAttributedString(string: block.inlineContent.spans.map(\.text).joined())
+        let fullRange = NSRange(location: 0, length: attributed.length)
+        if fullRange.length > 0 {
+            let baseFont = Self.baseFont(for: block.kind)
+            var baseAttributes: [NSAttributedString.Key: Any] = [
+                .font: baseFont,
+                .foregroundColor: Self.baseColor(for: block.kind)
+            ]
+            if let paragraphStyle = Self.paragraphStyle(for: block.kind) {
+                baseAttributes[.paragraphStyle] = paragraphStyle
+            }
+            if block.kind == .code {
+                baseAttributes[.backgroundColor] = NSColor.textBackgroundColor.withAlphaComponent(0.7)
+            }
+            if block.kind == .link {
+                baseAttributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+            }
+            if projectedTaskCompleted {
+                baseAttributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+            }
+            attributed.addAttributes(baseAttributes, range: fullRange)
+
+            var cursor = 0
+            for span in block.inlineContent.spans {
+                let length = (span.text as NSString).length
+                if length > 0 {
+                    let range = NSRange(location: cursor, length: length)
+                    attributed.addAttribute(.font, value: Self.styledFont(base: baseFont, marks: span.marks), range: range)
+                    if span.marks.contains(.code) {
+                        attributed.addAttribute(
+                            NSAttributedString.Key("com.adeptify.jelly.inline-code"), value: true, range: range
+                        )
+                        attributed.addAttribute(.backgroundColor, value: NSColor.quaternaryLabelColor, range: range)
+                    }
+                    if let link = span.linkURL, BlockURLValidator.isValid(link) {
+                        attributed.addAttributes([
+                            .link: link,
+                            .foregroundColor: NSColor.linkColor,
+                            .underlineStyle: NSUnderlineStyle.single.rawValue
+                        ], range: range)
+                    }
+                }
+                cursor += length
+            }
+        }
+        applyAuthoritativeProjection(
+            attributedString: attributed,
+            selectedRange: selectedRange,
+            isSelected: isSelected,
+            accessibilityRole: block.kind == .divider ? .splitter : .textArea
+        )
+    }
+
+    private func applyAuthoritativeProjection(
+        attributedString: NSAttributedString,
+        selectedRange: NSRange,
+        isSelected: Bool,
+        accessibilityRole: NSAccessibility.Role
+    ) {
         guard !applyingProjection else { return }
         applyingProjection = true
         defer { applyingProjection = false }
-        textStorage?.setAttributedString(NSAttributedString(string: text))
-        setAccessibilityValue(text)
+        textStorage?.setAttributedString(attributedString)
+        setAccessibilityRole(accessibilityRole)
+        setAccessibilityValue(attributedString.string)
         setAccessibilitySelected(isSelected)
         projectedAccessibilitySelected = isSelected
-        let length = (text as NSString).length
+        isEditable = projectedKind != .divider
+        needsDisplay = true
+        let length = attributedString.length
         guard selectedRange.location != NSNotFound,
               selectedRange.location >= 0,
               selectedRange.location <= length,
               selectedRange.length >= 0,
               selectedRange.location <= length - selectedRange.length else { return }
         self.selectedRange = selectedRange
+        // AppKit reapplies the insertion-point typing font to the backing store
+        // when a rich text view receives a programmatic selection. Restore the
+        // authoritative attributes without replacing the string (which would
+        // itself collapse the just-projected selection to the document end).
+        if let textStorage, attributedString.length > 0 {
+            textStorage.beginEditing()
+            textStorage.setAttributes([:], range: .init(location: 0, length: attributedString.length))
+            attributedString.enumerateAttributes(
+                in: .init(location: 0, length: attributedString.length),
+                options: []
+            ) { attributes, range, _ in
+                textStorage.setAttributes(attributes, range: range)
+            }
+            textStorage.endEditing()
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let color = NSColor.secondaryLabelColor
+        switch projectedKind {
+        case .bullet:
+            ("•" as NSString).draw(at: .init(x: 1, y: textContainerOrigin.y), withAttributes: [.foregroundColor: color])
+        case .ordered:
+            ("1." as NSString).draw(at: .init(x: 0, y: textContainerOrigin.y), withAttributes: [.foregroundColor: color])
+        case .task:
+            let marker = projectedTaskCompleted ? "☑" : "☐"
+            (marker as NSString).draw(at: .init(x: 0, y: textContainerOrigin.y), withAttributes: [.foregroundColor: color])
+        case .quote:
+            color.setFill()
+            NSBezierPath(rect: .init(x: 1, y: 2, width: 2, height: max(0, bounds.height - 4))).fill()
+        case .divider:
+            color.setStroke()
+            let path = NSBezierPath()
+            path.move(to: .init(x: 0, y: bounds.midY))
+            path.line(to: .init(x: bounds.maxX, y: bounds.midY))
+            path.stroke()
+        case .paragraph, .heading1, .heading2, .heading3, .code, .link:
+            break
+        }
+    }
+
+    private static func baseFont(for kind: BlockKind) -> NSFont {
+        switch kind {
+        case .heading1: return .systemFont(ofSize: 24, weight: .bold)
+        case .heading2: return .systemFont(ofSize: 20, weight: .semibold)
+        case .heading3: return .systemFont(ofSize: 17, weight: .semibold)
+        case .code: return .monospacedSystemFont(ofSize: 13, weight: .regular)
+        case .quote:
+            return NSFontManager.shared.convert(.systemFont(ofSize: 14), toHaveTrait: .italicFontMask)
+        case .paragraph, .bullet, .ordered, .task, .divider, .link:
+            return .systemFont(ofSize: 14)
+        }
+    }
+
+    private static func baseColor(for kind: BlockKind) -> NSColor {
+        switch kind {
+        case .quote: .secondaryLabelColor
+        case .link: .linkColor
+        case .paragraph, .heading1, .heading2, .heading3, .bullet, .ordered, .task, .code, .divider:
+            .labelColor
+        }
+    }
+
+    private static func paragraphStyle(for kind: BlockKind) -> NSParagraphStyle? {
+        guard [.bullet, .ordered, .task, .quote].contains(kind) else { return nil }
+        let style = NSMutableParagraphStyle()
+        style.firstLineHeadIndent = 18
+        style.headIndent = 18
+        return style
+    }
+
+    private static func styledFont(base: NSFont, marks: Set<InlineMark>) -> NSFont {
+        var font = marks.contains(.code)
+            ? NSFont.monospacedSystemFont(ofSize: base.pointSize, weight: .regular)
+            : base
+        if marks.contains(.bold) {
+            font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+        }
+        if marks.contains(.italic) {
+            font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+        }
+        return font
     }
 
     var attachedSession: BlockEditorSession? { editorSession }
@@ -171,22 +332,38 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
         return becameFirstResponder
     }
 
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned, let hostToken { editorSession?.blur(hostToken: hostToken) }
+        return resigned
+    }
+
     func textViewDidChangeSelection(_ notification: Notification) {
         guard !applyingProjection, let blockID, let hostToken else { return }
         editorSession?.updateNativeSelection(blockID: blockID, range: selectedRange, hostToken: hostToken)
     }
 
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-        if !applyingProjection, let blockID, let hostToken {
-            markedCompositionToken = editorSession?.beginComposition(
-                blockID: blockID, replacementRange: replacementRange, hostToken: hostToken
-            )
-            if markedCompositionToken != nil { markedCandidate = Self.string(from: string) }
+        guard !applyingProjection, let editorSession, let blockID, let hostToken else {
+            super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+            return
         }
+        markedCompositionToken = editorSession.beginComposition(
+            blockID: blockID, replacementRange: replacementRange, hostToken: hostToken
+        )
+        guard markedCompositionToken != nil else {
+            editorSession.projectAuthoritativeState()
+            return
+        }
+        markedCandidate = Self.string(from: string)
         super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
     }
 
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        if executingComposingTextSystemCommand {
+            super.insertText(insertString, replacementRange: replacementRange)
+            return
+        }
         guard !applyingProjection, let value = Self.string(from: insertString) else {
             super.insertText(insertString, replacementRange: replacementRange)
             return
@@ -204,6 +381,10 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func unmarkText() {
+        if executingComposingTextSystemCommand {
+            super.unmarkText()
+            return
+        }
         if let hostToken, editorSession?.isComposing == true {
             let value = markedCandidate ?? ""
             markedCandidate = nil
@@ -229,9 +410,12 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
     override func doCommand(by selector: Selector) {
         // IME owns every structural key while a candidate is marked.
         if editorSession?.isComposing == true {
-            // The input context supplies terminal candidate text through insertText or
-            // unmarkText. Calling NSTextView's structural selector here would mutate its
-            // transient storage a second time before that terminal transition.
+            // Keep the native marked-text buffer live for candidate navigation and
+            // editing. The session ignores its delegate callbacks until the terminal
+            // insert/unmark/cancel restores one authoritative projection.
+            executingComposingTextSystemCommand = true
+            defer { executingComposingTextSystemCommand = false }
+            super.doCommand(by: selector)
             return
         }
         if editorSession?.handleSlashSelector(selector) == true { return }
@@ -244,7 +428,19 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
             editorSession.projectAuthoritativeState()
             return
         }
+        if editorSession != nil, Self.mutationFirewallSelectors.contains(selector.description) {
+            editorSession?.projectAuthoritativeState()
+            return
+        }
         super.doCommand(by: selector)
+    }
+
+    override func readSelection(from pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+        guard editorSession == nil else {
+            editorSession?.projectAuthoritativeState()
+            return false
+        }
+        return super.readSelection(from: pboard, type: type)
     }
 
     override func copy(_ sender: Any?) {
@@ -312,6 +508,20 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
         default: nil
         }
     }
+
+    private static let mutationFirewallSelectors: Set<String> = [
+        "deleteForward:",
+        "deleteWordBackward:",
+        "deleteWordForward:",
+        "deleteToBeginningOfLine:",
+        "deleteToEndOfLine:",
+        "transpose:",
+        "transposeWords:",
+        "uppercaseWord:",
+        "lowercaseWord:",
+        "capitalizeWord:",
+        "yank:"
+    ]
 
     private static func string(from value: Any) -> String? {
         if let text = value as? String { return text }

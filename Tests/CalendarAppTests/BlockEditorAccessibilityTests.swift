@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import Testing
 import WorkspaceDomain
 @testable import CalendarApp
@@ -410,6 +411,308 @@ struct BlockEditorAccessibilityTests {
         #expect(fixture.view.string == "abc")
         #expect(fixture.counter.value == 0)
     }
+
+    @Test func invalidAndStaleMarkedRangesPlusUnsupportedSelectorsCannotEscapeAuthoritativeStorage() throws {
+        let fixture = selectorFixture(selection: 1..<1)
+        let original = fixture.session.document
+        fixture.view.setMarkedText(
+            "X", selectedRange: .init(location: 1, length: 0),
+            replacementRange: .init(location: 99, length: 0)
+        )
+        #expect(fixture.session.document == original)
+        #expect(fixture.session.isComposing == false)
+        #expect(fixture.view.string == "abc")
+
+        let id = fixture.session.document.blocks[0].id
+        let replacement = BlockEditorTextView()
+        fixture.session.attach(blockID: id, hostToken: UUID(), textView: replacement)
+        fixture.view.setMarkedText(
+            "stale", selectedRange: .init(location: 5, length: 0),
+            replacementRange: .init(location: NSNotFound, length: 0)
+        )
+        #expect(fixture.session.document == original)
+        #expect(fixture.view.string == "abc")
+        #expect(fixture.session.isComposing == false)
+
+        let selectors: [Selector] = [
+            #selector(NSResponder.deleteForward(_:)),
+            #selector(NSResponder.deleteWordBackward(_:)),
+            #selector(NSResponder.deleteWordForward(_:)),
+            #selector(NSResponder.deleteToBeginningOfLine(_:)),
+            #selector(NSResponder.deleteToEndOfLine(_:)),
+            #selector(NSResponder.transpose(_:)),
+            #selector(NSResponder.transposeWords(_:)),
+            #selector(NSResponder.uppercaseWord(_:)),
+            #selector(NSResponder.lowercaseWord(_:)),
+            #selector(NSResponder.capitalizeWord(_:)),
+            #selector(NSResponder.yank(_:))
+        ]
+        for selector in selectors {
+            let protected = selectorFixture(selection: 1..<1)
+            protected.view.doCommand(by: selector)
+            #expect(protected.session.document.blocks[0].inlineContent.spans.map(\.text).joined() == "abc")
+            #expect(protected.view.string == "abc", Comment(rawValue: selector.description))
+            #expect(protected.counter.value == 0)
+        }
+
+        let service = selectorFixture(selection: 1..<2)
+        let serviceBoard = NSPasteboard.withUniqueName()
+        serviceBoard.clearContents()
+        _ = serviceBoard.setString("SERVICE", forType: .string)
+        #expect(service.view.readSelection(from: serviceBoard, type: .string) == false)
+        #expect(service.session.document.blocks[0].inlineContent.spans.map(\.text).joined() == "abc")
+        #expect(service.view.string == "abc")
+
+        NSPasteboard.general.clearContents()
+        _ = NSPasteboard.general.setString("PASTE", forType: .string)
+        let paste = selectorFixture(selection: 1..<2)
+        paste.view.paste(nil)
+        #expect(paste.session.document.blocks[0].inlineContent.spans.map(\.text).joined() == "aPASTEc")
+        #expect(paste.view.string == "aPASTEc")
+        #expect(paste.counter.value == 1)
+    }
+
+    @Test func composingSelectorsReallyDeferThroughTheTextSystemThenTerminallyRejoinSessionTruth() {
+        let fixture = selectorFixture(selection: 1..<1)
+        let original = fixture.session.document
+        fixture.view.setMarkedText(
+            "pin", selectedRange: .init(location: 3, length: 0),
+            replacementRange: .init(location: NSNotFound, length: 0)
+        )
+        let beforeTextSystemCommand = fixture.view.string
+        fixture.view.doCommand(by: #selector(NSResponder.deleteBackward(_:)))
+        #expect(fixture.view.string != beforeTextSystemCommand)
+        #expect(fixture.session.document == original)
+        #expect(fixture.counter.value == 0)
+        fixture.view.cancelOperation(nil)
+        #expect(fixture.session.document == original)
+        #expect(fixture.view.string == "abc")
+        #expect(fixture.session.isComposing == false)
+    }
+
+    @Test func anyPresentInvalidPrivatePayloadUsesOnlyCompleteStringAndNeverConflictingRTF() throws {
+        let board = NSPasteboard.withUniqueName()
+        let adapter = BlockPasteboardAdapter(pasteboard: board)
+        let rtfSource = NSAttributedString(string: "CONFLICTING RTF")
+        let rtf = try rtfSource.data(
+            from: .init(location: 0, length: rtfSource.length),
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+        )
+        let privateCandidates: [Data] = [
+            Data("not json".utf8),
+            Data("{\"version\":2,\"plainText\":\"PRIVATE\",\"blocks\":[]}".utf8),
+            Data("{\"version\":1,\"plainText\":\"PRIVATE\",\"blocks\":[{\"kind\":\"paragraph\",\"spans\":[{\"text\":\"x\",\"marks\":[],\"linkURL\":null}],\"indentLevel\":9,\"codeInfoString\":null}]}".utf8)
+        ]
+        for data in privateCandidates {
+            board.clearContents()
+            _ = board.setString("COMPLETE", forType: .string)
+            _ = board.setData(data, forType: BlockPasteboardAdapter.privateType)
+            _ = board.setData(rtf, forType: .rtf)
+            #expect(adapter.readPayload() == .plainText("COMPLETE"))
+        }
+
+        board.clearContents()
+        _ = board.setData(Data("not json".utf8), forType: BlockPasteboardAdapter.privateType)
+        _ = board.setData(rtf, forType: .rtf)
+        #expect(adapter.readPayload() == nil)
+    }
+
+    @Test func attributedLinksAcceptFoundationRepresentationsThroughOneValidatorAndStripOnlyUnsafeStyle() throws {
+        let safe = "https://example.com/path"
+        let safeValues: [Any] = [
+            try #require(URL(string: safe)),
+            try #require(NSURL(string: safe)),
+            safe,
+            safe as NSString
+        ]
+        for value in safeValues {
+            let board = NSPasteboard.withUniqueName()
+            let adapter = BlockPasteboardAdapter(pasteboard: board)
+            let attributed = NSMutableAttributedString(string: "link")
+            attributed.addAttribute(.link, value: value, range: .init(location: 0, length: 4))
+            try adapter.write(attributedString: attributed)
+            guard case let .richText(blocks, fallback) = try #require(adapter.readPayload()) else {
+                Issue.record("expected rich payload")
+                continue
+            }
+            #expect(fallback == "link")
+            #expect(blocks[0].inlineContent.spans.map(\.text).joined() == "link")
+            #expect(blocks[0].inlineContent.spans[0].linkURL == URL(string: safe))
+        }
+
+        for unsafeURL in ["https://example.com/%00", "https://example.com/%01"] {
+            let board = NSPasteboard.withUniqueName()
+            let adapter = BlockPasteboardAdapter(pasteboard: board)
+            let attributed = NSMutableAttributedString(string: "unsafe")
+            attributed.addAttribute(.link, value: unsafeURL as NSString, range: .init(location: 0, length: 6))
+            try adapter.write(attributedString: attributed)
+            guard case let .richText(blocks, fallback) = try #require(adapter.readPayload()) else {
+                Issue.record("expected rich payload")
+                continue
+            }
+            #expect(fallback == "unsafe")
+            #expect(blocks[0].inlineContent.spans.map(\.text).joined() == "unsafe")
+            #expect(blocks[0].inlineContent.spans.allSatisfy { $0.linkURL == nil })
+        }
+    }
+
+    @Test func productionInsertAndIMEApplyEveryMarkdownShortcutAsOneCallbackAndOneUndo() throws {
+        let cases: [(String, BlockKind, String?)] = [
+            ("# ", .heading1, nil), ("## ", .heading2, nil), ("### ", .heading3, nil),
+            ("- ", .bullet, nil), ("* ", .bullet, nil), ("1. ", .ordered, nil),
+            ("[] ", .task, nil), ("[ ] ", .task, nil), ("> ", .quote, nil),
+            ("``` ", .code, nil), ("```swift ", .code, "swift")
+        ]
+        for (prefix, kind, codeInfo) in cases {
+            let fixture = markdownProductionFixture()
+            fixture.view.insertText(prefix, replacementRange: .init(location: NSNotFound, length: 0))
+            #expect(fixture.session.document.blocks[0].kind == kind, Comment(rawValue: prefix.debugDescription))
+            #expect(fixture.session.document.blocks[0].codeInfoString == codeInfo)
+            #expect(fixture.session.document.blocks[0].inlineContent.spans.map(\.text).joined().isEmpty)
+            #expect(fixture.counter.value == 1)
+            fixture.session.undoManager.undo()
+            #expect(fixture.session.document == fixture.original)
+            fixture.session.undoManager.redo()
+            #expect(fixture.session.document.blocks[0].kind == kind)
+        }
+
+        let ime = markdownProductionFixture()
+        ime.view.setMarkedText(
+            "# ", selectedRange: .init(location: 2, length: 0),
+            replacementRange: .init(location: NSNotFound, length: 0)
+        )
+        ime.view.insertText("# ", replacementRange: .init(location: NSNotFound, length: 0))
+        ime.view.unmarkText()
+        #expect(ime.session.document.blocks[0].kind == .heading1)
+        #expect(ime.counter.value == 1)
+        #expect(ime.session.undoManager.canUndo)
+
+        for value in ["中文🙂", "#", "#### "] {
+            let rejected = markdownProductionFixture()
+            rejected.view.insertText(value, replacementRange: .init(location: NSNotFound, length: 0))
+            #expect(rejected.session.document.blocks[0].kind == .paragraph)
+            #expect(rejected.session.document.blocks[0].inlineContent.spans.map(\.text).joined() == value)
+            #expect(rejected.counter.value == 1)
+        }
+    }
+
+    @Test func productionProjectionCarriesInlineSpansAndDistinctVisualSemanticsForEveryBlockKind() throws {
+        let link = try #require(URL(string: "https://example.com/visual"))
+        let ids = (0..<11).map { _ in BlockID() }
+        let blocks: [DocumentBlock] = [
+            .init(id: ids[0], kind: .paragraph, inlineContent: .init(spans: [
+                .init(text: "B", marks: [.bold]), .init(text: "I", marks: [.italic]),
+                .init(text: "C", marks: [.code]), .init(text: "L", linkURL: link)
+            ]), taskState: nil, indentLevel: 0),
+            projectionBlock(ids[1], .heading1, "H1"), projectionBlock(ids[2], .heading2, "H2"),
+            projectionBlock(ids[3], .heading3, "H3"), projectionBlock(ids[4], .bullet, "Bullet"),
+            projectionBlock(ids[5], .ordered, "Ordered"),
+            .init(id: ids[6], kind: .task, inlineContent: .plain("Task"), taskState: .init(completedAt: Date(timeIntervalSince1970: 1)), indentLevel: 0),
+            projectionBlock(ids[7], .quote, "Quote"), projectionBlock(ids[8], .code, "Code"),
+            projectionBlock(ids[9], .divider, ""),
+            .init(id: ids[10], kind: .link, inlineContent: .init(spans: [.init(text: "Link", linkURL: link)]), taskState: nil, indentLevel: 0)
+        ]
+        let session = BlockEditorSession(
+            noteID: NoteID(), editSessionID: UUID(), initialDocument: .init(blocks: blocks),
+            initialSelection: projectionCaret(ids[0], 0), focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in }
+        )
+        var views: [BlockID: BlockEditorTextView] = [:]
+        for block in blocks {
+            let view = BlockEditorTextView()
+            session.attach(blockID: block.id, hostToken: UUID(), textView: view)
+            views[block.id] = view
+        }
+        let paragraph = try #require(views[ids[0]]?.textStorage)
+        let bold = try #require(paragraph.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+        let italic = try #require(paragraph.attribute(.font, at: 1, effectiveRange: nil) as? NSFont)
+        #expect(bold.fontDescriptor.symbolicTraits.contains(.bold))
+        #expect(italic.fontDescriptor.symbolicTraits.contains(.italic))
+        #expect((paragraph.attribute(NSAttributedString.Key("com.adeptify.jelly.inline-code"), at: 2, effectiveRange: nil) as? Bool) == true)
+        #expect((paragraph.attribute(.link, at: 3, effectiveRange: nil) as? URL) == link)
+
+        let bodyFont = try #require(bold as NSFont?)
+        let h1 = try projectionFont(views[ids[1]])
+        let h2 = try projectionFont(views[ids[2]])
+        let h3 = try projectionFont(views[ids[3]])
+        #expect(h1.pointSize > h2.pointSize && h2.pointSize > h3.pointSize && h3.pointSize > bodyFont.pointSize)
+        #expect(try projectionParagraph(views[ids[4]]).headIndent > 0)
+        #expect(try projectionParagraph(views[ids[5]]).headIndent > 0)
+        #expect(try projectionParagraph(views[ids[7]]).headIndent > 0)
+        #expect(try projectionFont(views[ids[8]]).fontDescriptor.symbolicTraits.contains(.monoSpace))
+        #expect(views[ids[8]]?.textStorage?.attribute(.backgroundColor, at: 0, effectiveRange: nil) != nil)
+        #expect(views[ids[6]]?.textStorage?.attribute(.strikethroughStyle, at: 0, effectiveRange: nil) != nil)
+        #expect(views[ids[10]]?.textStorage?.attribute(.underlineStyle, at: 0, effectiveRange: nil) != nil)
+        #expect(views[ids[9]]?.accessibilityRole() == .splitter)
+    }
+
+    @Test func selectedSupportedTextShowsKeyboardReachableFormattingControlsAndCollapsedOrUnsupportedHidesThem() throws {
+        _ = NSApplication.shared
+        let id = BlockID()
+        let link = try #require(URL(string: "https://example.com/control"))
+        let document = BlockDocument(blocks: [.init(
+            id: id, kind: .paragraph,
+            inlineContent: .init(spans: [.init(text: "link", linkURL: link)]),
+            taskState: nil, indentLevel: 0
+        )])
+        var callbacks = 0
+        let root = BlockEditorView(
+            noteID: NoteID(), editSessionID: UUID(), initialDocument: document,
+            initialSelection: .text(
+                anchor: .init(blockID: id, graphemeOffset: 0),
+                focus: .init(blockID: id, graphemeOffset: 4), preferredColumn: nil,
+                typingAttributes: .init(marks: [], linkURL: nil)
+            ), focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in callbacks += 1 }
+        )
+        let hosting = NSHostingView(rootView: root)
+        hosting.frame = .init(x: 0, y: 0, width: 500, height: 240)
+        hosting.layoutSubtreeIfNeeded()
+        let buttons = accessibilityDescendants(of: hosting, as: NSButton.self)
+        let identifiers = Set(buttons.compactMap { $0.accessibilityIdentifier() })
+        #expect(identifiers.isSuperset(of: [
+            "block-format-bold", "block-format-italic", "block-format-code", "block-format-link"
+        ]))
+        let bold = try #require(buttons.first { $0.accessibilityIdentifier() == "block-format-bold" })
+        let linkButton = try #require(buttons.first { $0.accessibilityIdentifier() == "block-format-link" })
+        #expect(bold.acceptsFirstResponder)
+        #expect(linkButton.acceptsFirstResponder)
+        bold.performClick(bold)
+        let textView = try #require(accessibilityDescendants(of: hosting, as: BlockEditorTextView.self).first)
+        #expect(textView.beginPointerSelection(atUTF16Offset: 0))
+        #expect(textView.extendPointerSelection(toUTF16Offset: 4))
+        hosting.layoutSubtreeIfNeeded()
+        let refreshedLinkButton = try #require(
+            accessibilityDescendants(of: hosting, as: NSButton.self).first {
+                $0.accessibilityIdentifier() == "block-format-link"
+            }
+        )
+        refreshedLinkButton.performClick(refreshedLinkButton)
+        #expect(callbacks == 2)
+
+        let collapsed = NSHostingView(rootView: BlockEditorView(
+            noteID: NoteID(), editSessionID: UUID(), initialDocument: document,
+            initialSelection: projectionCaret(id, 0), focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in }
+        ))
+        collapsed.frame = hosting.frame
+        collapsed.layoutSubtreeIfNeeded()
+        #expect(accessibilityDescendants(of: collapsed, as: NSButton.self).allSatisfy {
+            !$0.accessibilityIdentifier().hasPrefix("block-format-")
+        })
+
+        let codeDocument = BlockDocument(blocks: [projectionBlock(id, .code, "code")])
+        let unsupported = NSHostingView(rootView: BlockEditorView(
+            noteID: NoteID(), editSessionID: UUID(), initialDocument: codeDocument,
+            initialSelection: .text(
+                anchor: .init(blockID: id, graphemeOffset: 0),
+                focus: .init(blockID: id, graphemeOffset: 4), preferredColumn: nil,
+                typingAttributes: .init(marks: [], linkURL: nil)
+            ), focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in }
+        ))
+        unsupported.frame = hosting.frame
+        unsupported.layoutSubtreeIfNeeded()
+        #expect(accessibilityDescendants(of: unsupported, as: NSButton.self).allSatisfy {
+            !$0.accessibilityIdentifier().hasPrefix("block-format-")
+        })
+    }
 }
 
 @MainActor
@@ -444,4 +747,56 @@ private func keyEvent(characters: String, modifiers: NSEvent.ModifierFlags) thro
         isARepeat: false,
         keyCode: 0
     ))
+}
+
+@MainActor
+private func markdownProductionFixture() -> (
+    session: BlockEditorSession, view: BlockEditorTextView,
+    counter: SelectorCounter, original: BlockDocument
+) {
+    let id = BlockID()
+    let original = BlockDocument(blocks: [projectionBlock(id, .paragraph, "")])
+    let counter = SelectorCounter()
+    let session = BlockEditorSession(
+        noteID: NoteID(), editSessionID: UUID(), initialDocument: original,
+        initialSelection: projectionCaret(id, 0), focusRegistry: EditorFocusRegistry(),
+        onDocumentChange: { _ in counter.value += 1 }
+    )
+    let view = BlockEditorTextView()
+    session.attach(blockID: id, hostToken: UUID(), textView: view)
+    return (session, view, counter, original)
+}
+
+private func projectionBlock(_ id: BlockID, _ kind: BlockKind, _ text: String) -> DocumentBlock {
+    .init(
+        id: id, kind: kind, inlineContent: .plain(text),
+        taskState: kind == .task ? .init(completedAt: nil) : nil,
+        indentLevel: 0
+    )
+}
+
+private func projectionCaret(_ id: BlockID, _ offset: Int) -> BlockEditorSelection {
+    .text(
+        anchor: .init(blockID: id, graphemeOffset: offset),
+        focus: .init(blockID: id, graphemeOffset: offset),
+        preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil)
+    )
+}
+
+@MainActor
+private func projectionFont(_ view: BlockEditorTextView?) throws -> NSFont {
+    let storage = try #require(view?.textStorage)
+    return try #require(storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+}
+
+@MainActor
+private func projectionParagraph(_ view: BlockEditorTextView?) throws -> NSParagraphStyle {
+    let storage = try #require(view?.textStorage)
+    return try #require(storage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)
+}
+
+@MainActor
+private func accessibilityDescendants<T: NSView>(of view: NSView, as type: T.Type) -> [T] {
+    let own = (view as? T).map { [$0] } ?? []
+    return own + view.subviews.flatMap { accessibilityDescendants(of: $0, as: type) }
 }

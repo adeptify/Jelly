@@ -276,12 +276,13 @@ struct BlockEditorUndoTests {
 
         try harness.mouseDown(firstView, at: firstPoint)
         try harness.mouseDragged(firstView, to: secondPoint)
-        #expect(harness.window.firstResponder === firstView)
+        #expect(harness.window.firstResponder === secondView)
         #expect(firstView.selectedRange == .init(location: 1, length: 4))
         #expect(secondView.selectedRange == .init(location: 0, length: 1))
 
         try harness.mouseDown(firstView, at: firstPoint)
         try harness.mouseDown(secondView, at: secondPoint, modifiers: [.shift])
+        #expect(harness.window.firstResponder === secondView)
         #expect(firstView.selectedRange == .init(location: 1, length: 4))
         #expect(secondView.selectedRange == .init(location: 0, length: 1))
 
@@ -310,6 +311,65 @@ struct BlockEditorUndoTests {
 
         #expect(harness.registry.routeUndo() == .focusedPerformed)
         #expect(harness.document == document)
+    }
+
+    @Test func hostedFormattingButtonsRestoreEditorFocusAndKeepUndoRoutedToSession() throws {
+        _ = NSApplication.shared
+        let blockID = BlockID()
+        let document = BlockDocument(blocks: [reviewBlock(blockID, "a")])
+        let selection = BlockEditorSelection.text(
+            anchor: .init(blockID: blockID, graphemeOffset: 0),
+            focus: .init(blockID: blockID, graphemeOffset: 1),
+            preferredColumn: nil,
+            typingAttributes: .init(marks: [], linkURL: nil)
+        )
+        let promptedURL = try #require(URL(string: "https://example.com/focused-link"))
+        let promptResponses = LinkPromptResponses([promptedURL, nil])
+        let harness = try HostedBlockEditorHarness(
+            document: document, selection: selection,
+            requestLinkURL: { promptResponses.next() }
+        )
+        defer { harness.close() }
+        var workspaceUndoCalls = 0
+        func routeFocusedUndo() -> EditorUndoRouteResult {
+            let route = harness.registry.routeUndo()
+            if route == .noFocusedOwner { workspaceUndoCalls += 1 }
+            return route
+        }
+        let textView = try harness.textView(for: blockID)
+        #expect(harness.window.makeFirstResponder(textView))
+
+        let bold = try harness.formattingButton(identifier: "block-format-bold")
+        #expect(harness.window.makeFirstResponder(bold))
+        #expect(bold.sendAction(bold.action, to: bold.target))
+        #expect(harness.window.firstResponder === textView)
+        #expect(harness.registry.availability == .focused(canUndo: true, canRedo: false))
+        #expect(routeFocusedUndo() == .focusedPerformed)
+        #expect(harness.document == document)
+        #expect(workspaceUndoCalls == 0)
+
+        let generalPasteboard = NSPasteboard.general
+        generalPasteboard.clearContents()
+        defer { generalPasteboard.clearContents() }
+        harness.redraw()
+        let link = try harness.formattingButton(identifier: "block-format-link")
+        #expect(harness.window.makeFirstResponder(link))
+        #expect(link.sendAction(link.action, to: link.target))
+        #expect(harness.window.firstResponder === textView)
+        #expect(harness.document.blocks[0].inlineContent.spans.allSatisfy { $0.linkURL == promptedURL })
+        #expect(routeFocusedUndo() == .focusedPerformed)
+        #expect(harness.document == document)
+        #expect(workspaceUndoCalls == 0)
+
+        generalPasteboard.clearContents()
+        harness.redraw()
+        let cancelLink = try harness.formattingButton(identifier: "block-format-link")
+        #expect(harness.window.makeFirstResponder(cancelLink))
+        #expect(cancelLink.sendAction(cancelLink.action, to: cancelLink.target))
+        #expect(harness.window.firstResponder === textView)
+        #expect(routeFocusedUndo() == .focusedUnavailable)
+        #expect(harness.document == document)
+        #expect(workspaceUndoCalls == 0)
     }
 
     @Test func imeMultiUpdateInsertAndUnmarkCommitExactlyOnceWithChineseAndEmoji() {
@@ -693,13 +753,13 @@ struct BlockEditorUndoTests {
         let actions = try #require(thirdHandle.accessibilityCustomActions())
         #expect(actions.map(\.name) == ["Move Up", "Move Down"])
         #expect(thirdHandle.performAccessibilityAction(named: "Move Up"))
-        #expect(harness.document.blocks.map(\.id) == [ids[0], ids[2], ids[1]])
+        #expect(harness.document.blocks.map(\.id) == ids)
         #expect(session.selection == .blocks(anchor: ids[2], focus: ids[0]))
         #expect(thirdHandle.performAccessibilityAction(named: "Move Down"))
         #expect(harness.document.blocks.map(\.id) == ids)
         harness.redraw()
         try harness.keyDown(try harness.handle(for: ids[2]), keyCode: 126)
-        #expect(harness.document.blocks.map(\.id) == [ids[0], ids[2], ids[1]])
+        #expect(harness.document.blocks.map(\.id) == ids)
     }
 
     @Test func hostedTextViewsExposeStableAccessibilityIdentityValueRoleAndDividerSelection() throws {
@@ -719,10 +779,353 @@ struct BlockEditorUndoTests {
         #expect(textView.accessibilityValue() == "正文")
         #expect(textView.projectedAccessibilitySelected == false)
         #expect(dividerView.accessibilityIdentifier() == dividerID.rawValue.uuidString)
-        #expect(dividerView.accessibilityRole() == .textArea)
+        #expect(dividerView.accessibilityRole() == .splitter)
         #expect(dividerView.accessibilityValue() == "")
         #expect(dividerView.projectedAccessibilitySelected)
     }
+
+    @Test func crossBlockMovementTransfersFirstResponderAndNSNotFoundTargetsSessionCaret() throws {
+        _ = NSApplication.shared
+        let first = BlockID(), second = BlockID()
+        let document = BlockDocument(blocks: [
+            reviewBlock(first, "a"), reviewBlock(second, "b")
+        ])
+        let cases: [(Selector, BlockID, Int, BlockID, String)] = [
+            (#selector(NSResponder.moveRight(_:)), first, 1, second, "Xb"),
+            (#selector(NSResponder.moveLeft(_:)), second, 0, first, "aX"),
+            (#selector(NSResponder.moveDown(_:)), first, 1, second, "bX"),
+            (#selector(NSResponder.moveUp(_:)), second, 0, first, "Xa")
+        ]
+
+        for (selector, sourceID, offset, destinationID, expectedText) in cases {
+            let selection = reviewCaret(sourceID, offset)
+            let session = BlockEditorSession(
+                noteID: NoteID(), editSessionID: UUID(), initialDocument: document,
+                initialSelection: selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in }
+            )
+            let firstView = BlockEditorTextView(frame: .init(x: 0, y: 50, width: 180, height: 40))
+            let secondView = BlockEditorTextView(frame: .init(x: 0, y: 0, width: 180, height: 40))
+            session.attach(blockID: first, hostToken: UUID(), textView: firstView)
+            session.attach(blockID: second, hostToken: UUID(), textView: secondView)
+            let container = NSView(frame: .init(x: 0, y: 0, width: 200, height: 100))
+            container.addSubview(firstView)
+            container.addSubview(secondView)
+            let window = NSWindow(
+                contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false
+            )
+            window.contentView = container
+            window.makeKeyAndOrderFront(nil)
+            defer { window.orderOut(nil) }
+            let sourceView = sourceID == first ? firstView : secondView
+            let destinationView = destinationID == first ? firstView : secondView
+            #expect(window.makeFirstResponder(sourceView))
+
+            sourceView.doCommand(by: selector)
+
+            guard case let .text(anchor, focus, _, _) = session.selection else {
+                Issue.record("movement must leave a text caret")
+                continue
+            }
+            #expect(anchor == focus)
+            #expect(focus.blockID == destinationID)
+            #expect(window.firstResponder === destinationView)
+            destinationView.insertText("X", replacementRange: .init(location: NSNotFound, length: 0))
+            #expect(reviewText(session.document, destinationID) == expectedText)
+        }
+    }
+
+    @Test func crossBlockPointerAndShiftSelectionsStayAuthoritativeForTypeIMEDeleteCopyFormatAndLink() throws {
+        let first = BlockID(), second = BlockID()
+        let document = BlockDocument(blocks: [reviewBlock(first, "ab"), reviewBlock(second, "cd")])
+
+        let typed = reviewCrossSession(document: document, selection: reviewCaret(first, 0))
+        #expect(typed.firstView.beginPointerSelection(atUTF16Offset: 1))
+        #expect(typed.secondView.extendPointerSelection(toUTF16Offset: 1))
+        typed.secondView.insertText("X", replacementRange: .init(location: NSNotFound, length: 0))
+        #expect(typed.session.document.blocks.map(reviewText) == ["aXd"])
+        #expect(typed.counter.value == 1)
+
+        let ime = reviewCrossSession(document: document, selection: reviewCaret(second, 1))
+        #expect(ime.secondView.beginPointerSelection(atUTF16Offset: 1))
+        #expect(ime.firstView.extendPointerSelection(toUTF16Offset: 1))
+        ime.firstView.setMarkedText(
+            "zhong", selectedRange: .init(location: 5, length: 0),
+            replacementRange: .init(location: NSNotFound, length: 0)
+        )
+        ime.firstView.insertText("中🙂", replacementRange: .init(location: NSNotFound, length: 0))
+        ime.firstView.unmarkText()
+        #expect(ime.session.document.blocks.map(reviewText) == ["a中🙂d"])
+        #expect(ime.counter.value == 1)
+
+        let deleted = reviewCrossSession(document: document, selection: reviewCaret(first, 1))
+        #expect(deleted.secondView.extendSelectionWithShift(toUTF16Offset: 1))
+        deleted.secondView.doCommand(by: #selector(NSResponder.deleteBackward(_:)))
+        #expect(deleted.session.document.blocks.map(reviewText) == ["ad"])
+
+        let copied = reviewCrossSession(document: document, selection: reviewCaret(second, 1))
+        #expect(copied.firstView.extendSelectionWithShift(toUTF16Offset: 1))
+        copied.firstView.copy(nil)
+        #expect(NSPasteboard.general.string(forType: .string) == "b\nc")
+        #expect(copied.session.document == document)
+
+        let formatted = reviewCrossSession(document: document, selection: reviewCaret(first, 1))
+        #expect(formatted.secondView.extendSelectionWithShift(toUTF16Offset: 1))
+        #expect(formatted.session.dispatchTextCommand(.toggleInlineMark(.bold)))
+        let formattedSpans = formatted.session.document.blocks.flatMap(\.inlineContent.spans)
+        #expect(formattedSpans.filter { $0.marks.contains(.bold) }.map(\.text).joined() == "bc")
+        #expect(formattedSpans.filter { !$0.marks.contains(.bold) }.map(\.text).joined() == "ad")
+
+        let linked = reviewCrossSession(document: document, selection: reviewCaret(second, 1))
+        #expect(linked.firstView.extendSelectionWithShift(toUTF16Offset: 1))
+        let url = try #require(URL(string: "https://example.com/cross"))
+        #expect(linked.session.dispatchTextCommand(.setLink(url)))
+        let linkedSpans = linked.session.document.blocks.flatMap(\.inlineContent.spans)
+        #expect(linkedSpans.filter { $0.linkURL == url }.map(\.text).joined() == "bc")
+        #expect(linkedSpans.filter { $0.linkURL == nil }.map(\.text).joined() == "ad")
+
+        let cut = reviewCrossSession(document: document, selection: reviewCaret(first, 1))
+        #expect(cut.secondView.extendSelectionWithShift(toUTF16Offset: 1))
+        cut.secondView.cut(nil)
+        #expect(cut.session.document.blocks.map(reviewText) == ["ad"])
+        #expect(cut.counter.value == 1)
+    }
+
+    @Test func hostedPointerAndShiftTransferFocusToTheEndpointBeforeTypeAndIMECommit() throws {
+        let first = BlockID(), second = BlockID()
+        let document = BlockDocument(blocks: [reviewBlock(first, "ab"), reviewBlock(second, "cd")])
+
+        let pointer = try HostedBlockEditorHarness(document: document, selection: reviewCaret(first, 1))
+        defer { pointer.close() }
+        let pointerFirst = try pointer.textView(for: first)
+        let pointerSecond = try pointer.textView(for: second)
+        let firstPoint = try #require(pointerFirst.windowPoint(forUTF16Offset: 1))
+        let secondPoint = try #require(pointerSecond.windowPoint(forUTF16Offset: 1))
+        try pointer.mouseDown(pointerFirst, at: firstPoint)
+        try pointer.mouseDragged(pointerFirst, to: secondPoint)
+        #expect(pointer.window.firstResponder === pointerSecond)
+        pointerSecond.insertText("X", replacementRange: .init(location: NSNotFound, length: 0))
+        #expect(pointer.document.blocks.map(reviewText) == ["aXd"])
+        #expect(pointer.documents.count == 1)
+
+        let shift = try HostedBlockEditorHarness(document: document, selection: reviewCaret(second, 1))
+        defer { shift.close() }
+        let shiftFirst = try shift.textView(for: first)
+        let shiftSecond = try shift.textView(for: second)
+        let shiftFirstPoint = try #require(shiftFirst.windowPoint(forUTF16Offset: 1))
+        let shiftSecondPoint = try #require(shiftSecond.windowPoint(forUTF16Offset: 1))
+        try shift.mouseDown(shiftSecond, at: shiftSecondPoint)
+        try shift.mouseDown(shiftFirst, at: shiftFirstPoint, modifiers: [.shift])
+        #expect(shift.window.firstResponder === shiftFirst)
+        shiftFirst.setMarkedText(
+            "zhong", selectedRange: .init(location: 5, length: 0),
+            replacementRange: .init(location: NSNotFound, length: 0)
+        )
+        shiftFirst.insertText("中🙂", replacementRange: .init(location: NSNotFound, length: 0))
+        shiftFirst.unmarkText()
+        #expect(shift.document.blocks.map(reviewText) == ["a中🙂d"])
+        #expect(shift.documents.count == 1)
+    }
+
+    @Test func realFirstResponderTransitionsReleaseFocusAndDelayedOldResignCannotClearNewOwner() {
+        _ = NSApplication.shared
+        let first = BlockID(), second = BlockID()
+        let registry = EditorFocusRegistry()
+        let session = BlockEditorSession(
+            noteID: NoteID(), editSessionID: UUID(),
+            initialDocument: .init(blocks: [reviewBlock(first, "a"), reviewBlock(second, "b")]),
+            initialSelection: reviewCaret(first, 0), focusRegistry: registry, onDocumentChange: { _ in }
+        )
+        let firstView = BlockEditorTextView(frame: .init(x: 0, y: 80, width: 160, height: 35))
+        let secondView = BlockEditorTextView(frame: .init(x: 0, y: 40, width: 160, height: 35))
+        let firstToken = UUID(), secondToken = UUID()
+        session.attach(blockID: first, hostToken: firstToken, textView: firstView)
+        session.attach(blockID: second, hostToken: secondToken, textView: secondView)
+        let calendarButton = NSButton(frame: .init(x: 180, y: 80, width: 100, height: 30))
+        let handle = BlockSelectionHandleView(frame: .init(x: 180, y: 40, width: 20, height: 20))
+        handle.configure(
+            blockID: first, index: 0, total: 2, session: session,
+            dragHandler: BlockDragDropHandler(session: session)
+        )
+        let container = NSView(frame: .init(x: 0, y: 0, width: 300, height: 130))
+        [firstView, secondView, calendarButton, handle].forEach(container.addSubview)
+        let window = NSWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        #expect(window.makeFirstResponder(firstView))
+        #expect(registry.availability != .noFocusedOwner)
+        #expect(window.makeFirstResponder(calendarButton))
+        #expect(registry.availability == .noFocusedOwner)
+
+        #expect(window.makeFirstResponder(firstView))
+        #expect(window.makeFirstResponder(secondView))
+        #expect(registry.availability != .noFocusedOwner)
+
+        #expect(window.makeFirstResponder(handle))
+        #expect(registry.availability == .noFocusedOwner)
+    }
+
+    @Test func redoThenTypingStartsFreshTypingRecordAcrossSelectionAutosaveAndAtomicBoundaries() throws {
+        let fixture = undoFixture()
+        var callbacks = 0
+        let session = BlockEditorSession(
+            noteID: NoteID(), editSessionID: UUID(), initialDocument: fixture.document,
+            initialSelection: fixture.selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in callbacks += 1 }
+        )
+        _ = try session.dispatch(.insertTextApplyingMarkdownShortcut("x"))
+        session.undoManager.undo()
+        session.undoManager.redo()
+        session.autosaveDidResolve(.saving)
+        session.autosaveDidResolve(.saved)
+        _ = try session.dispatch(.insertTextApplyingMarkdownShortcut("y"))
+        #expect(reviewText(session.document.blocks[0]) == "axy")
+        let afterYSelection = session.selection
+        session.undoManager.undo()
+        #expect(reviewText(session.document.blocks[0]) == "ax")
+        session.undoManager.redo()
+        #expect(reviewText(session.document.blocks[0]) == "axy")
+        #expect(session.selection == afterYSelection)
+
+        _ = try session.dispatch(.enter)
+        let afterEnter = session.document
+        session.undoManager.undo()
+        #expect(reviewText(session.document.blocks[0]) == "axy")
+        session.undoManager.redo()
+        #expect(session.document == afterEnter)
+        #expect(callbacks == 9)
+    }
+
+    @Test func editorKeyKeepsEquivalentRedrawButReplacesSessionForEitherIdentityChangeOrRecovery() throws {
+        _ = NSApplication.shared
+        let registry = EditorFocusRegistry()
+        let firstID = BlockID(), secondID = BlockID(), thirdID = BlockID()
+        let noteA = NoteID(), noteB = NoteID()
+        let editA = UUID(), editB = UUID(), editC = UUID()
+        func root(_ note: NoteID, _ edit: UUID, _ id: BlockID, _ value: String) -> BlockEditorView {
+            BlockEditorView(
+                noteID: note, editSessionID: edit,
+                initialDocument: .init(blocks: [reviewBlock(id, value)]),
+                initialSelection: reviewCaret(id, 0), focusRegistry: registry, onDocumentChange: { _ in }
+            )
+        }
+        let hosting = NSHostingView(rootView: root(noteA, editA, firstID, "old"))
+        hosting.frame = .init(x: 0, y: 0, width: 420, height: 220)
+        let window = NSWindow(contentRect: hosting.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        hosting.layoutSubtreeIfNeeded()
+        let oldView = try #require(reviewTextViews(in: hosting).first)
+        let oldSession = try #require(oldView.attachedSession)
+        #expect(window.makeFirstResponder(oldView))
+        oldSession.autosaveDidResolve(.saved)
+
+        hosting.rootView = root(noteA, editA, firstID, "ignored redraw")
+        hosting.layoutSubtreeIfNeeded()
+        #expect(try #require(reviewTextViews(in: hosting).first?.attachedSession) === oldSession)
+        #expect(reviewTextViews(in: hosting).first?.string == "old")
+
+        hosting.rootView = root(noteA, editB, secondID, "recovered")
+        hosting.layoutSubtreeIfNeeded()
+        let recovered = try #require(reviewTextViews(in: hosting).first)
+        #expect(recovered.attachedSession !== oldSession)
+        #expect(recovered.string == "recovered")
+        #expect(registry.availability == .noFocusedOwner)
+
+        let recoveredSession = try #require(recovered.attachedSession)
+        hosting.rootView = root(noteB, editC, thirdID, "other note")
+        hosting.layoutSubtreeIfNeeded()
+        let other = try #require(reviewTextViews(in: hosting).first)
+        #expect(other.attachedSession !== recoveredSession)
+        #expect(other.string == "other note")
+    }
+
+    @Test func keyboardAccessibilityAndDragUseTheSameForwardReverseMultiRootSelection() throws {
+        let ids = (0..<5).map { _ in BlockID() }
+        let document = BlockDocument(blocks: [
+            reviewBlock(ids[0], "A", kind: .bullet),
+            reviewBlock(ids[1], "A-child", kind: .bullet, indent: 1),
+            reviewBlock(ids[2], "B", kind: .bullet),
+            reviewBlock(ids[3], "B-child", kind: .bullet, indent: 1),
+            reviewBlock(ids[4], "C", kind: .bullet)
+        ])
+        for reverse in [false, true] {
+            let selected: BlockEditorSelection = reverse
+                ? .blocks(anchor: ids[4], focus: ids[2])
+                : .blocks(anchor: ids[2], focus: ids[4])
+            for keyboard in [false, true] {
+                let session = BlockEditorSession(
+                    noteID: NoteID(), editSessionID: UUID(), initialDocument: document,
+                    initialSelection: selected, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in }
+                )
+                let handler = BlockDragDropHandler(session: session)
+                #expect(handler.dragRoots(startingAt: ids[2]) == [ids[2], ids[3], ids[4]])
+                let handle = BlockSelectionHandleView()
+                handle.configure(blockID: ids[2], index: 2, total: 5, session: session, dragHandler: handler)
+                if keyboard {
+                    let event = try #require(NSEvent.keyEvent(
+                        with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                        windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "",
+                        isARepeat: false, keyCode: 126
+                    ))
+                    handle.keyDown(with: event)
+                } else {
+                    #expect(handle.performAccessibilityAction(named: "Move Up"))
+                }
+                #expect(session.document.blocks.map(\.id) == [ids[2], ids[3], ids[4], ids[0], ids[1]])
+                #expect(session.selection == selected)
+            }
+        }
+    }
+}
+
+@MainActor
+private func reviewCrossSession(
+    document: BlockDocument,
+    selection: BlockEditorSelection
+) -> (session: BlockEditorSession, firstView: BlockEditorTextView, secondView: BlockEditorTextView, counter: CallbackCounter) {
+    let counter = CallbackCounter()
+    let session = BlockEditorSession(
+        noteID: NoteID(), editSessionID: UUID(), initialDocument: document,
+        initialSelection: selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in counter.value += 1 }
+    )
+    let firstView = BlockEditorTextView(), secondView = BlockEditorTextView()
+    session.attach(blockID: document.blocks[0].id, hostToken: UUID(), textView: firstView)
+    session.attach(blockID: document.blocks[1].id, hostToken: UUID(), textView: secondView)
+    return (session, firstView, secondView, counter)
+}
+
+private func reviewBlock(
+    _ id: BlockID, _ value: String, kind: BlockKind = .paragraph, indent: Int = 0
+) -> DocumentBlock {
+    .init(
+        id: id, kind: kind, inlineContent: .plain(value),
+        taskState: kind == .task ? .init(completedAt: nil) : nil,
+        indentLevel: indent
+    )
+}
+
+private func reviewCaret(_ id: BlockID, _ offset: Int) -> BlockEditorSelection {
+    .text(
+        anchor: .init(blockID: id, graphemeOffset: offset),
+        focus: .init(blockID: id, graphemeOffset: offset),
+        preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil)
+    )
+}
+
+private func reviewText(_ block: DocumentBlock) -> String {
+    block.inlineContent.spans.map(\.text).joined()
+}
+
+private func reviewText(_ document: BlockDocument, _ id: BlockID) -> String {
+    document.blocks.first(where: { $0.id == id }).map(reviewText) ?? ""
+}
+
+@MainActor
+private func reviewTextViews(in view: NSView) -> [BlockEditorTextView] {
+    let own = (view as? BlockEditorTextView).map { [$0] } ?? []
+    return own + view.subviews.flatMap(reviewTextViews(in:))
 }
 
 @MainActor
@@ -784,11 +1187,16 @@ private final class HostedBlockEditorHarness {
     private let initialSelection: BlockEditorSelection
     private let noteID: NoteID
     private let editSessionID: UUID
+    private let requestLinkURL: () -> URL?
 
     var documents: [BlockDocument] { sink.documents }
     var document: BlockDocument { sink.documents.last ?? initialDocument }
 
-    init(document: BlockDocument, selection: BlockEditorSelection) throws {
+    init(
+        document: BlockDocument,
+        selection: BlockEditorSelection,
+        requestLinkURL: @escaping () -> URL? = { nil }
+    ) throws {
         _ = NSApplication.shared
         initialDocument = document
         initialSelection = selection
@@ -796,12 +1204,14 @@ private final class HostedBlockEditorHarness {
         let editSessionID = UUID()
         self.noteID = noteID
         self.editSessionID = editSessionID
+        self.requestLinkURL = requestLinkURL
         let sink = DocumentSink()
         self.sink = sink
         let root = BlockEditorView(
             noteID: noteID, editSessionID: editSessionID, initialDocument: document,
             initialSelection: selection, focusRegistry: registry,
-            onDocumentChange: { sink.documents.append($0) }
+            onDocumentChange: { sink.documents.append($0) },
+            requestLinkURL: requestLinkURL
         )
         hostingView = NSHostingView(rootView: root)
         window = NSWindow(
@@ -828,6 +1238,13 @@ private final class HostedBlockEditorHarness {
             throw HostedHarnessError.missingTextViews
         }
         return handle
+    }
+
+    func formattingButton(identifier: String) throws -> NSButton {
+        guard let button = buttonDescendants(of: hostingView).first(where: {
+            $0.accessibilityIdentifier() == identifier
+        }) else { throw HostedHarnessError.missingFormattingButton }
+        return button
     }
 
     func mouseDown(_ view: BlockEditorTextView, at point: NSPoint, modifiers: NSEvent.ModifierFlags = []) throws {
@@ -903,7 +1320,8 @@ private final class HostedBlockEditorHarness {
         BlockEditorView(
             noteID: noteID, editSessionID: editSessionID, initialDocument: initialDocument,
             initialSelection: initialSelection, focusRegistry: registry,
-            onDocumentChange: { [sink] in sink.documents.append($0) }
+            onDocumentChange: { [sink] in sink.documents.append($0) },
+            requestLinkURL: requestLinkURL
         )
     }
 
@@ -916,9 +1334,27 @@ private final class HostedBlockEditorHarness {
         let own = (view as? BlockSelectionHandleView).map { [$0] } ?? []
         return own + view.subviews.flatMap(handleDescendants(of:))
     }
+
+    private func buttonDescendants(of view: NSView) -> [NSButton] {
+        let own = (view as? NSButton).map { [$0] } ?? []
+        return own + view.subviews.flatMap(buttonDescendants(of:))
+    }
 }
 
 private enum HostedHarnessError: Error {
     case missingTextViews
+    case missingFormattingButton
     case couldNotCreateEvent
+}
+
+@MainActor
+private final class LinkPromptResponses {
+    private var values: [URL?]
+
+    init(_ values: [URL?]) { self.values = values }
+
+    func next() -> URL? {
+        guard values.isEmpty == false else { return nil }
+        return values.removeFirst()
+    }
 }
