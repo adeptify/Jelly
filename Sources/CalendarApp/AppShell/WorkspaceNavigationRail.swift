@@ -3,6 +3,7 @@ import SwiftUI
 struct WorkspaceNavigationRail: View {
     let features: WorkspaceFeatures
     @ObservedObject var routeState: WorkspaceRouteState
+    @ObservedObject var transitionCoordinator: WorkspaceRouteTransitionCoordinator
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: CalendarSemanticAppearance {
@@ -36,7 +37,7 @@ struct WorkspaceNavigationRail: View {
         let metadata = route.railMetadata
         let isSelected = routeState.route == route
         return Button {
-            _ = routeState.activate(route, features: features)
+            Task { _ = await transitionCoordinator.requestActivation(route) }
         } label: {
             Image(systemName: metadata.symbolName)
                 .font(.system(size: 17, weight: isSelected ? .semibold : .medium))

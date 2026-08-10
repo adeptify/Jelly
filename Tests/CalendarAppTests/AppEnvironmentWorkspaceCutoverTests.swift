@@ -5,7 +5,7 @@ import Testing
 @Suite("AppEnvironmentWorkspaceCutoverTests")
 @MainActor
 struct AppEnvironmentWorkspaceCutoverTests {
-    @Test func productionEnvironmentKeepsUnfinishedWorkspaceModulesDisabled() throws {
+    @Test func productionEnvironmentEnablesNotesAndKeepsInspirationDisabled() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("jelly-7-environment-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -14,7 +14,8 @@ struct AppEnvironmentWorkspaceCutoverTests {
         ])
 
         #expect(environment.features == .production)
-        #expect(environment.features == .calendarOnly)
+        #expect(environment.features.notes == true)
+        #expect(environment.features.inspiration == false)
     }
 
     @Test func liveEnvironmentComposesOneWorkspaceStoreFromTheResolvedDataDirectory() async throws {

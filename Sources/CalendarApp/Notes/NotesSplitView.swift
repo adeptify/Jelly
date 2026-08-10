@@ -10,6 +10,7 @@ import WorkspaceDomain
 struct NotesSplitView: View {
     let store: WorkspaceStore
     let focusRegistry: EditorFocusRegistry
+    let transitionCoordinator: WorkspaceRouteTransitionCoordinator?
     let clock: @Sendable () -> Date
 
     @State private var viewModel: NotesWorkspaceViewModel
@@ -28,10 +29,12 @@ struct NotesSplitView: View {
     init(
         store: WorkspaceStore,
         focusRegistry: EditorFocusRegistry,
+        transitionCoordinator: WorkspaceRouteTransitionCoordinator? = nil,
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.store = store
         self.focusRegistry = focusRegistry
+        self.transitionCoordinator = transitionCoordinator
         self.clock = clock
         let autosave = NoteAutosaveCoordinator(store: store)
         let viewModel = NotesWorkspaceViewModel(store: store, autosave: autosave, clock: clock)
@@ -119,7 +122,11 @@ struct NotesSplitView: View {
             }
         }
         .onAppear {
+            registerRouteBridge()
             refreshRecoveryPresentation()
+        }
+        .onChange(of: editorIdentity) { _, _ in
+            registerRouteBridge()
         }
         .onChange(of: store.statePublicationGeneration) { _, _ in
             refreshRecoveryPresentation()
@@ -166,6 +173,10 @@ struct NotesSplitView: View {
         Array(store.calendarState.categories.values).sorted {
             $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
+    }
+
+    private func registerRouteBridge() {
+        transitionCoordinator?.attachNotesCloseBridge(closeBridge, finalizer: nativeFinalizer)
     }
 
     private func selectNote(_ noteID: NoteID) async {

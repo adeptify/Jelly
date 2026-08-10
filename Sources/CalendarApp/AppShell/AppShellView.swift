@@ -65,6 +65,7 @@ struct AppShellView: View {
     let focusRegistry: EditorFocusRegistry
     @ObservedObject var routeState: WorkspaceRouteState
     @ObservedObject var newItemRouter: WorkspaceNewItemRouter
+    @ObservedObject var transitionCoordinator: WorkspaceRouteTransitionCoordinator
     @StateObject private var moduleHosts: WorkspaceModuleHostStore
 
     init(
@@ -73,6 +74,7 @@ struct AppShellView: View {
         routeState: WorkspaceRouteState,
         newItemRouter: WorkspaceNewItemRouter,
         focusRegistry: EditorFocusRegistry = EditorFocusRegistry(),
+        transitionCoordinator: WorkspaceRouteTransitionCoordinator? = nil,
         moduleHostBuilder: ((WorkspaceRoute) -> WorkspaceModuleHost)? = nil
     ) {
         self.store = store
@@ -80,6 +82,9 @@ struct AppShellView: View {
         self.focusRegistry = focusRegistry
         self.routeState = routeState
         self.newItemRouter = newItemRouter
+        let coordinator = transitionCoordinator
+            ?? WorkspaceRouteTransitionCoordinator(routeState: routeState, features: features)
+        self.transitionCoordinator = coordinator
 
         let builder = moduleHostBuilder ?? { route in
             switch route {
@@ -93,13 +98,12 @@ struct AppShellView: View {
                     lifetimeToken: WorkspaceModuleLifetimeToken()
                 )
             case .notes:
-                // Production notes remains feature-gated false until Task 10D.
-                // The host is only built when features.notes is true.
                 WorkspaceModuleHost(
                     route: .notes,
                     content: AnyView(NotesSplitView(
                         store: store,
-                        focusRegistry: focusRegistry
+                        focusRegistry: focusRegistry,
+                        transitionCoordinator: coordinator
                     )),
                     lifetimeToken: WorkspaceModuleLifetimeToken()
                 )
@@ -115,7 +119,11 @@ struct AppShellView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            WorkspaceNavigationRail(features: features, routeState: routeState)
+            WorkspaceNavigationRail(
+                features: features,
+                routeState: routeState,
+                transitionCoordinator: transitionCoordinator
+            )
             ZStack {
                 ForEach(moduleHosts.hosts) { host in
                     let presentation = moduleHosts.presentation(

@@ -18,17 +18,21 @@ struct PersonalCalendarApp: App {
     @StateObject private var routeState: WorkspaceRouteState
     @StateObject private var newItemRouter: WorkspaceNewItemRouter
     @StateObject private var editorFocusRegistry: EditorFocusRegistry
+    @StateObject private var transitionCoordinator: WorkspaceRouteTransitionCoordinator
     @AppStorage(CalendarAppearancePreference.storageKey)
     private var appearancePreferenceRaw = CalendarAppearancePreference.light.rawValue
 
     init() {
         let initialEnvironment = AppEnvironment.liveOrTerminate()
         _environment = State(initialValue: initialEnvironment)
-        _routeState = StateObject(wrappedValue: WorkspaceRouteState(
-            features: initialEnvironment.features
-        ))
+        let routeState = WorkspaceRouteState(features: initialEnvironment.features)
+        _routeState = StateObject(wrappedValue: routeState)
         _newItemRouter = StateObject(wrappedValue: WorkspaceNewItemRouter())
         _editorFocusRegistry = StateObject(wrappedValue: EditorFocusRegistry())
+        _transitionCoordinator = StateObject(wrappedValue: WorkspaceRouteTransitionCoordinator(
+            routeState: routeState,
+            features: initialEnvironment.features
+        ))
     }
 
     private var appearancePreference: CalendarAppearancePreference {
@@ -42,7 +46,8 @@ struct PersonalCalendarApp: App {
                 features: environment.features,
                 routeState: routeState,
                 newItemRouter: newItemRouter,
-                focusRegistry: editorFocusRegistry
+                focusRegistry: editorFocusRegistry,
+                transitionCoordinator: transitionCoordinator
             )
                 .preferredColorScheme(appearancePreference.preferredColorScheme)
                 .task { await environment.store.load() }
@@ -58,6 +63,7 @@ struct PersonalCalendarApp: App {
             WorkspaceCommands(
                 routeState: routeState,
                 newItemRouter: newItemRouter,
+                transitionCoordinator: transitionCoordinator,
                 features: environment.features
             )
             CalendarUndoCommands(store: environment.store, focusRegistry: editorFocusRegistry)

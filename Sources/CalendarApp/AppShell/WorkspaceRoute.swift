@@ -5,7 +5,8 @@ struct WorkspaceFeatures: Equatable, Sendable {
     var inspiration: Bool
 
     static let calendarOnly = Self(notes: false, inspiration: false)
-    static let production = calendarOnly
+    /// Task 10D activates Notes; Inspiration remains gated until Task 13.
+    static let production = Self(notes: true, inspiration: false)
 
     func isEnabled(_ route: WorkspaceRoute) -> Bool {
         switch route {

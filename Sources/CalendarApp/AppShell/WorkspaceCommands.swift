@@ -25,6 +25,7 @@ enum WorkspaceCommandComposition {
 struct WorkspaceCommands: Commands {
     @ObservedObject var routeState: WorkspaceRouteState
     @ObservedObject var newItemRouter: WorkspaceNewItemRouter
+    @ObservedObject var transitionCoordinator: WorkspaceRouteTransitionCoordinator
     let features: WorkspaceFeatures
 
     var body: some Commands {
@@ -63,7 +64,7 @@ struct WorkspaceCommands: Commands {
     @ViewBuilder
     private func navigationCommand(_ descriptor: WorkspaceNavigationCommandDescriptor) -> some View {
         Button(descriptor.title) {
-            _ = routeState.activate(descriptor.route, features: features)
+            Task { _ = await transitionCoordinator.requestActivation(descriptor.route) }
         }
         .keyboardShortcut(KeyEquivalent(Character(descriptor.key)), modifiers: .command)
     }
