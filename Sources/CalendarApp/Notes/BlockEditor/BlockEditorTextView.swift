@@ -428,7 +428,7 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
             editorSession.projectAuthoritativeState()
             return
         }
-        if editorSession != nil, Self.mutationFirewallSelectors.contains(selector.description) {
+        if editorSession != nil {
             editorSession?.projectAuthoritativeState()
             return
         }
@@ -508,20 +508,6 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
         default: nil
         }
     }
-
-    private static let mutationFirewallSelectors: Set<String> = [
-        "deleteForward:",
-        "deleteWordBackward:",
-        "deleteWordForward:",
-        "deleteToBeginningOfLine:",
-        "deleteToEndOfLine:",
-        "transpose:",
-        "transposeWords:",
-        "uppercaseWord:",
-        "lowercaseWord:",
-        "capitalizeWord:",
-        "yank:"
-    ]
 
     private static func string(from value: Any) -> String? {
         if let text = value as? String { return text }

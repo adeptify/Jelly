@@ -440,6 +440,8 @@ struct BlockEditorAccessibilityTests {
             #selector(NSResponder.deleteWordForward(_:)),
             #selector(NSResponder.deleteToBeginningOfLine(_:)),
             #selector(NSResponder.deleteToEndOfLine(_:)),
+            #selector(NSResponder.deleteToBeginningOfParagraph(_:)),
+            #selector(NSResponder.deleteToEndOfParagraph(_:)),
             #selector(NSResponder.transpose(_:)),
             #selector(NSResponder.transposeWords(_:)),
             #selector(NSResponder.uppercaseWord(_:)),
@@ -515,6 +517,33 @@ struct BlockEditorAccessibilityTests {
         _ = board.setData(Data("not json".utf8), forType: BlockPasteboardAdapter.privateType)
         _ = board.setData(rtf, forType: .rtf)
         #expect(adapter.readPayload() == nil)
+
+        let sameItem = NSPasteboardItem()
+        sameItem.setData(Data("not json".utf8), forType: BlockPasteboardAdapter.privateType)
+        sameItem.setString("SAME ITEM", forType: .string)
+        sameItem.setData(rtf, forType: .rtf)
+        board.clearContents()
+        #expect(board.writeObjects([sameItem]))
+        #expect(adapter.readPayload() == .plainText("SAME ITEM"))
+
+        let stringAfterRTF = NSPasteboardItem()
+        stringAfterRTF.setData(Data("not json".utf8), forType: BlockPasteboardAdapter.privateType)
+        stringAfterRTF.setData(rtf, forType: .rtf)
+        stringAfterRTF.setString("STRING AFTER RTF", forType: .string)
+        board.clearContents()
+        #expect(board.writeObjects([stringAfterRTF]))
+        #expect(adapter.readPayload() == .plainText("STRING AFTER RTF"))
+
+        for privateFirst in [true, false] {
+            let privateItem = NSPasteboardItem()
+            privateItem.setData(Data("not json".utf8), forType: BlockPasteboardAdapter.privateType)
+            privateItem.setData(rtf, forType: .rtf)
+            let stringItem = NSPasteboardItem()
+            stringItem.setString(privateFirst ? "PRIVATE FIRST" : "STRING FIRST", forType: .string)
+            board.clearContents()
+            #expect(board.writeObjects(privateFirst ? [privateItem, stringItem] : [stringItem, privateItem]))
+            #expect(adapter.readPayload() == .plainText(privateFirst ? "PRIVATE FIRST" : "STRING FIRST"))
+        }
     }
 
     @Test func attributedLinksAcceptFoundationRepresentationsThroughOneValidatorAndStripOnlyUnsafeStyle() throws {

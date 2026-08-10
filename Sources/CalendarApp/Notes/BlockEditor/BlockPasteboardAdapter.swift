@@ -51,11 +51,7 @@ final class BlockPasteboardAdapter {
                (try? BlockPasteParser.parse(payload)) != nil {
                 return payload
             }
-            let types = pasteboard.types ?? []
-            guard let stringIndex = types.firstIndex(of: .string),
-                  let privateIndex = types.firstIndex(of: Self.privateType),
-                  stringIndex < privateIndex else { return nil }
-            return pasteboard.string(forType: .string).map(BlockPastePayload.plainText)
+            return exactStringRepresentation().map(BlockPastePayload.plainText)
         }
         if let rtf = pasteboard.data(forType: .rtf),
            let attributed = try? NSAttributedString(
@@ -69,6 +65,34 @@ final class BlockPasteboardAdapter {
             )
         }
         return pasteboard.string(forType: .string).map(BlockPastePayload.plainText)
+    }
+
+    /// `NSPasteboard.string(forType:)` may synthesize or concatenate text from
+    /// RTF items. Invalid private data may fall back only to a representation
+    /// that an item explicitly declares as `.string`, independent of item/type
+    /// ordering, so a conflicting rich flavor can never enter the fallback.
+    private func exactStringRepresentation() -> String? {
+        for item in pasteboard.pasteboardItems ?? [] {
+            let types = item.types
+            guard let stringIndex = types.firstIndex(of: .string),
+                  let value = item.string(forType: .string) else { continue }
+            guard let rtfIndex = types.firstIndex(of: .rtf) else { return value }
+            if stringIndex < rtfIndex { return value }
+
+            // AppKit appends synthesized UTF-8 text after RTF. When an explicit
+            // string was written later it occupies the same position, so prove
+            // it is independent by comparing it with the decoded rich value.
+            // Equal/undecodable values are ambiguous and therefore fail closed.
+            guard let rtf = item.data(forType: .rtf),
+                  let attributed = try? NSAttributedString(
+                      data: rtf,
+                      options: [.documentType: NSAttributedString.DocumentType.rtf],
+                      documentAttributes: nil
+                  ),
+                  attributed.string != value else { continue }
+            return value
+        }
+        return nil
     }
 
     private static func pasteBlocks(from attributed: NSAttributedString) -> [BlockPasteBlock] {
