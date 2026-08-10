@@ -77,9 +77,9 @@ struct WorkspaceNavigationTests {
         #expect(second.route == .calendar)
     }
 
-    @Test func productionFeaturesEnableNotesAndKeepInspirationDisabled() {
-        #expect(WorkspaceFeatures.production == .init(notes: true, inspiration: false))
-        #expect(WorkspaceRoute.visibleRoutes(.production) == [.calendar, .notes])
+    @Test func productionFeaturesEnableNotesAndInspiration() {
+        #expect(WorkspaceFeatures.production == .init(notes: true, inspiration: true))
+        #expect(WorkspaceRoute.visibleRoutes(.production) == [.calendar, .notes, .inspiration])
     }
 
     @Test func disabledModuleBuildersAreNeverInvoked() {

@@ -7,10 +7,10 @@ import WorkspaceDomain
 @Suite("WorkspaceRouteTransitionTests")
 @MainActor
 struct WorkspaceRouteTransitionTests {
-    @Test func productionEnablesNotesAndKeepsInspirationDisabled() {
+    @Test func productionEnablesNotesAndInspiration() {
         #expect(WorkspaceFeatures.production.notes == true)
-        #expect(WorkspaceFeatures.production.inspiration == false)
-        #expect(WorkspaceRoute.visibleRoutes(.production) == [.calendar, .notes])
+        #expect(WorkspaceFeatures.production.inspiration == true)
+        #expect(WorkspaceRoute.visibleRoutes(.production) == [.calendar, .notes, .inspiration])
     }
 
     @Test func protectedOnlyNotesDraftBlocksRouteActivation() async throws {

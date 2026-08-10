@@ -124,7 +124,7 @@ struct NotesVerticalIntegrationTests {
             transitionCoordinator: transition
         )
         // Host store is built in init; notes must be present, inspiration absent.
-        #expect(WorkspaceRoute.visibleRoutes(.production) == [.calendar, .notes])
+        #expect(WorkspaceRoute.visibleRoutes(.production) == [.calendar, .notes, .inspiration])
         _ = shell
     }
 }

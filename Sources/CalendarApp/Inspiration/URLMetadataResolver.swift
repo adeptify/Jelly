@@ -1,0 +1,78 @@
+import Foundation
+import WorkspaceDomain
+
+/// Best-effort URL enrichment with timeout, size cap and no script execution.
+/// Failures never overwrite the durable raw URL inspiration.
+final class URLMetadataResolver: URLMetadataResolving, @unchecked Sendable {
+    private let session: URLSession
+    private let timeout: TimeInterval
+    private let maxBytes: Int
+
+    init(timeout: TimeInterval = 8, maxBytes: Int = 256_000) {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = timeout
+        config.timeoutIntervalForResource = timeout
+        config.httpCookieAcceptPolicy = .never
+        config.httpShouldSetCookies = false
+        self.session = URLSession(configuration: config)
+        self.timeout = timeout
+        self.maxBytes = maxBytes
+    }
+
+    func resolve(_ url: URL) async throws -> URLMetadataResolveResult {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) else {
+            throw URLMetadataResolverError.httpFailure
+        }
+        let limited = data.prefix(maxBytes)
+        let html = String(decoding: limited, as: UTF8.self)
+        let title = Self.extractTitle(from: html) ?? url.host
+        let metadata = SourceMetadata(
+            title: title,
+            siteName: url.host,
+            domain: url.host,
+            thumbnailURL: nil,
+            fetchStatus: .succeeded
+        )
+        return .init(metadata: metadata, resolvedKind: .article)
+    }
+
+    private static func extractTitle(from html: String) -> String? {
+        guard let start = html.range(of: "<title>", options: .caseInsensitive),
+              let end = html.range(of: "</title>", options: .caseInsensitive, range: start.upperBound..<html.endIndex)
+        else { return nil }
+        let raw = html[start.upperBound..<end.lowerBound]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw.isEmpty ? nil : String(raw.prefix(200))
+    }
+}
+
+enum URLMetadataResolverError: Error {
+    case httpFailure
+}
+
+/// Deterministic resolver for tests and offline fixtures.
+final class SuspendedURLMetadataResolver: URLMetadataResolving, @unchecked Sendable {
+    private(set) var startedURLs: [URL] = []
+    private var continuation: CheckedContinuation<URLMetadataResolveResult, Error>?
+
+    func resolve(_ url: URL) async throws -> URLMetadataResolveResult {
+        startedURLs.append(url)
+        return try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func resume(with result: URLMetadataResolveResult) {
+        continuation?.resume(returning: result)
+        continuation = nil
+    }
+
+    func fail(_ error: Error) {
+        continuation?.resume(throwing: error)
+        continuation = nil
+    }
+}

@@ -108,7 +108,11 @@ struct AppShellView: View {
                     lifetimeToken: WorkspaceModuleLifetimeToken()
                 )
             case .inspiration:
-                fatalError("尚未完成的模块不能被生产外壳实例化")
+                WorkspaceModuleHost(
+                    route: .inspiration,
+                    content: AnyView(InspirationSplitView(store: store)),
+                    lifetimeToken: WorkspaceModuleLifetimeToken()
+                )
             }
         }
         _moduleHosts = StateObject(wrappedValue: WorkspaceModuleHostStore(
