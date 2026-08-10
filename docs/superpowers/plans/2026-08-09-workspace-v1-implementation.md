@@ -1473,22 +1473,31 @@ git commit -m "refactor(app): 切换为唯一工作空间存储与串行保存"
 - Create: Sources/CalendarApp/AppShell/WorkspaceRoute.swift
 - Create: Sources/CalendarApp/AppShell/WorkspaceNavigationRail.swift
 - Create: Sources/CalendarApp/AppShell/WorkspaceRouteState.swift
+- Create: Sources/CalendarApp/AppShell/WorkspaceCommands.swift
+- Create: Sources/CalendarApp/AppShell/WorkspaceNewItemRouter.swift
 - Create: Sources/CalendarApp/Calendar/CalendarModuleView.swift
+- Create: Sources/CalendarApp/Calendar/CalendarNewItemRequestPolicy.swift
+- Modify: Sources/CalendarApp/AppEnvironment.swift
 - Modify: Sources/CalendarApp/PersonalCalendarApp.swift
+- Modify: Sources/CalendarApp/Month/MonthView.swift
+- Modify: Sources/CalendarApp/DayDrawer/DayDrawerView.swift
 - Create: Tests/CalendarAppTests/WorkspaceNavigationTests.swift
 - Create: Tests/CalendarAppTests/WorkspaceWindowLayoutTests.swift
+- Create: Tests/CalendarAppTests/WorkspaceCommandRoutingTests.swift
+- Modify: Tests/CalendarAppTests/AppEnvironmentWorkspaceCutoverTests.swift
 
 **Produces:** Fixed narrow icon rail, route persistence, Command-1/2/3, 1044pt minimum width and an unchanged calendar module.
 
 **Consumes:** WorkspaceStore and existing MonthView.
 
-- [ ] Write RED tests for route order, hover labels, warm selected appearance token, accessibility labels, Command-1/2/3, route-aware Command-N, independent route selection state, 64pt rail width, 1044pt minimum window width and feature-gated visible routes.
+- [ ] **Task 7A Core RED:** write tests for route order, Chinese help/accessibility metadata, warm selected and inactive appearance tokens, stable Command-1/2/3 mapping, route-aware Command-N requests, UI-only preference normalization/writeback, independent route selection state, 64pt rail width, 980pt Calendar content width, 1044pt shell/window minimum and feature-gated visible routes. Automated metadata tests do not count as real hover or VoiceOver validation. Stable view-host lifetime belongs to 7B, after the host exists.
 
 ~~~swift
 @Test func unfinishedRoutesAreNotClickable() {
     let features = WorkspaceFeatures(notes: false, inspiration: false)
     #expect(WorkspaceRoute.visibleRoutes(features) == [.calendar])
-    var state = WorkspaceRouteState(route: .calendar)
+    let preferences = SpyWorkspaceRoutePreferenceStore(initial: "calendar")
+    let state = WorkspaceRouteState(features: features, preferences: preferences)
     #expect(state.activate(.notes, features: features) == false)
     #expect(state.handleCommandShortcut("2", features: features) == false)
     #expect(state.route == .calendar)
@@ -1500,16 +1509,43 @@ git commit -m "refactor(app): 切换为唯一工作空间存储与串行保存"
     #expect(WorkspaceRoute.commandShortcut("2") == .notes)
     #expect(WorkspaceRoute.commandShortcut("3") == .inspiration)
 }
+
+@Test func persistedDisabledOrUnknownRouteNormalizesAndWritesBackCalendar() {
+    let features = WorkspaceFeatures.calendarOnly
+    let preferences = SpyWorkspaceRoutePreferenceStore(initial: "notes")
+    let state = WorkspaceRouteState(features: features, preferences: preferences)
+    #expect(state.route == .calendar)
+    #expect(preferences.writes == ["calendar"])
+}
+
+@Test func calendarNewItemUsesOneRequestAndStableDatePrecedence() {
+    let router = WorkspaceNewItemRouter()
+    let request = router.requestNewItem(route: .calendar, features: .calendarOnly)
+    #expect(router.consume(request!.id, route: .calendar) != nil)
+    #expect(router.consume(request!.id, route: .calendar) == nil)
+    #expect(CalendarNewItemRequestPolicy.resolve(
+        dayDrawerDate: drawerDate,
+        selectedDate: selectedDate,
+        today: today,
+        isQuickCreatePresented: false,
+        isItemEditorPresented: false
+    ) == drawerDate)
+}
 ~~~
 
-- [ ] Run RED.
+- [ ] `WorkspaceFeatures.production` is the only production feature truth and defaults to `.calendarOnly`. `AppEnvironment.features = .production`, and AppEnvironment tests assert the preset; `WorkspaceNewItemRouter` is UI-session state created by PersonalCalendarApp, not part of the persistence environment. UserDefaults, environment variables and user actions must not enable unfinished modules. Task 10 may enable Notes only after its real loop is complete; Task 13 may enable the complete Workspace only after Inspiration is complete. Disabled routes are not visible, instantiated, selectable or shortcut-activated.
+- [ ] Define injectable UI-only `WorkspaceRoutePreferenceStore`; its production adapter uses only UserDefaults key `workspace.selectedRoute`. `WorkspaceRouteState` owns only `route`: unknown/persisted-disabled values normalize to Calendar and write `calendar` exactly once; successful activation writes the target raw value once; rejected disabled activation changes neither route nor storage. Feature Gate state itself never reads or writes UserDefaults. Cover initialization fallback, accepted write and rejected zero-write with a spy store.
+- [ ] `WorkspaceCommands` is the only owner of Command-1/2/3/N. It adds navigation commands and replaces `.newItem` without touching `.undoRedo` or `EditorFocusRegistry`. `WorkspaceNewItemRouter` emits only one-shot `(route, requestID)` requests and never receives Calendar dates or editor state. Remove DayDrawer's `.keyboardShortcut("n")` but keep its button; Rail buttons install no shortcuts. MonthView first consumes a matching request exactly once, then pure `CalendarNewItemRequestPolicy` returns nil when quick-create/item editor is already presented, otherwise resolves `selectedDayDrawerDate ?? model.selectedDate ?? model.today`. A draft-blocked request stays consumed and never replays after the editor closes; wrong-route consumers do not consume it. Command-2/3 remain stable mappings but do nothing while gated off.
+- [ ] Run Task 7A RED, implement Route/Features/RouteState/layout constants/NewItemRouter/CalendarNewItemRequestPolicy, run focused GREEN and an intermediate build before creating Shell views.
 
 ~~~zsh
 ./Scripts/test.sh --filter CalendarAppTests.WorkspaceNavigationTests
 ./Scripts/test.sh --filter CalendarAppTests.WorkspaceWindowLayoutTests
+./Scripts/test.sh --filter CalendarAppTests.WorkspaceCommandRoutingTests
+swift build
 ~~~
 
-- [ ] Implement AppShell with a fixed 64pt leading rail and CalendarModuleView retaining the existing 980pt minimum. Notes and Inspiration remain hidden while their feature flags are false.
+- [ ] **Task 7B Wiring:** implement AppShell with `HStack(spacing: 0)`, a fixed 64pt leading Rail and CalendarModuleView retaining exactly the existing 980pt content minimum. Draw the divider inside the Rail so it adds no layout width. AppShell/window min width is 1044 and min height remains 680; keep the existing window ID, default size, Store load task and appearance binding, and set `.windowResizability(.contentMinSize)`. Move the current 1044 frame off MonthView to the shell boundary.
 
 ~~~swift
 struct WorkspaceFeatures: Equatable, Sendable {
@@ -1520,22 +1556,33 @@ struct WorkspaceFeatures: Equatable, Sendable {
 ~~~
 
 - [ ] Wrap MonthView without changing internal layout, gestures, continuous scrolling, DayDrawer, create/edit overlay or category sheet. Route state owns only current route; each module owns its own selection and scroll state.
-- [ ] Add Command-1/2/3 and route-aware Command-N. Add Chinese hover labels and VoiceOver names 日历、笔记、灵感; selected state uses a warm light rounded tile plus a non-color accessibility value, while inactive icons stay low contrast.
-- [ ] Run GREEN plus focused interaction regressions and release build.
+- [ ] In Task 7B, AppShell retains one stable host lifetime for every enabled module and switches visibility only; hidden hosts disable hit testing and are accessibility-hidden. Feature-disabled module builders are invoked zero times and no `EmptyView`/placeholder page may satisfy route exhaustiveness. Use injectable sentinel modules to prove object identity, selection and scroll tokens survive route round trips, and explicitly test inactive-host interaction/accessibility flags; repeat with real Calendar↔Notes in Task 10.
+- [ ] Rail descriptors use Chinese help/VoiceOver names 日历、笔记、灵感. Selected state uses `theme.rangePreviewFill` in a rounded tile plus selected trait/non-color accessibility value; Rail background uses `theme.elevatedSurface`; inactive icons use `theme.secondaryText`. Only enabled route buttons are constructed.
+- [ ] Run GREEN plus focused interaction regressions, full CalendarAppTests and release build. Confirm static uniqueness: only AppEnvironment constructs WorkspaceStore, only WorkspaceCommands owns 1/2/3/N and DayDrawer/Rail own no duplicate shortcuts.
 
 ~~~zsh
 ./Scripts/test.sh --filter CalendarAppTests.WorkspaceNavigationTests
 ./Scripts/test.sh --filter CalendarAppTests.WorkspaceWindowLayoutTests
+./Scripts/test.sh --filter CalendarAppTests.WorkspaceCommandRoutingTests
 ./Scripts/test.sh --filter CalendarAppTests.CalendarInteractionCoordinatorTests
 ./Scripts/test.sh --filter CalendarAppTests.WeekRowPresentationTests
+./Scripts/test.sh --filter CalendarAppTests
 swift build -c release
 git diff --check
+~~~
+
+- [ ] Build a fresh packaged artifact, verify its signature, then launch that exact bundle with an isolated `JELLY_ACCEPTANCE_DATA_DIRECTORY`; verify real tooltip hover, 1044pt minimum resize, warm selected tile and unchanged Calendar create/edit/scroll/DayDrawer basics. Record VoiceOver as unverified until the final accessibility Gate unless it is actually run; metadata tests alone must not claim live VoiceOver success.
+
+~~~zsh
+./Scripts/build-app.sh
+codesign --verify --deep --strict dist/Jelly.app
+open -n --env "JELLY_ACCEPTANCE_DATA_DIRECTORY=$(mktemp -d /tmp/jelly-task7-gui.XXXXXX)" dist/Jelly.app
 ~~~
 
 - [ ] Commit.
 
 ~~~zsh
-git add Sources/CalendarApp/AppShell Sources/CalendarApp/Calendar Sources/CalendarApp/PersonalCalendarApp.swift Tests/CalendarAppTests
+git add Sources/CalendarApp/AppShell Sources/CalendarApp/Calendar Sources/CalendarApp/AppEnvironment.swift Sources/CalendarApp/Month/MonthView.swift Sources/CalendarApp/DayDrawer/DayDrawerView.swift Sources/CalendarApp/PersonalCalendarApp.swift Tests/CalendarAppTests
 git commit -m "feat(app): 增加工作空间导航外壳"
 ~~~
 
