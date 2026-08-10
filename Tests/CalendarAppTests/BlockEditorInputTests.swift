@@ -1109,6 +1109,65 @@ struct BlockEditorInputTests {
         }
     }
 
+    @Test func completingMarkdownPrefixPreservesEveryEarlierZeroLengthSpanInOriginalOrder() throws {
+        let id = blockID(475)
+        let zeroItalic = InlineSpan(text: "", marks: [.italic])
+        let zeroCode = InlineSpan(text: "", marks: [.code], linkURL: exactLinkURL)
+        let suffix: [InlineSpan] = [
+            .init(text: "中", marks: [.bold]),
+            .init(text: "文", marks: [.bold]),
+            .init(text: "🙂", marks: [.italic])
+        ]
+        let conversions: [(String, BlockKind, String?)] = [
+            ("# ", .heading1, nil), ("## ", .heading2, nil), ("### ", .heading3, nil),
+            ("- ", .bullet, nil), ("* ", .bullet, nil), ("1. ", .ordered, nil),
+            ("[] ", .task, nil), ("[ ] ", .task, nil), ("> ", .quote, nil),
+            ("``` ", .code, nil), ("```swift ", .code, "swift")
+        ]
+
+        for (prefix, kind, codeInfo) in conversions {
+            let partial = String(prefix.dropLast())
+            let original = doc([DocumentBlock(
+                id: id,
+                kind: .paragraph,
+                inlineContent: .init(spans: [
+                    zeroItalic,
+                    .init(text: partial, marks: [.italic]),
+                    zeroCode
+                ] + suffix),
+                taskState: nil,
+                indentLevel: 0
+            )])
+            let expectedContent: InlineContent = kind == .code
+                ? .plain("中文🙂")
+                : .init(spans: [zeroItalic, zeroCode] + suffix)
+            let expected = BlockInputResult(
+                document: doc([DocumentBlock(
+                    id: id,
+                    kind: kind,
+                    inlineContent: expectedContent,
+                    taskState: kind == .task ? .init(completedAt: nil) : nil,
+                    indentLevel: 0,
+                    codeInfoString: codeInfo
+                )]),
+                selection: kind == .code
+                    ? caret(id, 0)
+                    : caret(id, 0, attributes: .init(marks: [.bold], linkURL: nil)),
+                mutation: .document,
+                effect: .handled,
+                undo: .atomic(.conversion)
+            )
+            #expect(
+                try reduce(
+                    original,
+                    caret(id, partial.count, attributes: .init(marks: [.italic], linkURL: nil)),
+                    .insertTextApplyingMarkdownShortcut(String(prefix.suffix(1)))
+                ) == expected,
+                Comment(rawValue: prefix.debugDescription)
+            )
+        }
+    }
+
     @Test(arguments: SlashExactFixture.all)
     func slashConversionAndInvalidSelectionShapesReturnExactResults(_ fixture: SlashExactFixture) throws {
         #expect(

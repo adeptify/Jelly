@@ -286,7 +286,7 @@ private extension ReductionContext {
             originalCaret = startedCollapsed ? anchor : nil
             preservedZeroLengthSpans = startedCollapsed
                 ? document.blocks.first(where: { $0.id == anchor.blockID })?
-                    .inlineContent.zeroLengthSpans(at: anchor.graphemeOffset) ?? []
+                    .inlineContent.zeroLengthSpans(upTo: anchor.graphemeOffset) ?? []
                 : []
         } else {
             startedCollapsed = false
@@ -1385,11 +1385,11 @@ private extension ReductionContext {
 }
 
 private extension InlineContent {
-    func zeroLengthSpans(at offset: Int) -> [InlineSpan] {
+    func zeroLengthSpans(upTo offset: Int) -> [InlineSpan] {
         var cursor = 0
         var matches: [InlineSpan] = []
         for span in spans {
-            if span.text.isEmpty, cursor == offset {
+            if span.text.isEmpty, cursor <= offset {
                 matches.append(span)
             }
             cursor += span.text.count
