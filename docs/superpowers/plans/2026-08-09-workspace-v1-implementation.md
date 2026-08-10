@@ -2078,8 +2078,8 @@ git commit -m "feat(notes): 交付极简结构化 Block 编辑器"
 
 ### Task 10 hard entry Gate
 
-- [ ] Do not create a Task 10 production file until the frozen Task 9 package has a fresh Sol review verdict of `0 Critical / 0 Important`. Any Task 9 API change made for Task 10 receives a scoped Task 9 re-review before Notes is feature-enabled.
-- [ ] Re-run the Task 9 focused, Task 8, CalendarApp, full and Release gates. The Task 10 implementation may consume only the reviewed `(noteID, editSessionID)` session surface.
+- [x] Do not create a Task 10 production file until the frozen Task 9 package has a fresh Sol review verdict of `0 Critical / 0 Important`. Any Task 9 API change made for Task 10 receives a scoped Task 9 re-review before Notes is feature-enabled.
+- [x] Re-run the Task 9 focused, Task 8, CalendarApp, full and Release gates. The Task 10 implementation may consume only the reviewed `(noteID, editSessionID)` session surface.
 
 ~~~zsh
 ./Scripts/test.sh --filter CalendarAppTests.BlockEditorBridgeTests
