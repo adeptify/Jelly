@@ -2,10 +2,14 @@ import Combine
 import Foundation
 
 enum EditorUndoRouteResult: Equatable, Sendable { case noFocusedOwner, focusedPerformed, focusedUnavailable }
+enum EditorFocusAvailability: Equatable, Sendable {
+    case noFocusedOwner
+    case focused(canUndo: Bool, canRedo: Bool)
+}
 
 @MainActor
-final class EditorFocusRegistry: @preconcurrency ObservableObject {
-    let objectWillChange = ObservableObjectPublisher()
+final class EditorFocusRegistry: ObservableObject {
+    @Published private var publicationRevision = 0
     private weak var focusedManager: UndoManager?
     private var focusedOwnerID: UUID?
     private var notificationTokens: [NSObjectProtocol] = []
@@ -14,6 +18,11 @@ final class EditorFocusRegistry: @preconcurrency ObservableObject {
 
     var canUndo: Bool { refreshAvailability(); return lastAvailability.0 }
     var canRedo: Bool { refreshAvailability(); return lastAvailability.1 }
+    var availability: EditorFocusAvailability {
+        refreshAvailability()
+        guard focusedOwnerID != nil else { return .noFocusedOwner }
+        return .focused(canUndo: lastAvailability.0, canRedo: lastAvailability.1)
+    }
     var availabilityPublisher: AnyPublisher<(Bool, Bool), Never> { availabilitySubject.eraseToAnyPublisher() }
 
     func register(_ manager: UndoManager, ownerID: UUID) {
@@ -83,8 +92,8 @@ final class EditorFocusRegistry: @preconcurrency ObservableObject {
     private func publishAvailability(_ availability: (Bool, Bool), forceNotification: Bool = false) {
         let changed = availability != lastAvailability
         guard changed || forceNotification else { return }
-        objectWillChange.send()
         lastAvailability = availability
+        publicationRevision &+= 1
         if changed || forceNotification {
             availabilitySubject.send(availability)
         }

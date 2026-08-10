@@ -1,0 +1,924 @@
+import AppKit
+import Foundation
+import SwiftUI
+import Testing
+import WorkspaceDomain
+@testable import CalendarApp
+
+@Suite("BlockEditorUndoTests")
+@MainActor
+struct BlockEditorUndoTests {
+    @Test func sessionOwnsOneUndoManagerAndTypingUndoRestoresAuthoritativeSnapshot() throws {
+        let fixture = undoFixture()
+        var published: [BlockDocument] = []
+        let session = BlockEditorSession(
+            noteID: NoteID(UUID(uuidString: "00000000-0000-0000-0000-000000000701")!),
+            editSessionID: UUID(uuidString: "00000000-0000-0000-0000-000000000702")!,
+            initialDocument: fixture.document,
+            initialSelection: fixture.selection,
+            focusRegistry: EditorFocusRegistry(),
+            onDocumentChange: { published.append($0) }
+        )
+        let manager = session.undoManager
+
+        _ = try session.dispatch(.insertText("甲"))
+        #expect(session.document.blocks[0].inlineContent.spans.map(\.text).joined() == "a甲")
+        #expect(published.count == 1)
+        #expect(session.undoManager === manager)
+
+        manager.undo()
+        #expect(session.document == fixture.document)
+        #expect(session.selection == fixture.selection)
+        #expect(published.count == 2)
+
+        manager.redo()
+        #expect(session.document.blocks[0].inlineContent.spans.map(\.text).joined() == "a甲")
+        #expect(published.count == 3)
+    }
+
+    @Test func staleHostDetachCannotClearNewerHostFocusLease() {
+        let fixture = undoFixture()
+        let registry = EditorFocusRegistry()
+        let session = BlockEditorSession(
+            noteID: NoteID(), editSessionID: UUID(), initialDocument: fixture.document,
+            initialSelection: fixture.selection, focusRegistry: registry, onDocumentChange: { _ in }
+        )
+        let first = UUID()
+        let second = UUID()
+        let firstView = BlockEditorTextView()
+        let secondView = BlockEditorTextView()
+
+        session.attach(blockID: fixture.blockID, hostToken: first, textView: firstView)
+        session.attach(blockID: fixture.blockID, hostToken: second, textView: secondView)
+        session.focus(hostToken: second)
+        session.detach(hostToken: first)
+
+        #expect(registry.availability != .noFocusedOwner)
+        session.detach(hostToken: second)
+        #expect(registry.availability == .noFocusedOwner)
+    }
+
+    @Test func projectionDoesNotDispatchOrCreateUndo() throws {
+        let fixture = undoFixture()
+        var published = 0
+        let session = BlockEditorSession(
+            noteID: NoteID(), editSessionID: UUID(), initialDocument: fixture.document,
+            initialSelection: fixture.selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in published += 1 }
+        )
+        let view = BlockEditorTextView()
+        session.attach(blockID: fixture.blockID, hostToken: UUID(), textView: view)
+        session.projectAuthoritativeState()
+
+        #expect(published == 0)
+        #expect(session.undoManager.canUndo == false)
+        #expect(session.document == fixture.document)
+    }
+
+    @Test func resultConsumptionAcceptsOnlyTheCompleteLegalMatrix() throws {
+        let fixture = undoFixture()
+        let changed = BlockDocument(blocks: [
+            .init(id: fixture.blockID, kind: .paragraph, inlineContent: .plain("ab"), taskState: nil, indentLevel: 0)
+        ])
+        let end = BlockEditorSelection.text(
+            anchor: .init(blockID: fixture.blockID, graphemeOffset: 2),
+            focus: .init(blockID: fixture.blockID, graphemeOffset: 2),
+            preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil)
+        )
+        let rows: [BlockInputResult] = [
+            .init(document: fixture.document, selection: fixture.selection, mutation: .none(.samePosition), effect: .handled, undo: .none),
+            .init(document: fixture.document, selection: fixture.selection, mutation: .none(.composingText), effect: .deferToTextSystem, undo: .none),
+            .init(document: fixture.document, selection: fixture.selection, mutation: .none(.emptySelection), effect: .writeClipboard(.init(plainText: "a", richBlocks: [])), undo: .none),
+            .init(document: fixture.document, selection: fixture.selection, mutation: .none(.samePosition), effect: .handled, undo: .breakCoalescing),
+            .init(document: fixture.document, selection: end, mutation: .selectionOnly, effect: .handled, undo: .none),
+            .init(document: changed, selection: end, mutation: .document, effect: .handled, undo: .coalesceTyping(fixture.blockID)),
+            .init(document: changed, selection: end, mutation: .document, effect: .handled, undo: .atomic(.enter)),
+            .init(document: changed, selection: end, mutation: .document, effect: .writeClipboard(.init(plainText: "a", richBlocks: [])), undo: .atomic(.cut))
+        ]
+
+        for row in rows {
+            let session = makeUndoSession(fixture: fixture)
+            _ = try session.consume(row)
+        }
+
+        let invalid = BlockInputResult(
+            document: changed, selection: end, mutation: .document, effect: .handled, undo: .breakCoalescing
+        )
+        let session = makeUndoSession(fixture: fixture)
+        let before = session.document
+        #expect(throws: BlockEditorIntegrationError.illegalResult) {
+            try session.consume(invalid)
+        }
+        #expect(session.document == before)
+        #expect(session.undoManager.canUndo == false)
+    }
+
+    @Test func failedMandatoryPlainClipboardWritePreventsCutPublicationOrUndo() throws {
+        let first = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000743")!)
+        let second = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000744")!)
+        let document = BlockDocument(blocks: [
+            .init(id: first, kind: .paragraph, inlineContent: .plain("甲"), taskState: nil, indentLevel: 0),
+            .init(id: second, kind: .paragraph, inlineContent: .plain("乙"), taskState: nil, indentLevel: 0)
+        ])
+        let crossSelection = BlockEditorSelection.text(
+            anchor: .init(blockID: first, graphemeOffset: 0),
+            focus: .init(blockID: second, graphemeOffset: 1),
+            preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil)
+        )
+        let cut = try BlockInputReducer.reduce(
+            document, selection: crossSelection, command: .cutSelection,
+            environment: .init(isComposingText: false, idSource: .random)
+        )
+        let expectedPlain: String
+        guard case let .writeClipboard(payload) = cut.effect else {
+            Issue.record("cut must carry one complete clipboard payload")
+            return
+        }
+        expectedPlain = payload.plainText
+
+        var failedCallbacks = 0
+        var failedWrites = 0
+        let failedSession = BlockEditorSession(
+            noteID: NoteID(), editSessionID: UUID(), initialDocument: document,
+            initialSelection: crossSelection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in failedCallbacks += 1 }
+        )
+
+        #expect(throws: BlockEditorIntegrationError.clipboardWriteFailed) {
+            try failedSession.consume(cut, clipboardWriter: { _ in failedWrites += 1; return false })
+        }
+        #expect(failedWrites == 1)
+        #expect(failedSession.document == document)
+        #expect(failedSession.selection == crossSelection)
+        #expect(failedCallbacks == 0)
+        #expect(failedSession.undoManager.canUndo == false)
+
+        let pasteboard = NSPasteboard.withUniqueName()
+        let adapter = BlockPasteboardAdapter(
+            pasteboard: pasteboard,
+            plainTextWriter: { board, text in board.setString(text, forType: .string) },
+            customDataWriter: { _, _ in false }
+        )
+        var successCallbacks = 0
+        let successfulSession = BlockEditorSession(
+            noteID: NoteID(), editSessionID: UUID(), initialDocument: document,
+            initialSelection: crossSelection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in successCallbacks += 1 }
+        )
+
+        _ = try successfulSession.consume(cut, clipboardWriter: { adapter.write(payload: $0) })
+        #expect(pasteboard.string(forType: .string) == expectedPlain)
+        #expect(successfulSession.document == cut.document)
+        #expect(successCallbacks == 1)
+        #expect(successfulSession.undoManager.canUndo)
+    }
+
+    @Test func resultConsumptionAcceptsOnlyEightRowsAndEveryOtherMatrixCellIsSideEffectFree() {
+        let fixture = undoFixture()
+        let changed = BlockDocument(blocks: [
+            .init(id: fixture.blockID, kind: .paragraph, inlineContent: .plain("ab"), taskState: nil, indentLevel: 0)
+        ])
+        let end = BlockEditorSelection.text(
+            anchor: .init(blockID: fixture.blockID, graphemeOffset: 2),
+            focus: .init(blockID: fixture.blockID, graphemeOffset: 2),
+            preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil)
+        )
+        let payload = BlockClipboardPayload(plainText: "a", richBlocks: [])
+        let mutations: [BlockInputMutation] = [.none(.samePosition), .selectionOnly, .document]
+        let effects: [BlockInputEffect] = [.handled, .deferToTextSystem, .writeClipboard(payload)]
+        let undos: [BlockUndoDirective] = [.none, .breakCoalescing, .coalesceTyping(fixture.blockID), .atomic(.enter)]
+        var legalRows = 0
+        var rejectedRows = 0
+
+        for mutation in mutations {
+            for effect in effects {
+                for undo in undos {
+                    let resolvedUndo: BlockUndoDirective
+                    if mutation == .document, case .writeClipboard = effect, case .atomic = undo {
+                        resolvedUndo = .atomic(.cut)
+                    } else {
+                        resolvedUndo = undo
+                    }
+                    let result = BlockInputResult(
+                        document: mutation == .document ? changed : fixture.document,
+                        selection: mutation == .selectionOnly || mutation == .document ? end : fixture.selection,
+                        mutation: mutation, effect: effect, undo: resolvedUndo
+                    )
+                    let legal = isLegalConsumptionRow(mutation: mutation, effect: effect, undo: resolvedUndo)
+                    var callbacks = 0
+                    var writes = 0
+                    let session = BlockEditorSession(
+                        noteID: NoteID(), editSessionID: UUID(), initialDocument: fixture.document,
+                        initialSelection: fixture.selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in callbacks += 1 }
+                    )
+
+                    if legal {
+                        legalRows += 1
+                        do {
+                            _ = try session.consume(result, clipboardWriter: { _ in writes += 1; return true })
+                        } catch {
+                            Issue.record("legal result was rejected: \(mutation), \(effect), \(resolvedUndo)")
+                        }
+                        let publishes = mutation == .document
+                        let usesClipboard: Bool
+                        if case .writeClipboard = effect { usesClipboard = true } else { usesClipboard = false }
+                        #expect(callbacks == (publishes ? 1 : 0))
+                        #expect(writes == (usesClipboard ? 1 : 0))
+                        #expect(session.undoManager.canUndo == publishes)
+                    } else {
+                        rejectedRows += 1
+                        #expect(throws: BlockEditorIntegrationError.illegalResult) {
+                            try session.consume(result, clipboardWriter: { _ in writes += 1; return true })
+                        }
+                        #expect(session.document == fixture.document)
+                        #expect(session.selection == fixture.selection)
+                        #expect(callbacks == 0)
+                        #expect(writes == 0)
+                        #expect(session.undoManager.canUndo == false)
+                    }
+                }
+            }
+        }
+        #expect(legalRows == 8)
+        #expect(rejectedRows == 28)
+
+        let illegalClipboardAction = BlockInputResult(
+            document: changed, selection: end, mutation: .document,
+            effect: .writeClipboard(payload), undo: .atomic(.enter)
+        )
+        let illegalSession = makeUndoSession(fixture: fixture)
+        #expect(throws: BlockEditorIntegrationError.illegalResult) {
+            try illegalSession.consume(illegalClipboardAction, clipboardWriter: { _ in true })
+        }
+        #expect(illegalSession.document == fixture.document)
+        #expect(illegalSession.undoManager.canUndo == false)
+    }
+
+    @Test func hostedProductionEditorFindsNativeTextViewsAndRoutesPointerTypeUndoAndAutosave() throws {
+        let first = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000751")!)
+        let second = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000752")!)
+        let document = BlockDocument(blocks: [
+            .init(id: first, kind: .paragraph, inlineContent: .plain("甲👍🏽"), taskState: nil, indentLevel: 0),
+            .init(id: second, kind: .paragraph, inlineContent: .plain("乙文"), taskState: nil, indentLevel: 0)
+        ])
+        let selection = BlockEditorSelection.text(
+            anchor: .init(blockID: first, graphemeOffset: 0),
+            focus: .init(blockID: first, graphemeOffset: 0),
+            preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil)
+        )
+        let harness = try HostedBlockEditorHarness(document: document, selection: selection)
+        defer { harness.close() }
+        let firstView = try harness.textView(for: first)
+        let secondView = try harness.textView(for: second)
+        #expect(firstView.attachedSession === secondView.attachedSession)
+        let session = try #require(firstView.attachedSession)
+        let firstPoint = try #require(firstView.windowPoint(forUTF16Offset: 1))
+        let secondPoint = try #require(secondView.windowPoint(forUTF16Offset: 1))
+        #expect(firstView.utf16Offset(at: firstView.convert(firstPoint, from: nil)) == 1)
+        #expect(secondView.utf16Offset(at: secondView.convert(secondPoint, from: nil)) == 1)
+
+        try harness.mouseDown(firstView, at: firstPoint)
+        try harness.mouseDragged(firstView, to: secondPoint)
+        #expect(harness.window.firstResponder === firstView)
+        #expect(firstView.selectedRange == .init(location: 1, length: 4))
+        #expect(secondView.selectedRange == .init(location: 0, length: 1))
+
+        try harness.mouseDown(firstView, at: firstPoint)
+        try harness.mouseDown(secondView, at: secondPoint, modifiers: [.shift])
+        #expect(firstView.selectedRange == .init(location: 1, length: 4))
+        #expect(secondView.selectedRange == .init(location: 0, length: 1))
+
+        try harness.mouseDown(firstView, at: firstPoint)
+        firstView.insertText("中", replacementRange: .init(location: NSNotFound, length: 0))
+        #expect(harness.documents.count == 1)
+        #expect(harness.document.blocks[0].inlineContent.spans.map(\.text).joined() == "甲中👍🏽")
+        firstView.setMarkedText("pin", selectedRange: .init(location: 3, length: 0), replacementRange: .init(location: NSNotFound, length: 0))
+        firstView.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        #expect(harness.documents.count == 1)
+        firstView.insertText("拼", replacementRange: .init(location: NSNotFound, length: 0))
+        firstView.unmarkText()
+        #expect(harness.documents.count == 2)
+        #expect(harness.document.blocks[0].inlineContent.spans.map(\.text).joined() == "甲中拼👍🏽")
+        #expect(session.undoManager.canUndo)
+        let beforeAutosaveView = firstView
+        let manager = session.undoManager
+        session.autosaveDidResolve(.saving)
+        session.autosaveDidResolve(.saved)
+        harness.redrawWithEquivalentRoot()
+        let redrawnFirstView = try harness.textView(for: first)
+        #expect(redrawnFirstView === beforeAutosaveView)
+        #expect(redrawnFirstView.attachedSession === session)
+        #expect(redrawnFirstView.attachedSession?.undoManager === manager)
+        #expect(redrawnFirstView.string == "甲中拼👍🏽")
+
+        #expect(harness.registry.routeUndo() == .focusedPerformed)
+        #expect(harness.document == document)
+    }
+
+    @Test func imeMultiUpdateInsertAndUnmarkCommitExactlyOnceWithChineseAndEmoji() {
+        let fixture = undoFixture()
+        var callbacks = 0
+        let session = BlockEditorSession(
+            noteID: NoteID(), editSessionID: UUID(), initialDocument: fixture.document,
+            initialSelection: fixture.selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in callbacks += 1 }
+        )
+        let view = BlockEditorTextView()
+        let hostToken = UUID()
+        session.attach(blockID: fixture.blockID, hostToken: hostToken, textView: view)
+        session.focus(hostToken: hostToken)
+
+        view.setMarkedText("zh", selectedRange: .init(location: 2, length: 0), replacementRange: .init(location: 1, length: 0))
+        view.setMarkedText("zho", selectedRange: .init(location: 3, length: 0), replacementRange: .init(location: 1, length: 0))
+        #expect(session.document == fixture.document)
+        view.insertText("中🙂", replacementRange: .init(location: 1, length: 0))
+        #expect(session.document.blocks[0].inlineContent.spans.map(\.text).joined() == "a中🙂")
+        #expect(callbacks == 1)
+        view.unmarkText()
+        #expect(session.document.blocks[0].inlineContent.spans.map(\.text).joined() == "a中🙂")
+        #expect(callbacks == 1)
+
+        view.setMarkedText("拼音🙂", selectedRange: .init(location: 4, length: 0), replacementRange: .init(location: 2, length: 0))
+        view.unmarkText()
+        #expect(session.document.blocks[0].inlineContent.spans.map(\.text).joined() == "a中拼音🙂🙂")
+        #expect(callbacks == 2)
+        view.unmarkText()
+        #expect(callbacks == 2)
+    }
+
+    @Test func imeCancelRestoresOriginalReverseSelectionNotItsReplacementRange() {
+        let fixture = undoFixture()
+        let original = BlockEditorSelection.text(
+            anchor: .init(blockID: fixture.blockID, graphemeOffset: 1),
+            focus: .init(blockID: fixture.blockID, graphemeOffset: 0),
+            preferredColumn: nil, typingAttributes: .init(marks: [.bold], linkURL: nil)
+        )
+        var callbacks = 0
+        let session = BlockEditorSession(
+            noteID: NoteID(), editSessionID: UUID(), initialDocument: fixture.document,
+            initialSelection: original, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in callbacks += 1 }
+        )
+        let view = BlockEditorTextView()
+        let token = UUID()
+        session.attach(blockID: fixture.blockID, hostToken: token, textView: view)
+        view.setMarkedText("pinyin", selectedRange: .init(location: 5, length: 0), replacementRange: .init(location: 1, length: 0))
+        view.cancelOperation(nil)
+
+        #expect(session.document == fixture.document)
+        #expect(session.selection == original)
+        #expect(callbacks == 0)
+        #expect(session.undoManager.canUndo == false)
+    }
+
+    @Test func compositionTerminalTokensSuppressOnlyLateDuplicatesAndActiveDetachRestoresBaseline() {
+        let fixture = undoFixture()
+        var callbacks = 0
+        let session = BlockEditorSession(noteID: NoteID(), editSessionID: UUID(), initialDocument: fixture.document, initialSelection: fixture.selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in callbacks += 1 })
+        let view = BlockEditorTextView()
+        let token = UUID()
+        session.attach(blockID: fixture.blockID, hostToken: token, textView: view)
+
+        view.setMarkedText("zh", selectedRange: .init(location: 2, length: 0), replacementRange: .init(location: NSNotFound, length: 0))
+        view.insertText("中", replacementRange: .init(location: NSNotFound, length: 0))
+        view.insertText("中", replacementRange: .init(location: NSNotFound, length: 0))
+        view.unmarkText()
+        #expect(session.document.blocks[0].inlineContent.spans.map(\.text).joined() == "a中")
+        #expect(callbacks == 1)
+        view.insertText("x", replacementRange: .init(location: NSNotFound, length: 0))
+        #expect(session.document.blocks[0].inlineContent.spans.map(\.text).joined() == "a中x")
+        #expect(callbacks == 2)
+
+        let independent = BlockEditorSession(noteID: NoteID(), editSessionID: UUID(), initialDocument: fixture.document, initialSelection: fixture.selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in })
+        let independentView = BlockEditorTextView()
+        let independentToken = UUID()
+        independent.attach(blockID: fixture.blockID, hostToken: independentToken, textView: independentView)
+        independentView.setMarkedText("zh", selectedRange: .init(location: 2, length: 0), replacementRange: .init(location: NSNotFound, length: 0))
+        independentView.insertText("中", replacementRange: .init(location: NSNotFound, length: 0))
+        independentView.beginNativeInputEvent()
+        independentView.insertText("中", replacementRange: .init(location: NSNotFound, length: 0))
+        #expect(independent.document.blocks[0].inlineContent.spans.map(\.text).joined() == "a中中")
+
+        let detaching = BlockEditorSession(noteID: NoteID(), editSessionID: UUID(), initialDocument: fixture.document, initialSelection: fixture.selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in })
+        let composingView = BlockEditorTextView()
+        let composingToken = UUID()
+        detaching.attach(blockID: fixture.blockID, hostToken: composingToken, textView: composingView)
+        composingView.setMarkedText("p", selectedRange: .init(location: 1, length: 0), replacementRange: .init(location: NSNotFound, length: 0))
+        detaching.detach(hostToken: composingToken)
+        #expect(detaching.isComposing == false)
+        #expect(detaching.document == fixture.document)
+        let replacement = BlockEditorTextView()
+        let replacementToken = UUID()
+        detaching.attach(blockID: fixture.blockID, hostToken: replacementToken, textView: replacement)
+        replacement.insertText("新", replacementRange: .init(location: NSNotFound, length: 0))
+        #expect(detaching.document.blocks[0].inlineContent.spans.map(\.text).joined() == "a新")
+
+        var unmarkCallbacks = 0
+        let unmarkSession = BlockEditorSession(noteID: NoteID(), editSessionID: UUID(), initialDocument: fixture.document, initialSelection: fixture.selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in unmarkCallbacks += 1 })
+        let unmarkView = BlockEditorTextView()
+        let unmarkToken = UUID()
+        unmarkSession.attach(blockID: fixture.blockID, hostToken: unmarkToken, textView: unmarkView)
+        unmarkView.setMarkedText("拼", selectedRange: .init(location: 1, length: 0), replacementRange: .init(location: NSNotFound, length: 0))
+        unmarkView.unmarkText()
+        unmarkView.insertText("拼", replacementRange: .init(location: NSNotFound, length: 0))
+        #expect(unmarkSession.document.blocks[0].inlineContent.spans.map(\.text).joined() == "a拼")
+        #expect(unmarkCallbacks == 1)
+
+        let cancelSession = BlockEditorSession(noteID: NoteID(), editSessionID: UUID(), initialDocument: fixture.document, initialSelection: fixture.selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in })
+        let cancelView = BlockEditorTextView()
+        let cancelToken = UUID()
+        cancelSession.attach(blockID: fixture.blockID, hostToken: cancelToken, textView: cancelView)
+        cancelView.setMarkedText("p", selectedRange: .init(location: 1, length: 0), replacementRange: .init(location: NSNotFound, length: 0))
+        cancelView.cancelOperation(nil)
+        cancelView.insertText("p", replacementRange: .init(location: NSNotFound, length: 0))
+        #expect(cancelSession.document == fixture.document)
+        cancelView.insertText("x", replacementRange: .init(location: NSNotFound, length: 0))
+        #expect(cancelSession.document.blocks[0].inlineContent.spans.map(\.text).joined() == "ax")
+    }
+
+    @Test func replacementHostLeaseRejectsStaleFocusSelectionAndComposition() {
+        let fixture = undoFixture()
+        let registry = EditorFocusRegistry()
+        let session = BlockEditorSession(noteID: NoteID(), editSessionID: UUID(), initialDocument: fixture.document, initialSelection: fixture.selection, focusRegistry: registry, onDocumentChange: { _ in })
+        let first = UUID()
+        let second = UUID()
+        let staleView = BlockEditorTextView()
+        let activeView = BlockEditorTextView()
+        session.attach(blockID: fixture.blockID, hostToken: first, textView: staleView)
+        session.attach(blockID: fixture.blockID, hostToken: second, textView: activeView)
+        session.focus(hostToken: first)
+        #expect(registry.availability == .noFocusedOwner)
+        staleView.setMarkedText("p", selectedRange: .init(location: 1, length: 0), replacementRange: .init(location: NSNotFound, length: 0))
+        staleView.applyAuthoritativeProjection(text: "a", selectedRange: .init(location: 0, length: 0))
+        session.updateNativeSelection(blockID: fixture.blockID, range: .init(location: 0, length: 0), hostToken: first)
+        #expect(session.selection == fixture.selection)
+        #expect(session.isComposing == false)
+        session.focus(hostToken: second)
+        #expect(registry.availability != .noFocusedOwner)
+        session.detach(hostToken: first)
+        #expect(registry.availability != .noFocusedOwner)
+        activeView.insertText("甲", replacementRange: .init(location: NSNotFound, length: 0))
+        #expect(session.document.blocks[0].inlineContent.spans.map(\.text).joined() == "a甲")
+    }
+
+    @Test func dragUsesStableRootsPreservesClosuresAndRejectsInsideClosureDrop() {
+        let root = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000711")!)
+        let child = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000712")!)
+        let moving = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000713")!)
+        let document = BlockDocument(blocks: [
+            .init(id: root, kind: .bullet, inlineContent: .plain("父"), taskState: nil, indentLevel: 0),
+            .init(id: child, kind: .bullet, inlineContent: .plain("子"), taskState: nil, indentLevel: 1),
+            .init(id: moving, kind: .bullet, inlineContent: .plain("移动"), taskState: nil, indentLevel: 0)
+        ])
+        let selection = BlockEditorSelection.text(anchor: .init(blockID: root, graphemeOffset: 0), focus: .init(blockID: root, graphemeOffset: 0), preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil))
+        var callbacks = 0
+        let session = BlockEditorSession(noteID: NoteID(), editSessionID: UUID(), initialDocument: document, initialSelection: selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in callbacks += 1 })
+        let drag = BlockDragCoordinator(session: session)
+
+        #expect(drag.move(roots: [moving], before: root))
+        #expect(session.document.blocks.map(\.id) == [moving, root, child])
+        #expect(callbacks == 1)
+        #expect(drag.move(roots: [root], before: child))
+        #expect(session.document.blocks.map(\.id) == [moving, root, child])
+        #expect(callbacks == 1)
+    }
+
+    @Test func dragMoveDownCrossesTheNextRootInsteadOfDroppingAtItsOriginalPosition() {
+        let ids = (0..<3).map { value in BlockID(UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", 720 + value))!) }
+        let document = BlockDocument(blocks: ids.enumerated().map { index, id in
+            .init(id: id, kind: .paragraph, inlineContent: .plain("\(index)"), taskState: nil, indentLevel: 0)
+        })
+        let selection = BlockEditorSelection.text(anchor: .init(blockID: ids[0], graphemeOffset: 0), focus: .init(blockID: ids[0], graphemeOffset: 0), preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil))
+        var callbacks = 0
+        let session = BlockEditorSession(noteID: NoteID(), editSessionID: UUID(), initialDocument: document, initialSelection: selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in callbacks += 1 })
+
+        #expect(BlockDragCoordinator(session: session).moveDown(roots: [ids[0]]))
+        #expect(session.document.blocks.map(\.id) == [ids[1], ids[0], ids[2]])
+        #expect(callbacks == 1)
+    }
+
+    @Test func dragDocumentEdgesAreNoopsAndRootNormalizationIgnoresDescendantsAndStaleIDs() {
+        let ids = (0..<4).map { value in BlockID(UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", 730 + value))!) }
+        let document = BlockDocument(blocks: [
+            .init(id: ids[0], kind: .bullet, inlineContent: .plain("A"), taskState: nil, indentLevel: 0),
+            .init(id: ids[1], kind: .bullet, inlineContent: .plain("A-child"), taskState: nil, indentLevel: 1),
+            .init(id: ids[2], kind: .bullet, inlineContent: .plain("B"), taskState: nil, indentLevel: 0),
+            .init(id: ids[3], kind: .bullet, inlineContent: .plain("C"), taskState: nil, indentLevel: 0)
+        ])
+        let selection = BlockEditorSelection.text(anchor: .init(blockID: ids[0], graphemeOffset: 0), focus: .init(blockID: ids[0], graphemeOffset: 0), preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil))
+        var callbacks = 0
+        let session = BlockEditorSession(noteID: NoteID(), editSessionID: UUID(), initialDocument: document, initialSelection: selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in callbacks += 1 })
+        let drag = BlockDragCoordinator(session: session)
+
+        #expect(drag.moveUp(roots: [ids[0]]))
+        #expect(session.document == document)
+        #expect(drag.moveDown(roots: [ids[3]]))
+        #expect(session.document == document)
+        #expect(callbacks == 0)
+        #expect(session.undoManager.canUndo == false)
+
+        #expect(drag.moveUp(roots: [ids[2]]))
+        #expect(session.document.blocks.map(\.id) == [ids[2], ids[0], ids[1], ids[3]])
+        #expect(callbacks == 1)
+        #expect(drag.move(roots: [ids[1], ids[0]], before: ids[3]))
+        #expect(session.document.blocks.map(\.id) == [ids[2], ids[0], ids[1], ids[3]])
+        #expect(drag.move(roots: [BlockID()], before: nil) == false)
+    }
+
+    @Test func dragKeyboardAlternativesNormalizeUnsortedRootsAndKeepSelectionIDsStable() {
+        let ids = (0..<5).map { value in BlockID(UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", 760 + value))!) }
+        let document = BlockDocument(blocks: [
+            .init(id: ids[0], kind: .bullet, inlineContent: .plain("A"), taskState: nil, indentLevel: 0),
+            .init(id: ids[1], kind: .bullet, inlineContent: .plain("A-child"), taskState: nil, indentLevel: 1),
+            .init(id: ids[2], kind: .bullet, inlineContent: .plain("B"), taskState: nil, indentLevel: 0),
+            .init(id: ids[3], kind: .bullet, inlineContent: .plain("B-child"), taskState: nil, indentLevel: 1),
+            .init(id: ids[4], kind: .bullet, inlineContent: .plain("C"), taskState: nil, indentLevel: 0)
+        ])
+        let selected = BlockEditorSelection.blocks(anchor: ids[2], focus: ids[3])
+        var callbacks = 0
+        let session = BlockEditorSession(noteID: NoteID(), editSessionID: UUID(), initialDocument: document, initialSelection: selected, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in callbacks += 1 })
+        let drag = BlockDragCoordinator(session: session)
+
+        #expect(drag.moveUp(roots: [ids[3], ids[2], BlockID()]))
+        #expect(session.document.blocks.map(\.id) == [ids[2], ids[3], ids[0], ids[1], ids[4]])
+        #expect(session.selection == selected)
+        #expect(callbacks == 1)
+        #expect(session.undoManager.canUndo)
+    }
+
+    @Test func sessionOwnsForwardAndReverseCrossHostPointerAndShiftSelectionProjections() {
+        let first = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000741")!)
+        let second = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000742")!)
+        let document = BlockDocument(blocks: [
+            .init(id: first, kind: .paragraph, inlineContent: .plain("甲👍🏽"), taskState: nil, indentLevel: 0),
+            .init(id: second, kind: .paragraph, inlineContent: .plain("乙文"), taskState: nil, indentLevel: 0)
+        ])
+        let caret = BlockEditorSelection.text(
+            anchor: .init(blockID: first, graphemeOffset: 0),
+            focus: .init(blockID: first, graphemeOffset: 0),
+            preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil)
+        )
+        let session = BlockEditorSession(
+            noteID: NoteID(), editSessionID: UUID(), initialDocument: document, initialSelection: caret,
+            focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in }
+        )
+        let firstToken = UUID()
+        let secondToken = UUID()
+        let firstView = BlockEditorTextView()
+        let secondView = BlockEditorTextView()
+        session.attach(blockID: first, hostToken: firstToken, textView: firstView)
+        session.attach(blockID: second, hostToken: secondToken, textView: secondView)
+        #expect(firstView.string == "甲👍🏽")
+        #expect(secondView.string == "乙文")
+
+        #expect(firstView.beginPointerSelection(atUTF16Offset: 1))
+        #expect(secondView.extendPointerSelection(toUTF16Offset: 1))
+        #expect(session.selection == .text(
+            anchor: .init(blockID: first, graphemeOffset: 1),
+            focus: .init(blockID: second, graphemeOffset: 1),
+            preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil)
+        ))
+        #expect(BlockSelectionController(selection: session.selection).projectedRange(for: first, document: document) == .init(location: 1, length: 4))
+        #expect(BlockSelectionController(selection: session.selection).projectedRange(for: second, document: document) == .init(location: 0, length: 1))
+        #expect(firstView.selectedRange == .init(location: 1, length: 4))
+        #expect(secondView.selectedRange == .init(location: 0, length: 1))
+
+        #expect(firstView.extendSelectionWithShift(toUTF16Offset: 1))
+        #expect(session.selection == .text(
+            anchor: .init(blockID: first, graphemeOffset: 1),
+            focus: .init(blockID: first, graphemeOffset: 1),
+            preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil)
+        ))
+        #expect(secondView.beginPointerSelection(atUTF16Offset: 1))
+        #expect(firstView.extendPointerSelection(toUTF16Offset: 1))
+        #expect(firstView.selectedRange == .init(location: 1, length: 4))
+        #expect(secondView.selectedRange == .init(location: 0, length: 1))
+    }
+
+    @Test func crossHostSelectionRoutesCopyCutDeleteFormattingAndLinkOnceEach() throws {
+        let first = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000745")!)
+        let second = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000746")!)
+        let document = BlockDocument(blocks: [
+            .init(id: first, kind: .paragraph, inlineContent: .plain("甲"), taskState: nil, indentLevel: 0),
+            .init(id: second, kind: .paragraph, inlineContent: .plain("乙"), taskState: nil, indentLevel: 0)
+        ])
+        let selection = BlockEditorSelection.text(
+            anchor: .init(blockID: first, graphemeOffset: 0),
+            focus: .init(blockID: second, graphemeOffset: 1),
+            preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil)
+        )
+
+        func session(counter: CallbackCounter) -> BlockEditorSession {
+            BlockEditorSession(
+                noteID: NoteID(), editSessionID: UUID(), initialDocument: document,
+                initialSelection: selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in counter.value += 1 }
+            )
+        }
+
+        let copyCallbacks = CallbackCounter()
+        let copy = session(counter: copyCallbacks)
+        #expect(try copy.dispatch(.copySelection).commandHandled)
+        #expect(copyCallbacks.value == 0)
+        #expect(copy.undoManager.canUndo == false)
+
+        let cutCallbacks = CallbackCounter()
+        let cut = session(counter: cutCallbacks)
+        #expect(try cut.dispatch(.cutSelection).commandHandled)
+        #expect(cutCallbacks.value == 1)
+        #expect(cut.undoManager.canUndo)
+
+        let deleteCallbacks = CallbackCounter()
+        let delete = session(counter: deleteCallbacks)
+        #expect(try delete.dispatch(.deleteSelection).commandHandled)
+        #expect(deleteCallbacks.value == 1)
+        #expect(delete.undoManager.canUndo)
+
+        let formatCallbacks = CallbackCounter()
+        let format = session(counter: formatCallbacks)
+        #expect(try format.dispatch(.toggleInlineMark(.bold)).commandHandled)
+        #expect(formatCallbacks.value == 1)
+        #expect(format.undoManager.canUndo)
+
+        let linkCallbacks = CallbackCounter()
+        let link = session(counter: linkCallbacks)
+        #expect(try link.dispatch(.setLink(URL(string: "https://example.com/path"))).commandHandled)
+        #expect(linkCallbacks.value == 1)
+        #expect(link.undoManager.canUndo)
+    }
+
+    @Test func hostedProductionDropHandlerDecodesPrivateStableIDsAndKeepsNoopAtomic() async throws {
+        let ids = (0..<3).map { value in BlockID(UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", 770 + value))!) }
+        let document = BlockDocument(blocks: ids.enumerated().map { index, id in
+            .init(id: id, kind: .paragraph, inlineContent: .plain("\(index)"), taskState: nil, indentLevel: 0)
+        })
+        let selection = BlockEditorSelection.text(anchor: .init(blockID: ids[0], graphemeOffset: 0), focus: .init(blockID: ids[0], graphemeOffset: 0), preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil))
+        let harness = try HostedBlockEditorHarness(document: document, selection: selection)
+        defer { harness.close() }
+        let session = try #require(harness.textView(for: ids[0]).attachedSession)
+        let handler = BlockDragDropHandler(session: session)
+        let payload = try handler.payloadData(for: [ids[2]])
+        let provider = handler.itemProvider(for: [ids[2]])
+
+        #expect(handler.performDrop(provider: provider, before: ids[0]))
+        for _ in 0..<8 { await Task.yield() }
+        #expect(harness.document.blocks.map(\.id) == [ids[2], ids[0], ids[1]])
+        #expect(harness.documents.count == 1)
+        #expect(session.undoManager.canUndo)
+        let endProvider = handler.itemProvider(for: [ids[0]])
+        #expect(handler.performDrop(provider: endProvider, before: nil))
+        for _ in 0..<8 { await Task.yield() }
+        #expect(harness.document.blocks.map(\.id) == [ids[2], ids[1], ids[0]])
+        #expect(harness.documents.count == 2)
+        #expect(handler.performDrop(data: payload, before: ids[2]))
+        #expect(harness.documents.count == 2)
+        #expect(handler.performDrop(data: Data("corrupt".utf8), before: ids[0]) == false)
+    }
+
+    @Test func hostedHandlesEnterForwardReverseBlockSelectionAndExposeKeyboardAccessibilityReorder() throws {
+        let ids = (0..<3).map { value in BlockID(UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", 780 + value))!) }
+        let document = BlockDocument(blocks: ids.enumerated().map { index, id in
+            .init(id: id, kind: .paragraph, inlineContent: .plain("\(index)"), taskState: nil, indentLevel: 0)
+        })
+        let selection = BlockEditorSelection.text(anchor: .init(blockID: ids[0], graphemeOffset: 0), focus: .init(blockID: ids[0], graphemeOffset: 0), preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil))
+        let harness = try HostedBlockEditorHarness(document: document, selection: selection)
+        defer { harness.close() }
+        let firstHandle = try harness.handle(for: ids[0])
+        let thirdHandle = try harness.handle(for: ids[2])
+        let session = try #require(harness.textView(for: ids[0]).attachedSession)
+
+        try harness.mouseDown(firstHandle, at: harness.centerWindowPoint(of: firstHandle))
+        try harness.mouseDown(thirdHandle, at: harness.centerWindowPoint(of: thirdHandle), modifiers: [.shift])
+        #expect(session.selection == .blocks(anchor: ids[0], focus: ids[2]))
+        #expect(try harness.textView(for: ids[0]).selectedRange == .init(location: 0, length: 1))
+        #expect(try harness.textView(for: ids[2]).selectedRange == .init(location: 0, length: 1))
+
+        try harness.mouseDown(thirdHandle, at: harness.centerWindowPoint(of: thirdHandle))
+        try harness.mouseDown(firstHandle, at: harness.centerWindowPoint(of: firstHandle), modifiers: [.shift])
+        #expect(session.selection == .blocks(anchor: ids[2], focus: ids[0]))
+        let actions = try #require(thirdHandle.accessibilityCustomActions())
+        #expect(actions.map(\.name) == ["Move Up", "Move Down"])
+        #expect(thirdHandle.performAccessibilityAction(named: "Move Up"))
+        #expect(harness.document.blocks.map(\.id) == [ids[0], ids[2], ids[1]])
+        #expect(session.selection == .blocks(anchor: ids[2], focus: ids[0]))
+        #expect(thirdHandle.performAccessibilityAction(named: "Move Down"))
+        #expect(harness.document.blocks.map(\.id) == ids)
+        harness.redraw()
+        try harness.keyDown(try harness.handle(for: ids[2]), keyCode: 126)
+        #expect(harness.document.blocks.map(\.id) == [ids[0], ids[2], ids[1]])
+    }
+
+    @Test func hostedTextViewsExposeStableAccessibilityIdentityValueRoleAndDividerSelection() throws {
+        let textID = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000790")!)
+        let dividerID = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000791")!)
+        let document = BlockDocument(blocks: [
+            .init(id: textID, kind: .paragraph, inlineContent: .plain("正文"), taskState: nil, indentLevel: 0),
+            .init(id: dividerID, kind: .divider, inlineContent: .plain(""), taskState: nil, indentLevel: 0)
+        ])
+        let selection = BlockEditorSelection.blocks(anchor: dividerID, focus: dividerID)
+        let harness = try HostedBlockEditorHarness(document: document, selection: selection)
+        defer { harness.close() }
+        let textView = try harness.textView(for: textID)
+        let dividerView = try harness.textView(for: dividerID)
+        #expect(textView.accessibilityIdentifier() == textID.rawValue.uuidString)
+        #expect(textView.accessibilityRole() == .textArea)
+        #expect(textView.accessibilityValue() == "正文")
+        #expect(textView.projectedAccessibilitySelected == false)
+        #expect(dividerView.accessibilityIdentifier() == dividerID.rawValue.uuidString)
+        #expect(dividerView.accessibilityRole() == .textArea)
+        #expect(dividerView.accessibilityValue() == "")
+        #expect(dividerView.projectedAccessibilitySelected)
+    }
+}
+
+@MainActor
+private func makeUndoSession(fixture: (document: BlockDocument, selection: BlockEditorSelection, blockID: BlockID)) -> BlockEditorSession {
+    BlockEditorSession(
+        noteID: NoteID(), editSessionID: UUID(), initialDocument: fixture.document,
+        initialSelection: fixture.selection, focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in }
+    )
+}
+
+private func undoFixture() -> (document: BlockDocument, selection: BlockEditorSelection, blockID: BlockID) {
+    let blockID = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000700")!)
+    let document = BlockDocument(blocks: [
+        .init(id: blockID, kind: .paragraph, inlineContent: .plain("a"), taskState: nil, indentLevel: 0)
+    ])
+    return (document, .text(
+        anchor: .init(blockID: blockID, graphemeOffset: 1),
+        focus: .init(blockID: blockID, graphemeOffset: 1),
+        preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil)
+    ), blockID)
+}
+
+private func isLegalConsumptionRow(
+    mutation: BlockInputMutation,
+    effect: BlockInputEffect,
+    undo: BlockUndoDirective
+) -> Bool {
+    switch (mutation, effect, undo) {
+    case (.none, .handled, .none),
+         (.none, .deferToTextSystem, .none),
+         (.none, .writeClipboard, .none),
+         (.none, .handled, .breakCoalescing),
+         (.selectionOnly, .handled, .none),
+         (.document, .handled, .coalesceTyping),
+         (.document, .handled, .atomic),
+         (.document, .writeClipboard, .atomic(.cut)):
+        true
+    default:
+        false
+    }
+}
+
+@MainActor
+private final class CallbackCounter {
+    var value = 0
+}
+
+@MainActor
+private final class HostedBlockEditorHarness {
+    private final class DocumentSink {
+        var documents: [BlockDocument] = []
+    }
+
+    let registry = EditorFocusRegistry()
+    let window: NSWindow
+    private let hostingView: NSHostingView<BlockEditorView>
+    private let sink: DocumentSink
+    private let initialDocument: BlockDocument
+    private let initialSelection: BlockEditorSelection
+    private let noteID: NoteID
+    private let editSessionID: UUID
+
+    var documents: [BlockDocument] { sink.documents }
+    var document: BlockDocument { sink.documents.last ?? initialDocument }
+
+    init(document: BlockDocument, selection: BlockEditorSelection) throws {
+        _ = NSApplication.shared
+        initialDocument = document
+        initialSelection = selection
+        let noteID = NoteID()
+        let editSessionID = UUID()
+        self.noteID = noteID
+        self.editSessionID = editSessionID
+        let sink = DocumentSink()
+        self.sink = sink
+        let root = BlockEditorView(
+            noteID: noteID, editSessionID: editSessionID, initialDocument: document,
+            initialSelection: selection, focusRegistry: registry,
+            onDocumentChange: { sink.documents.append($0) }
+        )
+        hostingView = NSHostingView(rootView: root)
+        window = NSWindow(
+            contentRect: .init(x: 80, y: 80, width: 520, height: 360),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false
+        )
+        window.contentView = hostingView
+        window.makeKeyAndOrderFront(nil)
+        redraw()
+        guard descendants(of: hostingView).count == document.blocks.count else {
+            throw HostedHarnessError.missingTextViews
+        }
+    }
+
+    func textView(for blockID: BlockID) throws -> BlockEditorTextView {
+        guard let textView = descendants(of: hostingView).first(where: { $0.representedBlockID == blockID }) else {
+            throw HostedHarnessError.missingTextViews
+        }
+        return textView
+    }
+
+    func handle(for blockID: BlockID) throws -> BlockSelectionHandleView {
+        guard let handle = handleDescendants(of: hostingView).first(where: { $0.representedBlockID == blockID }) else {
+            throw HostedHarnessError.missingTextViews
+        }
+        return handle
+    }
+
+    func mouseDown(_ view: BlockEditorTextView, at point: NSPoint, modifiers: NSEvent.ModifierFlags = []) throws {
+        let event = try mouseEvent(type: .leftMouseDown, location: point, modifiers: modifiers)
+        view.mouseDown(with: event)
+    }
+
+    func mouseDown(_ view: NSView, at point: NSPoint, modifiers: NSEvent.ModifierFlags = []) throws {
+        let event = try mouseEvent(type: .leftMouseDown, location: point, modifiers: modifiers)
+        view.mouseDown(with: event)
+    }
+
+    func mouseDragged(_ view: BlockEditorTextView, to point: NSPoint) throws {
+        let event = try mouseEvent(type: .leftMouseDragged, location: point)
+        view.mouseDragged(with: event)
+    }
+
+    func keyDown(_ view: NSView, keyCode: UInt16) throws {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: keyCode
+        ) else { throw HostedHarnessError.couldNotCreateEvent }
+        view.keyDown(with: event)
+    }
+
+    func redraw() {
+        hostingView.frame = window.contentView?.bounds ?? .zero
+        hostingView.needsLayout = true
+        hostingView.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        hostingView.layoutSubtreeIfNeeded()
+    }
+
+    func redrawWithEquivalentRoot() {
+        hostingView.rootView = makeRoot()
+        redraw()
+    }
+
+    func close() { window.orderOut(nil) }
+
+    func centerWindowPoint(of view: NSView) -> NSPoint {
+        view.convert(.init(x: view.bounds.midX, y: view.bounds.midY), to: nil)
+    }
+
+    private func mouseEvent(
+        type: NSEvent.EventType,
+        location: NSPoint,
+        modifiers: NSEvent.ModifierFlags = []
+    ) throws -> NSEvent {
+        guard let event = NSEvent.mouseEvent(
+            with: type,
+            location: location,
+            modifierFlags: modifiers,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        ) else { throw HostedHarnessError.couldNotCreateEvent }
+        return event
+    }
+
+    private func makeRoot() -> BlockEditorView {
+        BlockEditorView(
+            noteID: noteID, editSessionID: editSessionID, initialDocument: initialDocument,
+            initialSelection: initialSelection, focusRegistry: registry,
+            onDocumentChange: { [sink] in sink.documents.append($0) }
+        )
+    }
+
+    private func descendants(of view: NSView) -> [BlockEditorTextView] {
+        let own = (view as? BlockEditorTextView).map { [$0] } ?? []
+        return own + view.subviews.flatMap(descendants(of:))
+    }
+
+    private func handleDescendants(of view: NSView) -> [BlockSelectionHandleView] {
+        let own = (view as? BlockSelectionHandleView).map { [$0] } ?? []
+        return own + view.subviews.flatMap(handleDescendants(of:))
+    }
+}
+
+private enum HostedHarnessError: Error {
+    case missingTextViews
+    case couldNotCreateEvent
+}

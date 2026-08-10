@@ -17,6 +17,7 @@ struct PersonalCalendarApp: App {
     @State private var environment: AppEnvironment
     @StateObject private var routeState: WorkspaceRouteState
     @StateObject private var newItemRouter: WorkspaceNewItemRouter
+    @StateObject private var editorFocusRegistry: EditorFocusRegistry
     @AppStorage(CalendarAppearancePreference.storageKey)
     private var appearancePreferenceRaw = CalendarAppearancePreference.light.rawValue
 
@@ -27,6 +28,7 @@ struct PersonalCalendarApp: App {
             features: initialEnvironment.features
         ))
         _newItemRouter = StateObject(wrappedValue: WorkspaceNewItemRouter())
+        _editorFocusRegistry = StateObject(wrappedValue: EditorFocusRegistry())
     }
 
     private var appearancePreference: CalendarAppearancePreference {
@@ -57,7 +59,7 @@ struct PersonalCalendarApp: App {
                 newItemRouter: newItemRouter,
                 features: environment.features
             )
-            CalendarUndoCommands(store: environment.store)
+            CalendarUndoCommands(store: environment.store, focusRegistry: editorFocusRegistry)
             if CalendarAppCommandPolicy.installsBackupCommands(in: .mainCalendar) {
                 BackupCommands(store: environment.store, rollbackDirectory: environment.dataURLs.rollbackDirectory)
             }
