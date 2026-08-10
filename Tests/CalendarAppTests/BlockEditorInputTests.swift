@@ -997,7 +997,7 @@ struct BlockEditorInputTests {
             let converted = DocumentBlock(
                 id: id,
                 kind: kind,
-                inlineContent: kind == .code ? .plain("") : .init(spans: []),
+                inlineContent: .plain(""),
                 taskState: kind == .task ? .init(completedAt: nil) : nil,
                 indentLevel: 0,
                 codeInfoString: codeInfo
@@ -1050,6 +1050,63 @@ struct BlockEditorInputTests {
             effect: .deferToTextSystem,
             undo: .none
         ))
+    }
+
+    @Test func compositeMarkdownConversionPreservesLeadingZeroLengthSpansAndAdjacentAttributesExactly() throws {
+        let id = blockID(474)
+        let zeroItalic = InlineSpan(text: "", marks: [.italic])
+        let zeroCode = InlineSpan(text: "", marks: [.code], linkURL: exactLinkURL)
+        let suffix: [InlineSpan] = [
+            .init(text: "中", marks: [.bold]),
+            .init(text: "文", marks: [.bold]),
+            .init(text: "🙂", marks: [.italic])
+        ]
+        let original = doc([DocumentBlock(
+            id: id,
+            kind: .paragraph,
+            inlineContent: .init(spans: [zeroItalic, zeroCode] + suffix),
+            taskState: nil,
+            indentLevel: 0
+        )])
+        let conversions: [(String, BlockKind, String?)] = [
+            ("# ", .heading1, nil),
+            ("## ", .heading2, nil),
+            ("### ", .heading3, nil),
+            ("- ", .bullet, nil),
+            ("* ", .bullet, nil),
+            ("1. ", .ordered, nil),
+            ("[] ", .task, nil),
+            ("[ ] ", .task, nil),
+            ("> ", .quote, nil),
+            ("``` ", .code, nil),
+            ("```swift ", .code, "swift")
+        ]
+
+        for (prefix, kind, codeInfo) in conversions {
+            let expectedContent: InlineContent = kind == .code
+                ? .plain("中文🙂")
+                : .init(spans: [zeroItalic, zeroCode] + suffix)
+            let expected = BlockInputResult(
+                document: doc([DocumentBlock(
+                    id: id,
+                    kind: kind,
+                    inlineContent: expectedContent,
+                    taskState: kind == .task ? .init(completedAt: nil) : nil,
+                    indentLevel: 0,
+                    codeInfoString: codeInfo
+                )]),
+                selection: kind == .code
+                    ? caret(id, 0)
+                    : caret(id, 0, attributes: .init(marks: [.bold], linkURL: nil)),
+                mutation: .document,
+                effect: .handled,
+                undo: .atomic(.conversion)
+            )
+            #expect(
+                try reduce(original, caret(id, 0), .insertTextApplyingMarkdownShortcut(prefix)) == expected,
+                Comment(rawValue: prefix.debugDescription)
+            )
+        }
     }
 
     @Test(arguments: SlashExactFixture.all)

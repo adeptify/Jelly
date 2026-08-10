@@ -279,10 +279,19 @@ private extension BlockTypingAttributes {
 private extension ReductionContext {
     mutating func insertTextApplyingMarkdownShortcut(_ value: String) throws -> BlockInputResult {
         let startedCollapsed: Bool
+        let originalCaret: BlockTextPosition?
+        let preservedZeroLengthSpans: [InlineSpan]
         if case let .text(anchor, focus, _, _) = selection {
             startedCollapsed = anchor == focus
+            originalCaret = startedCollapsed ? anchor : nil
+            preservedZeroLengthSpans = startedCollapsed
+                ? document.blocks.first(where: { $0.id == anchor.blockID })?
+                    .inlineContent.zeroLengthSpans(at: anchor.graphemeOffset) ?? []
+                : []
         } else {
             startedCollapsed = false
+            originalCaret = nil
+            preservedZeroLengthSpans = []
         }
         let inserted = try insertText(value)
         guard startedCollapsed, inserted.mutation == .document else { return inserted }
@@ -291,7 +300,18 @@ private extension ReductionContext {
         selection = inserted.selection
         let converted = try applyMarkdownShortcut()
         guard converted.mutation == .document else { return inserted }
-        return converted
+        guard !preservedZeroLengthSpans.isEmpty,
+              let originalCaret,
+              let index = converted.document.blocks.firstIndex(where: { $0.id == originalCaret.blockID }),
+              converted.document.blocks[index].kind != .code else { return converted }
+        var candidate = converted.document
+        candidate.blocks[index].inlineContent.spans.insert(contentsOf: preservedZeroLengthSpans, at: 0)
+        return try documentResult(
+            candidate,
+            selection: converted.selection,
+            effect: converted.effect,
+            undo: converted.undo
+        )
     }
 
     mutating func insertText(_ value: String) throws -> BlockInputResult {
@@ -1365,6 +1385,18 @@ private extension ReductionContext {
 }
 
 private extension InlineContent {
+    func zeroLengthSpans(at offset: Int) -> [InlineSpan] {
+        var cursor = 0
+        var matches: [InlineSpan] = []
+        for span in spans {
+            if span.text.isEmpty, cursor == offset {
+                matches.append(span)
+            }
+            cursor += span.text.count
+        }
+        return matches
+    }
+
     func span(containingGrapheme target: Int) -> InlineSpan? {
         guard target >= 0 else { return nil }
         var cursor = 0
