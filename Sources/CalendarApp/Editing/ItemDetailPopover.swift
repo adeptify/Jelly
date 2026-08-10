@@ -1,16 +1,19 @@
 import CalendarDomain
 import SwiftUI
+import WorkspaceDomain
 
 struct ItemDetailPopover: View {
     let item: ProjectedItem
     let store: WorkspaceStore
     let categories: [CalendarCategory]
     let onClose: () -> Void
+    var onOpenNote: (NoteID) -> Void = { _ in }
     @State private var pendingAction: DetailAction?
     @State private var editorConfiguration: ItemEditorConfiguration?
     @State private var deleteConfirmationShown = false
     @State private var localError: String?
     @State private var recoveryAction: WorkspaceRecoveryAction?
+    @State private var noteRelationModel: CalendarNoteIntegrationModel?
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: CalendarSemanticAppearance {
@@ -80,6 +83,14 @@ struct ItemDetailPopover: View {
                         .fill(theme.subtleBorder.opacity(0.16))
                 )
             }
+            if let noteRelationModel {
+                Divider()
+                CalendarNoteRelationPopover(
+                    model: noteRelationModel,
+                    store: store,
+                    onOpenNote: onOpenNote
+                )
+            }
             if let message = localError {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(message).font(.footnote).foregroundStyle(theme.error)
@@ -96,6 +107,16 @@ struct ItemDetailPopover: View {
                 Button("删除", role: .destructive) { begin(.delete) }
                     .disabled(store.phase != .ready)
                 Spacer()
+            }
+        }
+        .onAppear {
+            if noteRelationModel == nil {
+                noteRelationModel = CalendarNoteIntegrationModel(
+                    target: calendarTarget(for: item),
+                    store: store
+                )
+            } else {
+                noteRelationModel?.refresh()
             }
         }
         .padding(18)
@@ -209,6 +230,15 @@ struct ItemDetailPopover: View {
 
     private static func dateString(_ date: CalendarDate) -> String {
         String(format: "%04d-%02d-%02d", date.year, date.month, date.day)
+    }
+
+    private func calendarTarget(for item: ProjectedItem) -> CalendarTargetID {
+        switch item {
+        case let .item(calendarItem):
+            .item(calendarItem.id)
+        case let .occurrence(occurrence):
+            .occurrence(occurrence.key)
+        }
     }
 }
 
