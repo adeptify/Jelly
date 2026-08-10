@@ -2072,76 +2072,280 @@ git commit -m "feat(notes): 交付极简结构化 Block 编辑器"
 
 ## Task 10: Deliver the First Notes Vertical Slice and Restart Recovery
 
+**Produces:** A visible Notes tab with create/select/edit, title + Block content, debounced Journal-first autosave, truthful close protection and restart recovery choice.
+
+**Consumes:** An independently approved Task 9 BlockEditor, WorkspaceStore, the single PersonalCalendarApp EditorFocusRegistry, DraftJournalCoordinator and BlockMarkdownCodec.
+
+### Task 10 hard entry Gate
+
+- [ ] Do not create a Task 10 production file until the frozen Task 9 package has a fresh Sol review verdict of `0 Critical / 0 Important`. Any Task 9 API change made for Task 10 receives a scoped Task 9 re-review before Notes is feature-enabled.
+- [ ] Re-run the Task 9 focused, Task 8, CalendarApp, full and Release gates. The Task 10 implementation may consume only the reviewed `(noteID, editSessionID)` session surface.
+
+~~~zsh
+./Scripts/test.sh --filter CalendarAppTests.BlockEditorBridgeTests
+./Scripts/test.sh --filter CalendarAppTests.BlockEditorUndoTests
+./Scripts/test.sh --filter CalendarAppTests.BlockEditorAccessibilityTests
+./Scripts/test.sh --filter CalendarAppTests.CalendarUndoCommandRoutingTests
+./Scripts/test.sh --filter CalendarAppTests.BlockEditorInputTests
+./Scripts/test.sh --filter CalendarAppTests.WorkspaceCommandRoutingTests
+./Scripts/test.sh --filter CalendarAppTests
+./Scripts/test.sh
+swift build -c release
+~~~
+
+### Task 10A: Store-owned two-phase draft protection and restart recovery
+
+**Files**
+
+- Modify: Sources/WorkspaceDomain/DraftContracts.swift
+- Modify: Sources/CalendarPersistence/DraftJournal.swift
+- Modify: Sources/CalendarPersistence/DraftJournalRepository.swift
+- Modify: Sources/CalendarApp/Workspace/DraftJournalCoordinator.swift
+- Modify: Sources/CalendarApp/Workspace/WorkspaceStore.swift
+- Modify: Sources/CalendarApp/Workspace/WorkspaceMutationOutcomePresenter.swift
+- Modify: Sources/CalendarApp/Backup/BackupRecoveryPolicy.swift
+- Modify: Sources/CalendarApp/Backup/BackupCommands.swift
+- Modify: Tests/CalendarPersistenceTests/DraftJournalRepositoryTests.swift
+- Create: Tests/CalendarPersistenceTests/DraftJournalRecoveryRepositoryTests.swift
+- Modify: Tests/CalendarAppTests/DraftJournalCoordinatorTests.swift
+- Modify: Tests/CalendarAppTests/WorkspaceStoreTests.swift
+- Create: Tests/CalendarAppTests/NoteDraftRecoveryStoreTests.swift
+- Modify: Tests/CalendarAppTests/WorkspaceMutationPresentationTests.swift
+- Modify: Tests/CalendarAppTests/BackupRecoveryPolicyTests.swift
+
+- [ ] Preserve `submitDraft(_:)` as a compatibility wrapper, but make the authoritative path two-stage and Store-owned. UI code never receives a Journal repository and never performs a sidecar write itself. Lock internal public-shaped contracts with semantics equivalent to:
+
+~~~swift
+// CalendarApp/Workspace/WorkspaceStore.swift. This type is internal to the
+// app module so its fileprivate initializer and capability never cross a
+// module boundary; Notes code can only pass back a Store-issued value.
+struct ProtectedNoteDraft: Equatable, Sendable {
+    fileprivate let capability: UUID
+    let identityAndGeneration: DraftJournalIdentityAndGeneration
+    let noteSnapshotChecksum: String
+    let journalChecksum: String
+}
+
+enum DraftProtectionOutcome: Equatable, Sendable {
+    case protected(ProtectedNoteDraft)
+    case superseded(currentGeneration: UInt64)
+}
+
+struct DraftRecoveryToken: Hashable, Codable, Sendable {
+    let identityAndGeneration: DraftJournalIdentityAndGeneration
+    let noteSnapshotChecksum: String
+    let journalChecksum: String
+}
+
+struct DraftRecoveryCandidate: Equatable, Sendable {
+    let token: DraftRecoveryToken
+    let draft: Note
+    let persisted: Note?
+    let updatedAt: Date
+}
+
+enum DraftRecoveryAction: Equatable, Sendable {
+    case restoreAsCurrent
+    case keepPersisted
+    case saveAsNew(noteID: NoteID, blockIDs: [BlockID])
+}
+
+func protectDraft(_ submission: NoteDraftSubmission) async throws -> DraftProtectionOutcome
+func commitProtectedDraft(_ protected: ProtectedNoteDraft) async throws -> WorkspaceTransactionOutcome
+func resolveDraftRecovery(_ token: DraftRecoveryToken, action: DraftRecoveryAction) async throws -> WorkspaceTransactionOutcome
+~~~
+
+- [ ] Put `DraftRecoveryToken` (and only the non-authorizing exact record identity needed by Persistence) in `WorkspaceDomain/DraftContracts.swift` with public Codable access so `DraftJournalRepository` can compare it. The token is forgeable but not authority: compare-and-discard succeeds only against the exact locked record. Keep `ProtectedNoteDraft`, `DraftProtectionOutcome`, `DraftRecoveryCandidate` and `DraftRecoveryAction` internal to CalendarApp; only the protected capability is authorization.
+- [ ] `ProtectedNoteDraft` lives in the same `WorkspaceStore.swift` file as its `fileprivate` initializer/capability; do not place an inaccessible `fileprivate` member in `WorkspaceDomain`. It is an opaque, Store-issued, single-use capability. The Store retains `capability → complete frozen NoteDraftSubmission`, including base snapshot/checksum, base task links, modified fields and every deletion disposition. `commitProtectedDraft` accepts no replacement submission and queues only the frozen value. A newer protected generation invalidates the older capability; first commit attempt consumes it into the queue/pending record, and replay cannot queue or save twice. After a definite `.notCommitted` has exact-unbound the same bare Journal generation, `protectDraft` may issue one fresh capability for that still-current exact record; the consumed capability remains invalid. Restart loses in-memory capabilities and exposes the durable bare record only through the recovery flow.
+- [ ] `DraftJournalRepository` performs protect/supersede and recovery discard under its existing cross-process advisory lock. Add an atomic compare-and-discard keyed by exact identity, generation, entry checksum and note snapshot checksum. A stale preview can never delete or replace a newer generation. Keep the old `persist` API as a compatibility wrapper over the same single algorithm.
+- [ ] `commitProtectedDraft` never writes the Journal again. It verifies that the Store-owned capability still identifies the current bare record, then queues only its frozen submission. A newer record returns `.draftSuperseded`; missing/mismatched/corrupt evidence fails closed. The existing queue, rebase-and-bind, receipt, uncertain commit and cleanup machinery remains the only main-file writer.
+- [ ] Extend startup recovery from the current `publishedDraftNotPersisted` freeze to an observable `.needsDraftRecovery` phase with validated `DraftRecoveryCandidate`s. Exact persisted receipts are silently acknowledged/cleared. Bare materially different records become candidates; corrupt bytes remain errors and are never treated as absent. Resolving one identity cannot change another record.
+- [ ] `restoreAsCurrent` is one queued revision. It overwrites the current Note with the reviewed snapshot, or recreates the same Note ID if absent. Recovery relation rules are exact and are derived from the current Workspace graph plus the reviewed draft, never from guessed historical edges: a retained linked Task Block is normalized to the current Calendar item's `completedAt`; a removed or non-task replacement unlinks and keeps the Calendar item; a missing/dangling Calendar side leaves the Journal untouched and enters relationship repair. A link added after the draft is retained when its Block survives, with the same completion normalization. `saveAsNew` requires fresh Block IDs whose count equals the draft block count, maps them in document order, rejects duplicate/source IDs, carries zero task/calendar relations, preserves task completion as independent content, and resets archive/revision/timestamps through the reducer. Both clear the original recovery record only after the main save is committed; commit-uncertain parks a typed draft-recovery completion so reconciliation publishes/resolves the reviewed identity exactly once. `keepPersisted` performs only the exact compare-and-discard.
+- [ ] Add `JournalCleanupStep.discardRecovery` (or an equivalent typed step) and retain the exact recovery token for retry. Update every exhaustive `WorkspaceStorePhase` and `JournalCleanupStep` consumer in this file list in the same compile slice; `BackupRecoveryPolicy`, `BackupCommands` and `WorkspaceMutationOutcomePresenter` must expose the exact recovery identity/step and never relabel discard as ordinary receipt cleanup. If post-commit discard fails, publish the committed state once and enter cleanup-pending; if keep-persisted discard fails, do not claim the draft was dismissed. Retry never replays the main save.
+- [ ] `.needsDraftRecovery` blocks ordinary mutation, backup restore and external reload until every candidate and cleanup is resolved. It still permits read-only main-file backup plus explicit draft copy/Markdown export; opaque-primary raw export retains its existing repository precondition. Backup policy and menu labels must describe draft recovery rather than offering an action that Store will reject. The last exact candidate/cleanup transition alone restores the previous valid Store phase.
+- [ ] Because the current Journal has one record per identity, `.commitPending` and every Journal cleanup-pending state are temporarily read-only: title, Block, category and archive edits do not create or protect a successor generation until reconcile/cleanup reaches a terminal state. `.notCommitted` restores editing only after exact unbind; committed reconcile refreshes the base snapshot/revision before editing resumes. This Task does not introduce a hidden second pending/successor record.
+- [ ] Write public RED first. Cover opaque capability construction/replay, complete frozen submission binding, exact generation/checksum, supersede, multi-record isolation, exact persisted receipt cleanup, bare candidate publication, missing Note, retained/removed/new/dangling task links, restore current, save-as-new ordered ID remap, keep persisted, stale discard, corrupt Journal raw-byte preservation, commitPending/read-only/notCommitted-unbind/resume/sourceChanged/unreadable and every recovery cleanup failure. Cover `.needsDraftRecovery` backup/restore/reload policy and raw evidence preservation. Task 10A has no debounce or Notes UI test.
+
+~~~zsh
+./Scripts/test.sh --filter CalendarPersistenceTests.DraftJournalRecoveryRepositoryTests
+./Scripts/test.sh --filter CalendarAppTests.NoteDraftRecoveryStoreTests
+swift build --target CalendarApp
+./Scripts/test.sh --filter CalendarPersistenceTests.DraftJournalRepositoryTests
+./Scripts/test.sh --filter CalendarAppTests.DraftJournalCoordinatorTests
+./Scripts/test.sh --filter CalendarAppTests.WorkspaceStoreTests
+./Scripts/test.sh --filter CalendarAppTests.WorkspaceMutationPresentationTests
+./Scripts/test.sh --filter CalendarAppTests.BackupRecoveryPolicyTests
+git diff --check
+~~~
+
+- [ ] Request fresh Sol xhigh review of Task 10A, fix every Critical/Important finding, explicitly stage only the 10A file list, verify the cached file list and commit it before creating 10B tests.
+
+~~~zsh
+git add Sources/WorkspaceDomain/DraftContracts.swift Sources/CalendarPersistence/DraftJournal.swift Sources/CalendarPersistence/DraftJournalRepository.swift Sources/CalendarApp/Workspace/DraftJournalCoordinator.swift Sources/CalendarApp/Workspace/WorkspaceStore.swift Sources/CalendarApp/Workspace/WorkspaceMutationOutcomePresenter.swift Sources/CalendarApp/Backup/BackupRecoveryPolicy.swift Sources/CalendarApp/Backup/BackupCommands.swift Tests/CalendarPersistenceTests/DraftJournalRepositoryTests.swift Tests/CalendarPersistenceTests/DraftJournalRecoveryRepositoryTests.swift Tests/CalendarAppTests/DraftJournalCoordinatorTests.swift Tests/CalendarAppTests/WorkspaceStoreTests.swift Tests/CalendarAppTests/NoteDraftRecoveryStoreTests.swift Tests/CalendarAppTests/WorkspaceMutationPresentationTests.swift Tests/CalendarAppTests/BackupRecoveryPolicyTests.swift
+git diff --cached --name-only
+git commit -m "feat(notes): 建立草稿保护与重启恢复"
+~~~
+
+### Task 10B: Notes browser, derived search/archive truth and debounced autosave model
+
+**Files**
+
+- Create: Sources/CalendarApp/Notes/NotesViewModel.swift
+- Create: Sources/CalendarApp/Notes/NoteAutosaveCoordinator.swift
+- Create: Sources/CalendarApp/Notes/NoteCloseProtectionBridge.swift
+- Create: Tests/CalendarAppTests/NotesWorkspaceViewModelTests.swift
+- Create: Tests/CalendarAppTests/NoteAutosaveCoordinatorTests.swift
+- Create: Tests/CalendarAppTests/NoteCloseProtectionTests.swift
+
+- [ ] Add an injected scheduler and a single generation owner. Every title, Block or category draft edit increments `draftGeneration` and computes the complete `NoteDraftSubmission` from the selected session's immutable base Note, base checksum, base task links, modified fields and required linked-block dispositions. Archive/restore are not draft edits and never create an `archivedAt` generation. No view constructs a partial submission.
+- [ ] Debounce from the latest edit timestamp: at 150ms protect only the latest generation; at 650ms total commit that exact protected token. A newer edit cancels both old timers. `flushLatest` is one MainActor-linearized barrier shared by selection change, route change, app inactive, window close and termination. It has two explicit stages: first enter `.finalizingNativeInput(permit)` and invoke the injected 10B finalizer contract. During that stage ordinary edits and stale hosts are rejected, while exactly one authoritative callback carrying the exact `(nonce, noteID, editSessionID, activeHostToken)` permit may commit the current marked candidate and synchronously increment generation; the permit is consumed once. If finalization succeeds (including no pending candidate), enter sealed read-only state, capture `(identity, generation, noteSnapshotChecksum)`, then protect/commit that exact value. As a defensive invariant, if generation/checksum nevertheless changes while awaiting Journal/main I/O, the barrier loops from finalization/protection for the new latest value and never releases a caller on an older result. Concurrent inactive+close+route callers await the same task; success is returned only when the terminal receipt/protection identity equals the then-current latest triple. Finalization failure does not capture or persist anything, keeps the window/route/selection unchanged and returns to the truthful editable state. Once a commit is uncertain, no later generation is submitted until the exact pending transaction is reconciled.
+- [ ] Lock a complete `NoteAutosaveState` mapping for `.committed`, `.noChange`, `.conflict`, `.draftSuperseded`, `.commitPending`, `.notCommitted`, `.externalSourceChanged`, `.persistenceBlocked` and Journal cleanup-pending. A definite main failure after exact unbind stays editable and says `保存失败—草稿已保护`; commit-uncertain and cleanup-pending are visibly read-only until their exact retry completes; protection failure says the draft is not protected and blocks silent close. No non-throw outcome is silently promoted to saved.
+- [ ] `NoteCloseProtectionBridge` owns the real main-window/application lifecycle seam. It returns false/terminate-later while the shared linearized flush is pending, closes after the exact current generation is protected-or-persisted, and keeps the window open when Journal and main protection both fail until explicit copy/export succeeds. A result for generation N never closes while generation N+1 exists. `.onDisappear` alone is not accepted as close protection.
+- [ ] Deliver deterministic in-memory browser truth in Task 10: Chinese title plus concatenated Block-text search; search ∩ shared-category filter; 最近编辑 sorted by `updatedAt desc`, then `note.id.rawValue.uuidString.lowercased()` ascending; 全部 and 归档 partitions. Archived Notes are excluded from recent/all and shown only in 归档. Task 14 may replace this with a rebuildable persisted index but must preserve the same result contract.
+- [ ] Create/select/archive/restore/delete-selection fallback are queued Workspace commands. Archiving first requires the latest draft to be committed to the main file—not merely Journal-protected—then sends exactly one `.archiveNote`; restore sends one `.restoreNote`. A protected-only/main-failed draft does not archive. Only a successful archive/restore changes selection; use the item now occupying the same displayed index or the preceding item, and show a real empty state when none remain. Category definitions always come from the shared Workspace calendar categories; category edits on a Note are Journal-protected draft fields.
+- [ ] Define the native-input finalizer as an injected 10B contract/closure using only `noteID`, `editSessionID`, active host token and an opaque nonce generated and consumed by the MainActor `NoteAutosaveCoordinator` barrier owner. This nonce authorizes only one current-editor native callback; it is not WorkspaceStore/Journal authority and never crosses into Persistence. 10B must compile and test without any AppKit/Task 9 production type. The 10C editor supplies the real implementation. Write RED for 149/150ms and 649/650ms, continuous generations, exact permitted terminal callback accepted once, duplicate/ordinary/stale-host callbacks rejected, edit-during-await, exact latest-triple comparison, concurrent inactive+close+route callers sharing one barrier, pending/cleanup read-only and terminal resume, selection-save races, each Store outcome, Journal/main dual failure, copy/export close release, Chinese title/body search, category intersection, exact UUID-string tie break, recent/all/archive, committed-flush-before-archive, archive failure selection stability, restore once and no second Journal repository.
+
+~~~zsh
+./Scripts/test.sh --filter CalendarAppTests.NotesWorkspaceViewModelTests
+./Scripts/test.sh --filter CalendarAppTests.NoteAutosaveCoordinatorTests
+./Scripts/test.sh --filter CalendarAppTests.NoteCloseProtectionTests
+swift build --target CalendarApp
+git diff --check
+~~~
+
+- [ ] Request fresh Sol xhigh review of Task 10B, fix every Critical/Important finding, explicitly stage only the 10B file list, verify the cached file list and commit it before creating 10C tests.
+
+~~~zsh
+git add Sources/CalendarApp/Notes/NotesViewModel.swift Sources/CalendarApp/Notes/NoteAutosaveCoordinator.swift Sources/CalendarApp/Notes/NoteCloseProtectionBridge.swift Tests/CalendarAppTests/NotesWorkspaceViewModelTests.swift Tests/CalendarAppTests/NoteAutosaveCoordinatorTests.swift Tests/CalendarAppTests/NoteCloseProtectionTests.swift
+git diff --cached --name-only
+git commit -m "feat(notes): 建立笔记浏览与自动保存"
+~~~
+
+### Task 10C: Editor identity, Markdown and production Notes composition
+
 **Files**
 
 - Create: Sources/CalendarApp/Notes/NotesSplitView.swift
 - Create: Sources/CalendarApp/Notes/NoteBrowserView.swift
 - Create: Sources/CalendarApp/Notes/NoteEditorView.swift
-- Create: Sources/CalendarApp/Notes/NotesViewModel.swift
-- Create: Sources/CalendarApp/Notes/NoteAutosaveCoordinator.swift
+- Create: Sources/CalendarApp/Notes/NoteTitleTextField.swift
 - Create: Sources/CalendarApp/Notes/DraftRecoverySheet.swift
 - Create: Sources/CalendarApp/Notes/NoteMarkdownCommands.swift
-- Modify: Sources/CalendarApp/AppShell/WorkspaceRoute.swift
+- Modify: Sources/CalendarApp/Notes/BlockEditor/BlockEditorSelection.swift
+- Modify: Sources/CalendarApp/Notes/BlockEditor/BlockInputReducer.swift
+- Modify: Sources/CalendarApp/Notes/BlockEditor/BlockEditorView.swift
+- Modify: Sources/CalendarApp/Notes/BlockEditor/BlockEditorSession.swift
+- Modify: Sources/CalendarApp/Notes/BlockEditor/BlockEditorTextView.swift
 - Modify: Sources/CalendarApp/AppShell/AppShellView.swift
-- Modify: Sources/CalendarApp/AppShell/WorkspaceNavigationRail.swift
-- Create: Tests/CalendarAppTests/NotesWorkspaceViewModelTests.swift
-- Create: Tests/CalendarAppTests/NoteAutosaveCoordinatorTests.swift
+- Modify: Sources/CalendarApp/PersonalCalendarApp.swift
+- Create: Tests/CalendarAppTests/NotesEditorIdentityTests.swift
 - Create: Tests/CalendarAppTests/DraftRecoveryPresentationTests.swift
 - Create: Tests/CalendarAppTests/NoteMarkdownCommandTests.swift
+- Modify: Tests/CalendarAppTests/BlockEditorInputTests.swift
+- Modify: Tests/CalendarAppTests/BlockEditorUndoTests.swift
+- Modify: Tests/CalendarAppTests/AppEnvironmentWorkspaceCutoverTests.swift
 
-**Produces:** A visible Notes tab with create/select/edit, title + Block content, debounced Journal-first autosave, save state and restart recovery choice.
-
-**Consumes:** WorkspaceStore, BlockEditor, the single PersonalCalendarApp EditorFocusRegistry and DraftJournalCoordinator.
-
-- [ ] Write RED tests for create/select/delete-selection fallback, empty state, title edit, 150ms Journal and 650ms main-save debounce, coalesced generations, save failure, recovered-newer-draft preview, 恢复为当前版本, 保留磁盘版本, 另存为新笔记, Markdown import fidelity and Markdown export.
-
-~~~swift
-@Test func typingWritesJournalBeforeDebouncedMainSave() async throws {
-    let model = NotesViewModel(store: store, scheduler: scheduler)
-    model.select(noteID)
-    model.editTitle("新标题")
-    #expect(await journal.latest(noteID) == nil)
-    #expect(repository.saveCount == 0)
-    await scheduler.advance(by: .milliseconds(150))
-    #expect(await journal.latest(noteID)?.draftGeneration == 1)
-    #expect(repository.saveCount == 0)
-    await scheduler.advance(by: .milliseconds(500))
-    #expect(repository.saveCount == 1)
-}
-~~~
-
-- [ ] Run RED.
+- [ ] Define `EditorKey(noteID, editSessionID)` as the SwiftUI identity. Ordinary redraws, Store publications, autosave status and category truth changes preserve the same `BlockEditorSession` and UndoManager. Selection change first runs the same native-input terminalization plus exact-latest flush barrier for the old Note, then opens the new Note with a fresh editSessionID; switching back is an explicit reopen and also gets a fresh editSessionID. Recovery and save-as-new always create a new key.
+- [ ] Thread the exact `PersonalCalendarApp` `EditorFocusRegistry` object through AppShell → NotesSplitView → NoteEditorView → BlockEditorView. No Notes, view model, representable or preview creates another production registry. `NoteTitleTextField` registers its real field-editor UndoManager with that same registry while focused, so Command-Z in the title cannot fall back to Workspace undo; stale title/Block detach clears only its own owner token.
+- [ ] Add the production implementation of the injected `NoteNativeInputFinalizer`, owned by the current EditorKey. During `.finalizingNativeInput(permit)` it asks the real title field editor or active `BlockEditorTextView` to terminally commit marked text through the normal authoritative callback/reducer transaction carrying that permit; focus ownership means at most one current field editor may consume it. It never reads private marked storage into a parallel model and never silently calls cancel/discard. After the one permitted callback (or confirmed no candidate), the coordinator seals editing and captures the updated generation. If AppKit cannot commit a live composition, finalization fails closed, leaves the current route/window/EditorKey open and presents an explicit `请先完成或取消正在输入的文字` state; only an explicit user cancel may discard the candidate. A duplicate permit use or stale host/token cannot mutate, finalize or clear the current host.
+- [ ] Add a dedicated reducer-backed document-import command; do not reuse or widen the clipboard DTO. Its payload carries complete validated `DocumentBlock`s, including checked-task `completedAt`, and an explicit replace/append mode. Replace/append reject duplicate IDs and invalid documents before effects, preserve `[x]` task completion exactly, return one `.document/.handled/.atomic` result, and produce one session callback/undo. Clipboard payloads remain completion-free. Each accepted import stays in the current EditorKey; cancel and diagnostics produce zero changes. Directly replacing the `@StateObject` document is forbidden and the Task 8/9 API modification receives scoped reviews.
+- [ ] Add 导入 Markdown and 导出 Markdown under the Note more menu. Import shows `BlockMarkdownImportResult` diagnostics and an explicit replace/append/cancel choice. Export writes the canonical Markdown selected by the user, readbacks the chosen file and reports write failure truthfully.
+- [ ] Implement a collapsible two-column NotesSplitView. The left column contains search, shared-category filter, 最近编辑, 全部笔记, 归档, Note list and 新建. The right column contains borderless title, BlockEditor, category, exceptional save state and more. Reuse `CategoryManagerView(store:)`; do not create a fourth route or another category model. Inspiration remains hidden. Calendar links and `安排到日历` remain absent until Task 11 has a real transaction flow—no disabled or empty placeholder control.
+- [ ] `DraftRecoverySheet` renders the reviewed current/draft difference and the exact candidate token. It offers 恢复为当前版本, 保留磁盘版本 and 另存为新笔记; stale actions refresh rather than deleting newer evidence. Pending/cleanup/external/unreadable outcomes reuse the shared truthful recovery presentation and never claim saved.
+- [ ] Write RED through real `NSApplication` + key `NSWindow` + `NSHostingView` production composition for stable identity, Note switching, title-vs-Block undo routing, recovery key replacement, import undo, category reuse, close veto and absence of Task 11 controls. Add hosted IME-during-note-switch, route-change, window-close and termination cases for both title and Block input: the exact permit callback commits the candidate once before generation capture, while an ordinary callback and a stale/duplicate permit are rejected; otherwise the transition is vetoed with no candidate loss.
 
 ~~~zsh
-./Scripts/test.sh --filter CalendarAppTests.NotesWorkspaceViewModelTests
-./Scripts/test.sh --filter CalendarAppTests.NoteAutosaveCoordinatorTests
+./Scripts/test.sh --filter CalendarAppTests.NotesEditorIdentityTests
 ./Scripts/test.sh --filter CalendarAppTests.DraftRecoveryPresentationTests
 ./Scripts/test.sh --filter CalendarAppTests.NoteMarkdownCommandTests
-~~~
-
-- [ ] Implement a collapsible two-column NotesSplitView. The left column contains search, shared-category filter, 最近编辑, 全部笔记, 归档, Note list and 新建. The right column contains borderless title, BlockEditor and only category, exceptional save state, 安排到日历 and more at the top. Calendar relations appear on demand, not as a permanent side panel. Expose the shared Category manager from the Notes toolbar without making it a fourth route. Do not add AI buttons in V1. Thread the exact `PersonalCalendarApp` `EditorFocusRegistry` through AppShell → NotesSplitView → NoteEditorView → BlockEditorView; never create a module-local second registry. A selected Note gets a stable editSessionID until explicit recovery/reopen changes the authoritative draft.
-- [ ] Add 导入 Markdown and 导出 Markdown under the Note more menu. Import previews BlockMarkdownImportResult diagnostics before replacing/appending; cancel leaves the Note unchanged. Export writes the canonical Markdown selected by the user and reports write failure truthfully.
-- [ ] Enable Notes only after create/edit/autosave/recovery paths are wired. Inspiration remains hidden.
-- [ ] Every edit increments draftGeneration and computes checksum, coalesces Journal writes at 150ms, then saves the main Workspace at 650ms total. submitDraft carries only that Note snapshot/generation. Flush both layers on selection change, app inactive and window close.
-- [ ] On launch, validate journalChecksum, then compare Journal, persisted receipt and current Note snapshot. Silently discard exact persisted receipts; for a materially newer/different draft show a preview with 恢复为当前版本, 保留磁盘版本 and 另存为新笔记. Recovery and save-as-new are queued new revisions; choosing disk deletes only the exact reviewed Journal entry.
-- [ ] Show truthful states: 正在保护草稿, 草稿已保护, 正在保存, 已保存, 保存失败—草稿已保护, 已恢复草稿. Failed main save keeps editor editable and Journal intact. If Journal and main both fail, block silent close and offer copy/export.
-- [ ] Run GREEN and an isolated vertical integration test: raw V2 load/migrate, verify byte-exact snapshot plus manifest, create Note with stable ID, edit Block content, verify Journal protection precedes main save, persist, construct a fresh Store, reload, and verify the Note plus exact original CalendarState and calendar interaction projections.
-
-~~~zsh
-./Scripts/test.sh --filter CalendarAppTests.NotesWorkspaceViewModelTests
-./Scripts/test.sh --filter CalendarAppTests.NoteAutosaveCoordinatorTests
-./Scripts/test.sh --filter CalendarAppTests.DraftRecoveryPresentationTests
-./Scripts/test.sh --filter CalendarAppTests.NoteMarkdownCommandTests
-./Scripts/test.sh --filter CalendarAppTests.WorkspaceStoreTests
-./Scripts/test.sh --filter CalendarPersistenceTests.WorkspaceMigrationSnapshotTests
-swift build -c release
+./Scripts/test.sh --filter CalendarAppTests.BlockEditorInputTests
+./Scripts/test.sh --filter CalendarAppTests.BlockEditorBridgeTests
+./Scripts/test.sh --filter CalendarAppTests.BlockEditorUndoTests
+./Scripts/test.sh --filter CalendarAppTests.BlockEditorAccessibilityTests
+./Scripts/test.sh --filter CalendarAppTests.CalendarUndoCommandRoutingTests
+./Scripts/test.sh --filter CalendarAppTests
+./Scripts/test.sh
+swift build --target CalendarApp
 git diff --check
 ~~~
 
-- [ ] Commit.
+- [ ] Write the import reducer RED, add its public-shaped skeleton, run `swift build --target CalendarApp`, then implement behavior. Request fresh Sol xhigh review of the modified Task 8/9 surfaces; fix every Critical/Important finding, explicitly stage only the 10C file list, verify the cached file list and commit it.
 
 ~~~zsh
-git add Sources/CalendarApp/Notes Sources/CalendarApp/AppShell Tests/CalendarAppTests
+git add Sources/CalendarApp/Notes/NotesSplitView.swift Sources/CalendarApp/Notes/NoteBrowserView.swift Sources/CalendarApp/Notes/NoteEditorView.swift Sources/CalendarApp/Notes/NoteTitleTextField.swift Sources/CalendarApp/Notes/DraftRecoverySheet.swift Sources/CalendarApp/Notes/NoteMarkdownCommands.swift Sources/CalendarApp/Notes/BlockEditor/BlockEditorSelection.swift Sources/CalendarApp/Notes/BlockEditor/BlockInputReducer.swift Sources/CalendarApp/Notes/BlockEditor/BlockEditorView.swift Sources/CalendarApp/Notes/BlockEditor/BlockEditorSession.swift Sources/CalendarApp/Notes/BlockEditor/BlockEditorTextView.swift Sources/CalendarApp/AppShell/AppShellView.swift Sources/CalendarApp/PersonalCalendarApp.swift Tests/CalendarAppTests/NotesEditorIdentityTests.swift Tests/CalendarAppTests/DraftRecoveryPresentationTests.swift Tests/CalendarAppTests/NoteMarkdownCommandTests.swift Tests/CalendarAppTests/BlockEditorInputTests.swift Tests/CalendarAppTests/BlockEditorUndoTests.swift Tests/CalendarAppTests/AppEnvironmentWorkspaceCutoverTests.swift
+git diff --cached --name-only
+git commit -m "feat(notes): 组合笔记编辑与 Markdown 恢复界面"
+~~~
+
+### Task 10D: Feature activation and real V2 → V3 → restart vertical slice
+
+**Files**
+
+- Modify: Sources/CalendarApp/AppShell/WorkspaceRoute.swift
+- Modify: Sources/CalendarApp/AppShell/AppShellView.swift
+- Modify: Sources/CalendarApp/AppShell/WorkspaceNavigationRail.swift
+- Modify: Sources/CalendarApp/AppShell/WorkspaceCommands.swift
+- Modify: Sources/CalendarApp/AppShell/WorkspaceRouteState.swift
+- Create: Sources/CalendarApp/AppShell/WorkspaceRouteTransitionCoordinator.swift
+- Modify: Sources/CalendarApp/PersonalCalendarApp.swift
+- Create: Tests/CalendarAppTests/NotesVerticalIntegrationTests.swift
+- Modify: Tests/CalendarAppTests/WorkspaceNavigationTests.swift
+- Modify: Tests/CalendarAppTests/WorkspaceCommandRoutingTests.swift
+- Create: Tests/CalendarAppTests/WorkspaceRouteTransitionTests.swift
+
+- [ ] Keep `WorkspaceFeatures.production.notes == false` through 10A–10C. In 10D, first run the real integration RED, then set production to Notes enabled and Inspiration disabled. Production host composition must build one stable Notes module, rail/menu/Command-2/Command-N expose only enabled routes, and no `EmptyView`, fatal placeholder or Task 11 control is reachable.
+- [ ] Add one async `WorkspaceRouteTransitionCoordinator` used by the rail, menu and Command-1/2/3. Leaving Notes first awaits the same idempotent latest-generation flush barrier; only a protected-or-persisted terminal outcome activates the target once. Protection failure, commitPending/cleanup read-only, external-source or persistence block leaves the route and EditorKey unchanged. No user transition calls `WorkspaceRouteState.activate` directly after this cutover.
+- [ ] The vertical integration test uses real raw V2 bytes, `JSONWorkspaceRepository`, migration snapshot/manifest, DraftJournalRepository, WorkspaceStore, NotesViewModel and a fresh second repository/Store. It must prove this exact order:
+
+~~~text
+raw V2 bytes
+  → load/migrate + byte-exact snapshot and manifest
+  → host production AppShellView and activate the visible Notes route
+  → invoke the production 新建 action
+  → type through the real title field and BlockEditor callback
+  → exact Journal generation is durable before main save
+  → main Workspace persists
+  → construct a fresh repository and Store
+  → reload the exact Note
+  → original CalendarState and calendar interaction projections are unchanged
+~~~
+
+- [ ] Add restart recovery branches to the same real hosted/repository fixture: exact persisted receipt cleans silently; a newer bare draft presents recovery; keep/restore/save-as-new each affect only the reviewed identity; corrupt Journal preserves evidence and blocks a false success. A view-model-only test cannot satisfy this vertical Gate.
+- [ ] Run all Task 10 slices, Store/Persistence migrations, Task 9 regressions, CalendarApp, full, Release, fresh app bundle and an isolated data-directory GUI smoke. Automated metadata/hosted tests do not claim live VoiceOver; record unavailable GUI interactions truthfully.
+
+~~~zsh
+./Scripts/test.sh --filter CalendarAppTests.NoteDraftRecoveryStoreTests
+./Scripts/test.sh --filter CalendarAppTests.NotesWorkspaceViewModelTests
+./Scripts/test.sh --filter CalendarAppTests.NoteAutosaveCoordinatorTests
+./Scripts/test.sh --filter CalendarAppTests.NoteCloseProtectionTests
+./Scripts/test.sh --filter CalendarAppTests.NotesEditorIdentityTests
+./Scripts/test.sh --filter CalendarAppTests.DraftRecoveryPresentationTests
+./Scripts/test.sh --filter CalendarAppTests.NoteMarkdownCommandTests
+./Scripts/test.sh --filter CalendarAppTests.NotesVerticalIntegrationTests
+./Scripts/test.sh --filter CalendarAppTests.WorkspaceRouteTransitionTests
+./Scripts/test.sh --filter CalendarAppTests.WorkspaceStoreTests
+./Scripts/test.sh --filter CalendarPersistenceTests.DraftJournalRecoveryRepositoryTests
+./Scripts/test.sh --filter CalendarPersistenceTests.WorkspaceMigrationSnapshotTests
+./Scripts/test.sh --filter CalendarAppTests.BlockEditorUndoTests
+./Scripts/test.sh --filter CalendarAppTests.CalendarUndoCommandRoutingTests
+./Scripts/test.sh --filter CalendarAppTests
+./Scripts/test.sh
+swift build -c release
+./Scripts/build-app.sh
+codesign --verify --deep --strict dist/Jelly.app
+task10_gui_root="$(mktemp -d "$(getconf DARWIN_USER_TEMP_DIR)jelly-task10-gui.XXXXXX")"
+open -n --env "JELLY_ACCEPTANCE_DATA_DIRECTORY=$task10_gui_root" dist/Jelly.app
+git diff --check
+~~~
+
+- [ ] In the isolated packaged app, verify the Calendar route first, open Notes from the real rail and menu, create one Note, edit its title and at least two different Block kinds, wait through Journal protection and main save, switch Calendar → Notes without losing editor/selection state, terminate and relaunch against the same isolated directory, and verify the exact Note plus unchanged Calendar content. Repeat with a newer bare Journal draft and exercise keep/restore/save-as-new. Record menu Command-Z/Shift-Command-Z, resize/scroll and VoiceOver as `PASS`, `FAIL` or `UNVERIFIED`; hosted tests never substitute for these observations. Inventory the default production data directory before and after and require byte/name equality.
+
+- [ ] Request a final fresh Sol xhigh cumulative Task 10 review of commits 10A–10C plus the uncommitted 10D package, focused on two-stage durability, recovery evidence identity, close truth, session/focus identity, async route gating, feature gating and V2 restart preservation. Fix every Critical/Important finding before the Task 10D commit.
+- [ ] Explicitly stage only the 10D file list above. Compare `git diff --cached --name-only` against that exact list and fail if any path is missing or extra; do not use directory-wide `git add`.
+
+~~~zsh
+git add Sources/CalendarApp/AppShell/WorkspaceRoute.swift Sources/CalendarApp/AppShell/AppShellView.swift Sources/CalendarApp/AppShell/WorkspaceNavigationRail.swift Sources/CalendarApp/AppShell/WorkspaceCommands.swift Sources/CalendarApp/AppShell/WorkspaceRouteState.swift Sources/CalendarApp/AppShell/WorkspaceRouteTransitionCoordinator.swift Sources/CalendarApp/PersonalCalendarApp.swift Tests/CalendarAppTests/NotesVerticalIntegrationTests.swift Tests/CalendarAppTests/WorkspaceNavigationTests.swift Tests/CalendarAppTests/WorkspaceCommandRoutingTests.swift Tests/CalendarAppTests/WorkspaceRouteTransitionTests.swift
+git diff --cached --name-only
 git commit -m "feat(notes): 打通笔记编辑保存与重启恢复"
 ~~~
 
@@ -2530,3 +2734,5 @@ This final section is an execution invariant, not mutable completion state, so i
 - After each task review passes, update Tasks 1–15 checkboxes and the active Goal plan, push the reviewed commit, and immediately start the next unchecked task.
 - If a test, build, package, migration, recovery, GUI or review gate fails, keep the Goal active, write a focused RED reproduction, fix it, obtain scoped re-review, and resume from the failed checkbox.
 - Stop only when every checkbox in Tasks 1–15 is complete, local HEAD equals origin/main, worktree is clean, freshly unpacked Jelly.app passes the full isolated GUI checklist, the default data-directory inventory is unchanged, final Sol xhigh review is approved, and the user receives an evidence-backed handoff.
+
+自动继续下一任务
