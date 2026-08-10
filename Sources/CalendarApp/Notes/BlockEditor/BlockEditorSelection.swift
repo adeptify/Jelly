@@ -33,6 +33,7 @@ enum BlockVerticalDirection: Equatable, Sendable {
 
 enum BlockInputCommand: Equatable, Sendable {
     case insertText(String)
+    case insertTextApplyingMarkdownShortcut(String)
     case enter
     case softBreak
     case backspace

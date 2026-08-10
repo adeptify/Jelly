@@ -29,6 +29,8 @@ enum BlockInputReducer {
         switch command {
         case let .insertText(value):
             return try context.insertText(value)
+        case let .insertTextApplyingMarkdownShortcut(value):
+            return try context.insertTextApplyingMarkdownShortcut(value)
         case .enter:
             return try context.enter()
         case .softBreak:
@@ -93,7 +95,7 @@ enum BlockInputReducer {
 private extension BlockInputCommand {
     var isCompositionSensitive: Bool {
         switch self {
-        case .insertText, .enter, .softBreak, .backspace,
+        case .insertText, .insertTextApplyingMarkdownShortcut, .enter, .softBreak, .backspace,
              .moveHorizontal, .moveVertical, .applyMarkdownShortcut, .applySlashConversion:
             true
         case .indent, .outdent, .convert, .toggleInlineMark, .setLink,
@@ -275,6 +277,23 @@ private extension BlockTypingAttributes {
 }
 
 private extension ReductionContext {
+    mutating func insertTextApplyingMarkdownShortcut(_ value: String) throws -> BlockInputResult {
+        let startedCollapsed: Bool
+        if case let .text(anchor, focus, _, _) = selection {
+            startedCollapsed = anchor == focus
+        } else {
+            startedCollapsed = false
+        }
+        let inserted = try insertText(value)
+        guard startedCollapsed, inserted.mutation == .document else { return inserted }
+
+        document = inserted.document
+        selection = inserted.selection
+        let converted = try applyMarkdownShortcut()
+        guard converted.mutation == .document else { return inserted }
+        return converted
+    }
+
     mutating func insertText(_ value: String) throws -> BlockInputResult {
         guard !value.isEmpty else { return noChange(.emptySelection) }
         var candidate = document

@@ -976,6 +976,82 @@ struct BlockEditorInputTests {
         )
     }
 
+    @Test func insertingTextAndApplyingMarkdownIsOneExactReducerTransaction() throws {
+        let id = blockID(470)
+        let conversions: [(String, BlockKind, String?)] = [
+            ("# ", .heading1, nil),
+            ("## ", .heading2, nil),
+            ("### ", .heading3, nil),
+            ("- ", .bullet, nil),
+            ("* ", .bullet, nil),
+            ("1. ", .ordered, nil),
+            ("[] ", .task, nil),
+            ("[ ] ", .task, nil),
+            ("> ", .quote, nil),
+            ("``` ", .code, nil),
+            ("```swift ", .code, "swift")
+        ]
+        for (prefix, kind, codeInfo) in conversions {
+            let document = doc([block(id, .paragraph, "")])
+            let result = try reduce(document, caret(id, 0), .insertTextApplyingMarkdownShortcut(prefix))
+            let converted = DocumentBlock(
+                id: id,
+                kind: kind,
+                inlineContent: kind == .code ? .plain("") : .init(spans: []),
+                taskState: kind == .task ? .init(completedAt: nil) : nil,
+                indentLevel: 0,
+                codeInfoString: codeInfo
+            )
+            #expect(result == .init(
+                document: doc([converted]),
+                selection: caret(id, 0),
+                mutation: .document,
+                effect: .handled,
+                undo: .atomic(.conversion)
+            ), Comment(rawValue: prefix.debugDescription))
+        }
+
+        let ordinaryCases: [(String, BlockDocument, BlockEditorSelection)] = [
+            ("中文🙂", doc([block(id, .paragraph, "")]), caret(id, 0)),
+            ("#", doc([block(id, .paragraph, "")]), caret(id, 0)),
+            ("#### ", doc([block(id, .paragraph, "")]), caret(id, 0)),
+            ("# ", doc([block(id, .paragraph, "x")]), caret(id, 1)),
+            ("# ", doc([block(id, .heading1, "x")]), caret(id, 1)),
+            ("# ", doc([block(id, .paragraph, "x")]), textSelection(id, 0, id, 1))
+        ]
+        let fallback = blockID(473)
+        for (value, document, selection) in ordinaryCases {
+            #expect(
+                try reduce(document, selection, .insertTextApplyingMarkdownShortcut(value), ids: [fallback])
+                    == reduce(document, selection, .insertText(value), ids: [fallback]),
+                Comment(rawValue: value.debugDescription)
+            )
+        }
+
+        let first = blockID(471), second = blockID(472)
+        let crossDocument = doc([
+            block(first, .paragraph, "甲乙"),
+            block(second, .paragraph, "丙丁")
+        ])
+        let crossSelection = textSelection(first, 1, second, 1)
+        #expect(
+            try reduce(crossDocument, crossSelection, .insertTextApplyingMarkdownShortcut("# "))
+                == reduce(crossDocument, crossSelection, .insertText("# "))
+        )
+
+        let composing = try reduce(
+            doc([block(id, .paragraph, "")]), caret(id, 0),
+            .insertTextApplyingMarkdownShortcut("# "), composing: true
+        )
+        #expect(composing == .init(
+            document: doc([block(id, .paragraph, "")]),
+            selection: caret(id, 0),
+            mutation: .none(.composingText),
+            effect: .deferToTextSystem,
+            undo: .none
+        ))
+    }
+
     @Test(arguments: SlashExactFixture.all)
     func slashConversionAndInvalidSelectionShapesReturnExactResults(_ fixture: SlashExactFixture) throws {
         #expect(
