@@ -17,11 +17,6 @@ struct BlockEditorPurityGateTests {
     }
 
     @Test(arguments: [
-        "import Foundation; import AppKit",
-        "import Foundation\n@preconcurrency\nimport SwiftUI",
-        "import Foundation\npublic\nstruct Leaked {}",
-        "import Foundation\n@MainActor\nnonisolated public\nfunc leaked() {}",
-        "import Foundation\npublic /* comment */ struct Leaked {}",
         "public import WorkspaceDomain",
         "package import WorkspaceDomain",
         "internal import WorkspaceDomain",
@@ -34,29 +29,80 @@ struct BlockEditorPurityGateTests {
         "  import Foundation",
         "import /* gap */ Foundation",
         "@preconcurrency // keep\nimport WorkspaceDomain",
+        "@_exported\n// keep\nimport WorkspaceDomain",
+        "public\n// keep\nimport WorkspaceDomain",
+        "@preconcurrency\n\nimport WorkspaceDomain",
         "@_spi(FixtureSPI) import WorkspaceDomain",
         "@_weakLinked import WorkspaceDomain"
     ])
-    func scannerRejectsLegalMultilineAndSemicolonBypasses(_ invalidSource: String) throws {
+    func scannerRejectsHeaderSpellingAttacks(_ invalidSource: String) throws {
+        let result = try scanFixture(reducerSource: invalidSource)
+        #expect(result.status != 0, Comment(rawValue: "scanner accepted:\n\(invalidSource)\n\(result.output)"))
+        #expect(result.output.contains("exact two-import header"))
+    }
+
+    @Test(arguments: [
+        "import AppKit",
+        "@preconcurrency import AppKit",
+        "import Foundation; import AppKit",
+        "#if os(macOS)\nimport AppKit\n#endif"
+    ])
+    func scannerRejectsExtraImportsFromRecursiveAST(_ extraImport: String) throws {
+        let source = """
+        import Foundation
+        import WorkspaceDomain
+
+        \(extraImport)
+        struct Fixture {}
+        """
+        let result = try scanFixture(reducerSource: source)
+        #expect(result.status != 0, Comment(rawValue: "scanner accepted:\n\(extraImport)\n\(result.output)"))
+        #expect(result.output.contains("imports must be exactly Foundation then WorkspaceDomain"))
+    }
+
+    @Test(arguments: [
+        "public struct Leaked {}",
+        "open class Leaked {}",
+        "@MainActor\npublic\nfunc leaked() {}",
+        "public /* comment */ struct Leaked {}"
+    ])
+    func scannerRejectsPublicDeclarationsFromAST(_ declaration: String) throws {
+        let source = """
+        import Foundation
+        import WorkspaceDomain
+
+        \(declaration)
+        struct Fixture {}
+        """
+        let result = try scanFixture(reducerSource: source)
+        #expect(result.status != 0, Comment(rawValue: "scanner accepted:\n\(declaration)\n\(result.output)"))
+        #expect(result.output.contains("Public declaration"))
+    }
+
+    private func scanFixture(reducerSource: String) throws -> (status: Int32, output: String) {
         let fixture = FileManager.default.temporaryDirectory
             .appendingPathComponent("jelly-purity-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: fixture) }
-        for name in ["BlockInputReducer.swift", "BlockEditorSelection.swift", "BlockPasteParser.swift"] {
-            try "import Foundation\nstruct Fixture {}\n".write(
-                to: fixture.appendingPathComponent(name),
-                atomically: true,
-                encoding: .utf8
-            )
-        }
-        try invalidSource.write(
+
+        let exactHeader = "import Foundation\nimport WorkspaceDomain\n\n"
+        try (exactHeader + "struct BlockEditorSelectionFixture {}\n").write(
+            to: fixture.appendingPathComponent("BlockEditorSelection.swift"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try (exactHeader + "struct BlockPasteParserFixture {}\n").write(
+            to: fixture.appendingPathComponent("BlockPasteParser.swift"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try reducerSource.write(
             to: fixture.appendingPathComponent("BlockInputReducer.swift"),
             atomically: true,
             encoding: .utf8
         )
 
-        let result = try runPurityScript(arguments: [fixture.path])
-        #expect(result.status != 0, Comment(rawValue: "scanner accepted:\n\(invalidSource)\n\(result.output)"))
+        return try runPurityScript(arguments: [fixture.path])
     }
 
     private func runPurityScript(arguments: [String]) throws -> (status: Int32, output: String) {

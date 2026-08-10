@@ -1,5 +1,8 @@
 #!/bin/sh
 set -euo pipefail
+if [[ -n "${ZSH_VERSION:-}" ]]; then
+  setopt typesetsilent
+fi
 
 fail() {
   printf '%s\n' "$1" >&2
@@ -13,84 +16,18 @@ scan_file() {
     return 1
   fi
 
-  local syntax_tree
-  if ! syntax_tree=$(xcrun swiftc -frontend -dump-parse "$file" 2>&1); then
-    fail "Task 8 source is not legal Swift: $file"
-    printf '%s\n' "$syntax_tree" >&2
+  # This is byte-for-byte on purpose. The three Task 8 files are deliberately
+  # closed to a two-import header; normalizing or tokenizing before this proof
+  # would allow comments, modifiers, indentation, or a conditional import.
+  local required_prefix=$'import Foundation\nimport WorkspaceDomain\n\n'
+  local required_hex
+  required_hex=$(printf '%s' "$required_prefix" | od -An -tx1 | tr -d '[:space:]')
+  local actual_hex
+  actual_hex=$(LC_ALL=C head -c "${#required_prefix}" "$file" | od -An -tx1 | tr -d '[:space:]')
+  if [[ "$actual_hex" != "$required_hex" ]]; then
+    fail "Task 8 source must begin with the exact two-import header: $file"
     return 1
   fi
-
-  local json_tree
-  if ! json_tree=$(xcrun swiftc -frontend -dump-parse -dump-ast-format json "$file" 2>&1); then
-    fail "Task 8 source cannot expose import tokens: $file"
-    printf '%s\n' "$json_tree" >&2
-    return 1
-  fi
-  local item_count
-  if ! item_count=$(printf '%s' "$json_tree" | plutil -extract items raw -); then
-    fail "Task 8 import token output is not structured JSON: $file"
-    return 1
-  fi
-  local item_index=0
-  local start
-  local module
-  while [[ "$item_index" -lt "$item_count" ]]; do
-    local kind
-    if ! kind=$(printf '%s' "$json_tree" | plutil -extract "items.$item_index._kind" raw -); then
-      fail "Task 8 import token is missing its kind: $file"
-      return 1
-    fi
-    if [[ "$kind" != "import_decl" ]]; then
-      item_index=$((item_index + 1))
-      continue
-    fi
-    if ! start=$(printf '%s' "$json_tree" | plutil -extract "items.$item_index.range.start" raw -) ||
-       ! module=$(printf '%s' "$json_tree" | plutil -extract "items.$item_index.module_path.0" raw -); then
-      fail "Task 8 import token is missing its source position: $file"
-      return 1
-    fi
-    case "$module" in
-      Foundation|WorkspaceDomain) ;;
-      *)
-        fail "Forbidden import '$module' in $file"
-        return 1
-        ;;
-    esac
-
-    local expected="import $module"
-    local expected_length=${#expected}
-    local source_slice
-    source_slice=$(LC_ALL=C tail -c +$((start + 1)) "$file" | head -c "$expected_length")
-    local next_byte
-    next_byte=$(LC_ALL=C dd if="$file" bs=1 skip=$((start + expected_length)) count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')
-    local previous_byte
-    previous_byte=""
-    if [[ "$start" -gt 0 ]]; then
-      previous_byte=$(LC_ALL=C dd if="$file" bs=1 skip=$((start - 1)) count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')
-    fi
-    if [[ "$source_slice" != "$expected" || ( "$start" -gt 0 && "$previous_byte" != "0a" ) || ( -n "$next_byte" && "$next_byte" != "0a" ) ]]; then
-      fail "Modified import '$module' in $file"
-      return 1
-    fi
-
-    if [[ "$start" -gt 0 ]]; then
-      local previous_line
-      previous_line=$(head -c "$start" "$file" | sed -n '$p' | sed 's/^[[:space:]]*//')
-      case "$previous_line" in
-        @*)
-          fail "Modified import '$module' in $file"
-          return 1
-          ;;
-      esac
-    fi
-    item_index=$((item_index + 1))
-  done
-
-  if printf '%s\n' "$syntax_tree" | grep -E 'access_level=(public|open)([)[:space:]]|$)' >/dev/null; then
-    fail "Public declaration in $file"
-    return 1
-  fi
-  return 0
 }
 
 scan_directory() {
@@ -99,20 +36,121 @@ scan_directory() {
   for name in BlockInputReducer.swift BlockEditorSelection.swift BlockPasteParser.swift; do
     scan_file "$directory/$name" || return 1
   done
+
+  local module_path="${BLOCK_INPUT_PURITY_MODULE_PATH:-}"
+  if [[ -z "$module_path" ]]; then
+    local candidate
+    for candidate in .build/*/debug/Modules .build/*/release/Modules; do
+      if [[ -f "$candidate/WorkspaceDomain.swiftmodule" ]]; then
+        module_path="$candidate"
+        break
+      fi
+    done
+  fi
+  if [[ -z "$module_path" ]]; then
+    fail "Missing WorkspaceDomain module needed to inspect Task 8 imports"
+    return 1
+  fi
+
+  local sdk_path
+  if ! sdk_path=$(xcrun --show-sdk-path); then
+    fail "Cannot locate the Swift SDK for Task 8 purity inspection"
+    return 1
+  fi
+  local expected_imports=$'Foundation\nWorkspaceDomain'
+  local reducer="$directory/BlockInputReducer.swift"
+  local selection="$directory/BlockEditorSelection.swift"
+  local parser="$directory/BlockPasteParser.swift"
+  for name in BlockInputReducer.swift BlockEditorSelection.swift BlockPasteParser.swift; do
+    local primary_file="$directory/$name"
+    local other_one
+    local other_two
+    case "$name" in
+      BlockInputReducer.swift)
+        other_one="$selection"
+        other_two="$parser"
+        ;;
+      BlockEditorSelection.swift)
+        other_one="$reducer"
+        other_two="$parser"
+        ;;
+      BlockPasteParser.swift)
+        other_one="$reducer"
+        other_two="$selection"
+        ;;
+    esac
+    local syntax_tree
+    if ! syntax_tree=$(xcrun swiftc \
+      -frontend -dump-ast -parse-as-library \
+      -sdk "$sdk_path" -I "$module_path" \
+      -primary-file "$primary_file" \
+      "$other_one" "$other_two" 2>&1); then
+      fail "Task 8 source is not legal Swift: $directory/$name"
+      printf '%s\n' "$syntax_tree" >&2
+      return 1
+    fi
+
+    # dump-ast includes imports nested in conditional compilation blocks. Only
+    # actual import_decl nodes are considered, so comments and string literals
+    # cannot masquerade as imports.
+    local imports
+    imports=$(printf '%s\n' "$syntax_tree" | sed -nE 's/^[[:space:]]*\(import_decl .* module="([^"]+)"\)$/\1/p')
+    if [[ "$imports" != "$expected_imports" ]]; then
+      fail "Task 8 imports must be exactly Foundation then WorkspaceDomain: $directory/$name"
+      return 1
+    fi
+
+    if printf '%s\n' "$syntax_tree" | grep -E 'access=(public|open)([)[:space:]]|$)' >/dev/null; then
+      fail "Public declaration in $directory/$name"
+      return 1
+    fi
+  done
   return 0
+}
+
+write_fixture_headers() {
+  local directory="$1"
+  mkdir -p "$directory"
+  local name
+  for name in BlockInputReducer.swift BlockEditorSelection.swift BlockPasteParser.swift; do
+    printf 'import Foundation\nimport WorkspaceDomain\n\n' > "$directory/$name"
+  done
+}
+
+append_fixture_declarations() {
+  local directory="$1"
+  printf 'struct BlockInputReducerFixture {}\n' >> "$directory/BlockInputReducer.swift"
+  printf 'struct BlockEditorSelectionFixture {}\n' >> "$directory/BlockEditorSelection.swift"
+  printf 'struct BlockPasteParserFixture {}\n' >> "$directory/BlockPasteParser.swift"
+}
+
+typecheck_fixture() {
+  local directory="$1"
+  local name
+  for name in BlockInputReducer.swift BlockEditorSelection.swift BlockPasteParser.swift; do
+    xcrun swiftc -typecheck -parse-as-library -package-name Jelly -I "$BLOCK_INPUT_PURITY_MODULE_PATH" \
+      "$directory/$name" || return 1
+  done
+}
+
+assert_fixture_is_rejected_at() {
+  local directory="$1"
+  local expected_stage="$2"
+  local output
+  if output=$(scan_directory "$directory" 2>&1); then
+    fail "Self-test accepted forbidden fixture: $directory"
+    return 1
+  fi
+  if [[ "$output" != *"$expected_stage"* ]]; then
+    fail "Self-test rejected fixture at the wrong stage ($expected_stage): $output"
+    return 1
+  fi
 }
 
 self_test() {
   local fixture_root
   fixture_root=$(mktemp -d -t jelly-block-input-purity)
   trap "rm -rf '$fixture_root'" EXIT
-
-  mkdir -p "$fixture_root/valid"
-  local name
-  for name in BlockInputReducer.swift BlockEditorSelection.swift BlockPasteParser.swift; do
-    printf 'import Foundation\nimport WorkspaceDomain\nstruct Fixture {}\n' > "$fixture_root/valid/$name"
-  done
-  scan_directory "$fixture_root/valid"
 
   printf 'public struct FixtureExport { public init() {} }\n' > "$fixture_root/WorkspaceDomainFixture.swift"
   xcrun swiftc \
@@ -122,26 +160,27 @@ self_test() {
     "$fixture_root/WorkspaceDomainFixture.swift" \
     -emit-module-path "$fixture_root/WorkspaceDomain.swiftmodule"
 
-  local modified_index=0
-  local modified_import
-  while IFS= read -r modified_import; do
-    modified_index=$((modified_index + 1))
-    mkdir -p "$fixture_root/modified-$modified_index"
-    for name in BlockInputReducer.swift BlockEditorSelection.swift BlockPasteParser.swift; do
-      printf 'import Foundation\nstruct Fixture {}\n' > "$fixture_root/modified-$modified_index/$name"
-    done
-    printf '%b\n' "$modified_import" \
-      >> "$fixture_root/modified-$modified_index/BlockInputReducer.swift"
-    if ! xcrun swiftc \
-      -frontend \
-      -parse \
-      "$fixture_root/modified-$modified_index/BlockInputReducer.swift" >/dev/null 2>&1; then
-      fail "Self-test modified import is not legal Swift syntax: $modified_import"
+  local BLOCK_INPUT_PURITY_MODULE_PATH="$fixture_root"
+  write_fixture_headers "$fixture_root/valid"
+  append_fixture_declarations "$fixture_root/valid"
+  typecheck_fixture "$fixture_root/valid"
+  scan_directory "$fixture_root/valid"
+
+  # These replace the header. They must typecheck but stop at raw-byte proof.
+  local header_index=0
+  local header_attack
+  while IFS= read -r header_attack; do
+    header_index=$((header_index + 1))
+    local directory="$fixture_root/header-$header_index"
+    write_fixture_headers "$directory"
+    printf '%b\n' "$header_attack" > "$directory/BlockInputReducer.swift"
+    append_fixture_declarations "$directory"
+    if ! typecheck_fixture "$directory" >/dev/null 2>&1; then
+      fail "Self-test header attack is not legal Swift: $header_attack"
+      return 1
     fi
-    if scan_directory "$fixture_root/modified-$modified_index" >/dev/null 2>&1; then
-      fail "Self-test accepted modified import: $modified_import"
-    fi
-  done <<'MODIFIED_IMPORTS'
+    assert_fixture_is_rejected_at "$directory" "exact two-import header" || return 1
+  done <<'HEADER_ATTACKS'
 public import WorkspaceDomain
 package import WorkspaceDomain
 internal import WorkspaceDomain
@@ -156,40 +195,57 @@ private import WorkspaceDomain
   import Foundation
 import /* gap */ Foundation
 @preconcurrency // keep\nimport WorkspaceDomain
-MODIFIED_IMPORTS
+@_exported\n// keep\nimport WorkspaceDomain
+public\n// keep\nimport WorkspaceDomain
+@preconcurrency\n\nimport WorkspaceDomain
+HEADER_ATTACKS
 
-  local index=0
-  local invalid
-  while IFS= read -r invalid; do
-    index=$((index + 1))
-    mkdir -p "$fixture_root/invalid-$index"
-    for name in BlockInputReducer.swift BlockEditorSelection.swift BlockPasteParser.swift; do
-      printf 'import Foundation\nstruct Fixture {}\n' > "$fixture_root/invalid-$index/$name"
-    done
-    printf '%b\n' "$invalid" >> "$fixture_root/invalid-$index/BlockInputReducer.swift"
-    if ! xcrun swiftc -frontend -parse "$fixture_root/invalid-$index/BlockInputReducer.swift" >/dev/null 2>&1; then
-      fail "Self-test fixture is not legal Swift: $invalid"
+  # These begin with the exact header, proving recursive AST import checking.
+  local ast_import_index=0
+  local ast_import_attack
+  while IFS= read -r ast_import_attack; do
+    ast_import_index=$((ast_import_index + 1))
+    local directory="$fixture_root/ast-import-$ast_import_index"
+    write_fixture_headers "$directory"
+    printf '%b\n' "$ast_import_attack" >> "$directory/BlockInputReducer.swift"
+    append_fixture_declarations "$directory"
+    if ! typecheck_fixture "$directory" >/dev/null 2>&1; then
+      fail "Self-test AST import attack is not legal Swift: $ast_import_attack"
+      return 1
     fi
-    if scan_directory "$fixture_root/invalid-$index" >/dev/null 2>&1; then
-      fail "Self-test accepted forbidden spelling: $invalid"
-    fi
-  done <<'INVALID_CASES'
+    assert_fixture_is_rejected_at "$directory" "imports must be exactly Foundation then WorkspaceDomain" || return 1
+  done <<'AST_IMPORT_ATTACKS'
 import AppKit
-  import SwiftUI
 @preconcurrency import AppKit
-import CalendarDomain
-import Foundation.URLSession
+import Foundation; import AppKit
+#if os(macOS)\nimport AppKit\n#endif
+AST_IMPORT_ATTACKS
+
+  # These begin with the exact header and prove public/open AST inspection.
+  local public_index=0
+  local public_attack
+  while IFS= read -r public_attack; do
+    public_index=$((public_index + 1))
+    local directory="$fixture_root/public-$public_index"
+    write_fixture_headers "$directory"
+    printf '%b\n' "$public_attack" >> "$directory/BlockInputReducer.swift"
+    append_fixture_declarations "$directory"
+    if ! typecheck_fixture "$directory" >/dev/null 2>&1; then
+      fail "Self-test public declaration attack is not legal Swift: $public_attack"
+      return 1
+    fi
+    assert_fixture_is_rejected_at "$directory" "Public declaration" || return 1
+  done <<'PUBLIC_DECLARATION_ATTACKS'
 public struct Leaked {}
   public enum Leaked {}
 @available(macOS 14, *) public final class Leaked {}
 open class Leaked {}
 final public class Leaked {}
-@MainActor nonisolated public func leaked() {}
-import Foundation; import AppKit
+@MainActor public func leaked() {}
 public\nstruct Leaked {}
-@MainActor\nnonisolated public\nfunc leaked() {}
+@MainActor\npublic\nfunc leaked() {}
 public /* comment */ struct Leaked {}
-INVALID_CASES
+PUBLIC_DECLARATION_ATTACKS
 
   printf '%s\n' "Block input purity self-test passed"
 }

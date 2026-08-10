@@ -1354,6 +1354,24 @@ struct MovementExactFixture: Sendable, CustomTestStringConvertible {
         )
         let dividerOnlyDocument = doc([block(divider, .divider, "")])
         let dividerOnlySelection = caret(divider, 0)
+        let preferredPrevious = blockID(325), preferredDivider = blockID(326), preferredFollowing = blockID(327)
+        let preferredDividerDocument = doc([
+            block(preferredPrevious, .paragraph, "abcd"),
+            block(preferredDivider, .divider, ""),
+            block(preferredFollowing, .paragraph, "wxyz")
+        ])
+        let preferredDividerSelection = BlockEditorSelection.text(
+            anchor: .init(blockID: preferredDivider, graphemeOffset: 0),
+            focus: .init(blockID: preferredDivider, graphemeOffset: 0),
+            preferredColumn: 4,
+            typingAttributes: .init(marks: [], linkURL: nil)
+        )
+        let reverseDividerSelection = BlockEditorSelection.text(
+            anchor: .init(blockID: preferredDivider, graphemeOffset: 0),
+            focus: .init(blockID: preferredDivider, graphemeOffset: 0),
+            preferredColumn: 0,
+            typingAttributes: .init(marks: [], linkURL: nil)
+        )
 
         return [
             moved(
@@ -1381,8 +1399,8 @@ struct MovementExactFixture: Sendable, CustomTestStringConvertible {
                 dividerSelection,
                 .moveVertical(.up, extending: false),
                 .text(
-                    anchor: .init(blockID: dividerPrevious, graphemeOffset: 2),
-                    focus: .init(blockID: dividerPrevious, graphemeOffset: 2),
+                    anchor: .init(blockID: dividerPrevious, graphemeOffset: 0),
+                    focus: .init(blockID: dividerPrevious, graphemeOffset: 0),
                     preferredColumn: 0,
                     typingAttributes: .init(marks: [.bold], linkURL: exactLinkURL)
                 )
@@ -1404,7 +1422,7 @@ struct MovementExactFixture: Sendable, CustomTestStringConvertible {
                 .moveVertical(.up, extending: true),
                 .text(
                     anchor: .init(blockID: divider, graphemeOffset: 0),
-                    focus: .init(blockID: dividerPrevious, graphemeOffset: 2),
+                    focus: .init(blockID: dividerPrevious, graphemeOffset: 0),
                     preferredColumn: 0,
                     typingAttributes: .init(marks: [.bold], linkURL: exactLinkURL)
                 )
@@ -1426,6 +1444,45 @@ struct MovementExactFixture: Sendable, CustomTestStringConvertible {
                 selection: dividerOnlySelection,
                 command: .moveVertical(.up, extending: false),
                 expected: exactNoChange(dividerOnlyDocument, dividerOnlySelection, .documentBoundary)
+            ),
+            moved(
+                preferredDividerDocument,
+                caret(preferredPrevious, 4),
+                .moveVertical(.down, extending: false),
+                .text(
+                    anchor: .init(blockID: preferredDivider, graphemeOffset: 0),
+                    focus: .init(blockID: preferredDivider, graphemeOffset: 0),
+                    preferredColumn: 4,
+                    typingAttributes: .init(marks: [], linkURL: nil)
+                )
+            ),
+            moved(
+                preferredDividerDocument,
+                preferredDividerSelection,
+                .moveVertical(.down, extending: false),
+                .text(
+                    anchor: .init(blockID: preferredFollowing, graphemeOffset: 4),
+                    focus: .init(blockID: preferredFollowing, graphemeOffset: 4),
+                    preferredColumn: 4,
+                    typingAttributes: .init(marks: [], linkURL: nil)
+                )
+            ),
+            moved(
+                preferredDividerDocument,
+                caret(preferredFollowing, 0),
+                .moveVertical(.up, extending: false),
+                reverseDividerSelection
+            ),
+            moved(
+                preferredDividerDocument,
+                reverseDividerSelection,
+                .moveVertical(.up, extending: false),
+                .text(
+                    anchor: .init(blockID: preferredPrevious, graphemeOffset: 0),
+                    focus: .init(blockID: preferredPrevious, graphemeOffset: 0),
+                    preferredColumn: 0,
+                    typingAttributes: .init(marks: [], linkURL: nil)
+                )
             ),
             .init(
                 label: "vertical-divider-document-end",

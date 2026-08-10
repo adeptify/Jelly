@@ -978,7 +978,7 @@ private extension ReductionContext {
         }
         let block = document.blocks[blockIndex]
         if block.kind == .divider {
-            let sourceColumn = 0
+            let sourceColumn = preferredColumn ?? 0
             let next: BlockTextPosition
             switch direction {
             case .up:
@@ -987,14 +987,19 @@ private extension ReductionContext {
                 let target = logicalLines(in: Array(previous.text)).last!
                 next = .init(
                     blockID: previous.id,
-                    graphemeOffset: previous.kind == .divider ? 0 : target.end
+                    graphemeOffset: previous.kind == .divider
+                        ? 0
+                        : target.start + min(sourceColumn, target.end - target.start)
                 )
             case .down:
                 guard blockIndex + 1 < document.blocks.count else { return noChange(.documentBoundary) }
                 let following = document.blocks[blockIndex + 1]
+                let target = logicalLines(in: Array(following.text)).first!
                 next = .init(
                     blockID: following.id,
-                    graphemeOffset: 0
+                    graphemeOffset: following.kind == .divider
+                        ? 0
+                        : target.start + min(sourceColumn, target.end - target.start)
                 )
             }
             return selectionResult(.text(
