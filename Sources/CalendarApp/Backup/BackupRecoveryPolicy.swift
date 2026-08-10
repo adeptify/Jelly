@@ -39,6 +39,11 @@ enum BackupRecoveryPolicy {
         }
     }
 
+    static func pendingCommitMenuTitle(for phase: WorkspaceStorePhase) -> String? {
+        guard case .parkedCommitUncertain = phase else { return nil }
+        return "继续确认未完成操作"
+    }
+
     static func message(for outcome: PendingCommitRetryOutcome) -> String {
         switch outcome {
         case let .committed(operation, journal):

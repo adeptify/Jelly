@@ -22,9 +22,10 @@ struct BackupCommands: Commands {
                 Divider()
                 Button("导出原始恢复副本…", action: exportRawRecoveryCopy)
             }
-            if case let .retryPendingCommit(transactionID)? = BackupRecoveryPolicy.actions(for: store.phase).first {
+            if case let .retryPendingCommit(transactionID)? = BackupRecoveryPolicy.actions(for: store.phase).first,
+               let title = BackupRecoveryPolicy.pendingCommitMenuTitle(for: store.phase) {
                 Divider()
-                Button("继续确认未完成保存", action: { retryPendingCommit(transactionID) })
+                Button(title, action: { retryPendingCommit(transactionID) })
             }
             if case let .retryJournalCleanup(identity, step)? = BackupRecoveryPolicy.actions(for: store.phase).first {
                 Divider()

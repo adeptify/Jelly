@@ -2665,13 +2665,18 @@ private actor RestoreCountingRepository: WorkspaceRepository {
     private var discardCountStorage = 0
     private var commitSuspended = false
     private var commitStarted = false
+    private var saveCountStorage = 0
     private var commitStartWaiters: [CheckedContinuation<Void, Never>] = []
     private var commitResumeWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(backing: JSONWorkspaceRepository) { self.backing = backing }
 
     func load() async throws -> WorkspaceLoadResult { try await backing.load() }
-    func save(_ state: WorkspaceState, draft: PersistableDraftContext?) async throws -> WorkspaceSaveReceipt { try await backing.save(state, draft: draft) }
+    func save(_ state: WorkspaceState, draft: PersistableDraftContext?) async throws -> WorkspaceSaveReceipt {
+        let receipt = try await backing.save(state, draft: draft)
+        saveCountStorage += 1
+        return receipt
+    }
     func verifyPersistedDraft(_ context: PersistableDraftContext) async throws -> WorkspaceDraftPersistenceVerification { try await backing.verifyPersistedDraft(context) }
     func prepareRestore(_ preview: WorkspaceRestorePreview, rollbackDirectoryURL: URL) async throws -> PreparedWorkspaceRestore {
         try await backing.prepareRestore(preview, rollbackDirectoryURL: rollbackDirectoryURL)
@@ -2721,6 +2726,7 @@ private actor RestoreCountingRepository: WorkspaceRepository {
         let waiters = commitResumeWaiters; commitResumeWaiters.removeAll(); waiters.forEach { $0.resume() }
     }
     var discardCount: Int { discardCountStorage }
+    var saveCount: Int { saveCountStorage }
 }
 
 actor WorkspaceStoreTestRepository: WorkspaceRepository {
@@ -2883,9 +2889,12 @@ extension WorkspaceStoreTests {
         #expect(projection.entries.filter { $0.id == .item(item.id) }.count == 1)
         #expect(projection.entries.contains { $0.id == .item(legacyStoreItemID) })
         #expect(projection.entries.first { $0.id == .occurrence(legacyStoreMovedKey) }?.title == "已移动")
+        #expect(projection.entries.first { $0.id == .occurrence(legacyStoreMovedKey) }?.schedule == legacyStoreMovedSchedule)
         #expect(projection.entries.first { $0.id == .occurrence(legacyStoreCompletionKey) }?.completedAt == legacyStoreOccurrenceCompletionDate)
         #expect(projection.entries.contains { $0.id == .occurrence(legacyStoreSkippedKey) } == false)
         #expect(try await repository.load().state == store.state)
+        let primaryAfterMutation = try Data(contentsOf: primary)
+        #expect(try legacyStoreSchemaVersion(in: primaryAfterMutation) == WorkspaceDocument.currentSchemaVersion)
 
         _ = try await store.undo()
         // Workspace revisions are monotonic across undo; the restored content
@@ -2893,7 +2902,10 @@ extension WorkspaceStoreTests {
         #expect(store.state.calendar == migrated.calendar)
         #expect(store.state.notes == migrated.notes)
         #expect(store.state.calendar.items[item.id] == nil)
+        try legacyAssertCompleteV1Graph(store.calendarState)
         #expect(try await repository.load().state == store.state)
+        let primaryAfterUndo = try Data(contentsOf: primary)
+        #expect(try legacyStoreSchemaVersion(in: primaryAfterUndo) == WorkspaceDocument.currentSchemaVersion)
     }
 
     @Test func legacyV1BackupRestoreMigratesAndCorruptBackupCannotOverwriteIt() async throws {
@@ -3014,23 +3026,62 @@ extension WorkspaceStoreTests {
         try legacyStoreV1CompleteGraphData.write(to: source)
         let backing = JSONWorkspaceRepository(documentURL: directory.appendingPathComponent("main.json"), seed: { initial })
         let repository = RestoreCountingRepository(backing: backing)
-        await repository.suspendNextCommit()
         let store = WorkspaceStore(initialState: initial, repository: repository, clock: { .distantPast })
         await store.load()
+        let preRestoreItem = try makeItem(
+            id: UUID(),
+            categoryID: legacyStoreCategoryID,
+            title: "恢复前用于建立撤销记录"
+        )
+        guard case .committed = try await store.sendCalendar(
+            .createItem(preRestoreItem),
+            undoLabel: "恢复前撤销记录"
+        ) else {
+            Issue.record("恢复前必须真实建立 undo record")
+            return
+        }
+        #expect(store.canUndo)
+        #expect(await repository.saveCount == 1)
+        let stateBeforeRestore = store.state
+        let generationBeforeRestore = store.statePublicationGeneration
+        let primaryBeforeRestore = try Data(contentsOf: directory.appendingPathComponent("main.json"))
+
         let preview = try await store.inspectRestoreSource(at: source)
+        await repository.suspendNextCommit()
         let restoring = Task { @MainActor in try await store.restore(preview, rollbackDirectoryURL: directory.appendingPathComponent("Rollbacks", isDirectory: true)) }
         await repository.waitForCommitStart()
         let queuedItem = try makeItem(id: UUID(), categoryID: legacyStoreCategoryID, title: "不得抢跑")
         let queued = Task { @MainActor in try await store.sendCalendar(.createItem(queuedItem), undoLabel: "队列事项") }
         await Task.yield()
+        let queuedUndo = Task { @MainActor in try await store.undo() }
+        await Task.yield()
 
         #expect(store.phase == .mutating)
-        #expect(store.state == initial)
+        #expect(store.state == stateBeforeRestore)
+        #expect(store.statePublicationGeneration == generationBeforeRestore)
         #expect(store.state.calendar.items[queuedItem.id] == nil)
+        #expect(store.state.calendar.items[preRestoreItem.id] == preRestoreItem)
+        #expect(await repository.saveCount == 1)
+        #expect(try Data(contentsOf: directory.appendingPathComponent("main.json")) == primaryBeforeRestore)
+
         await repository.resumeCommit()
         guard case .restored = try await restoring.value else { Issue.record("恢复必须完成"); return }
         guard case .committed = try await queued.value else { Issue.record("恢复后的队列事务必须再独立提交"); return }
+        await #expect(throws: WorkspaceUndoReducerError.conflict) {
+            _ = try await queuedUndo.value
+        }
+
+        #expect(store.statePublicationGeneration == generationBeforeRestore + 2)
+        #expect(await repository.saveCount == 2)
+        #expect(store.state.calendar.items[preRestoreItem.id] == nil)
         #expect(store.state.calendar.items[queuedItem.id] != nil)
+        var restoredCalendar = store.calendarState
+        #expect(restoredCalendar.items.removeValue(forKey: queuedItem.id) == queuedItem)
+        try legacyAssertCompleteV1Graph(restoredCalendar)
+        let persisted = try WorkspaceDocumentCodec.decode(
+            Data(contentsOf: directory.appendingPathComponent("main.json"))
+        ).state
+        #expect(persisted == store.state)
     }
 
     @Test func legacyCorruptPrimaryCanRestoreValidBackupAndPreserveRawRollback() async throws {
@@ -3176,11 +3227,22 @@ private let legacyStoreMovedKey = OccurrenceKey(seriesID: legacyStoreSeriesID, o
 private let legacyStoreSkippedKey = OccurrenceKey(seriesID: legacyStoreSeriesID, originalDate: .init(year: 2026, month: 8, day: 12)!)
 private let legacyStoreCompletionKey = OccurrenceKey(seriesID: legacyStoreSeriesID, originalDate: .init(year: 2026, month: 8, day: 17)!)
 private let legacyStoreOccurrenceCompletionDate = Date(timeIntervalSince1970: 1_700_000_300.5)
+private let legacyStoreMovedSchedule = try! CalendarSchedule(
+    startDate: .init(year: 2026, month: 8, day: 13)!,
+    endDate: .init(year: 2026, month: 8, day: 13)!,
+    startTime: MinuteOfDay(hour: 11, minute: 0),
+    endTime: MinuteOfDay(hour: 12, minute: 0)
+)
 
 private func legacyStoreDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("JellyLegacyStore-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
     return url
+}
+
+private func legacyStoreSchemaVersion(in data: Data) throws -> Int {
+    let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    return try #require(object?["schemaVersion"] as? Int)
 }
 
 private func legacyAssertCompleteV1Graph(_ state: CalendarState) throws {
@@ -3236,13 +3298,7 @@ private func legacyAssertCompleteV1Graph(_ state: CalendarState) throws {
         Issue.record("完整 V1 图中的移动例外必须保持移动例外")
         return
     }
-    let expectedMovedSchedule = try CalendarSchedule(
-        startDate: .init(year: 2026, month: 8, day: 13)!,
-        endDate: .init(year: 2026, month: 8, day: 13)!,
-        startTime: MinuteOfDay(hour: 11, minute: 0),
-        endTime: MinuteOfDay(hour: 12, minute: 0)
-    )
-    #expect(override.displayedSchedule == expectedMovedSchedule)
+    #expect(override.displayedSchedule == legacyStoreMovedSchedule)
     #expect(override.title == "已移动")
     #expect(override.kind == .task)
     #expect(override.categoryID == legacyStoreCategoryID)

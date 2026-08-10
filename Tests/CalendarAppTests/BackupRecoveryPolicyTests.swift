@@ -31,6 +31,15 @@ struct BackupRecoveryPolicyTests {
         )), journal: .clean)) == "此前恢复已确认。恢复前没有可回滚的主数据文件。")
     }
 
+    @Test func pendingCommitMenuUsesAnOperationNeutralLabelWithoutLosingTheTransaction() {
+        let transactionID = UUID()
+        let phase = WorkspaceStorePhase.parkedCommitUncertain(transactionID)
+
+        #expect(BackupRecoveryPolicy.actions(for: phase) == [.retryPendingCommit(transactionID)])
+        #expect(BackupRecoveryPolicy.pendingCommitMenuTitle(for: phase) == "继续确认未完成操作")
+        #expect(BackupRecoveryPolicy.pendingCommitMenuTitle(for: .ready) == nil)
+    }
+
     @Test func parkedJournalExposesTheExactIdentityAndStep() {
         let identity = DraftJournalIdentity(noteID: NoteID(UUID()), editSessionID: .editor(UUID()))
 

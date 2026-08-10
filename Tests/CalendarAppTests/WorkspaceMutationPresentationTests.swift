@@ -145,6 +145,48 @@ struct WorkspaceMutationPresentationTests {
         #expect(reconciled.message == "此前恢复已确认。恢复前的数据已保留在：\n/tmp/jelly-restore-rollback.json")
     }
 
+    @Test func directPendingRestoreWithAFileReportsItsPathAndIdentity() {
+        let transactionID = UUID()
+        let rollbackURL = URL(fileURLWithPath: "/tmp/jelly-pending-restore-rollback.json")
+        let artifacts = WorkspacePendingCommitArtifacts(rollback: .file(
+            rollbackURL,
+            .init(sha256: "pending-restore-hash", byteCount: 8)
+        ))
+
+        let pending = WorkspaceMutationOutcomePresenter.restorePresentation(for: .commitPending(
+            transactionID: transactionID,
+            artifacts: artifacts
+        ))
+
+        #expect(pending.allowsDismissal == false)
+        #expect(pending.recoveryAction == .retryPendingCommit(transactionID, artifacts))
+        #expect(pending.message == """
+        恢复结果尚未确认，当前数据是否已替换仍未知；请在恢复菜单中继续确认。
+
+        恢复前的数据已保留在：
+        /tmp/jelly-pending-restore-rollback.json
+        校验：pending-restore-hash（8 字节）
+        """)
+    }
+
+    @Test func directPendingRestoreWithAnAbsentPrimaryReportsNoRollbackFile() {
+        let transactionID = UUID()
+        let artifacts = WorkspacePendingCommitArtifacts(rollback: .nonePreviousSourceAbsent)
+
+        let pending = WorkspaceMutationOutcomePresenter.restorePresentation(for: .commitPending(
+            transactionID: transactionID,
+            artifacts: artifacts
+        ))
+
+        #expect(pending.allowsDismissal == false)
+        #expect(pending.recoveryAction == .retryPendingCommit(transactionID, artifacts))
+        #expect(pending.message == """
+        恢复结果尚未确认，当前数据是否已替换仍未知；请在恢复菜单中继续确认。
+
+        恢复前没有可回滚的主数据文件。
+        """)
+    }
+
     @Test func directRestoreOutcomesKeepRecoveryArtifactsAndNeverUseEditSaveWording() {
         let transactionID = UUID()
         let rollbackURL = URL(fileURLWithPath: "/tmp/jelly-direct-restore-rollback.json")
@@ -159,13 +201,6 @@ struct WorkspaceMutationPresentationTests {
         )))
         #expect(restored.allowsDismissal)
         #expect(restored.message == "恢复完成。恢复前的数据已保留在：\n/tmp/jelly-direct-restore-rollback.json")
-
-        let pending = WorkspaceMutationOutcomePresenter.restorePresentation(for: .commitPending(
-            transactionID: transactionID, artifacts: absentArtifacts
-        ))
-        #expect(pending.allowsDismissal == false)
-        #expect(pending.message == "恢复结果尚未确认，当前数据是否已替换仍未知；请在恢复菜单中继续确认。")
-        #expect(pending.recoveryAction == .retryPendingCommit(transactionID, absentArtifacts))
 
         let notCommitted = WorkspaceMutationOutcomePresenter.restorePresentation(for: .notCommitted(
             transactionID: transactionID, journal: .clean, artifacts: fileArtifacts

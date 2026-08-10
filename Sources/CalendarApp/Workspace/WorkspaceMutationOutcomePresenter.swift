@@ -113,8 +113,11 @@ enum WorkspaceMutationOutcomePresenter {
                 message: "恢复完成。\(rollbackMessage(for: restored.rollback))",
                 recoveryAction: nil
             )
-        case .commitPending:
-            return presentation(for: outcome)
+        case let .commitPending(transactionID, artifacts):
+            return .retain(
+                "恢复结果尚未确认，当前数据是否已替换仍未知；请在恢复菜单中继续确认。\n\n\(pendingRollbackMessage(for: artifacts.rollback))",
+                recoveryAction: .retryPendingCommit(transactionID, artifacts)
+            )
         case let .notCommitted(_, journal, artifacts):
             return failedSavePresentation(
                 journal: journal,
@@ -267,9 +270,19 @@ enum WorkspaceMutationOutcomePresenter {
     }
 
     private static func rollbackMessage(for rollback: WorkspaceRollbackArtifact) -> String {
-        switch rollback {
+        return switch rollback {
         case let .file(url, _):
             "恢复前的数据已保留在：\n\(url.path)"
+        case .nonePreviousSourceAbsent:
+            "恢复前没有可回滚的主数据文件。"
+        }
+    }
+
+    private static func pendingRollbackMessage(for rollback: WorkspaceRollbackArtifact?) -> String {
+        guard let rollback else { return "恢复前的数据是否已保留仍未知。" }
+        return switch rollback {
+        case let .file(url, identity):
+            "恢复前的数据已保留在：\n\(url.path)\n校验：\(identity.sha256)（\(identity.byteCount) 字节）"
         case .nonePreviousSourceAbsent:
             "恢复前没有可回滚的主数据文件。"
         }
