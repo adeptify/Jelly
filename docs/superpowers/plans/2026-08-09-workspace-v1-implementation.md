@@ -1438,10 +1438,10 @@ enum AppDataDirectoryResolver {
 ~~~
 
 - [x] **Task 6B GREEN/review/commit:** run WorkspaceDomainTests, CalendarPersistenceTests, focused CalendarApp Store tests and full tests. Obtain fresh Sol xhigh review focused on queue continuation/park/retry, Journal cleanup, failure publication, repair/adoption, sequential generation delta replay, multi-round delta undo revisions and focus ownership; fix every Critical/Important finding, rerun, and commit while WorkspaceStore remains dormant and unconstructed by the App composition root.
-- [ ] **Task 6C cutover:** only after the reviewed 6B commit, port every row in the assertion map, replace InMemoryCalendarRepository with InMemoryWorkspaceRepository across TestSupport, and migrate MonthView, WeekView, DayDrawer, editors, drag/drop, progress, categories, backup/restore, AppEnvironment, PersonalCalendarApp and all tests to WorkspaceStore in one consumer cutover. Views read calendarState; CategoryManagerViewModel sends Workspace category commands; BackupCommands calls Store only.
-- [ ] Remove the deprecated Calendar-only BackupService export/validate/restore wrappers after BackupCommands and WorkspaceStore use prepareRestore/queued commitRestore. Port their useful tests to WorkspaceBackupServiceTests before deletion.
-- [ ] Complete and verify every row in the 39-row legacy assertion map with `Scripts/verify-task6-legacy-assertion-map.sh --complete`, run every mapped target, then in the same final cutover delete CalendarStore, CalendarRepository, JSONCalendarRepository, InMemoryCalendarRepository, their old tests and all deprecated wrappers. Run `--complete` again after deletion from the committed inventory. Do not leave aliases, compatibility shims or a second business save path.
-- [ ] Run GREEN, all existing app tests and release compile.
+- [x] **Task 6C cutover:** only after the reviewed 6B commit, port every row in the assertion map, replace InMemoryCalendarRepository with InMemoryWorkspaceRepository across TestSupport, and migrate MonthView, WeekView, DayDrawer, editors, drag/drop, progress, categories, backup/restore, AppEnvironment, PersonalCalendarApp and all tests to WorkspaceStore in one consumer cutover. Views read calendarState; CategoryManagerViewModel sends Workspace category commands; BackupCommands calls Store only.
+- [x] Remove the deprecated Calendar-only BackupService export/validate/restore wrappers after BackupCommands and WorkspaceStore use prepareRestore/queued commitRestore. Port their useful tests to WorkspaceBackupServiceTests before deletion.
+- [x] Complete and verify every row in the 39-row legacy assertion map with `Scripts/verify-task6-legacy-assertion-map.sh --complete`, run every mapped target, then in the same final cutover delete CalendarStore, CalendarRepository, JSONCalendarRepository, InMemoryCalendarRepository, their old tests and all deprecated wrappers. Run `--complete` again after deletion from the committed inventory. Do not leave aliases, compatibility shims or a second business save path.
+- [x] Run GREEN, all existing app tests and release compile.
 
 ~~~zsh
 ./Scripts/test.sh --filter CalendarAppTests.WorkspaceStoreTests
@@ -1457,8 +1457,8 @@ swift build -c release
 git diff --check
 ~~~
 
-- [ ] Request fresh Sol xhigh final Task 6 review focused on single-store ownership, all 39 legacy assertion mappings, Calendar behavior preservation, queue/Journal/restore UI wiring and dead-path removal; fix every Critical/Important finding and rerun CalendarAppTests, CalendarPersistenceTests, full tests and release build.
-- [ ] Commit the 6A persistence prerequisite, 6B Store core and 6C cutover as separately reviewable commits; add one final tracking commit only after all Task 6 checkboxes and gates pass.
+- [x] Request fresh Sol xhigh final Task 6 review focused on single-store ownership, all 39 legacy assertion mappings, Calendar behavior preservation, queue/Journal/restore UI wiring and dead-path removal; fix every Critical/Important finding and rerun CalendarAppTests, CalendarPersistenceTests, full tests and release build.
+- [x] Commit the 6A persistence prerequisite, 6B Store core and 6C cutover as separately reviewable commits; add one final tracking commit only after all Task 6 checkboxes and gates pass.
 
 ~~~zsh
 git add Sources/CalendarApp Sources/CalendarPersistence Sources/WorkspaceDomain Tests/CalendarAppTests Tests/CalendarPersistenceTests Tests/WorkspaceDomainTests Scripts/verify-task6-legacy-assertion-map.sh docs/validation/workspace-v3/task-6-legacy-assertion-map.md docs/validation/workspace-v3/task-6-legacy-test-inventory.txt
