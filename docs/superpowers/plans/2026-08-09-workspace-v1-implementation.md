@@ -1860,24 +1860,39 @@ git commit -m "feat(notes): 锁定 Block 编辑输入状态机"
 - Create: Sources/CalendarApp/Notes/BlockEditor/BlockSlashMenu.swift
 - Create: Sources/CalendarApp/Notes/BlockEditor/BlockSelectionController.swift
 - Create: Sources/CalendarApp/Notes/BlockEditor/BlockDragCoordinator.swift
+- Create: Sources/CalendarApp/Notes/BlockEditor/BlockPasteboardAdapter.swift
+- Modify: Sources/CalendarApp/Workspace/EditorFocusRegistry.swift
+- Modify: Sources/CalendarApp/CalendarUndoCommands.swift
+- Modify: Sources/CalendarApp/PersonalCalendarApp.swift
 - Create: Tests/CalendarAppTests/BlockEditorBridgeTests.swift
 - Create: Tests/CalendarAppTests/BlockEditorUndoTests.swift
 - Create: Tests/CalendarAppTests/BlockEditorAccessibilityTests.swift
+- Create: Tests/CalendarAppTests/CalendarUndoCommandRoutingTests.swift
 
 **Produces:** Minimal, quiet, structured Block editor with IME-safe input, selection, paste, slash menu, drag reorder and editor-local undo.
 
 **Consumes:** Task 8 state machine, Workspace focus registry and BlockDocument.
 
-- [ ] Write RED hosted AppKit tests proving delegate command routing, marked-text behavior, selection mapping, cross-block copy/cut/delete/format/link, paste conversion, slash keyboard navigation, drag reorder, focus registry registration/removal and uninterrupted UndoManager grouping across autosave callbacks. The selection bridge table must round-trip Task 8 grapheme offsets to AppKit UTF-16 ranges for ASCII, Chinese, combining marks, flags, skin-tone emoji and ZWJ families; an `NSRange` boundary inside a grapheme is rejected as a typed bridge error rather than floored or clamped. The paste adapter must project supported `NSAttributedString` marks/links to `BlockPastePayload` and preserve all characters while dropping unsupported style.
+- [ ] Do not begin Task 9 until Task 8 is reviewed, committed and the following preflight is GREEN. Task 9 must consume the committed reducer rather than adding editor-only mutation algorithms.
 
-- [ ] Define the bridge API before implementing AppKit delegates. Both endpoints validate the Block ID and range against the current document; an `NSRange` is accepted only when `location` and `upperBound` are exact grapheme boundaries in the same Block. Cross-Block ranges are represented by two separately validated positions, never a synthetic global UTF-16 range.
+~~~zsh
+test -f Sources/CalendarApp/Notes/BlockEditor/BlockInputReducer.swift
+./Scripts/test.sh --filter CalendarAppTests.BlockEditorInputTests
+./Scripts/test.sh --filter CalendarAppTests.BlockEditorPurityGateTests
+swift build --target CalendarApp
+~~~
+
+- [ ] Define and RED-test the complete bidirectional UTF-16 bridge before delegate code. It operates on the concatenated span string, accepts divider offset zero only, validates missing Block/negative/overflow/`NSNotFound`/past-end, and accepts only exact `Character` boundaries or end index—never floor/clamp. A same-Block `NSRange` validates both endpoints atomically. Cross-Block selections remain two `BlockTextPosition`s and never become a synthetic global `NSRange`.
 
 ~~~swift
 enum BlockEditorBridgeError: Error, Equatable, Sendable {
     case missingBlock(BlockID)
     case negativeUTF16Offset
+    case nsNotFound
+    case integerOverflow
     case utf16OffsetOutOfRange
     case midGraphemeBoundary
+    case crossBlockRange
 }
 
 struct BlockTextRange: Equatable, Sendable {
@@ -1902,17 +1917,114 @@ protocol BlockSelectionBridging {
         nsRange: NSRange,
         document: BlockDocument
     ) throws -> BlockTextRange
+
+    static func nsRange(
+        textRange: BlockTextRange,
+        document: BlockDocument
+    ) throws -> NSRange
 }
 ~~~
 
-`BlockSelectionBridge` is the complete internal `BlockSelectionBridging` implementation in `BlockSelectionController.swift`; the protocol snippet is intentionally legal Swift and contains no body-less enum methods. `graphemeRange` rejects negative location/length, integer overflow, an upper bound past the same Block and either endpoint inside a grapheme, then returns positions with the same requested `blockID` atomically.
+`BlockSelectionBridge` is the complete internal implementation in `BlockSelectionController.swift`. `nsRange(textRange:)` accepts only a normalized same-Block `start <= end`; reverse Task 8 selections are normalized for the AppKit projection while `BlockSelectionController` separately preserves the original anchor/focus direction. Round-trip tables cover forward and reverse selection plus ASCII, Chinese, combining acute, flag, skin-tone emoji and ZWJ family; both endpoints of every range receive mid-grapheme probes.
 
-- [ ] Register one private Jelly pasteboard UTI for encoded `BlockClipboardPayload`. Prefer that payload only after complete decode and validation; otherwise read the pasteboard's full plain string. External `NSAttributedString` may supply only paragraph blocks with supported bold/italic/inline-code/link spans, zero indent and nil code info. It must never infer heading/list/task/quote/code/divider/link-Block kind from font, paragraph style or attachment. Unsupported attributes fall back to unstyled characters and every adapter result carries the exact plain string for Task 8 fallback.
+- [ ] Make the existing focus registry a production composition dependency. `PersonalCalendarApp` creates one `@StateObject EditorFocusRegistry`, injects that exact instance into `CalendarUndoCommands`, and Task 10 will pass the same instance to the Notes editor when it enables the route. Replace the tuple-only availability with a distinguishable snapshot while keeping the manager weak and owner-token clear semantics.
+
+~~~swift
+enum EditorFocusAvailability: Equatable, Sendable {
+    case noFocusedOwner
+    case focused(canUndo: Bool, canRedo: Bool)
+}
+~~~
+
+Both menu enablement and execution re-read the same registry state:
+
+- `.noFocusedOwner` alone may query/call WorkspaceStore undo or redo;
+- for any `.focused(...)`, read the requested side's boolean independently; if that side is false, consume/disable it and return `.focusedUnavailable` without Workspace fallback, regardless of whether the opposite side is available;
+- a focused available action calls only the session `UndoManager`;
+- if the weak manager has deallocated, registry clears that owner and becomes `.noFocusedOwner`;
+- install both Command-Z and Shift-Command-Z. A stale host A blur/dismantle may clear only A's lease and cannot clear a newer host B.
+
+- [ ] Define one stable `BlockEditorSession` per `(noteID, editSessionID)`. `BlockEditorView` creates it once with `@StateObject`; SwiftUI parent redraws and autosave receipts must not recreate it. The session strongly owns one shared `UndoManager`, authoritative `BlockDocument`, direction-preserving `BlockEditorSelection`, synthetic cross-host selection, composition state and attached host registry. `EditorFocusRegistry` remains a weak observer of that manager.
+
+~~~swift
+enum BlockEditorSaveStatus: Equatable, Sendable {
+    case idle
+    case saving
+    case saved
+    case failed(String)
+}
+
+struct BlockEditorDispatchOutcome: Equatable, Sendable {
+    let result: BlockInputResult
+    let commandHandled: Bool
+}
+
+@MainActor
+protocol BlockEditorSessionContract: AnyObject {
+    var noteID: NoteID { get }
+    var editSessionID: UUID { get }
+    var undoManager: UndoManager { get }
+    var document: BlockDocument { get }
+    var selection: BlockEditorSelection { get }
+    func attach(blockID: BlockID, hostToken: UUID, textView: BlockEditorTextView)
+    func detach(hostToken: UUID)
+    func dispatch(_ command: BlockInputCommand) throws -> BlockEditorDispatchOutcome
+    func autosaveDidResolve(_ status: BlockEditorSaveStatus)
+}
+~~~
+
+`BlockEditorSession` is the complete internal `ObservableObject & BlockEditorSessionContract` implementation. Its sole initializer is:
+
+~~~swift
+init(
+    noteID: NoteID,
+    editSessionID: UUID,
+    initialDocument: BlockDocument,
+    initialSelection: BlockEditorSelection,
+    focusRegistry: EditorFocusRegistry,
+    onDocumentChange: @escaping (BlockDocument) -> Void
+)
+~~~
+
+`BlockEditorView` uses only this entry to create its `@StateObject` once. Representable, host, selection and drag coordinators receive that session and may not create another registry, session, manager or document callback. These signatures are the exact Task 10 integration surface.
+
+Each host gets a unique lease token. Replacement host attach wins; stale detach only removes its exact token. Programmatic projection runs behind a reentrancy guard and cannot call the reducer, document callback or UndoManager. `onDocumentChange` is synchronous and fires exactly once only after an accepted `.document` result. Autosave status changes only save UI state; it never replaces session document/selection, ends a group or clears undo. An explicit recovery/new-note action creates a new editSessionID instead of silently rebasing the live session.
+
+- [ ] Lock the only legal `BlockInputResult` consumption combinations and RED-test every row plus invalid combinations:
+
+| Mutation | Effect | Undo | Delegate/session behavior |
+|---|---|---|---|
+| `.none` | `.handled` | `.none` | return handled; no callback/clipboard/undo |
+| `.none` | `.deferToTextSystem` | `.none` | return not-handled; no callback/undo |
+| `.none` | `.writeClipboard` | `.none` | copy once; no callback/undo |
+| `.none` | `.handled` | `.breakCoalescing` | close active typing group; handled; zero callback/clipboard/new undo |
+| `.selectionOnly` | `.handled` | `.none` | update session + host projections; close typing coalescing; no callback |
+| `.document` | `.handled` | `.coalesceTyping(id)` | publish/callback once; continue only same Block and continuous caret |
+| `.document` | `.handled` | `.atomic(action)` | close typing group, register exactly one undo group, callback once |
+| `.document` | `.writeClipboard` | `.atomic(.cut)` | write full plain string successfully before publishing; one clipboard/undo/callback |
+
+Every other combination is a typed/asserted integration error with zero side effects; any `.breakCoalescing` combination other than its table row is illegal. A custom pasteboard write may fail and still leave the mandatory plain string; a failed plain-string write prevents cut publication entirely. Before each accepted document mutation, capture the prior document/selection. Atomic undo restores that validated snapshot and registers the inverse redo; typing coalescing retains the first before-snapshot and latest after-snapshot. Undo/redo publish authoritative session truth and one document callback without passing through NSTextView storage or creating another user edit; this snapshot restore is the sole sanctioned non-reducer document transition inside a live session.
+
+- [ ] Define IME and host projection ordering, then write real delegate RED probes. The first `setMarkedText` freezes the authoritative document, Block ID, direction-preserving selection and explicit replacement range as one composition baseline. Later marked updates modify only the NSTextView transient projection. `insertText(_:replacementRange:)` while composing commits the complete candidate string exactly once against the frozen baseline, then reprojects session truth. If AppKit ends a live composition through `unmarkText` without a preceding insert, commit the current marked string exactly once; `cancelOperation:`/abandoned composition restores the frozen projection with zero reducer/callback/undo. Repeated insert/unmark after terminal commit/cancel is ignored by composition token. For ordinary insert, `NSNotFound` uses session selection and an explicit range goes through `BlockSelectionBridge`. While `hasMarkedText`, Return, Backspace, Tab/Backtab, arrows, Shift-arrows, slash and Escape defer to the input system and return not-handled. No marked storage becomes session truth before the terminal transition. Script Pinyin multi-update, insert commit, unmark commit, cancel, committed Chinese and emoji probes.
+
+- [ ] Route all production text commands explicitly: Enter, Shift-Enter, Backspace, Tab, Backtab, left/right/up/down, each `...AndModifySelection:` selector, insertText with selected/explicit replacement, copy, cut, paste and supported formatting/link shortcuts. Menu-open keys are handled by slash state first; composing keys are deferred first; all other accepted edits dispatch exactly one Task 8 command. Return handled/not-handled from the legal consumption table instead of letting NSTextView repeat an already-dispatched command.
+
+- [ ] Implement session-owned cross-Block selection. `BlockSelectionController` owns anchor/focus direction and pointer/Shift-key extension across host frames; each NSTextView only projects the intersection for its Block. Pointer drag, forward/reverse Shift extension and keyboard crossing preserve direction. Cross-Block copy/cut/delete/format/link dispatch once through Task 8, never concatenate independent `selectedRange` values. Unsupported mixed selections are one atomic no-change. Block selection is a separate stable-ID mode.
+
+- [ ] Define the private pasteboard contract. `BlockPasteboardAdapter` owns `NSPasteboard.PasteboardType("com.adeptify.jelly.block-clipboard.v1")` and a version-1 Codable DTO envelope that contains only plain text and Block kind/inline spans/indent/code info—never BlockID or completedAt. Copy/cut writes both custom data and complete `.string`; corrupt JSON, unknown version or invalid rich data falls back to the full `.string`. Bold/italic come only from font symbolic traits, links only from `.link` passing Task 8 validation, and inline-code only from a Jelly semantic attribute, never merely a monospace font. Paragraph/font/color styles do not infer Block kinds. Attachments/unsupported attributes lose styling but keep their characters, including U+FFFC, and `fallbackPlainText == attributed.string` exactly.
+
+- [ ] Define slash-menu state as `(blockID, queryRange, query, selectedIndex, dismissedRevision)`. It opens only for a leading slash query in a collapsed paragraph, closes during composition, recomputes after committed text/caret change, and does not immediately reopen for the same dismissed text/caret revision. Up/Down changes selection, Return dispatches one `.applySlashConversion`, Escape closes while preserving original text. Confirm/cancel are once-only and stale host/menu callbacks are ignored.
+
+- [ ] Define drag and keyboard reorder entirely in stable IDs. Normalize UI roots in document order, remove passed descendants, derive each continuous descendant closure, and compute `before:` from current Task 8 document. Drop inside a moved closure and same position are no-op. Move Up/Down selects the previous/next valid root boundary. One action performs one reducer dispatch, undo group and callback; keep selection on the same IDs and ignore stale host/index data. Provide a restrained 20pt affordance on hover/focus, keyboard alternatives and position announcements.
+
+- [ ] Accessibility contracts are production behavior: each Block exposes role/value, selection state and stable identifier; handles expose label, Move Up/Down actions and `第 n 项，共 m 项`; divider is selectable/operable; slash menu has deterministic focus/order/current-item state. Inline controls appear only for a nonempty supported text selection or explicit shortcut and remain keyboard reachable.
+
+- [ ] Write RED through real production paths, not only coordinator fakes. For editor behavior, initialize `NSApplication`, a key `NSWindow`, and `NSHostingView(BlockEditorView)` using production Session/TextView/Representable/FocusRegistry; IME, selection projection, pasteboard, drag, accessibility and the shared session UndoManager run there. Scene-level `CalendarUndoCommands: Commands` cannot be mounted in `NSHostingView`: `CalendarUndoCommandRoutingTests` instead call the production command router with the exact registry and WorkspaceStore, proving enablement/execution for no owner, undo-only, redo-only, both and focused-unavailable states without reimplementing routing. Actual App-menu Command-Z/Shift-Command-Z key equivalents remain a final packaged GUI Gate and are not claimed by SwiftPM hosted tests.
 
 ~~~swift
 @MainActor
 @Test func commandZUsesEditorUndoWhileFocused() throws {
-    let harness = BlockEditorHarness(document: fixture)
+    let harness = try HostedBlockEditorHarness(document: fixture)
     harness.focus(blockID)
     harness.type("甲")
     harness.storeAutosaveDidComplete()
@@ -1928,30 +2040,33 @@ protocol BlockSelectionBridging {
 ./Scripts/test.sh --filter CalendarAppTests.BlockEditorBridgeTests
 ./Scripts/test.sh --filter CalendarAppTests.BlockEditorUndoTests
 ./Scripts/test.sh --filter CalendarAppTests.BlockEditorAccessibilityTests
+./Scripts/test.sh --filter CalendarAppTests.CalendarUndoCommandRoutingTests
 ~~~
 
-- [ ] Implement one NSTextView per visible text block coordinated by BlockEditorSession. NSTextView storage is a view projection; BlockDocument remains session truth and committed edits go through BlockInputReducer.
-- [ ] In doCommandBy, defer Enter/Backspace when hasMarkedText is true. Apply structural commands only after composition commits. Add Pinyin candidate and emoji probes.
-- [ ] Map NSTextView ranges to BlockEditorSelection. Cross-block delete produces one undo group and one document callback.
-- [ ] Show the restrained inline-format/link controls only for a nonempty supported text selection or explicit keyboard shortcut; route cross-block copy, cut and supported formatting through the selection controller without losing unrecognized text.
-- [ ] Implement slash menu only for slash-prefixed paragraphs; arrows navigate, Return confirms, Escape closes, IME never opens it.
-- [ ] Implement a 20pt drag affordance on hover/focus, keyboard Move Up/Down alternatives, stable-ID reorder and accessible position announcements. Keep controls visually restrained.
-- [ ] Register the editor session UndoManager in EditorFocusRegistry on focus and clear it on blur/deinit. Autosave observers cannot end groups or replace the session.
-- [ ] Run GREEN.
+- [ ] Add the complete public-shaped internal API skeleton and production composition changes, then run `swift build --target CalendarApp` before filling delegate behavior. Do not weaken MainActor isolation or use `@preconcurrency` to hide an unsafe editor path.
+
+- [ ] Implement the minimum production Session, bridge, text hosts, selection, pasteboard, slash, drag, focus-command routing and accessibility behavior that turns every RED matrix GREEN. The old `MarkdownNotesEditor` and `MarkdownRichTextCodec` remain untouched and serve legacy calendar notes only.
+
+- [ ] Run GREEN plus Task 8, command routing, CalendarApp, full and release gates. Verify only one PersonalCalendarApp focus registry, one editor session/UndoManager per editSessionID and no AppKit mutation bypass around `BlockInputReducer`.
 
 ~~~zsh
 ./Scripts/test.sh --filter CalendarAppTests.BlockEditorBridgeTests
 ./Scripts/test.sh --filter CalendarAppTests.BlockEditorUndoTests
 ./Scripts/test.sh --filter CalendarAppTests.BlockEditorAccessibilityTests
+./Scripts/test.sh --filter CalendarAppTests.CalendarUndoCommandRoutingTests
 ./Scripts/test.sh --filter CalendarAppTests.BlockEditorInputTests
+./Scripts/test.sh --filter CalendarAppTests.WorkspaceCommandRoutingTests
+./Scripts/test.sh --filter CalendarAppTests
+./Scripts/test.sh
+swift build -c release
 git diff --check
 ~~~
 
-- [ ] Request fresh Sol xhigh review focused on IME, focus undo, selection identity, autosave boundaries and accessibility; fix every Critical/Important finding and rerun all BlockEditor filters.
+- [ ] Request fresh Sol xhigh review focused on real production command routing, IME baseline/commit/cancel, result-consumption atomicity, synthetic selection identity, pasteboard fallback, stable session/autosave boundaries and accessibility; fix every Critical/Important finding and rerun all BlockEditor filters plus full/release gates.
 - [ ] Commit.
 
 ~~~zsh
-git add Sources/CalendarApp/Notes/BlockEditor Tests/CalendarAppTests
+git add Sources/CalendarApp/Notes/BlockEditor/BlockEditorView.swift Sources/CalendarApp/Notes/BlockEditor/BlockEditorSession.swift Sources/CalendarApp/Notes/BlockEditor/BlockEditorTextView.swift Sources/CalendarApp/Notes/BlockEditor/BlockEditorTextViewRepresentable.swift Sources/CalendarApp/Notes/BlockEditor/BlockSlashMenu.swift Sources/CalendarApp/Notes/BlockEditor/BlockSelectionController.swift Sources/CalendarApp/Notes/BlockEditor/BlockDragCoordinator.swift Sources/CalendarApp/Notes/BlockEditor/BlockPasteboardAdapter.swift Sources/CalendarApp/Workspace/EditorFocusRegistry.swift Sources/CalendarApp/CalendarUndoCommands.swift Sources/CalendarApp/PersonalCalendarApp.swift Tests/CalendarAppTests/BlockEditorBridgeTests.swift Tests/CalendarAppTests/BlockEditorUndoTests.swift Tests/CalendarAppTests/BlockEditorAccessibilityTests.swift Tests/CalendarAppTests/CalendarUndoCommandRoutingTests.swift
 git commit -m "feat(notes): 交付极简结构化 Block 编辑器"
 ~~~
 
@@ -1976,7 +2091,7 @@ git commit -m "feat(notes): 交付极简结构化 Block 编辑器"
 
 **Produces:** A visible Notes tab with create/select/edit, title + Block content, debounced Journal-first autosave, save state and restart recovery choice.
 
-**Consumes:** WorkspaceStore, BlockEditor and DraftJournalCoordinator.
+**Consumes:** WorkspaceStore, BlockEditor, the single PersonalCalendarApp EditorFocusRegistry and DraftJournalCoordinator.
 
 - [ ] Write RED tests for create/select/delete-selection fallback, empty state, title edit, 150ms Journal and 650ms main-save debounce, coalesced generations, save failure, recovered-newer-draft preview, 恢复为当前版本, 保留磁盘版本, 另存为新笔记, Markdown import fidelity and Markdown export.
 
@@ -2004,7 +2119,7 @@ git commit -m "feat(notes): 交付极简结构化 Block 编辑器"
 ./Scripts/test.sh --filter CalendarAppTests.NoteMarkdownCommandTests
 ~~~
 
-- [ ] Implement a collapsible two-column NotesSplitView. The left column contains search, shared-category filter, 最近编辑, 全部笔记, 归档, Note list and 新建. The right column contains borderless title, BlockEditor and only category, exceptional save state, 安排到日历 and more at the top. Calendar relations appear on demand, not as a permanent side panel. Expose the shared Category manager from the Notes toolbar without making it a fourth route. Do not add AI buttons in V1.
+- [ ] Implement a collapsible two-column NotesSplitView. The left column contains search, shared-category filter, 最近编辑, 全部笔记, 归档, Note list and 新建. The right column contains borderless title, BlockEditor and only category, exceptional save state, 安排到日历 and more at the top. Calendar relations appear on demand, not as a permanent side panel. Expose the shared Category manager from the Notes toolbar without making it a fourth route. Do not add AI buttons in V1. Thread the exact `PersonalCalendarApp` `EditorFocusRegistry` through AppShell → NotesSplitView → NoteEditorView → BlockEditorView; never create a module-local second registry. A selected Note gets a stable editSessionID until explicit recovery/reopen changes the authoritative draft.
 - [ ] Add 导入 Markdown and 导出 Markdown under the Note more menu. Import previews BlockMarkdownImportResult diagnostics before replacing/appending; cancel leaves the Note unchanged. Export writes the canonical Markdown selected by the user and reports write failure truthfully.
 - [ ] Enable Notes only after create/edit/autosave/recovery paths are wired. Inspiration remains hidden.
 - [ ] Every edit increments draftGeneration and computes checksum, coalesces Journal writes at 150ms, then saves the main Workspace at 650ms total. submitDraft carries only that Note snapshot/generation. Flush both layers on selection change, app inactive and window close.
