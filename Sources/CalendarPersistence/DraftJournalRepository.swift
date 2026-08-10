@@ -17,26 +17,186 @@ public actor DraftJournalRepository {
     }
 
     public func persist(_ entry: DraftJournalEntry) throws {
+        _ = try protect(entry)
+    }
+
+    /// Inserts a bare record, or replaces an older generation, while holding
+    /// the cross-process lock.  A same-generation retry can reuse the exact
+    /// bare record but cannot silently replace its captured snapshot.
+    public func protect(_ entry: DraftJournalEntry) throws -> DraftJournalProtectionResult {
         guard isValid(entry) else { throw WorkspacePersistenceError.invalidJournal }
-        try withJournalLock {
+        return try withJournalLock {
             var envelope = try readValidatedAndMigrateLegacyIfNeededUnlocked() ?? emptyEnvelope()
             let identity = DraftJournalIdentity(noteID: entry.noteID, editSessionID: entry.editSessionID)
-            if let index = envelope.records.firstIndex(where: { $0.identity == identity }),
-               envelope.records[index].entry.draftGeneration > entry.draftGeneration {
-                return
-            }
-            let record = try makeRecord(entry: entry, pendingReceipt: nil, savedReceipt: nil)
             if let index = envelope.records.firstIndex(where: { $0.identity == identity }) {
-                envelope.records[index] = record
+                let current = envelope.records[index]
+                if current.entry.draftGeneration > entry.draftGeneration {
+                    return .superseded(currentGeneration: current.entry.draftGeneration)
+                }
+                if current.entry.draftGeneration == entry.draftGeneration {
+                    guard current.pendingReceipt == nil,
+                          current.savedReceipt == nil,
+                          current.recoveryCompletion == nil,
+                          sameSubmissionRecord(current.entry, as: entry)
+                    else {
+                        return .superseded(currentGeneration: current.entry.draftGeneration)
+                    }
+                    return .protected(recoveryToken(for: current.entry))
+                }
+                guard current.pendingReceipt == nil,
+                      current.savedReceipt == nil,
+                      current.recoveryCompletion == nil
+                else {
+                    return .busy(currentGeneration: current.entry.draftGeneration)
+                }
+                envelope.records[index] = try makeRecord(entry: entry, pendingReceipt: nil, savedReceipt: nil)
             } else {
-                envelope.records.append(record)
+                envelope.records.append(try makeRecord(entry: entry, pendingReceipt: nil, savedReceipt: nil))
             }
             try writeUnlocked(envelope)
+            return .protected(recoveryToken(for: entry))
+        }
+    }
+
+    /// Removes only the exact, still-bare record named by a recovery token.
+    /// A stale preview is an explicit `.staleOrMissing`, never a write to a
+    /// newer generation or another identity.
+    @discardableResult
+    public func discardRecovery(_ token: DraftRecoveryToken) throws -> DraftJournalExactTransitionResult {
+        try withJournalLock {
+            var envelope = try requireEnvelopeUnlocked()
+            guard let index = envelope.records.firstIndex(where: { recordMatchesBareRecoveryToken($0, token: token) }) else {
+                return .staleOrMissing
+            }
+            envelope.records.remove(at: index)
+            try writeUnlocked(envelope)
+            return .applied
+        }
+    }
+
+    /// Claim an exact bare recovery record before attempting its main-file
+    /// write. The durable pending marker is the restart boundary for recovery
+    /// saves, which intentionally do not masquerade as editor submissions.
+    @discardableResult
+    public func beginRecoveryCompletion(_ completion: DraftRecoveryCompletion) throws -> DraftJournalExactTransitionResult {
+        guard completion.state == .pending else { throw WorkspacePersistenceError.invalidJournal }
+        return try withJournalLock {
+            var envelope = try requireEnvelopeUnlocked()
+            guard let index = envelope.records.firstIndex(where: {
+                recordMatchesBareRecoveryToken($0, token: completion.token)
+            }) else { return .staleOrMissing }
+            envelope.records[index] = try makeRecord(
+                entry: envelope.records[index].entry,
+                pendingReceipt: nil,
+                savedReceipt: nil,
+                recoveryCompletion: completion
+            )
+            try writeUnlocked(envelope)
+            return .applied
+        }
+    }
+
+    /// Persist the post-save state before trying to discard the recovery
+    /// marker. Repeating this transition is idempotent.
+    @discardableResult
+    public func markRecoveryCompletionCommitted(_ completion: DraftRecoveryCompletion) throws -> DraftJournalExactTransitionResult {
+        try withJournalLock {
+            var envelope = try requireEnvelopeUnlocked()
+            guard let index = envelope.records.firstIndex(where: {
+                $0.recoveryCompletion?.withState(.pending) == completion.withState(.pending)
+            }) else { return .staleOrMissing }
+            let current = envelope.records[index]
+            guard let stored = current.recoveryCompletion else { return .staleOrMissing }
+            if stored.state == .committed { return .applied }
+            envelope.records[index] = try makeRecord(
+                entry: current.entry,
+                pendingReceipt: nil,
+                savedReceipt: nil,
+                recoveryCompletion: stored.withState(.committed)
+            )
+            try writeUnlocked(envelope)
+            return .applied
+        }
+    }
+
+    /// Compare-and-discard only the exact committed completion. A bare token
+    /// is never allowed to erase a marker for another action or result.
+    @discardableResult
+    public func discardRecoveryCompletion(_ completion: DraftRecoveryCompletion) throws -> DraftJournalExactTransitionResult {
+        try withJournalLock {
+            var envelope = try requireEnvelopeUnlocked()
+            guard let index = envelope.records.firstIndex(where: {
+                $0.recoveryCompletion == completion.withState(.committed)
+            }) else { return .staleOrMissing }
+            envelope.records.remove(at: index)
+            try writeUnlocked(envelope)
+            return .applied
+        }
+    }
+
+    /// A definite non-commit may reopen the original bare record. Once the
+    /// marker has reached committed, it is deliberately non-reversible.
+    @discardableResult
+    public func abandonRecoveryCompletion(_ completion: DraftRecoveryCompletion) throws -> DraftJournalExactTransitionResult {
+        try withJournalLock {
+            var envelope = try requireEnvelopeUnlocked()
+            guard let index = envelope.records.firstIndex(where: {
+                $0.recoveryCompletion == completion.withState(.pending)
+            }) else { return .staleOrMissing }
+            let current = envelope.records[index]
+            envelope.records[index] = try makeRecord(
+                entry: current.entry,
+                pendingReceipt: nil,
+                savedReceipt: nil,
+                recoveryCompletion: nil
+            )
+            try writeUnlocked(envelope)
+            return .applied
+        }
+    }
+
+    /// Checks the same exact bare record predicate used by compare-discard.
+    /// Store calls this before a recovery save, and `rebaseAndBind(expected:)`
+    /// repeats the predicate inside the binding transaction to close races.
+    public func isCurrentBare(_ token: DraftRecoveryToken) throws -> Bool {
+        try withJournalLock {
+            guard let envelope = try readValidatedAndMigrateLegacyIfNeededUnlocked() else { return false }
+            return envelope.records.contains { recordMatchesBareRecoveryToken($0, token: token) }
         }
     }
 
     public func rebaseAndBind(
         expected: DraftJournalIdentityAndGeneration,
+        finalCandidateNote: Note,
+        receipt: PersistedDraftReceipt
+    ) throws -> DraftJournalBindingResult {
+        try rebaseAndBind(
+            expected: expected,
+            exactBareToken: nil,
+            finalCandidateNote: finalCandidateNote,
+            receipt: receipt
+        )
+    }
+
+    /// Binds a Store-protected record only when the record is still the exact
+    /// bare record named by its recovery token.  This closes the interval
+    /// between issuing an in-memory capability and queueing its frozen save.
+    public func rebaseAndBind(
+        expected: DraftRecoveryToken,
+        finalCandidateNote: Note,
+        receipt: PersistedDraftReceipt
+    ) throws -> DraftJournalBindingResult {
+        try rebaseAndBind(
+            expected: expected.identityAndGeneration,
+            exactBareToken: expected,
+            finalCandidateNote: finalCandidateNote,
+            receipt: receipt
+        )
+    }
+
+    private func rebaseAndBind(
+        expected: DraftJournalIdentityAndGeneration,
+        exactBareToken: DraftRecoveryToken?,
         finalCandidateNote: Note,
         receipt: PersistedDraftReceipt
     ) throws -> DraftJournalBindingResult {
@@ -55,6 +215,11 @@ public actor DraftJournalRepository {
             guard current.entry.draftGeneration == expected.draftGeneration,
                   current.pendingReceipt == nil,
                   current.savedReceipt == nil,
+                  current.recoveryCompletion == nil,
+                  exactBareToken.map({ token in
+                      current.entry.noteSnapshotChecksum == token.noteSnapshotChecksum
+                          && current.entry.journalChecksum == token.journalChecksum
+                  }) ?? true,
                   receipt.persistedNoteRevision == finalCandidateNote.revision
             else { throw WorkspacePersistenceError.invalidJournal }
             let checksum = try WorkspaceChecksum.noteSnapshotChecksum(finalCandidateNote)
@@ -88,75 +253,79 @@ public actor DraftJournalRepository {
     }
 
     @discardableResult
-    public func record(_ receipt: PersistedDraftReceipt) throws -> Bool {
+    public func record(_ receipt: PersistedDraftReceipt) throws -> DraftJournalExactTransitionResult {
         try withJournalLock {
             var envelope = try requireEnvelopeUnlocked()
             let identity = DraftJournalIdentity(noteID: receipt.noteID, editSessionID: receipt.editSessionID)
             guard let index = envelope.records.firstIndex(where: { $0.identity == identity }),
                   envelope.records[index].pendingReceipt == receipt,
-                  envelope.records[index].savedReceipt == nil
-            else { return false }
+                  envelope.records[index].savedReceipt == nil,
+                  envelope.records[index].recoveryCompletion == nil
+            else { return .staleOrMissing }
             envelope.records[index] = try makeRecord(
                 entry: envelope.records[index].entry,
                 pendingReceipt: nil,
                 savedReceipt: receipt
             )
             try writeUnlocked(envelope)
-            return true
+            return .applied
         }
     }
 
     @discardableResult
-    public func unbindPending(_ receipt: PersistedDraftReceipt) throws -> Bool {
+    public func unbindPending(_ receipt: PersistedDraftReceipt) throws -> DraftJournalExactTransitionResult {
         try withJournalLock {
             var envelope = try requireEnvelopeUnlocked()
             let identity = DraftJournalIdentity(noteID: receipt.noteID, editSessionID: receipt.editSessionID)
             guard let index = envelope.records.firstIndex(where: { $0.identity == identity }),
                   envelope.records[index].pendingReceipt == receipt,
-                  envelope.records[index].savedReceipt == nil
-            else { return false }
+                  envelope.records[index].savedReceipt == nil,
+                  envelope.records[index].recoveryCompletion == nil
+            else { return .staleOrMissing }
             envelope.records[index] = try makeRecord(
                 entry: envelope.records[index].entry,
                 pendingReceipt: nil,
                 savedReceipt: nil
             )
             try writeUnlocked(envelope)
-            return true
+            return .applied
         }
     }
 
     @discardableResult
-    public func acknowledgeAlreadyPersisted(_ receipt: PersistedDraftReceipt) throws -> Bool {
+    public func acknowledgeAlreadyPersisted(_ receipt: PersistedDraftReceipt) throws -> DraftJournalExactTransitionResult {
         try withJournalLock {
             var envelope = try requireEnvelopeUnlocked()
             let identity = DraftJournalIdentity(noteID: receipt.noteID, editSessionID: receipt.editSessionID)
             guard let index = envelope.records.firstIndex(where: { $0.identity == identity }),
                   envelope.records[index].pendingReceipt == nil,
                   envelope.records[index].savedReceipt == nil,
+                  envelope.records[index].recoveryCompletion == nil,
                   isCompatible(receipt, with: envelope.records[index].entry)
-            else { return false }
+            else { return .staleOrMissing }
             envelope.records[index] = try makeRecord(
                 entry: envelope.records[index].entry,
                 pendingReceipt: nil,
                 savedReceipt: receipt
             )
             try writeUnlocked(envelope)
-            return true
+            return .applied
         }
     }
 
     @discardableResult
-    public func clear(_ receipt: PersistedDraftReceipt) throws -> Bool {
+    public func clear(_ receipt: PersistedDraftReceipt) throws -> DraftJournalExactTransitionResult {
         try withJournalLock {
             var envelope = try requireEnvelopeUnlocked()
             let identity = DraftJournalIdentity(noteID: receipt.noteID, editSessionID: receipt.editSessionID)
             guard let index = envelope.records.firstIndex(where: { $0.identity == identity }),
                   envelope.records[index].savedReceipt == receipt,
-                  envelope.records[index].pendingReceipt == nil
-            else { return false }
+                  envelope.records[index].pendingReceipt == nil,
+                  envelope.records[index].recoveryCompletion == nil
+            else { return .staleOrMissing }
             envelope.records.remove(at: index)
             try writeUnlocked(envelope)
-            return true
+            return .applied
         }
     }
 
@@ -215,6 +384,7 @@ public actor DraftJournalRepository {
         }
         guard let record else { return nil }
         guard record.entry.noteID == record.entry.noteSnapshot.id,
+              (try? BlockDocumentValidator.validate(record.entry.noteSnapshot.document)) != nil,
               record.entry.noteSnapshotChecksum
                 == (try? WorkspaceChecksum.noteSnapshotChecksum(record.entry.noteSnapshot)),
               record.entry.journalChecksum == (try? legacyEntryChecksum(record.entry)),
@@ -314,16 +484,19 @@ public actor DraftJournalRepository {
     private func makeRecord(
         entry: DraftJournalEntry,
         pendingReceipt: PersistedDraftReceipt?,
-        savedReceipt: PersistedDraftReceipt?
+        savedReceipt: PersistedDraftReceipt?,
+        recoveryCompletion: DraftRecoveryCompletion? = nil
     ) throws -> StoredDraftJournalRecord {
         StoredDraftJournalRecord(
             entry: entry,
             pendingReceipt: pendingReceipt,
             savedReceipt: savedReceipt,
+            recoveryCompletion: recoveryCompletion,
             recordChecksum: try DraftJournal.recordChecksum(
                 entry: entry,
                 pendingReceipt: pendingReceipt,
-                savedReceipt: savedReceipt
+                savedReceipt: savedReceipt,
+                recoveryCompletion: recoveryCompletion
             )
         )
     }
@@ -333,17 +506,80 @@ public actor DraftJournalRepository {
             && record.recordChecksum == (try? DraftJournal.recordChecksum(
                 entry: record.entry,
                 pendingReceipt: record.pendingReceipt,
-                savedReceipt: record.savedReceipt
+                savedReceipt: record.savedReceipt,
+                recoveryCompletion: record.recoveryCompletion
             ))
             && record.pendingReceipt.map({ isCompatible($0, with: record.entry) }) ?? true
             && record.savedReceipt.map({ isCompatible($0, with: record.entry) }) ?? true
+            && record.recoveryCompletion.map({ isValidRecoveryCompletion($0, for: record.entry) }) ?? true
             && !(record.pendingReceipt != nil && record.savedReceipt != nil)
+            && (record.recoveryCompletion == nil || (record.pendingReceipt == nil && record.savedReceipt == nil))
     }
 
     private func isValid(_ entry: DraftJournalEntry) -> Bool {
         entry.noteID == entry.noteSnapshot.id
+            && (try? BlockDocumentValidator.validate(entry.noteSnapshot.document)) != nil
             && entry.noteSnapshotChecksum == (try? WorkspaceChecksum.noteSnapshotChecksum(entry.noteSnapshot))
             && entry.journalChecksum == (try? DraftJournal.entryChecksum(for: entry))
+    }
+
+    private nonisolated func recoveryToken(for entry: DraftJournalEntry) -> DraftRecoveryToken {
+        .init(
+            identityAndGeneration: .init(
+                identity: .init(noteID: entry.noteID, editSessionID: entry.editSessionID),
+                draftGeneration: entry.draftGeneration
+            ),
+            noteSnapshotChecksum: entry.noteSnapshotChecksum,
+            journalChecksum: entry.journalChecksum
+        )
+    }
+
+    private nonisolated func sameSubmissionRecord(
+        _ current: DraftJournalEntry,
+        as submitted: DraftJournalEntry
+    ) -> Bool {
+        current.noteID == submitted.noteID
+            && current.editSessionID == submitted.editSessionID
+            && current.baseWorkspaceRevision == submitted.baseWorkspaceRevision
+            && current.baseNoteRevision == submitted.baseNoteRevision
+            && current.draftGeneration == submitted.draftGeneration
+            // A definite not-committed result unbinds the final reducer
+            // candidate, whose revision/timestamps differ from the original
+            // captured submission.  The retry is still the same draft when
+            // its user-visible content is identical; token issuance must use
+            // the exact current record rather than replacing it.
+            && current.noteSnapshot.id == submitted.noteSnapshot.id
+            && current.noteSnapshot.title == submitted.noteSnapshot.title
+            && current.noteSnapshot.document == submitted.noteSnapshot.document
+            && current.noteSnapshot.categoryID == submitted.noteSnapshot.categoryID
+            && current.noteSnapshot.archivedAt == submitted.noteSnapshot.archivedAt
+    }
+
+    private nonisolated func recordMatchesBareRecoveryToken(
+        _ record: StoredDraftJournalRecord,
+        token: DraftRecoveryToken
+    ) -> Bool {
+        record.identity == token.identityAndGeneration.identity
+            && record.entry.draftGeneration == token.identityAndGeneration.draftGeneration
+            && record.entry.noteSnapshotChecksum == token.noteSnapshotChecksum
+            && record.entry.journalChecksum == token.journalChecksum
+            && record.pendingReceipt == nil
+            && record.savedReceipt == nil
+            && record.recoveryCompletion == nil
+    }
+
+    private nonisolated func isValidRecoveryCompletion(
+        _ completion: DraftRecoveryCompletion,
+        for entry: DraftJournalEntry
+    ) -> Bool {
+        completion.token.identityAndGeneration.identity == .init(noteID: entry.noteID, editSessionID: entry.editSessionID)
+            && completion.token.identityAndGeneration.draftGeneration == entry.draftGeneration
+            && completion.token.noteSnapshotChecksum == entry.noteSnapshotChecksum
+            && completion.token.journalChecksum == entry.journalChecksum
+            && completion.source.workspaceRevision >= 0
+            && !completion.source.workspaceChecksum.isEmpty
+            && completion.result.noteRevision >= 0
+            && completion.result.workspaceRevision >= 0
     }
 
     private nonisolated func isCompatible(

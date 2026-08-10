@@ -85,8 +85,8 @@ struct DraftJournalRepositoryTests {
             finalCandidateNote: final,
             receipt: receipt
         ) == .bound)
-        #expect(try await journal.record(receipt))
-        #expect(try await journal.clear(receipt))
+        #expect(try await journal.record(receipt) == .applied)
+        #expect(try await journal.clear(receipt) == .applied)
         #expect(try await journal.current()?.records.isEmpty == true)
     }
 
@@ -115,6 +115,39 @@ struct DraftJournalRepositoryTests {
         ) == .supersededByNewerDraft)
         #expect(try await journal.current()?.records.first?.entry.draftGeneration == 4)
         #expect(try await journal.current()?.records.first?.pendingReceipt == nil)
+    }
+
+    @Test func persistCompatibilityAndRecoveryDiscardShareTheSameExactGenerationGuard() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let note = try #require(WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 4).notes.values.first)
+        let session = DraftJournalSessionID.editor(UUID())
+        let journal = DraftJournalRepository(fileURL: directory.file("draft-journal.json"))
+        let original = try makeDraftEntry(note: note, session: session, generation: 3)
+        try await journal.persist(original)
+        let token = DraftRecoveryToken(
+            identityAndGeneration: .init(
+                identity: .init(noteID: note.id, editSessionID: session),
+                draftGeneration: 3
+            ),
+            noteSnapshotChecksum: original.noteSnapshotChecksum,
+            journalChecksum: original.journalChecksum
+        )
+        var replacement = note
+        replacement.title = "same generation must not replace"
+
+        #expect(try await journal.protect(
+            try makeDraftEntry(note: replacement, session: session, generation: 3)
+        ) == .superseded(currentGeneration: 3))
+        #expect(try await journal.current()?.records.first?.entry == original)
+
+        let stale = DraftRecoveryToken(
+            identityAndGeneration: token.identityAndGeneration,
+            noteSnapshotChecksum: token.noteSnapshotChecksum,
+            journalChecksum: "stale-journal-checksum"
+        )
+        #expect(try await journal.discardRecovery(stale) == .staleOrMissing)
+        #expect(try await journal.discardRecovery(token) == .applied)
     }
 
     @Test func validTask5LegacyPendingReceiptMigratesToTheLegacyNamespace() async throws {
@@ -200,6 +233,68 @@ struct DraftJournalRepositoryTests {
         }
     }
 
+    @Test func domainInvalidEntriesCannotChangeAnExistingJournalThroughProtectOrPersist() async throws {
+        let state = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 4)
+        let validNote = try #require(state.notes.values.first)
+        let invalidNote = domainInvalidNote(from: validNote)
+
+        do {
+            let directory = try WorkspacePersistenceTemporaryDirectory()
+            defer { directory.remove() }
+            let url = directory.file("protect-domain-invalid.json")
+            let repository = DraftJournalRepository(fileURL: url)
+            try await repository.persist(try makeDraftEntry(
+                note: validNote, session: .editor(UUID()), generation: 1
+            ))
+            let before = try Data(contentsOf: url)
+
+            await #expect(throws: WorkspacePersistenceError.invalidJournal) {
+                _ = try await repository.protect(try makeDraftEntry(
+                    note: invalidNote, session: .editor(UUID()), generation: 2
+                ))
+            }
+
+            #expect(try Data(contentsOf: url) == before)
+        }
+
+        do {
+            let directory = try WorkspacePersistenceTemporaryDirectory()
+            defer { directory.remove() }
+            let url = directory.file("persist-domain-invalid.json")
+            let repository = DraftJournalRepository(fileURL: url)
+            try await repository.persist(try makeDraftEntry(
+                note: validNote, session: .editor(UUID()), generation: 1
+            ))
+            let before = try Data(contentsOf: url)
+
+            await #expect(throws: WorkspacePersistenceError.invalidJournal) {
+                try await repository.persist(try makeDraftEntry(
+                    note: invalidNote, session: .editor(UUID()), generation: 2
+                ))
+            }
+
+            #expect(try Data(contentsOf: url) == before)
+        }
+    }
+
+    @Test func checksumValidDomainInvalidJournalIsRejectedWithoutRewritingItsBytes() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let url = directory.file("domain-invalid-raw.json")
+        let note = try #require(WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 4).notes.values.first)
+        let entry = try makeDraftEntry(
+            note: domainInvalidNote(from: note), session: .editor(UUID()), generation: 1
+        )
+        let rawData = try canonicalJournalData(entry: entry)
+        try rawData.write(to: url)
+
+        await #expect(throws: WorkspacePersistenceError.invalidJournal) {
+            _ = try await DraftJournalRepository(fileURL: url).current()
+        }
+
+        #expect(try Data(contentsOf: url) == rawData)
+    }
+
     @Test func exactUnbindAcknowledgeAndClearAreDurablePerIdentity() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
@@ -224,11 +319,11 @@ struct DraftJournalRepositoryTests {
             finalCandidateNote: note,
             receipt: receipt
         ) == .bound)
-        #expect(try await journal.unbindPending(receipt))
+        #expect(try await journal.unbindPending(receipt) == .applied)
         #expect(try await journal.current()?.records.first?.pendingReceipt == nil)
-        #expect(try await journal.acknowledgeAlreadyPersisted(receipt))
+        #expect(try await journal.acknowledgeAlreadyPersisted(receipt) == .applied)
         #expect(try await journal.current()?.records.first?.savedReceipt == receipt)
-        #expect(try await journal.clear(receipt))
+        #expect(try await journal.clear(receipt) == .applied)
         #expect(try await journal.current()?.records.isEmpty == true)
     }
 
@@ -527,7 +622,7 @@ struct DraftJournalRepositoryTests {
         let fixture = try await makeBareJournalFixture()
         defer { fixture.directory.remove() }
         let repository = DraftJournalRepository(fileURL: fixture.url)
-        #expect(try await repository.acknowledgeAlreadyPersisted(fixture.receipt))
+        #expect(try await repository.acknowledgeAlreadyPersisted(fixture.receipt) == .applied)
         let before = try Data(contentsOf: fixture.url)
         await #expect(throws: WorkspacePersistenceError.atomicWriteFailed) {
             _ = try await DraftJournalRepository(fileURL: fixture.url, writer: DraftJournalAlwaysFailingWriter())
@@ -536,12 +631,80 @@ struct DraftJournalRepositoryTests {
         #expect(try Data(contentsOf: fixture.url) == before)
         #expect(try await DraftJournalRepository(fileURL: fixture.url).current()?.records.first?.savedReceipt == fixture.receipt)
     }
+
+    @Test func concurrentExactReceiptTransitionsReportOneAppliedAndOneStaleWithoutChangingTruth() async throws {
+        do {
+            let fixture = try await makeBoundJournalFixture()
+            defer { fixture.directory.remove() }
+            let first = DraftJournalRepository(fileURL: fixture.url)
+            let second = DraftJournalRepository(fileURL: fixture.url)
+
+            async let firstResult = first.unbindPending(fixture.receipt)
+            async let secondResult = second.unbindPending(fixture.receipt)
+            let results = try await [firstResult, secondResult]
+
+            expectOneAppliedAndOneStale(results)
+            let record = try #require(try await first.current()?.records.first)
+            #expect(record.pendingReceipt == nil)
+            #expect(record.savedReceipt == nil)
+        }
+
+        do {
+            let fixture = try await makeBoundJournalFixture()
+            defer { fixture.directory.remove() }
+            let first = DraftJournalRepository(fileURL: fixture.url)
+            let second = DraftJournalRepository(fileURL: fixture.url)
+
+            async let firstResult = first.record(fixture.receipt)
+            async let secondResult = second.record(fixture.receipt)
+            let results = try await [firstResult, secondResult]
+
+            expectOneAppliedAndOneStale(results)
+            let record = try #require(try await first.current()?.records.first)
+            #expect(record.pendingReceipt == nil)
+            #expect(record.savedReceipt == fixture.receipt)
+        }
+
+        do {
+            let fixture = try await makeBareJournalFixture()
+            defer { fixture.directory.remove() }
+            let first = DraftJournalRepository(fileURL: fixture.url)
+            let second = DraftJournalRepository(fileURL: fixture.url)
+
+            async let firstResult = first.acknowledgeAlreadyPersisted(fixture.receipt)
+            async let secondResult = second.acknowledgeAlreadyPersisted(fixture.receipt)
+            let results = try await [firstResult, secondResult]
+
+            expectOneAppliedAndOneStale(results)
+            #expect(try await first.current()?.records.first?.savedReceipt == fixture.receipt)
+        }
+
+        do {
+            let fixture = try await makeBareJournalFixture()
+            defer { fixture.directory.remove() }
+            let first = DraftJournalRepository(fileURL: fixture.url)
+            #expect(try await first.acknowledgeAlreadyPersisted(fixture.receipt) == .applied)
+            let second = DraftJournalRepository(fileURL: fixture.url)
+
+            async let firstResult = first.clear(fixture.receipt)
+            async let secondResult = second.clear(fixture.receipt)
+            let results = try await [firstResult, secondResult]
+
+            expectOneAppliedAndOneStale(results)
+            #expect(try await first.current()?.records.isEmpty == true)
+        }
+    }
 }
 
 private struct DraftJournalTestFixture {
     let directory: WorkspacePersistenceTemporaryDirectory
     let url: URL
     let receipt: PersistedDraftReceipt
+}
+
+private func expectOneAppliedAndOneStale(_ results: [DraftJournalExactTransitionResult]) {
+    #expect(results.filter { $0 == .applied }.count == 1)
+    #expect(results.filter { $0 == .staleOrMissing }.count == 1)
 }
 
 private func makeBareJournalFixture() async throws -> DraftJournalTestFixture {
@@ -615,6 +778,40 @@ private func makeDraftEntry(
         noteSnapshotChecksum: unsigned.noteSnapshotChecksum,
         journalChecksum: try DraftJournal.entryChecksum(for: unsigned)
     )
+}
+
+private func domainInvalidNote(from note: Note) -> Note {
+    var invalid = note
+    let duplicate = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000006dff")!)
+    invalid.document = .init(blocks: [
+        .init(
+            id: duplicate, kind: .paragraph, inlineContent: .plain("first"),
+            taskState: nil, indentLevel: 0
+        ),
+        .init(
+            id: duplicate, kind: .paragraph, inlineContent: .plain("second"),
+            taskState: nil, indentLevel: 0
+        ),
+    ])
+    return invalid
+}
+
+private func canonicalJournalData(entry: DraftJournalEntry) throws -> Data {
+    let record = StoredDraftJournalRecord(
+        entry: entry,
+        pendingReceipt: nil,
+        savedReceipt: nil,
+        recordChecksum: try DraftJournal.recordChecksum(
+            entry: entry, pendingReceipt: nil, savedReceipt: nil, recoveryCompletion: nil
+        )
+    )
+    let records = DraftJournal.canonicalRecords([record])
+    let envelope = DraftJournalEnvelope(
+        schemaVersion: DraftJournalEnvelope.currentSchemaVersion,
+        records: records,
+        envelopeChecksum: try DraftJournal.envelopeChecksum(records: records)
+    )
+    return try WorkspaceDocumentCodec.canonicalPersistentData(envelope)
 }
 
 private struct LegacyEntry: Codable {

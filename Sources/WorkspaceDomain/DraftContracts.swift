@@ -39,6 +39,28 @@ public struct DraftJournalIdentityAndGeneration: Hashable, Codable, Sendable {
     }
 }
 
+/// A durable, non-authorizing identity for one exact bare journal record.
+///
+/// The token can be decoded or forged, so it never grants permission to save
+/// a draft.  Persistence uses it solely as a compare-and-discard key under the
+/// journal lock; Store-issued `ProtectedNoteDraft` is the authorization for a
+/// live commit and deliberately remains inside CalendarApp.
+public struct DraftRecoveryToken: Hashable, Codable, Sendable {
+    public let identityAndGeneration: DraftJournalIdentityAndGeneration
+    public let noteSnapshotChecksum: String
+    public let journalChecksum: String
+
+    public init(
+        identityAndGeneration: DraftJournalIdentityAndGeneration,
+        noteSnapshotChecksum: String,
+        journalChecksum: String
+    ) {
+        self.identityAndGeneration = identityAndGeneration
+        self.noteSnapshotChecksum = noteSnapshotChecksum
+        self.journalChecksum = journalChecksum
+    }
+}
+
 public struct NoteDraftSubmission: Equatable, Sendable {
     public let noteID: NoteID
     public let editSessionID: UUID

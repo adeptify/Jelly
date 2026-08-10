@@ -59,7 +59,21 @@ enum WorkspaceMutationOutcomePresenter {
 
     static func presentation(for outcome: WorkspaceTransactionOutcome) -> WorkspaceMutationPresentation {
         switch outcome {
-        case let .committed(_, journal), let .noChange(_, journal):
+        case let .committed(_, journal):
+            if isRecoveryCleanupPending(journal) {
+                return recoveryCleanupPresentation(
+                    journal,
+                    message: "恢复内容已写入，但草稿恢复记录尚未丢弃。"
+                )
+            }
+            return presentation(for: journal, after: .mayDismiss)
+        case let .noChange(_, journal):
+            if isRecoveryCleanupPending(journal) {
+                return recoveryCleanupPresentation(
+                    journal,
+                    message: "草稿恢复记录尚未丢弃，当前内容保持不变。"
+                )
+            }
             return presentation(for: journal, after: .mayDismiss)
         case let .restored(outcome):
             return .init(
@@ -251,6 +265,35 @@ enum WorkspaceMutationOutcomePresenter {
         }
         return .retain(
             messageWithCleanupPending(message),
+            recoveryAction: .retryJournalCleanup(identity, step, .retain(message))
+        )
+    }
+
+    private static func isRecoveryCleanupPending(_ status: JournalResolutionStatus) -> Bool {
+        guard case let .cleanupPending(_, step) = status,
+              isRecoveryStep(step)
+        else { return false }
+        return true
+    }
+
+    private static func isRecoveryStep(_ step: JournalCleanupStep) -> Bool {
+        switch step {
+        case .discardRecovery, .markRecoveryCompletion, .discardRecoveryCompletion, .abandonRecoveryCompletion:
+            true
+        case .record, .acknowledge, .unbind, .clear:
+            false
+        }
+    }
+
+    private static func recoveryCleanupPresentation(
+        _ status: JournalResolutionStatus,
+        message: String
+    ) -> WorkspaceMutationPresentation {
+        guard case let .cleanupPending(identity, step) = status else {
+            return .retain(message)
+        }
+        return .retain(
+            "\(message) 请在草稿恢复流程中继续处理。",
             recoveryAction: .retryJournalCleanup(identity, step, .retain(message))
         )
     }

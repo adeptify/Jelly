@@ -50,6 +50,69 @@ struct WorkspaceMutationPresentationTests {
         #expect(presentation.message == "内容已写入，但草稿清理尚未完成；请在恢复菜单中继续清理。")
     }
 
+    @Test func recoveryDiscardFailureNeverClaimsThatTheReviewedDraftWasDismissed() {
+        let token = DraftRecoveryToken(
+            identityAndGeneration: .init(
+                identity: .init(noteID: NoteID(UUID()), editSessionID: .editor(UUID())),
+                draftGeneration: 4
+            ),
+            noteSnapshotChecksum: "draft",
+            journalChecksum: "journal"
+        )
+        let pending = JournalResolutionStatus.cleanupPending(
+            identity: token.identityAndGeneration.identity,
+            step: .discardRecovery(token)
+        )
+
+        let kept = WorkspaceMutationOutcomePresenter.presentation(for: .noChange(.identical, journal: pending))
+        let restored = WorkspaceMutationOutcomePresenter.presentation(for: .committed(
+            .init(workspaceRevision: 4, persistedDraft: nil), journal: pending
+        ))
+
+        #expect(kept.allowsDismissal == false)
+        #expect(kept.message == "草稿恢复记录尚未丢弃，当前内容保持不变。 请在草稿恢复流程中继续处理。")
+        #expect(restored.allowsDismissal == false)
+        #expect(restored.message == "恢复内容已写入，但草稿恢复记录尚未丢弃。 请在草稿恢复流程中继续处理。")
+    }
+
+    @Test func durableRecoveryCompletionCleanupUsesRecoveryWordingInsteadOfOrdinaryDraftCleanup() {
+        let token = DraftRecoveryToken(
+            identityAndGeneration: .init(
+                identity: .init(noteID: NoteID(UUID()), editSessionID: .editor(UUID())),
+                draftGeneration: 5
+            ),
+            noteSnapshotChecksum: "draft",
+            journalChecksum: "journal"
+        )
+        let completion = DraftRecoveryCompletion(
+            token: token,
+            action: .saveAsNew,
+            source: .init(workspaceRevision: 5, workspaceChecksum: "source"),
+            result: .init(
+                noteID: NoteID(UUID()), noteSnapshotChecksum: "result",
+                noteRevision: 3, workspaceRevision: 8
+            ),
+            state: .committed
+        )
+        let status = JournalResolutionStatus.cleanupPending(
+            identity: token.identityAndGeneration.identity,
+            step: .discardRecoveryCompletion(completion)
+        )
+
+        let presentation = WorkspaceMutationOutcomePresenter.presentation(for: .committed(
+            .init(workspaceRevision: 8, persistedDraft: nil), journal: status
+        ))
+
+        #expect(presentation.allowsDismissal == false)
+        #expect(presentation.message?.contains("草稿恢复记录尚未丢弃") == true)
+        #expect(presentation.message?.contains("草稿清理") == false)
+        #expect(presentation.recoveryAction == .retryJournalCleanup(
+            token.identityAndGeneration.identity,
+            .discardRecoveryCompletion(completion),
+            .retain("恢复内容已写入，但草稿恢复记录尚未丢弃。")
+        ))
+    }
+
     @Test func failedSaveWithJournalCleanupNeverClaimsThatContentWasWritten() {
         let identity = DraftJournalIdentity(noteID: NoteID(UUID()), editSessionID: .editor(UUID()))
         let outcome = WorkspaceTransactionOutcome.notCommitted(

@@ -36,6 +36,10 @@ struct BackupRecoveryPolicyTests {
         let phase = WorkspaceStorePhase.parkedCommitUncertain(transactionID)
 
         #expect(BackupRecoveryPolicy.actions(for: phase) == [.retryPendingCommit(transactionID)])
+        #expect(BackupRecoveryPolicy.actions(
+            for: phase,
+            rawRecoveryAvailable: true
+        ) == [.retryPendingCommit(transactionID)])
         #expect(BackupRecoveryPolicy.pendingCommitMenuTitle(for: phase) == "继续确认未完成操作")
         #expect(BackupRecoveryPolicy.pendingCommitMenuTitle(for: .ready) == nil)
     }
@@ -50,19 +54,98 @@ struct BackupRecoveryPolicyTests {
             "草稿清理仍未完成；请稍后继续清理。")
     }
 
-    @Test func onlyOpaquePrimaryExposesRawRecoveryCopy() {
-        #expect(BackupRecoveryPolicy.actions(for: .opaquePrimaryLoadFailed) == [.exportRawRecoveryCopy])
-        #expect(BackupRecoveryPolicy.actions(for: .unreadablePrimaryLoadFailed) == [])
+    @Test func draftRecoveryBlocksRestoreButAllowsReadOnlyBackupAndNamesExactTokens() {
+        let token = DraftRecoveryToken(
+            identityAndGeneration: .init(
+                identity: .init(noteID: NoteID(UUID()), editSessionID: .editor(UUID())),
+                draftGeneration: 2
+            ),
+            noteSnapshotChecksum: "snapshot",
+            journalChecksum: "journal"
+        )
+        let phase = WorkspaceStorePhase.needsDraftRecovery([
+            .init(token: token, draft: Note.empty(categoryID: UUID(), now: .distantPast), persisted: nil, updatedAt: .distantPast)
+        ])
+
+        #expect(!BackupRecoveryPolicy.allowsRestore(from: phase, journalReconciliationRequired: false))
+        #expect(BackupRecoveryPolicy.allowsReadOnlyBackup(from: phase))
+        #expect(BackupRecoveryPolicy.actions(for: phase) == [.draftRecoveryRequired([token])])
+        #expect(BackupRecoveryPolicy.message(for: .cleanupPending(
+            identity: token.identityAndGeneration.identity,
+            step: .discardRecovery(token)
+        )) == "草稿恢复记录仍未丢弃；请稍后继续处理。")
+    }
+
+    @Test func rawAvailabilityIsTheOnlyTruthForTheRawRecoveryAction() {
+        #expect(BackupRecoveryPolicy.actions(
+            for: .opaquePrimaryLoadFailed,
+            rawRecoveryAvailable: false
+        ) == [])
+        #expect(BackupRecoveryPolicy.actions(
+            for: .opaquePrimaryLoadFailed,
+            rawRecoveryAvailable: true
+        ) == [.exportRawRecoveryCopy])
+        #expect(BackupRecoveryPolicy.actions(
+            for: .unreadablePrimaryLoadFailed,
+            rawRecoveryAvailable: false
+        ) == [])
+    }
+
+    @Test func opaqueRawAndExactDraftRecoveryActionsCanCoexistByMembership() {
+        let token = DraftRecoveryToken(
+            identityAndGeneration: .init(
+                identity: .init(noteID: NoteID(UUID()), editSessionID: .editor(UUID())),
+                draftGeneration: 1
+            ),
+            noteSnapshotChecksum: "snapshot",
+            journalChecksum: "journal"
+        )
+        let phase = WorkspaceStorePhase.needsDraftRecovery([
+            .init(
+                token: token,
+                draft: Note.empty(categoryID: UUID(), now: .distantPast),
+                persisted: nil,
+                updatedAt: .distantPast
+            )
+        ])
+
+        let opaqueActions = BackupRecoveryPolicy.actions(
+            for: phase,
+            rawRecoveryAvailable: true
+        )
+        #expect(opaqueActions.contains(.draftRecoveryRequired([token])))
+        #expect(opaqueActions.contains(.exportRawRecoveryCopy))
+        #expect(opaqueActions.count == 2)
+
+        let absentOrUnreadableActions = BackupRecoveryPolicy.actions(
+            for: phase,
+            rawRecoveryAvailable: false
+        )
+        #expect(absentOrUnreadableActions == [.draftRecoveryRequired([token])])
+        #expect(!absentOrUnreadableActions.contains(.exportRawRecoveryCopy))
     }
 
     @Test func restoreAvailabilityMatchesTheStoreRecoveryContract() {
-        #expect(BackupRecoveryPolicy.allowsRestore(from: .ready))
-        #expect(BackupRecoveryPolicy.allowsRestore(from: .externalSourceChanged(.externalBytesChanged)))
-        #expect(BackupRecoveryPolicy.allowsRestore(from: .opaquePrimaryLoadFailed))
-        #expect(BackupRecoveryPolicy.allowsRestore(from: .needsRelationshipRepair))
-        #expect(!BackupRecoveryPolicy.allowsRestore(from: .loadFailed))
-        #expect(!BackupRecoveryPolicy.allowsRestore(from: .unreadablePrimaryLoadFailed))
-        #expect(!BackupRecoveryPolicy.allowsRestore(from: .parkedCommitUncertain(UUID())))
+        #expect(BackupRecoveryPolicy.allowsRestore(from: .ready, journalReconciliationRequired: false))
+        #expect(BackupRecoveryPolicy.allowsRestore(
+            from: .externalSourceChanged(.externalBytesChanged), journalReconciliationRequired: false
+        ))
+        #expect(BackupRecoveryPolicy.allowsRestore(from: .opaquePrimaryLoadFailed, journalReconciliationRequired: false))
+        #expect(BackupRecoveryPolicy.allowsRestore(from: .needsRelationshipRepair, journalReconciliationRequired: false))
+        #expect(!BackupRecoveryPolicy.allowsRestore(from: .loadFailed, journalReconciliationRequired: false))
+        #expect(!BackupRecoveryPolicy.allowsRestore(from: .unreadablePrimaryLoadFailed, journalReconciliationRequired: false))
+        #expect(!BackupRecoveryPolicy.allowsRestore(
+            from: .parkedCommitUncertain(UUID()), journalReconciliationRequired: false
+        ))
+
+        // A phase that ordinarily permits restore is not authoritative while
+        // the durable Journal still has not been reconciled against its source.
+        #expect(!BackupRecoveryPolicy.allowsRestore(
+            from: .externalSourceChanged(.externalBytesChanged), journalReconciliationRequired: true
+        ))
+        #expect(!BackupRecoveryPolicy.allowsRestore(
+            from: .needsRelationshipRepair, journalReconciliationRequired: true
+        ))
     }
 
     @Test func restoreRetriesDescribeRestoreRatherThanSaveAndUseReturnedCleanupToken() {
@@ -87,5 +170,38 @@ struct BackupRecoveryPolicyTests {
         let returnedIdentity = DraftJournalIdentity(noteID: NoteID(UUID()), editSessionID: .editor(UUID()))
         #expect(BackupRecoveryPolicy.cleanupDetail(for: .cleanupPending(identity: returnedIdentity, step: .clear)) ==
             "记录：\(returnedIdentity.noteID.rawValue.uuidString)，步骤：清除草稿记录。")
+    }
+
+    @Test func everyRecoveryCleanupStepKeepsRecoveryWordingAfterARetryBecomesClean() {
+        let token = DraftRecoveryToken(
+            identityAndGeneration: .init(
+                identity: .init(noteID: NoteID(UUID()), editSessionID: .editor(UUID())), draftGeneration: 3
+            ),
+            noteSnapshotChecksum: "draft", journalChecksum: "journal"
+        )
+        let completion = DraftRecoveryCompletion(
+            token: token,
+            action: .restoreAsCurrent,
+            source: .init(workspaceRevision: 3, workspaceChecksum: "source"),
+            result: .init(noteID: token.identityAndGeneration.identity.noteID, noteSnapshotChecksum: "result", noteRevision: 4, workspaceRevision: 4),
+            state: .pending
+        )
+        let steps: [JournalCleanupStep] = [
+            .discardRecovery(token),
+            .markRecoveryCompletion(completion),
+            .discardRecoveryCompletion(completion),
+            .abandonRecoveryCompletion(completion)
+        ]
+
+        for step in steps {
+            let pending = BackupRecoveryPolicy.message(for: .cleanupPending(
+                identity: token.identityAndGeneration.identity, step: step
+            ))
+            let clean = BackupRecoveryPolicy.message(for: .clean, completing: step)
+            #expect(pending.contains("草稿恢复"))
+            #expect(!pending.contains("草稿清理"))
+            #expect(clean.contains("草稿恢复"))
+            #expect(!clean.contains("草稿清理"))
+        }
     }
 }

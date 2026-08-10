@@ -1030,6 +1030,167 @@ struct WorkspaceStoreTests {
         #expect(await repository.saveCount == 0)
     }
 
+    @Test func startupMissingNotePublishesRecoveryAndBlocksOrdinaryMutationUntilTheReviewedDraftIsRestored() async throws {
+        let (loaded, note, submission) = try draftFixture()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("jelly-10a-startup-missing-note-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let journal = DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"))
+        try await journal.persist(try DraftJournalCoordinator.entry(
+            submission: submission,
+            workspaceRevision: loaded.revision,
+            clock: { .distantPast }
+        ))
+        var missing = loaded
+        missing.notes.removeValue(forKey: note.id)
+        let repository = WorkspaceStoreTestRepository(initial: missing)
+        let store = WorkspaceStore(initialState: .empty(calendar: loaded.calendar), repository: repository, journal: journal)
+
+        await store.load()
+        guard case let .needsDraftRecovery(candidates) = store.phase,
+              let candidate = candidates.first
+        else { Issue.record("A bare journal for a deleted Note must be reviewable"); return }
+        #expect(candidate.persisted == nil)
+        let item = try makeItem(id: UUID(), categoryID: loaded.calendar.uncategorizedID, title: "blocked while recovering")
+        await #expect(throws: WorkspaceStoreError.frozen) {
+            _ = try await store.sendCalendar(.createItem(item), undoLabel: "blocked")
+        }
+
+        guard case .committed = try await store.resolveDraftRecovery(candidate.token, action: .restoreAsCurrent) else {
+            Issue.record("Restoring a missing Note must recreate its original Note ID")
+            return
+        }
+        #expect(store.phase == .ready)
+        #expect(store.state.notes[note.id]?.id == note.id)
+        #expect(try await journal.current()?.records.isEmpty == true)
+    }
+
+    @Test func pendingProtectedDraftIsReadOnlyUntilDefiniteUnbindThenIssuesOneFreshCapability() async throws {
+        let (state, _, original) = try draftFixture()
+        var snapshot = original.snapshot
+        snapshot.title = "retry exact bare generation"
+        let submission = NoteDraftSubmission(
+            noteID: original.noteID, editSessionID: original.editSessionID,
+            baseNoteRevision: original.baseNoteRevision,
+            baseNoteSnapshotChecksum: original.baseNoteSnapshotChecksum,
+            baseSnapshot: original.baseSnapshot,
+            baseLinkedTaskBlockLinks: original.baseLinkedTaskBlockLinks,
+            draftGeneration: original.draftGeneration,
+            snapshot: snapshot,
+            noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(snapshot),
+            modifiedFields: [.title],
+            linkedBlockDeletionDispositions: [:]
+        )
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("jelly-10a-pending-protect-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let journal = DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"))
+        let repository = WorkspaceStoreTestRepository(initial: state)
+        await repository.makeNextSaveUncertain()
+        await repository.setReconciliation(.stillPending(.init()))
+        let store = WorkspaceStore(initialState: state, repository: repository, journal: journal, clock: { .distantPast })
+        await store.load()
+        let first: ProtectedNoteDraft
+        switch try await store.protectDraft(submission) {
+        case let .protected(value): first = value
+        case .superseded: Issue.record("Initial protected draft must be accepted"); return
+        }
+        guard case let .commitPending(transactionID, _) = try await store.commitProtectedDraft(first) else {
+            Issue.record("Uncertain save must park the consumed capability")
+            return
+        }
+        await #expect(throws: WorkspaceStoreError.frozen) {
+            _ = try await store.protectDraft(submission)
+        }
+        await repository.setReconciliation(.notCommitted(.init()))
+        guard case .notCommitted = try await store.retryPendingCommit(transactionID) else {
+            Issue.record("Definite non-commit must unbind the exact journal generation")
+            return
+        }
+        #expect(store.phase == .ready)
+
+        let fresh: ProtectedNoteDraft
+        switch try await store.protectDraft(submission) {
+        case let .protected(value): fresh = value
+        case .superseded: Issue.record("An exactly unbound same generation must receive a fresh capability"); return
+        }
+        guard case .committed = try await store.commitProtectedDraft(fresh) else {
+            Issue.record("The fresh capability must save the same frozen submission once")
+            return
+        }
+        #expect(await repository.saveCount == 1)
+    }
+
+    @Test func storeProtectRefusesAHigherGenerationWhileTheJournalIdentityIsRecoveryBusy() async throws {
+        let (state, _, original) = try draftFixture()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "jelly-10a-busy-protect-\(UUID().uuidString)", isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let journalURL = directory.appendingPathComponent("draft.json")
+        let journal = DraftJournalRepository(fileURL: journalURL)
+        let repository = WorkspaceStoreTestRepository(initial: state)
+        let store = WorkspaceStore(
+            initialState: state, repository: repository, journal: journal, clock: { .distantPast }
+        )
+        await store.load()
+
+        var firstSnapshot = original.snapshot
+        firstSnapshot.title = "durable recovery owns generation one"
+        let first = NoteDraftSubmission(
+            noteID: original.noteID, editSessionID: original.editSessionID,
+            baseNoteRevision: original.baseNoteRevision,
+            baseNoteSnapshotChecksum: original.baseNoteSnapshotChecksum,
+            baseSnapshot: original.baseSnapshot,
+            baseLinkedTaskBlockLinks: original.baseLinkedTaskBlockLinks,
+            draftGeneration: 1,
+            snapshot: firstSnapshot,
+            noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(firstSnapshot),
+            modifiedFields: [.title], linkedBlockDeletionDispositions: [:]
+        )
+        let entry = try DraftJournalCoordinator.entry(
+            submission: first, workspaceRevision: state.revision, clock: { .distantPast }
+        )
+        let token: DraftRecoveryToken
+        switch try await journal.protect(entry) {
+        case let .protected(value): token = value
+        case .superseded, .busy: Issue.record("The peer must publish generation one"); return
+        }
+        let completion = DraftRecoveryCompletion(
+            token: token,
+            action: .restoreAsCurrent,
+            source: try DraftJournal.recoverySourceIdentity(for: state),
+            result: .init(
+                noteID: original.noteID,
+                noteSnapshotChecksum: entry.noteSnapshotChecksum,
+                noteRevision: state.revision + 1,
+                workspaceRevision: state.revision + 1
+            ),
+            state: .pending
+        )
+        #expect(try await journal.beginRecoveryCompletion(completion) == .applied)
+        let occupiedBytes = try Data(contentsOf: journalURL)
+
+        var secondSnapshot = original.snapshot
+        secondSnapshot.title = "generation two must not cross recovery ownership"
+        let second = NoteDraftSubmission(
+            noteID: original.noteID, editSessionID: original.editSessionID,
+            baseNoteRevision: original.baseNoteRevision,
+            baseNoteSnapshotChecksum: original.baseNoteSnapshotChecksum,
+            baseSnapshot: original.baseSnapshot,
+            baseLinkedTaskBlockLinks: original.baseLinkedTaskBlockLinks,
+            draftGeneration: 2,
+            snapshot: secondSnapshot,
+            noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(secondSnapshot),
+            modifiedFields: [.title], linkedBlockDeletionDispositions: [:]
+        )
+
+        await #expect(throws: WorkspaceStoreError.frozen) {
+            _ = try await store.protectDraft(second)
+        }
+        #expect(try Data(contentsOf: journalURL) == occupiedBytes)
+        #expect(await repository.saveCount == 0)
+    }
+
     @Test func queuedLaterDraftGenerationReplaysOnlyItsDeltaAfterTheEarlierSave() async throws {
         let (state, _, original) = try draftFixture()
         var firstSnapshot = original.snapshot
@@ -1268,13 +1429,100 @@ struct WorkspaceStoreTests {
 
         await store.load()
 
-        #expect(store.phase == .ready)
+        let candidate = try #require(recoveryCandidatesForStoreTests(from: store.phase)?.first)
+        #expect(candidate.token.identityAndGeneration.identity == .init(
+            noteID: note.id, editSessionID: previousReceipt.editSessionID
+        ))
         let envelope = try await journal.current()
         let remaining = try #require(envelope?.records)
         #expect(remaining.count == 1)
         #expect(remaining.first?.identity == .init(noteID: note.id, editSessionID: previousReceipt.editSessionID))
         #expect(remaining.first?.pendingReceipt == nil)
         #expect(remaining.first?.savedReceipt == nil)
+        let bareBytes = try Data(contentsOf: directory.appendingPathComponent("draft.json"))
+        var newerSnapshot = note
+        newerSnapshot.title = "generation two must wait for reviewed generation one"
+        let newer = NoteDraftSubmission(
+            noteID: original.noteID, editSessionID: previousSession,
+            baseNoteRevision: original.baseNoteRevision,
+            baseNoteSnapshotChecksum: original.baseNoteSnapshotChecksum,
+            baseSnapshot: original.baseSnapshot,
+            baseLinkedTaskBlockLinks: original.baseLinkedTaskBlockLinks,
+            draftGeneration: 2,
+            snapshot: newerSnapshot,
+            noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(newerSnapshot),
+            modifiedFields: [.title], linkedBlockDeletionDispositions: [:]
+        )
+        await #expect(throws: WorkspaceStoreError.frozen) {
+            _ = try await store.protectDraft(newer)
+        }
+        #expect(try Data(contentsOf: directory.appendingPathComponent("draft.json")) == bareBytes)
+    }
+
+    @Test func concurrentStartupUnbindPublishesTheSameBareRecoveryInsteadOfParkingTheLoser() async throws {
+        let (state, note, original) = try draftFixture()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "jelly-10a-concurrent-startup-unbind-\(UUID().uuidString)", isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let journal = DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"))
+        let submission = NoteDraftSubmission(
+            noteID: original.noteID, editSessionID: original.editSessionID,
+            baseNoteRevision: original.baseNoteRevision,
+            baseNoteSnapshotChecksum: original.baseNoteSnapshotChecksum,
+            baseSnapshot: original.baseSnapshot,
+            baseLinkedTaskBlockLinks: original.baseLinkedTaskBlockLinks,
+            draftGeneration: 1,
+            snapshot: note,
+            noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(note),
+            modifiedFields: [], linkedBlockDeletionDispositions: [:]
+        )
+        let entry = try DraftJournalCoordinator.entry(
+            submission: submission, workspaceRevision: state.revision, clock: { .distantPast }
+        )
+        try await journal.persist(entry)
+        let receipt = PersistedDraftReceipt(
+            noteID: note.id, editSessionID: entry.editSessionID, draftGeneration: 1,
+            noteSnapshotChecksum: entry.noteSnapshotChecksum, persistedNoteRevision: note.revision
+        )
+        #expect(try await journal.rebaseAndBind(
+            expected: .init(identity: .init(noteID: note.id, editSessionID: entry.editSessionID), draftGeneration: 1),
+            finalCandidateNote: note,
+            receipt: receipt
+        ) == .bound)
+        let firstRepository = WorkspaceStoreTestRepository(initial: state)
+        let secondRepository = WorkspaceStoreTestRepository(initial: state)
+        await firstRepository.setVerification(.notPersisted)
+        await secondRepository.setVerification(.notPersisted)
+        await firstRepository.suspendNextVerification()
+        await secondRepository.suspendNextVerification()
+        let first = WorkspaceStore(
+            initialState: .empty(calendar: state.calendar), repository: firstRepository,
+            journal: journal, clock: { .distantPast }
+        )
+        let second = WorkspaceStore(
+            initialState: .empty(calendar: state.calendar), repository: secondRepository,
+            journal: journal, clock: { .distantPast }
+        )
+        let firstLoad = Task { @MainActor in await first.load() }
+        let secondLoad = Task { @MainActor in await second.load() }
+        await firstRepository.waitForVerificationStart()
+        await secondRepository.waitForVerificationStart()
+        await firstRepository.resumeVerification()
+        await secondRepository.resumeVerification()
+        await firstLoad.value
+        await secondLoad.value
+
+        let token = DraftRecoveryToken(
+            identityAndGeneration: .init(
+                identity: .init(noteID: note.id, editSessionID: entry.editSessionID), draftGeneration: 1
+            ),
+            noteSnapshotChecksum: entry.noteSnapshotChecksum,
+            journalChecksum: entry.journalChecksum
+        )
+        #expect(recoveryCandidatesForStoreTests(from: first.phase)?.map(\.token) == [token])
+        #expect(recoveryCandidatesForStoreTests(from: second.phase)?.map(\.token) == [token])
+        #expect(try await journal.isCurrentBare(token))
     }
 
     @Test func startupPendingReceiptWithChangedMainSourceFreezesAndPreservesItsExactBoundJournalRecord() async throws {
@@ -3319,6 +3567,15 @@ private final class LegacyStoreFailingRollbackWriter: ExclusiveFileWriting, @unc
 }
 
 private enum LegacyStoreInjectedFailure: Error { case requested }
+
+private func recoveryCandidatesForStoreTests(
+    from phase: WorkspaceStorePhase
+) -> [DraftRecoveryCandidate]? {
+    guard case let .needsDraftRecovery(candidates) = phase else {
+        return nil
+    }
+    return candidates
+}
 
 private struct LegacyStoreAlwaysFailingMainWriter: MainFileCompareAndReplaceWriting {
     func createIfAbsent(candidate: Data, at destination: URL) throws -> MainFileCompareAndReplaceResult { throw WorkspacePersistenceError.atomicWriteFailed }

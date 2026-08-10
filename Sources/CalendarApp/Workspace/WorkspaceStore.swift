@@ -6,8 +6,16 @@ import WorkspaceDomain
 
 enum WorkspaceStorePhase: Equatable, Sendable {
     case notLoaded, loading, ready, mutating
+    /// A recovery resolution owns the FIFO but must never borrow the normal
+    /// `.mutating` admission gate for ordinary calendar/editor commands.
+    case resolvingDraftRecovery
+    /// Repair/adoption that originates from an unresolved recovery record is
+    /// likewise not an ordinary mutation window.  Its final Journal rescan
+    /// must publish the exact recovery phase before any tail can execute.
+    case reconcilingDraftRecovery
     case parkedCommitUncertain(UUID)
     case parkedJournalCleanup(DraftJournalIdentity, JournalCleanupStep)
+    case needsDraftRecovery([DraftRecoveryCandidate])
     case needsRelationshipRepair
     case externalSourceChanged(WorkspaceExternalSourceChangeReason)
     case opaquePrimaryLoadFailed, unreadablePrimaryLoadFailed, loadFailed
@@ -45,12 +53,52 @@ enum WorkspaceExternalReloadOutcome: Equatable, Sendable {
 enum WorkspacePersistenceBlockReason: Equatable, Sendable { case unreadablePrimary, opaqueInvalidPrimary, loadFailed }
 enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUndo, nothingToRedo }
 
+/// An opaque, Store-issued capability.  Only this file can construct one, and
+/// only the Store keeps the complete frozen `NoteDraftSubmission` it names.
+struct ProtectedNoteDraft: Equatable, Sendable {
+    fileprivate let capability: UUID
+    let identityAndGeneration: DraftJournalIdentityAndGeneration
+    let noteSnapshotChecksum: String
+    let journalChecksum: String
+
+    fileprivate init(
+        capability: UUID,
+        identityAndGeneration: DraftJournalIdentityAndGeneration,
+        noteSnapshotChecksum: String,
+        journalChecksum: String
+    ) {
+        self.capability = capability
+        self.identityAndGeneration = identityAndGeneration
+        self.noteSnapshotChecksum = noteSnapshotChecksum
+        self.journalChecksum = journalChecksum
+    }
+}
+
+enum DraftProtectionOutcome: Equatable, Sendable {
+    case protected(ProtectedNoteDraft)
+    case superseded(currentGeneration: UInt64)
+}
+
+struct DraftRecoveryCandidate: Equatable, Sendable {
+    let token: DraftRecoveryToken
+    let draft: Note
+    let persisted: Note?
+    let updatedAt: Date
+}
+
+enum DraftRecoveryAction: Equatable, Sendable {
+    case restoreAsCurrent
+    case keepPersisted
+    case saveAsNew(noteID: NoteID, blockIDs: [BlockID])
+}
+
 @MainActor
 @Observable final class WorkspaceStore {
     private(set) var state: WorkspaceState { didSet { statePublicationGeneration &+= 1 } }
     var calendarState: CalendarState { state.calendar }
     private(set) var statePublicationGeneration: UInt = 0
     private(set) var phase: WorkspaceStorePhase = .notLoaded
+    private(set) var hasRawRecoverySource = false
     private(set) var canUndo = false
     private(set) var canRedo = false
 
@@ -64,9 +112,29 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
     private var journalCleanupReceipts: [DraftJournalIdentity: PersistedDraftReceipt] = [:]
     private var journalCleanupTerminalPhases: [DraftJournalIdentity: WorkspaceStorePhase] = [:]
     private var acceptedDraftGenerations: [DraftJournalIdentity: AcceptedDraftGeneration] = [:]
+    private var protectedDrafts: [UUID: FrozenProtectedDraft] = [:]
+    private var journalProtectionWaiters: [CheckedContinuation<Void, Never>] = []
+    private var draftRecoveryCandidates: [DraftRecoveryCandidate] = []
+    private var draftRecoveryTerminalPhaseWhenClean: WorkspaceStorePhase = .ready
+    private var claimedDraftRecoveryTokens: Set<DraftRecoveryToken> = []
+    /// New recovery selections may join an actively draining recovery FIFO,
+    /// but never a parked/uncertain/terminal resolution.
+    private var recoveryResolutionQueueOpen = false
+    private var journalCleanupRecoveryFinalizations: [DraftJournalIdentity: DraftRecoveryCleanupFinalization] = [:]
+    private var journalCleanupRequiresStartupRescan: Set<DraftJournalIdentity> = []
     private var parkedSave: ParkedSave?
     private var parkedRestore: ParkedRestore?
     private var pendingExternalRepairState: WorkspaceState?
+    /// Every accepted external source is incomplete until its durable Journal
+    /// has been scanned against that exact source.  This deliberately does
+    /// not infer recovery ownership from an already-published candidate: a
+    /// fresh Store can have only a completion marker, and another process can
+    /// create a bare record after the in-memory candidate list was emptied.
+    private var requiresJournalReconciliation = false
+    /// Read-only admission evidence for recovery UI. A phase alone is not
+    /// authoritative while the durable Journal still belongs to an
+    /// incomplete source reconciliation.
+    var hasUnresolvedJournalReconciliation: Bool { requiresJournalReconciliation }
 
     private struct ParkedSave {
         let transactionID: UUID
@@ -79,13 +147,21 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         case undo(undo: Bool, reverseRecord: WorkspaceStoreUndoRecord, ledger: [NoteID: Int64])
         case externalAdoption(ledger: [NoteID: Int64])
         case externalRepair(ledger: [NoteID: Int64])
+        case draftRecoveryRepair(ledger: [NoteID: Int64])
+        case draftRecovery(
+            completion: DraftRecoveryCompletion,
+            terminalPhase: WorkspaceStorePhase,
+            failurePhase: WorkspaceStorePhase
+        )
 
         var notCommittedTerminalPhase: WorkspaceStorePhase {
             switch self {
-            case .externalRepair:
+            case .externalRepair, .draftRecoveryRepair:
                 .needsRelationshipRepair
             case .externalAdoption:
                 .externalSourceChanged(.externalBytesChanged)
+            case let .draftRecovery(_, _, failurePhase):
+                failurePhase
             case .forward, .undo:
                 .ready
             }
@@ -95,7 +171,7 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
             switch self {
             case .forward, .undo:
                 true
-            case .externalAdoption, .externalRepair:
+            case .externalAdoption, .externalRepair, .draftRecoveryRepair, .draftRecovery:
                 false
             }
         }
@@ -103,7 +179,12 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         var sourceChangedTerminalPhase: WorkspaceStorePhase {
             // A direct or reconciled source change invalidates every saved
             // candidate, including a repair candidate held only in memory.
-            .externalSourceChanged(.externalBytesChanged)
+            switch self {
+            case .draftRecovery:
+                .externalSourceChanged(.externalBytesChanged)
+            case .forward, .undo, .externalAdoption, .externalRepair, .draftRecoveryRepair:
+                .externalSourceChanged(.externalBytesChanged)
+            }
         }
     }
     private struct ParkedRestore {
@@ -115,6 +196,20 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         let identity: DraftJournalIdentity
         let generation: UInt64
         let accepted: PreviousAcceptedDraft
+    }
+    private struct FrozenProtectedDraft: Sendable {
+        let protected: ProtectedNoteDraft
+        let submission: NoteDraftSubmission
+        let recoveryToken: DraftRecoveryToken?
+    }
+    private enum DraftRecoveryCleanupFinalization {
+        case completed(DraftRecoveryToken)
+        case abandoned(DraftRecoveryToken)
+    }
+    private enum DraftRecoveryCompletionVerification {
+        case committed
+        case notCommitted
+        case sourceChanged
     }
 
     init(
@@ -135,9 +230,13 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         phase = .loading
         do {
             let loaded = try await repository.load()
+            hasRawRecoverySource = false
             state = loaded.state
             noteRevisionHighWatermarks = loaded.state.notes.mapValues(\.revision)
-            phase = loaded.consistencyIssues.isEmpty ? .ready : .needsRelationshipRepair
+            requiresJournalReconciliation = journal != nil
+            phase = loaded.consistencyIssues.isEmpty
+                ? (requiresJournalReconciliation ? .reconcilingDraftRecovery : .ready)
+                : .needsRelationshipRepair
             pendingExternalRepairState = loaded.consistencyIssues.isEmpty ? nil : loaded.state
             if loaded.consistencyIssues.isEmpty {
                 await recoverJournalAtStartup()
@@ -146,10 +245,13 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
             let projection = try? await repository.reloadCurrentSourceAfterExternalChange()
             switch projection {
             case .opaqueInvalid:
-                phase = .opaquePrimaryLoadFailed
+                hasRawRecoverySource = true
+                await recoverJournalAtStartup(terminalPhaseWhenClean: .opaquePrimaryLoadFailed)
             case .unreadableUnknown:
-                phase = .unreadablePrimaryLoadFailed
+                hasRawRecoverySource = false
+                await recoverJournalAtStartup(terminalPhaseWhenClean: .unreadablePrimaryLoadFailed)
             default:
+                hasRawRecoverySource = false
                 phase = .loadFailed
             }
         }
@@ -179,12 +281,113 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
     }
 
     func submitDraft(_ submission: NoteDraftSubmission) async throws -> WorkspaceTransactionOutcome {
-        try ensureOrdinaryMutationAllowed()
-        if let journal {
-            let entry = try DraftJournalCoordinator.entry(submission: submission, workspaceRevision: state.revision, clock: clock)
-            try await journal.persist(entry)
+        switch try await protectDraft(submission) {
+        case let .protected(protected):
+            return try await commitProtectedDraft(protected)
+        case .superseded:
+            return .draftSuperseded
         }
-        return try await sendWorkspace(.updateNote(submission), undoLabel: "编辑笔记")
+    }
+
+    func protectDraft(_ submission: NoteDraftSubmission) async throws -> DraftProtectionOutcome {
+        try ensureOrdinaryMutationAllowed()
+        let identity = DraftJournalIdentity(
+            noteID: submission.noteID,
+            editSessionID: .editor(submission.editSessionID)
+        )
+        let protected: ProtectedNoteDraft
+        let token: DraftRecoveryToken?
+        if let journal {
+            let entry = try DraftJournalCoordinator.entry(
+                submission: submission, workspaceRevision: state.revision, clock: clock
+            )
+            switch try await journal.protect(entry) {
+            case let .superseded(currentGeneration):
+                return .superseded(currentGeneration: currentGeneration)
+            case .busy:
+                // An in-process head may have bound this identity immediately
+                // before its main save. Wait for that one head to reach a
+                // terminal Journal state, then retry protection; a peer-owned
+                // occupied record remains synchronously read-only.
+                if phase == .mutating {
+                    await waitForCurrentTransactionJournalResolution()
+                    return try await protectDraft(submission)
+                }
+                // The head can finish after `protect` observed its occupied
+                // bytes but before this actor resumes. Re-read once so that
+                // a now-absent or exactly unbound record does not become a
+                // false permanent busy result.
+                if phase == .ready {
+                    let current = try await journal.current()?.records.first { $0.identity == identity }
+                    if current == nil || (
+                        current?.pendingReceipt == nil
+                            && current?.savedReceipt == nil
+                            && current?.recoveryCompletion == nil
+                    ) {
+                        return try await protectDraft(submission)
+                    }
+                }
+                throw WorkspaceStoreError.frozen
+            case let .protected(value):
+                if let existing = protectedDrafts.values.first(where: { $0.recoveryToken == value }) {
+                    return .protected(existing.protected)
+                }
+                protectedDrafts = protectedDrafts.filter { _, frozen in
+                    frozen.protected.identityAndGeneration.identity != identity
+                }
+                token = value
+                protected = .init(
+                    capability: UUID(),
+                    identityAndGeneration: value.identityAndGeneration,
+                    noteSnapshotChecksum: value.noteSnapshotChecksum,
+                    journalChecksum: value.journalChecksum
+                )
+            }
+        } else {
+            let generation = DraftJournalIdentityAndGeneration(
+                identity: identity, draftGeneration: submission.draftGeneration
+            )
+            if let existing = protectedDrafts.values.first(where: {
+                $0.protected.identityAndGeneration == generation
+                    && $0.submission == submission
+            }) {
+                return .protected(existing.protected)
+            }
+            protectedDrafts = protectedDrafts.filter { _, frozen in
+                frozen.protected.identityAndGeneration.identity != identity
+            }
+            token = nil
+            protected = .init(
+                capability: UUID(),
+                identityAndGeneration: generation,
+                noteSnapshotChecksum: submission.noteSnapshotChecksum,
+                journalChecksum: ""
+            )
+        }
+        protectedDrafts[protected.capability] = .init(
+            protected: protected, submission: submission, recoveryToken: token
+        )
+        return .protected(protected)
+    }
+
+    func commitProtectedDraft(_ protected: ProtectedNoteDraft) async throws -> WorkspaceTransactionOutcome {
+        try ensureOrdinaryMutationAllowed()
+        guard let frozen = protectedDrafts.removeValue(forKey: protected.capability),
+              frozen.protected == protected
+        else { return .draftSuperseded }
+        if let token = frozen.recoveryToken, let journal,
+           try await journal.isCurrentBare(token) == false {
+            return .draftSuperseded
+        }
+        return try await enqueueTransaction { [weak self] id in
+            guard let self else { throw CancellationError() }
+            return try await self.perform(
+                command: .updateNote(frozen.submission),
+                undoLabel: "编辑笔记",
+                transactionID: id,
+                protectedToken: frozen.recoveryToken
+            )
+        }
     }
 
     func undo() async throws -> WorkspaceTransactionOutcome {
@@ -209,7 +412,8 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         _ preview: WorkspaceRestorePreview,
         rollbackDirectoryURL: URL
     ) async throws -> WorkspaceTransactionOutcome {
-        guard phase == .ready
+        guard requiresJournalReconciliation == false,
+              phase == .ready
             || phase.isExternalSourceChanged
             || phase == .opaquePrimaryLoadFailed
             || phase == .needsRelationshipRepair
@@ -224,8 +428,39 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         }
     }
 
+    func resolveDraftRecovery(
+        _ token: DraftRecoveryToken,
+        action: DraftRecoveryAction
+    ) async throws -> WorkspaceTransactionOutcome {
+        guard allowsDraftRecoveryResolution else { throw WorkspaceStoreError.frozen }
+        guard let recovery = draftRecoveryCandidates.first(where: { $0.token == token }) else {
+            return .draftSuperseded
+        }
+        // This claim deliberately happens before the first await. A repeated
+        // tap cannot pass an asynchronous Journal read and independently
+        // initiate a second main-file save.
+        guard claimedDraftRecoveryTokens.insert(token).inserted else {
+            return .draftSuperseded
+        }
+        recoveryResolutionQueueOpen = true
+        return try await enqueueTransaction { [weak self] id in
+            guard let self else { throw CancellationError() }
+            return try await self.performDraftRecovery(
+                recovery, action: action, transactionID: id
+            )
+        }
+    }
+
     func currentDocumentData() async throws -> Data { try await repository.currentDocumentData() }
     func rawRecoveryData() async throws -> WorkspaceRawRecoveryArtifact { try await repository.currentRawRecoveryData() }
+    /// Read-only evidence export for a currently reviewed recovery candidate.
+    /// It does not acknowledge, discard or otherwise mutate the Journal.
+    func draftRecoveryMarkdown(_ token: DraftRecoveryToken) throws -> String {
+        guard let candidate = draftRecoveryCandidates.first(where: { $0.token == token }) else {
+            throw WorkspaceStoreError.frozen
+        }
+        return try BlockMarkdownCodec.exportMarkdown(candidate.draft.document)
+    }
     func exportBackup(to destination: URL) async throws {
         try await BackupService().exportCurrent(from: repository, to: destination)
     }
@@ -250,12 +485,33 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
     @discardableResult
     func reloadExternalSource() async throws -> WorkspaceExternalReloadOutcome {
         guard phase.allowsExternalReload else { throw WorkspaceStoreError.frozen }
-        let reloaded = try await repository.reloadCurrentSourceAfterExternalChange()
+        let previousPhase = phase
+        let previousReconciliationRequirement = requiresJournalReconciliation
+        let previousRawRecoveryAvailability = hasRawRecoverySource
+        requiresJournalReconciliation = journal != nil
+        if requiresJournalReconciliation { phase = .reconcilingDraftRecovery }
+        let reloaded: WorkspaceReloadedSource
+        do {
+            reloaded = try await repository.reloadCurrentSourceAfterExternalChange()
+        } catch {
+            phase = previousPhase
+            requiresJournalReconciliation = previousReconciliationRequirement
+            hasRawRecoverySource = previousRawRecoveryAvailability
+            throw error
+        }
         switch reloaded {
         case let .valid(external):
-            let adoption = try WorkspaceExternalSourceAdoptionPlanner.plan(
-                current: state, external: external.state, sessionNoteHighWatermarks: noteRevisionHighWatermarks
-            )
+            hasRawRecoverySource = false
+            let adoption: WorkspaceExternalSourceAdoption
+            do {
+                adoption = try WorkspaceExternalSourceAdoptionPlanner.plan(
+                    current: state, external: external.state, sessionNoteHighWatermarks: noteRevisionHighWatermarks
+                )
+            } catch {
+                phase = previousPhase
+                requiresJournalReconciliation = previousReconciliationRequirement
+                throw error
+            }
             guard adoption.consistencyIssues.isEmpty else {
                 pendingExternalRepairState = external.state
                 phase = .needsRelationshipRepair
@@ -276,16 +532,22 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
                 return .transaction(outcome)
             }
             pendingExternalRepairState = nil
-            phase = .ready
+            phase = requiresJournalReconciliation ? .reconcilingDraftRecovery : .ready
+            await recoverJournalAtStartup()
         case .opaqueInvalid:
+            hasRawRecoverySource = true
             pendingExternalRepairState = nil
-            phase = .opaquePrimaryLoadFailed
+            await recoverJournalAtStartup(terminalPhaseWhenClean: .opaquePrimaryLoadFailed)
         case .unreadableUnknown:
+            hasRawRecoverySource = false
             pendingExternalRepairState = nil
-            phase = .unreadablePrimaryLoadFailed
+            await recoverJournalAtStartup(terminalPhaseWhenClean: .unreadablePrimaryLoadFailed)
         case .absent:
+            hasRawRecoverySource = false
             pendingExternalRepairState = nil
-            phase = .externalSourceChanged(.externalBytesChanged)
+            await recoverJournalAtStartup(
+                terminalPhaseWhenClean: .externalSourceChanged(.externalBytesChanged)
+            )
         }
         return .source(reloaded)
     }
@@ -304,8 +566,17 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
                     candidate: parked.candidate, completion: parked.completion, draftReceipt: parked.draftReceipt
                 )
                 parkedSave = nil
-                if phase == .parkedCommitUncertain(transactionID) { phase = .ready }
-                if case .cleanupPending = journalStatus { parkJournalCleanup(journalStatus, receipt: parked.draftReceipt) } else { queue.resume() }
+                if case .cleanupPending = journalStatus {
+                    if case .parkedJournalCleanup = phase {
+                        // `finishCommittedSave` retained the exact terminal
+                        // phase (notably remaining draft-recovery candidates).
+                    } else {
+                        parkJournalCleanup(journalStatus, receipt: parked.draftReceipt)
+                    }
+                } else {
+                    if phase == .parkedCommitUncertain(transactionID) { phase = .ready }
+                    if phase == .ready { queue.resume() }
+                }
                 return .committed(.save(receipt), journal: journalStatus)
             case let .restore(outcome):
                 guard let parked = parkedRestore, parked.transactionID == transactionID else { throw WorkspaceStoreError.frozen }
@@ -313,6 +584,7 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
                 undoStack.removeAll(); redoStack.removeAll(); updateUndoAvailability()
                 mergeSessionNoteLedger(with: parked.candidate)
                 pendingExternalRepairState = nil
+                hasRawRecoverySource = false
                 parkedRestore = nil
                 phase = .ready
                 queue.resume()
@@ -332,7 +604,7 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
                     completion: parked.completion, draftReceipt: draftReceipt, artifacts: artifacts
                 )
             } else {
-                journalStatus = await unbindIfNeeded(draftReceipt)
+                journalStatus = await unbindIfNeeded(draftReceipt).journalStatus
             }
             parkedSave = nil
             parkedRestore = nil
@@ -371,10 +643,11 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         guard case let .parkedJournalCleanup(parked, step) = phase, parked == identity, let journal else {
             return .clean
         }
-        let status = await DraftJournalCoordinator.retryCleanup(
+        let resolution = await DraftJournalCoordinator.retryCleanup(
             identity, step: step, receipt: journalCleanupReceipts[identity], journal: journal
         )
-        switch status {
+        let status = resolution.journalStatus
+        switch resolution {
         case let .cleanupPending(nextIdentity, _):
             // A retry can make partial progress (for example record succeeds
             // and clear then fails).  Park the returned, not captured, step
@@ -388,11 +661,42 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
                 journalCleanupReceipts.removeValue(forKey: identity)
                 journalCleanupTerminalPhases.removeValue(forKey: identity)
             }
-        case .clean:
+        case .clean, .staleOrMissing:
             journalCleanupReceipts.removeValue(forKey: identity)
             let terminalPhase = journalCleanupTerminalPhases.removeValue(forKey: identity) ?? .ready
+            let recoveryFinalization = journalCleanupRecoveryFinalizations.removeValue(forKey: identity)
+            if let recoveryFinalization, resolution == .clean {
+                switch recoveryFinalization {
+                case let .completed(token): finalizeDraftRecoveryCandidate(token)
+                case let .abandoned(token): claimedDraftRecoveryTokens.remove(token)
+                }
+            } else if let recoveryFinalization {
+                switch recoveryFinalization {
+                case let .completed(token), let .abandoned(token): claimedDraftRecoveryTokens.remove(token)
+                }
+            }
+            let requiresStartupRescan = journalCleanupRequiresStartupRescan.remove(identity) != nil
+                || resolution == .staleOrMissing
+            if requiresStartupRescan {
+                let terminalPhaseAfterRecoveryBatch = recoveryFinalization == nil
+                    ? terminalPhase
+                    : draftRecoveryTerminalPhaseWhenClean
+                await recoverJournalAtStartup(
+                    terminalPhaseWhenClean: terminalPhaseAfterRecoveryBatch
+                )
+                if phase.isDraftRecovery, claimedDraftRecoveryTokens.isEmpty == false {
+                    recoveryResolutionQueueOpen = true
+                    queue.resume()
+                }
+                return status
+            }
             phase = terminalPhase
-            if terminalPhase == .ready { queue.resume() }
+            if terminalPhase == .ready || terminalPhase.isDraftRecovery {
+                // Ordinary mutations cannot enter the FIFO while recovery is
+                // parked.  Any retained entry is therefore a previously
+                // claimed recovery resolution and may continue exactly once.
+                queue.resume()
+            }
         }
         return status
     }
@@ -400,7 +704,8 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
     private func perform(
         command originalCommand: WorkspaceCommand,
         undoLabel: String?,
-        transactionID: UUID
+        transactionID: UUID,
+        protectedToken: DraftRecoveryToken? = nil
     ) async throws -> WorkspaceTransactionOutcome {
         phase = .mutating
         defer { if phase == .mutating { phase = .ready } }
@@ -426,10 +731,18 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
                     guard let candidateNote = change.state.notes[receipt.noteID] else {
                         throw WorkspaceStoreError.frozen
                     }
-                    switch try await journal.rebaseAndBind(
-                        expected: .init(identity: .init(noteID: receipt.noteID, editSessionID: receipt.editSessionID), draftGeneration: receipt.draftGeneration),
-                        finalCandidateNote: candidateNote, receipt: receipt
-                    ) {
+                    let binding: DraftJournalBindingResult
+                    if let protectedToken {
+                        binding = try await journal.rebaseAndBind(
+                            expected: protectedToken, finalCandidateNote: candidateNote, receipt: receipt
+                        )
+                    } else {
+                        binding = try await journal.rebaseAndBind(
+                            expected: .init(identity: .init(noteID: receipt.noteID, editSessionID: receipt.editSessionID), draftGeneration: receipt.draftGeneration),
+                            finalCandidateNote: candidateNote, receipt: receipt
+                        )
+                    }
+                    switch binding {
                     case .bound: break
                     case .supersededByNewerDraft: return .draftSuperseded
                     }
@@ -471,8 +784,13 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
             persistedNoteRevision: receipt.persistedNoteRevision
         )) {
         case .verified:
-            let status = await DraftJournalCoordinator.acknowledgeAndClear(receipt, journal: journal)
-            if case .cleanupPending = status { parkJournalCleanup(status, receipt: receipt) }
+            let resolution = await DraftJournalCoordinator.acknowledgeAndClear(receipt, journal: journal)
+            let status = resolution.journalStatus
+            if case .cleanupPending = resolution {
+                parkJournalCleanup(status, receipt: receipt)
+            } else if case .staleOrMissing = resolution {
+                await recoverJournalAtStartup()
+            }
             return .noChange(reason, journal: status)
         case .sourceChanged:
             phase = .externalSourceChanged(.externalBytesChanged)
@@ -489,13 +807,13 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         }
     }
 
-    private func unbindIfNeeded(_ receipt: PersistedDraftReceipt?) async -> JournalResolutionStatus {
+    private func unbindIfNeeded(_ receipt: PersistedDraftReceipt?) async -> DraftRecoveryJournalResolution {
         guard let receipt, let journal else { return .clean }
         do {
-            guard try await journal.unbindPending(receipt) else {
-                return .cleanupPending(identity: .init(noteID: receipt.noteID, editSessionID: receipt.editSessionID), step: .unbind)
+            switch try await journal.unbindPending(receipt) {
+            case .applied: return .clean
+            case .staleOrMissing: return .staleOrMissing
             }
-            return .clean
         } catch {
             return .cleanupPending(identity: .init(noteID: receipt.noteID, editSessionID: receipt.editSessionID), step: .unbind)
         }
@@ -504,29 +822,102 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
     private func parkJournalCleanup(
         _ status: JournalResolutionStatus,
         receipt: PersistedDraftReceipt?,
-        terminalPhase: WorkspaceStorePhase = .ready
+        terminalPhase: WorkspaceStorePhase = .ready,
+        recoveryFinalization: DraftRecoveryCleanupFinalization? = nil,
+        requiresStartupRescan: Bool = false
     ) {
         guard case let .cleanupPending(identity, step) = status else { return }
         if let receipt { journalCleanupReceipts[identity] = receipt }
         journalCleanupTerminalPhases[identity] = terminalPhase
+        if let recoveryFinalization { journalCleanupRecoveryFinalizations[identity] = recoveryFinalization }
+        if requiresStartupRescan { journalCleanupRequiresStartupRescan.insert(identity) }
         phase = .parkedJournalCleanup(identity, step)
     }
 
-    private func recoverJournalAtStartup() async {
-        guard let journal else { return }
+    private func recoverJournalAtStartup(
+        terminalPhaseWhenClean: WorkspaceStorePhase = .ready
+    ) async {
+        draftRecoveryTerminalPhaseWhenClean = terminalPhaseWhenClean
+        guard let journal else {
+            requiresJournalReconciliation = false
+            phase = terminalPhaseWhenClean
+            if terminalPhaseWhenClean == .ready { queue.resume() }
+            return
+        }
+        // Set the nonordinary phase before the first Journal await.  Advisory
+        // locking can suspend here, and a durable record may be the only
+        // recovery evidence in a fresh Store.
+        requiresJournalReconciliation = true
+        phase = .reconcilingDraftRecovery
         do {
-            guard let envelope = try await journal.current() else { return }
+            guard let envelope = try await journal.current() else {
+                draftRecoveryCandidates.removeAll()
+                claimedDraftRecoveryTokens.removeAll()
+                recoveryResolutionQueueOpen = false
+                requiresJournalReconciliation = false
+                phase = terminalPhaseWhenClean
+                if terminalPhaseWhenClean == .ready { queue.resume() }
+                return
+            }
+            var candidates: [DraftRecoveryCandidate] = []
             for record in envelope.records {
                 let identity = record.identity
-                if let saved = record.savedReceipt {
-                    let status = await DraftJournalCoordinator.retryCleanup(
-                        identity, step: .clear, receipt: saved, journal: journal
-                    )
-                    if case .cleanupPending = status {
-                        parkJournalCleanup(status, receipt: saved)
+                if let recoveryCompletion = record.recoveryCompletion {
+                    switch try verifyRecoveryCompletion(recoveryCompletion, record: record) {
+                    case .committed:
+                        let resolution = await DraftJournalCoordinator.completeRecovery(recoveryCompletion, journal: journal)
+                        if case .cleanupPending = resolution {
+                            parkJournalCleanup(
+                                resolution.journalStatus,
+                                receipt: nil,
+                                terminalPhase: terminalPhaseWhenClean,
+                                requiresStartupRescan: true
+                            )
+                            return
+                        }
+                        if case .staleOrMissing = resolution {
+                            await recoverJournalAtStartup(terminalPhaseWhenClean: terminalPhaseWhenClean)
+                            return
+                        }
+                        await recoverJournalAtStartup(terminalPhaseWhenClean: terminalPhaseWhenClean)
+                        return
+                    case .notCommitted:
+                        let resolution = await DraftJournalCoordinator.abandonRecovery(recoveryCompletion, journal: journal)
+                        if case .cleanupPending = resolution {
+                            parkJournalCleanup(
+                                resolution.journalStatus,
+                                receipt: nil,
+                                terminalPhase: terminalPhaseWhenClean,
+                                requiresStartupRescan: true
+                            )
+                            return
+                        }
+                        if case .staleOrMissing = resolution {
+                            await recoverJournalAtStartup(terminalPhaseWhenClean: terminalPhaseWhenClean)
+                            return
+                        }
+                        await recoverJournalAtStartup(terminalPhaseWhenClean: terminalPhaseWhenClean)
+                        return
+                    case .sourceChanged:
+                        phase = .externalSourceChanged(.externalBytesChanged)
                         return
                     }
-                    continue
+                }
+                if let saved = record.savedReceipt {
+                    let resolution = await DraftJournalCoordinator.retryCleanup(
+                        identity, step: .clear, receipt: saved, journal: journal
+                    )
+                    if case .cleanupPending = resolution {
+                        parkJournalCleanup(
+                            resolution.journalStatus,
+                            receipt: saved,
+                            terminalPhase: terminalPhaseWhenClean,
+                            requiresStartupRescan: true
+                        )
+                        return
+                    }
+                    await recoverJournalAtStartup(terminalPhaseWhenClean: terminalPhaseWhenClean)
+                    return
                 }
                 if let pending = record.pendingReceipt {
                     let verification = try await repository.verifyPersistedDraft(.init(
@@ -536,18 +927,31 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
                     ))
                     switch verification {
                     case let .verified(receipt) where receipt == pending:
-                        let status = await DraftJournalCoordinator.recordAndClear(pending, journal: journal)
-                        if case .cleanupPending = status {
-                            parkJournalCleanup(status, receipt: pending)
+                        let resolution = await DraftJournalCoordinator.recordAndClear(pending, journal: journal)
+                        if case .cleanupPending = resolution {
+                            parkJournalCleanup(
+                                resolution.journalStatus,
+                                receipt: pending,
+                                terminalPhase: terminalPhaseWhenClean,
+                                requiresStartupRescan: true
+                            )
                             return
                         }
+                        await recoverJournalAtStartup(terminalPhaseWhenClean: terminalPhaseWhenClean)
+                        return
                     case .notPersisted:
-                        let status = await unbindIfNeeded(pending)
-                        if case .cleanupPending = status {
-                            parkJournalCleanup(status, receipt: pending)
+                        let resolution = await unbindIfNeeded(pending)
+                        if case .cleanupPending = resolution {
+                            parkJournalCleanup(
+                                resolution.journalStatus,
+                                receipt: pending,
+                                terminalPhase: terminalPhaseWhenClean,
+                                requiresStartupRescan: true
+                            )
                             return
                         }
-                        continue
+                        await recoverJournalAtStartup(terminalPhaseWhenClean: terminalPhaseWhenClean)
+                        return
                     case .sourceChanged:
                         phase = .externalSourceChanged(.externalBytesChanged)
                         return
@@ -555,39 +959,83 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
                         phase = .unreadablePrimaryLoadFailed
                         return
                     }
-                    continue
                 }
-                guard let note = state.notes[record.entry.noteID] else {
-                    phase = .externalSourceChanged(.publishedDraftNotPersisted)
-                    return
-                }
-                let context = PersistableDraftContext(
-                    noteID: note.id, editSessionID: record.entry.editSessionID,
-                    draftGeneration: record.entry.draftGeneration,
-                    noteSnapshotChecksum: record.entry.noteSnapshotChecksum,
-                    persistedNoteRevision: note.revision
-                )
-                switch try await repository.verifyPersistedDraft(context) {
-                case let .verified(receipt):
-                    let status = await DraftJournalCoordinator.acknowledgeAndClear(receipt, journal: journal)
-                    if case .cleanupPending = status {
-                        parkJournalCleanup(status, receipt: receipt)
+                let persisted = state.notes[record.entry.noteID]
+                if let persisted,
+                   (try WorkspaceChecksum.noteSnapshotChecksum(persisted)) == record.entry.noteSnapshotChecksum {
+                    let context = PersistableDraftContext(
+                        noteID: persisted.id, editSessionID: record.entry.editSessionID,
+                        draftGeneration: record.entry.draftGeneration,
+                        noteSnapshotChecksum: record.entry.noteSnapshotChecksum,
+                        persistedNoteRevision: persisted.revision
+                    )
+                    switch try await repository.verifyPersistedDraft(context) {
+                    case let .verified(receipt):
+                        let resolution = await DraftJournalCoordinator.acknowledgeAndClear(receipt, journal: journal)
+                        if case .cleanupPending = resolution {
+                            parkJournalCleanup(
+                                resolution.journalStatus,
+                                receipt: receipt,
+                                terminalPhase: terminalPhaseWhenClean,
+                                requiresStartupRescan: true
+                            )
+                            return
+                        }
+                        await recoverJournalAtStartup(terminalPhaseWhenClean: terminalPhaseWhenClean)
                         return
+                    case .unreadableUnknown:
+                        phase = .unreadablePrimaryLoadFailed
+                        return
+                    case .notPersisted, .sourceChanged:
+                        break
                     }
-                case .notPersisted:
-                    phase = .externalSourceChanged(.publishedDraftNotPersisted)
-                    return
-                case .sourceChanged:
-                    phase = .externalSourceChanged(.externalBytesChanged)
-                    return
-                case .unreadableUnknown:
-                    phase = .unreadablePrimaryLoadFailed
-                    return
                 }
+                candidates.append(.init(
+                    token: .init(
+                        identityAndGeneration: .init(
+                            identity: record.identity,
+                            draftGeneration: record.entry.draftGeneration
+                        ),
+                        noteSnapshotChecksum: record.entry.noteSnapshotChecksum,
+                        journalChecksum: record.entry.journalChecksum
+                    ),
+                    draft: record.entry.noteSnapshot,
+                    persisted: persisted,
+                    updatedAt: record.entry.updatedAt
+                ))
+            }
+            draftRecoveryCandidates = candidates
+            claimedDraftRecoveryTokens.formIntersection(Set(candidates.map(\.token)))
+            requiresJournalReconciliation = false
+            if candidates.isEmpty {
+                recoveryResolutionQueueOpen = false
+                phase = terminalPhaseWhenClean
+                if terminalPhaseWhenClean == .ready { queue.resume() }
+            } else {
+                phase = .needsDraftRecovery(candidates)
             }
         } catch {
             phase = .unreadablePrimaryLoadFailed
         }
+    }
+
+    private func verifyRecoveryCompletion(
+        _ completion: DraftRecoveryCompletion,
+        record: StoredDraftJournalRecord
+    ) throws -> DraftRecoveryCompletionVerification {
+        let result = completion.result
+        if state.revision == result.workspaceRevision,
+           let note = state.notes[result.noteID],
+           note.revision == result.noteRevision,
+           try WorkspaceChecksum.noteSnapshotChecksum(note) == result.noteSnapshotChecksum {
+            return .committed
+        }
+        // A committed marker is intentionally irreversible: a later source
+        // rollback must never turn a known committed recovery into a bare
+        // record and replay its main save.
+        guard completion.state == .pending else { return .sourceChanged }
+        let source = try DraftJournal.recoverySourceIdentity(for: state)
+        return source == completion.source ? .notCommitted : .sourceChanged
     }
 
     /// All ordinary, undo/redo, external-normalization and repair saves go
@@ -623,9 +1071,22 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
             )
             return .notCommitted(transactionID: transactionID, journal: journalStatus, artifacts: .init())
         } catch WorkspacePersistenceError.invalidDocument {
-            guard await repositoryReportsUnreadablePrimary() else {
+            let unreadablePrimary = await repositoryReportsUnreadablePrimary()
+            if case .draftRecovery = completion {
+                let journalStatus = await finishRejectedRecoverySave(completion: completion)
+                if unreadablePrimary {
+                    if case .cleanupPending = journalStatus {
+                        throw WorkspacePersistenceError.invalidDocument
+                    }
+                    return .persistenceBlocked(
+                        transactionID: transactionID,
+                        reason: .unreadablePrimary,
+                        journal: journalStatus
+                    )
+                }
                 throw WorkspacePersistenceError.invalidDocument
             }
+            guard unreadablePrimary else { throw WorkspacePersistenceError.invalidDocument }
             let journalStatus = await finishUnreadablePrimarySave(draftReceipt)
             return .persistenceBlocked(
                 transactionID: transactionID, reason: .unreadablePrimary, journal: journalStatus
@@ -642,6 +1103,7 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         completion: SaveCompletion,
         draftReceipt: PersistedDraftReceipt?
     ) async -> JournalResolutionStatus {
+        hasRawRecoverySource = false
         switch completion {
         case let .forward(undoRecord, acceptedDraft):
             publish(candidate, undoRecord: undoRecord)
@@ -657,11 +1119,58 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
             noteRevisionHighWatermarks = ledger
             pendingExternalRepairState = nil
             updateUndoAvailability()
+        case let .draftRecoveryRepair(ledger):
+            state = candidate
+            noteRevisionHighWatermarks = ledger
+            pendingExternalRepairState = nil
+            updateUndoAvailability()
+            draftRecoveryTerminalPhaseWhenClean = .ready
+            // The repair wrote only the persisted relationship graph.  Read
+            // the Journal again rather than carrying an in-memory reviewed
+            // draft across the durable repair boundary: another process may
+            // have superseded a token while the repair was saving.
+            await recoverJournalAtStartup(
+                terminalPhaseWhenClean: draftRecoveryTerminalPhaseWhenClean
+            )
+        case let .draftRecovery(recoveryCompletion, terminalPhase, _):
+            publish(candidate, undoRecord: nil)
+            draftRecoveryTerminalPhaseWhenClean = .ready
+            let committedTerminalPhase: WorkspaceStorePhase = terminalPhase.isDraftRecovery
+                ? terminalPhase
+                : .ready
+            let resolution = if let journal {
+                await DraftJournalCoordinator.completeRecovery(recoveryCompletion, journal: journal)
+            } else { DraftRecoveryJournalResolution.clean }
+            let journalStatus = resolution.journalStatus
+            if case .cleanupPending = resolution {
+                parkJournalCleanup(
+                    journalStatus,
+                    receipt: nil,
+                    terminalPhase: committedTerminalPhase,
+                    recoveryFinalization: .completed(recoveryCompletion.token),
+                    requiresStartupRescan: true
+                )
+            } else if case .staleOrMissing = resolution {
+                claimedDraftRecoveryTokens.remove(recoveryCompletion.token)
+                await recoverJournalAtStartup(
+                    terminalPhaseWhenClean: draftRecoveryTerminalPhaseWhenClean
+                )
+            } else {
+                finalizeDraftRecoveryCandidate(recoveryCompletion.token)
+                phase = committedTerminalPhase
+                if committedTerminalPhase == .ready { queue.resume() }
+            }
+            return journalStatus
         }
-        let journalStatus = if case .forward = completion, let journal, let draftReceipt {
+        let journalResolution = if case .forward = completion, let journal, let draftReceipt {
             await DraftJournalCoordinator.recordAndClear(draftReceipt, journal: journal)
-        } else { JournalResolutionStatus.clean }
-        if case .cleanupPending = journalStatus { parkJournalCleanup(journalStatus, receipt: draftReceipt) }
+        } else { DraftRecoveryJournalResolution.clean }
+        let journalStatus = journalResolution.journalStatus
+        if case .cleanupPending = journalResolution {
+            parkJournalCleanup(journalStatus, receipt: draftReceipt)
+        } else if case .staleOrMissing = journalResolution {
+            await recoverJournalAtStartup()
+        }
         return journalStatus
     }
 
@@ -675,12 +1184,43 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         draftReceipt: PersistedDraftReceipt?,
         artifacts: WorkspacePendingCommitArtifacts
     ) async -> JournalResolutionStatus {
-        let journalStatus = await unbindIfNeeded(draftReceipt)
-        if case .cleanupPending = journalStatus {
+        if case let .draftRecovery(recoveryCompletion, _, failurePhase) = completion,
+           let journal {
+            let resolution = await DraftJournalCoordinator.abandonRecovery(recoveryCompletion, journal: journal)
+            let journalStatus = resolution.journalStatus
+            if case .cleanupPending = resolution {
+                parkJournalCleanup(
+                    journalStatus,
+                    receipt: nil,
+                    terminalPhase: failurePhase,
+                    recoveryFinalization: .abandoned(recoveryCompletion.token),
+                    requiresStartupRescan: true
+                )
+                return journalStatus
+            }
+            claimedDraftRecoveryTokens.remove(recoveryCompletion.token)
+            if case .staleOrMissing = resolution {
+                await recoverJournalAtStartup(
+                    terminalPhaseWhenClean: draftRecoveryTerminalPhaseWhenClean
+                )
+            } else {
+                phase = failurePhase
+            }
+            return .clean
+        }
+        let journalResolution = await unbindIfNeeded(draftReceipt)
+        let journalStatus = journalResolution.journalStatus
+        if case .cleanupPending = journalResolution {
             parkJournalCleanup(
                 journalStatus, receipt: draftReceipt, terminalPhase: completion.notCommittedTerminalPhase
             )
             return journalStatus
+        }
+        if case .staleOrMissing = journalResolution {
+            await recoverJournalAtStartup(
+                terminalPhaseWhenClean: completion.notCommittedTerminalPhase
+            )
+            return .clean
         }
         applyNotCommittedTerminal(completion: completion, artifacts: artifacts)
         return .clean
@@ -691,7 +1231,7 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         artifacts: WorkspacePendingCommitArtifacts
     ) {
         switch completion {
-        case .externalRepair:
+        case .externalRepair, .draftRecoveryRepair:
             phase = .needsRelationshipRepair
             queue.terminateQueued { transactionID in
                 .notCommitted(transactionID: transactionID, journal: .clean, artifacts: artifacts)
@@ -699,6 +1239,8 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         case .externalAdoption:
             phase = .externalSourceChanged(.externalBytesChanged)
             terminateQueuedForExternal(reason: .externalBytesChanged, artifacts: artifacts)
+        case let .draftRecovery(_, _, failurePhase):
+            phase = failurePhase
         case .forward, .undo:
             phase = .ready
         }
@@ -719,10 +1261,13 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
     private func finishUnreadablePrimarySave(
         _ draftReceipt: PersistedDraftReceipt?
     ) async -> JournalResolutionStatus {
-        let journalStatus = await unbindIfNeeded(draftReceipt)
+        let journalResolution = await unbindIfNeeded(draftReceipt)
+        let journalStatus = journalResolution.journalStatus
         let terminalPhase = WorkspaceStorePhase.unreadablePrimaryLoadFailed
-        if case .cleanupPending = journalStatus {
+        if case .cleanupPending = journalResolution {
             parkJournalCleanup(journalStatus, receipt: draftReceipt, terminalPhase: terminalPhase)
+        } else if case .staleOrMissing = journalResolution {
+            await recoverJournalAtStartup(terminalPhaseWhenClean: terminalPhase)
         } else {
             phase = terminalPhase
         }
@@ -730,15 +1275,81 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         return journalStatus
     }
 
+    /// A recovery completion marker is written before the main-file save.
+    /// If the repository then rejects the save before any write can begin,
+    /// reopen only that exact marker. A failed reopen is durable cleanup work;
+    /// a stale marker requires a full truth rescan.
+    private func finishRejectedRecoverySave(
+        completion: SaveCompletion
+    ) async -> JournalResolutionStatus {
+        guard case let .draftRecovery(recoveryCompletion, _, failurePhase) = completion,
+              let journal
+        else { return .clean }
+        let resolution = await DraftJournalCoordinator.abandonRecovery(
+            recoveryCompletion,
+            journal: journal
+        )
+        let journalStatus = resolution.journalStatus
+        if case .cleanupPending = resolution {
+            parkJournalCleanup(
+                journalStatus,
+                receipt: nil,
+                terminalPhase: failurePhase,
+                recoveryFinalization: .abandoned(recoveryCompletion.token),
+                requiresStartupRescan: true
+            )
+            return journalStatus
+        }
+
+        claimedDraftRecoveryTokens.remove(recoveryCompletion.token)
+        if case .staleOrMissing = resolution {
+            await recoverJournalAtStartup(
+                terminalPhaseWhenClean: draftRecoveryTerminalPhaseWhenClean
+            )
+        } else {
+            phase = failurePhase
+        }
+        recoveryResolutionQueueOpen = claimedDraftRecoveryTokens.isEmpty == false
+        if recoveryResolutionQueueOpen { queue.resume() }
+        return .clean
+    }
+
     private func finishSourceChangedSave(
         completion: SaveCompletion,
         draftReceipt: PersistedDraftReceipt?,
         artifacts: WorkspacePendingCommitArtifacts
     ) async -> JournalResolutionStatus {
-        let journalStatus = await unbindIfNeeded(draftReceipt)
+        if case let .draftRecovery(recoveryCompletion, _, _) = completion,
+           let journal {
+            let resolution = await DraftJournalCoordinator.abandonRecovery(recoveryCompletion, journal: journal)
+            let journalStatus = resolution.journalStatus
+            if case .cleanupPending = resolution {
+                parkJournalCleanup(
+                    journalStatus,
+                    receipt: nil,
+                    terminalPhase: .externalSourceChanged(.externalBytesChanged),
+                    recoveryFinalization: .abandoned(recoveryCompletion.token),
+                    requiresStartupRescan: true
+                )
+            } else if case .staleOrMissing = resolution {
+                claimedDraftRecoveryTokens.remove(recoveryCompletion.token)
+                await recoverJournalAtStartup(
+                    terminalPhaseWhenClean: .externalSourceChanged(.externalBytesChanged)
+                )
+            } else {
+                claimedDraftRecoveryTokens.remove(recoveryCompletion.token)
+                phase = completion.sourceChangedTerminalPhase
+            }
+            terminateQueuedForExternal(reason: .externalBytesChanged, artifacts: artifacts)
+            return journalStatus
+        }
+        let journalResolution = await unbindIfNeeded(draftReceipt)
+        let journalStatus = journalResolution.journalStatus
         let terminalPhase = completion.sourceChangedTerminalPhase
-        if case .cleanupPending = journalStatus {
+        if case .cleanupPending = journalResolution {
             parkJournalCleanup(journalStatus, receipt: draftReceipt, terminalPhase: terminalPhase)
+        } else if case .staleOrMissing = journalResolution {
+            await recoverJournalAtStartup(terminalPhaseWhenClean: terminalPhase)
         } else {
             phase = terminalPhase
         }
@@ -815,9 +1426,13 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         transactionID: UUID
     ) async throws -> WorkspaceTransactionOutcome {
         guard let external = pendingExternalRepairState else { throw WorkspaceStoreError.frozen }
-        phase = .mutating
+        let preservesDraftRecovery = requiresJournalReconciliation
+        let repairPhase: WorkspaceStorePhase = preservesDraftRecovery
+            ? .reconcilingDraftRecovery
+            : .mutating
+        phase = repairPhase
         defer {
-            if phase == .mutating {
+            if phase == repairPhase {
                 phase = .needsRelationshipRepair
             }
         }
@@ -839,10 +1454,12 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
                 candidate: adoption.candidate,
                 draftContext: nil,
                 draftReceipt: nil,
-                completion: .externalRepair(ledger: adoption.noteRevisionHighWatermarks),
+                completion: preservesDraftRecovery
+                    ? .draftRecoveryRepair(ledger: adoption.noteRevisionHighWatermarks)
+                    : .externalRepair(ledger: adoption.noteRevisionHighWatermarks),
                 transactionID: transactionID
             )
-            if case .committed = outcome { phase = .ready }
+            if case .committed = outcome, preservesDraftRecovery == false { phase = .ready }
             return outcome
         }
     }
@@ -852,8 +1469,11 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         ledger: [NoteID: Int64],
         transactionID: UUID
     ) async throws -> WorkspaceTransactionOutcome {
-        phase = .mutating
-        defer { if phase == .mutating { phase = .ready } }
+        let adoptionPhase: WorkspaceStorePhase = requiresJournalReconciliation
+            ? .reconcilingDraftRecovery
+            : .mutating
+        phase = adoptionPhase
+        defer { if phase == adoptionPhase { phase = .ready } }
         _ = clock()
         let outcome = try await persistSave(
             candidate: candidate,
@@ -862,7 +1482,10 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
             completion: .externalAdoption(ledger: ledger),
             transactionID: transactionID
         )
-        if case .committed = outcome { phase = .ready }
+        if case .committed = outcome {
+            if requiresJournalReconciliation == false { phase = .ready }
+            await recoverJournalAtStartup()
+        }
         return outcome
     }
 
@@ -893,6 +1516,7 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
                 redoStack.removeAll()
                 mergeSessionNoteLedger(with: change.state)
                 pendingExternalRepairState = nil
+                hasRawRecoverySource = false
                 updateUndoAvailability()
                 return .restored(outcome)
             } catch let failure as WorkspaceDirectCommitFailure {
@@ -909,6 +1533,7 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
                     undoStack.removeAll(); redoStack.removeAll(); updateUndoAvailability()
                     mergeSessionNoteLedger(with: change.state)
                     pendingExternalRepairState = nil
+                    hasRawRecoverySource = false
                     return .restored(outcome)
                 case let .notCommitted(artifacts):
                     _ = await repository.discardPreparedRestore(prepared)
@@ -1038,16 +1663,36 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
     private func enqueueTransaction(
         _ operation: @escaping WorkspaceTransactionQueue.Operation
     ) async throws -> WorkspaceTransactionOutcome {
-        try await queue.enqueue(operation) { [weak self] in
+        defer { resumeJournalProtectionWaiters() }
+        return try await queue.enqueue(operation) { [weak self] in
             guard let self else { return true }
+            if self.recoveryResolutionQueueOpen,
+               self.claimedDraftRecoveryTokens.isEmpty == false,
+               self.phase.isDraftRecovery {
+                return false
+            }
             return self.phase.blocksQueuedDrainAfterFailure
         }
+    }
+
+    private func waitForCurrentTransactionJournalResolution() async {
+        await withCheckedContinuation { continuation in
+            journalProtectionWaiters.append(continuation)
+        }
+    }
+
+    private func resumeJournalProtectionWaiters() {
+        let waiters = journalProtectionWaiters
+        journalProtectionWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
     }
 
     private func terminateQueuedForExternal(
         reason: WorkspaceExternalSourceChangeReason,
         artifacts: WorkspacePendingCommitArtifacts
     ) {
+        claimedDraftRecoveryTokens.removeAll()
+        recoveryResolutionQueueOpen = false
         queue.terminateQueued { transactionID in
             .externalSourceChanged(
                 transactionID: transactionID, reason: reason, journal: .clean, artifacts: artifacts
@@ -1056,6 +1701,8 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
     }
 
     private func terminateQueuedForPersistenceBlock(reason: WorkspacePersistenceBlockReason) {
+        claimedDraftRecoveryTokens.removeAll()
+        recoveryResolutionQueueOpen = false
         queue.terminateQueued { transactionID in
             .persistenceBlocked(transactionID: transactionID, reason: reason, journal: .clean)
         }
@@ -1066,6 +1713,255 @@ enum WorkspaceStoreError: Error, Equatable, Sendable { case frozen, nothingToUnd
         case .ready, .mutating:
             return
         default:
+            throw WorkspaceStoreError.frozen
+        }
+    }
+
+    private var allowsDraftRecoveryResolution: Bool {
+        switch phase {
+        case .needsDraftRecovery:
+            true
+        case .resolvingDraftRecovery:
+            recoveryResolutionQueueOpen
+        case .notLoaded, .loading, .ready, .mutating, .reconcilingDraftRecovery, .parkedCommitUncertain,
+             .parkedJournalCleanup, .needsRelationshipRepair, .externalSourceChanged,
+             .opaquePrimaryLoadFailed, .unreadablePrimaryLoadFailed, .loadFailed:
+            false
+        }
+    }
+
+    private func draftRecoveryTerminalPhase(
+        afterResolving token: DraftRecoveryToken,
+        from candidates: [DraftRecoveryCandidate]
+    ) -> WorkspaceStorePhase {
+        let remaining = candidates.filter { $0.token != token }
+        return remaining.isEmpty
+            ? draftRecoveryTerminalPhaseWhenClean
+            : .needsDraftRecovery(remaining)
+    }
+
+    private func finalizeDraftRecoveryCandidate(_ token: DraftRecoveryToken) {
+        draftRecoveryCandidates.removeAll { $0.token == token }
+        claimedDraftRecoveryTokens.remove(token)
+        recoveryResolutionQueueOpen = false
+    }
+
+    private func performDraftRecovery(
+        _ recovery: DraftRecoveryCandidate,
+        action: DraftRecoveryAction,
+        transactionID: UUID
+    ) async throws -> WorkspaceTransactionOutcome {
+        guard claimedDraftRecoveryTokens.contains(recovery.token),
+              let journal
+        else { return .draftSuperseded }
+        let candidates = draftRecoveryCandidates
+        let terminalPhase = draftRecoveryTerminalPhase(afterResolving: recovery.token, from: candidates)
+        switch action {
+        case .keepPersisted:
+            let resolution = await DraftJournalCoordinator.discardRecovery(recovery.token, journal: journal)
+            if case .staleOrMissing = resolution {
+                claimedDraftRecoveryTokens.remove(recovery.token)
+                await recoverJournalAtStartup(
+                    terminalPhaseWhenClean: draftRecoveryTerminalPhaseWhenClean
+                )
+                return .draftSuperseded
+            }
+            let status = resolution.journalStatus
+            if case .cleanupPending = resolution {
+                parkJournalCleanup(
+                    status,
+                    receipt: nil,
+                    terminalPhase: terminalPhase,
+                    recoveryFinalization: .completed(recovery.token),
+                    requiresStartupRescan: true
+                )
+            } else {
+                finalizeDraftRecoveryCandidate(recovery.token)
+                phase = terminalPhase
+            }
+            recoveryResolutionQueueOpen = false
+            return .noChange(.identical, journal: status)
+
+        case .restoreAsCurrent, .saveAsNew:
+            let candidate: WorkspaceState
+            let completionAction: DraftRecoveryCompletionAction
+            let resultNoteID: NoteID
+            let completion: DraftRecoveryCompletion
+            do {
+                switch action {
+                case .restoreAsCurrent:
+                    candidate = try recoveredCurrentState(from: recovery)
+                    completionAction = .restoreAsCurrent
+                    resultNoteID = recovery.token.identityAndGeneration.identity.noteID
+                case let .saveAsNew(noteID, blockIDs):
+                    candidate = try recoveredNewNoteState(from: recovery, noteID: noteID, blockIDs: blockIDs)
+                    completionAction = .saveAsNew
+                    resultNoteID = noteID
+                case .keepPersisted:
+                    fatalError("covered above")
+                }
+                completion = try recoveryCompletion(
+                    token: recovery.token,
+                    action: completionAction,
+                    candidate: candidate,
+                    resultNoteID: resultNoteID
+                )
+                guard try await journal.beginRecoveryCompletion(completion) == .applied else {
+                    claimedDraftRecoveryTokens.remove(recovery.token)
+                    await recoverJournalAtStartup(
+                        terminalPhaseWhenClean: draftRecoveryTerminalPhaseWhenClean
+                    )
+                    return .draftSuperseded
+                }
+            } catch {
+                claimedDraftRecoveryTokens.remove(recovery.token)
+                throw error
+            }
+            phase = .resolvingDraftRecovery
+            defer {
+                if phase == .resolvingDraftRecovery {
+                    claimedDraftRecoveryTokens.remove(recovery.token)
+                    recoveryResolutionQueueOpen = false
+                    phase = .needsDraftRecovery(draftRecoveryCandidates)
+                }
+            }
+            let outcome = try await persistSave(
+                candidate: candidate,
+                draftContext: nil,
+                draftReceipt: nil,
+                completion: .draftRecovery(
+                    completion: completion,
+                    terminalPhase: terminalPhase,
+                    failurePhase: .needsDraftRecovery(candidates)
+                ),
+                transactionID: transactionID
+            )
+            if phase != .resolvingDraftRecovery { recoveryResolutionQueueOpen = false }
+            return outcome
+        }
+    }
+
+    private func recoveryCompletion(
+        token: DraftRecoveryToken,
+        action: DraftRecoveryCompletionAction,
+        candidate: WorkspaceState,
+        resultNoteID: NoteID
+    ) throws -> DraftRecoveryCompletion {
+        guard let note = candidate.notes[resultNoteID] else { throw WorkspaceStoreError.frozen }
+        return .init(
+            token: token,
+            action: action,
+            source: try DraftJournal.recoverySourceIdentity(for: state),
+            result: .init(
+                noteID: note.id,
+                noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(note),
+                noteRevision: note.revision,
+                workspaceRevision: candidate.revision
+            ),
+            state: .pending
+        )
+    }
+
+    private func recoveredCurrentState(
+        from recovery: DraftRecoveryCandidate
+    ) throws -> WorkspaceState {
+        // Relationship repair always begins from the current persisted graph.
+        // Do not place any reviewed draft bytes into that repair candidate:
+        // the user must separately and explicitly choose a later restore.
+        guard state.calendar.categories[recovery.draft.categoryID] != nil else {
+            enterDraftRecoveryRelationshipRepair()
+            throw WorkspaceStoreError.frozen
+        }
+        let sourceLinks = state.taskBlockLinks.filter { $0.noteID == recovery.draft.id }
+        for link in sourceLinks {
+            guard state.calendar.items[link.calendarItemID] != nil else {
+                enterDraftRecoveryRelationshipRepair()
+                throw WorkspaceStoreError.frozen
+            }
+        }
+
+        var candidate = state
+        var restored = recovery.draft
+        guard candidate.revision < Int64.max else { throw WorkspaceReducerError.revisionOverflow }
+        candidate.revision += 1
+        if let current = candidate.notes[restored.id] {
+            restored.createdAt = current.createdAt
+        }
+        restored.revision = candidate.revision
+        restored.updatedAt = clock()
+        candidate.notes[restored.id] = restored
+
+        let links = candidate.taskBlockLinks.filter { $0.noteID == restored.id }
+        for link in links {
+            guard let item = candidate.calendar.items[link.calendarItemID] else {
+                enterDraftRecoveryRelationshipRepair()
+                throw WorkspaceStoreError.frozen
+            }
+            guard let index = restored.document.blocks.firstIndex(where: {
+                $0.id == link.blockID && $0.kind == .task
+            }) else {
+                candidate.taskBlockLinks.remove(link)
+                continue
+            }
+            restored.document.blocks[index].taskState?.completedAt = item.completedAt
+        }
+        candidate.notes[restored.id] = restored
+        do {
+            try WorkspaceValidator.validate(candidate)
+        } catch {
+            enterDraftRecoveryRelationshipRepair()
+            throw WorkspaceStoreError.frozen
+        }
+        return candidate
+    }
+
+    private func enterDraftRecoveryRelationshipRepair() {
+        requiresJournalReconciliation = true
+        pendingExternalRepairState = state
+        claimedDraftRecoveryTokens.removeAll()
+        recoveryResolutionQueueOpen = false
+        phase = .needsRelationshipRepair
+    }
+
+    private func recoveredNewNoteState(
+        from recovery: DraftRecoveryCandidate,
+        noteID: NoteID,
+        blockIDs: [BlockID]
+    ) throws -> WorkspaceState {
+        let sourceIDs = recovery.draft.document.blocks.map(\.id)
+        let allExistingBlockIDs = Set(state.notes.values.flatMap { $0.document.blocks.map(\.id) })
+        guard state.notes[noteID] == nil,
+              blockIDs.count == sourceIDs.count,
+              Set(blockIDs).count == blockIDs.count,
+              Set(sourceIDs).isDisjoint(with: Set(blockIDs)),
+              allExistingBlockIDs.isDisjoint(with: Set(blockIDs))
+        else { throw WorkspaceStoreError.frozen }
+        var document = recovery.draft.document
+        document.blocks = zip(document.blocks, blockIDs).map { block, id in
+            .init(
+                id: id,
+                kind: block.kind,
+                inlineContent: block.inlineContent,
+                taskState: block.taskState,
+                indentLevel: block.indentLevel,
+                codeInfoString: block.codeInfoString
+            )
+        }
+        let now = clock()
+        let created = Note(
+            id: noteID,
+            title: recovery.draft.title,
+            document: document,
+            categoryID: recovery.draft.categoryID,
+            archivedAt: nil,
+            revision: 0,
+            createdAt: now,
+            updatedAt: now
+        )
+        switch try WorkspaceReducer.reduce(state, command: .createNote(.init(note: created)), now: now) {
+        case let .changed(change):
+            return change.state
+        case .noChange, .conflict:
             throw WorkspaceStoreError.frozen
         }
     }
@@ -1081,7 +1977,7 @@ private extension WorkspaceStorePhase {
         switch self {
         case .ready:
             false
-        case .mutating:
+        case .mutating, .resolvingDraftRecovery, .reconcilingDraftRecovery:
             true
         default:
             true
@@ -1092,9 +1988,14 @@ private extension WorkspaceStorePhase {
         switch self {
         case .ready, .needsRelationshipRepair, .opaquePrimaryLoadFailed, .externalSourceChanged:
             true
-        case .notLoaded, .loading, .mutating, .parkedCommitUncertain, .parkedJournalCleanup,
-             .unreadablePrimaryLoadFailed, .loadFailed:
+        case .notLoaded, .loading, .mutating, .resolvingDraftRecovery, .reconcilingDraftRecovery, .parkedCommitUncertain, .parkedJournalCleanup,
+             .needsDraftRecovery, .unreadablePrimaryLoadFailed, .loadFailed:
             false
         }
+    }
+
+    var isDraftRecovery: Bool {
+        if case .needsDraftRecovery = self { return true }
+        return false
     }
 }

@@ -9,33 +9,57 @@ enum BackupRecoveryAction: Equatable {
     case exportRawRecoveryCopy
     case retryPendingCommit(UUID)
     case retryJournalCleanup(DraftJournalIdentity, JournalCleanupStep)
+    case draftRecoveryRequired([DraftRecoveryToken])
 }
 
 enum BackupRecoveryPolicy {
     /// Keep the command's enablement identical to `WorkspaceStore.restore`.
     /// A failure phase must not advertise a restore that the store will reject
     /// before it can inspect the selected backup.
-    static func allowsRestore(from phase: WorkspaceStorePhase) -> Bool {
-        switch phase {
+    static func allowsRestore(
+        from phase: WorkspaceStorePhase,
+        journalReconciliationRequired: Bool
+    ) -> Bool {
+        guard journalReconciliationRequired == false else { return false }
+        return switch phase {
         case .ready, .externalSourceChanged, .opaquePrimaryLoadFailed, .needsRelationshipRepair:
             true
-        case .notLoaded, .loading, .mutating, .parkedCommitUncertain, .parkedJournalCleanup,
-             .loadFailed, .unreadablePrimaryLoadFailed:
+        case .notLoaded, .loading, .mutating, .resolvingDraftRecovery, .reconcilingDraftRecovery, .parkedCommitUncertain, .parkedJournalCleanup,
+             .needsDraftRecovery, .loadFailed, .unreadablePrimaryLoadFailed:
             false
         }
     }
 
-    static func actions(for phase: WorkspaceStorePhase) -> [BackupRecoveryAction] {
-        switch phase {
+    static func actions(
+        for phase: WorkspaceStorePhase,
+        rawRecoveryAvailable: Bool = false
+    ) -> [BackupRecoveryAction] {
+        var actions: [BackupRecoveryAction] = switch phase {
         case let .parkedCommitUncertain(transactionID):
             [.retryPendingCommit(transactionID)]
         case let .parkedJournalCleanup(identity, step):
             [.retryJournalCleanup(identity, step)]
-        case .opaquePrimaryLoadFailed:
-            [.exportRawRecoveryCopy]
-        case .notLoaded, .loading, .ready, .mutating, .needsRelationshipRepair,
-             .externalSourceChanged, .loadFailed, .unreadablePrimaryLoadFailed:
+        case let .needsDraftRecovery(candidates):
+            [.draftRecoveryRequired(candidates.map(\.token))]
+        case .notLoaded, .loading, .ready, .mutating, .resolvingDraftRecovery, .reconcilingDraftRecovery, .needsRelationshipRepair,
+             .externalSourceChanged, .opaquePrimaryLoadFailed, .loadFailed, .unreadablePrimaryLoadFailed:
             []
+        }
+        if case .parkedCommitUncertain = phase { return actions }
+        if rawRecoveryAvailable, actions.contains(.exportRawRecoveryCopy) == false {
+            actions.append(.exportRawRecoveryCopy)
+        }
+        return actions
+    }
+
+    static func allowsReadOnlyBackup(from phase: WorkspaceStorePhase) -> Bool {
+        switch phase {
+        case .ready, .needsDraftRecovery:
+            true
+        case .notLoaded, .loading, .mutating, .resolvingDraftRecovery, .reconcilingDraftRecovery, .parkedCommitUncertain, .parkedJournalCleanup,
+             .needsRelationshipRepair, .externalSourceChanged, .opaquePrimaryLoadFailed,
+             .unreadablePrimaryLoadFailed, .loadFailed:
+            false
         }
     }
 
@@ -82,12 +106,19 @@ enum BackupRecoveryPolicy {
         }
     }
 
-    static func message(for status: JournalResolutionStatus) -> String {
+    static func message(
+        for status: JournalResolutionStatus,
+        completing step: JournalCleanupStep? = nil
+    ) -> String {
         switch status {
         case .clean:
-            "草稿清理已完成。"
+            return step.map(isRecoveryStep) == true
+                ? "草稿恢复记录已处理。"
+                : "草稿清理已完成。"
+        case let .cleanupPending(_, step) where isRecoveryStep(step):
+            return "草稿恢复记录仍未丢弃；请稍后继续处理。"
         case .cleanupPending:
-            "草稿清理仍未完成；请稍后继续清理。"
+            return "草稿清理仍未完成；请稍后继续清理。"
         }
     }
 
@@ -97,7 +128,8 @@ enum BackupRecoveryPolicy {
     }
 
     private static func cleanupSuffix(for status: JournalResolutionStatus) -> String {
-        guard case .cleanupPending = status else { return "" }
+        guard case let .cleanupPending(_, step) = status else { return "" }
+        if isRecoveryStep(step) { return " 草稿恢复记录仍未丢弃，请在草稿恢复流程中继续处理。" }
         return " 草稿清理仍未完成，请继续清理。"
     }
 
@@ -114,6 +146,19 @@ enum BackupRecoveryPolicy {
         case .acknowledge: "确认草稿回执"
         case .unbind: "解除草稿绑定"
         case .clear: "清除草稿记录"
+        case .discardRecovery: "丢弃已审阅草稿恢复记录"
+        case .markRecoveryCompletion: "记录草稿恢复主保存结果"
+        case .discardRecoveryCompletion: "丢弃已完成草稿恢复记录"
+        case .abandonRecoveryCompletion: "释放未完成草稿恢复记录"
+        }
+    }
+
+    private static func isRecoveryStep(_ step: JournalCleanupStep) -> Bool {
+        switch step {
+        case .discardRecovery, .markRecoveryCompletion, .discardRecoveryCompletion, .abandonRecoveryCompletion:
+            true
+        case .record, .acknowledge, .unbind, .clear:
+            false
         }
     }
 }

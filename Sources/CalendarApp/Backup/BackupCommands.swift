@@ -15,31 +15,72 @@ struct BackupCommands: Commands {
         CommandGroup(after: .newItem) {
             Divider()
             Button("导出备份…", action: exportBackup)
-                .disabled(store.phase != .ready)
-            Button("恢复备份…", action: chooseBackupToRestore)
-                .disabled(!canRestore)
-            if case .exportRawRecoveryCopy? = BackupRecoveryPolicy.actions(for: store.phase).first {
+                .disabled(!BackupRecoveryPolicy.allowsReadOnlyBackup(from: store.phase))
+            if canRestore {
+                Button("恢复备份…", action: chooseBackupToRestore)
+            }
+            if recoveryActions.contains(.exportRawRecoveryCopy) {
                 Divider()
                 Button("导出原始恢复副本…", action: exportRawRecoveryCopy)
             }
-            if case let .retryPendingCommit(transactionID)? = BackupRecoveryPolicy.actions(for: store.phase).first,
+            if let transactionID = pendingCommitTransactionID,
                let title = BackupRecoveryPolicy.pendingCommitMenuTitle(for: store.phase) {
                 Divider()
                 Button(title, action: { retryPendingCommit(transactionID) })
             }
-            if case let .retryJournalCleanup(identity, step)? = BackupRecoveryPolicy.actions(for: store.phase).first {
+            if let (identity, step) = journalCleanupAction {
                 Divider()
-                Button("继续清理草稿记录", action: { retryJournalCleanup(identity, step: step) })
+                Button(journalCleanupTitle(for: step), action: { retryJournalCleanup(identity, step: step) })
+            }
+            if let tokens = draftRecoveryTokens {
+                Divider()
+                ForEach(Array(tokens.enumerated()), id: \.element) { offset, token in
+                    Button("导出草稿恢复副本 \(offset + 1)…", action: {
+                        exportDraftRecoveryMarkdown(token, ordinal: offset + 1)
+                    })
+                }
+                Button("需先处理草稿恢复", action: { showDraftRecoveryRequired(tokens) })
             }
         }
     }
 
     private var canRestore: Bool {
-        BackupRecoveryPolicy.allowsRestore(from: store.phase)
+        BackupRecoveryPolicy.allowsRestore(
+            from: store.phase,
+            journalReconciliationRequired: store.hasUnresolvedJournalReconciliation
+        )
+    }
+
+    private var recoveryActions: [BackupRecoveryAction] {
+        BackupRecoveryPolicy.actions(
+            for: store.phase,
+            rawRecoveryAvailable: store.hasRawRecoverySource
+        )
+    }
+
+    private var pendingCommitTransactionID: UUID? {
+        for case let .retryPendingCommit(transactionID) in recoveryActions {
+            return transactionID
+        }
+        return nil
+    }
+
+    private var journalCleanupAction: (DraftJournalIdentity, JournalCleanupStep)? {
+        for case let .retryJournalCleanup(identity, step) in recoveryActions {
+            return (identity, step)
+        }
+        return nil
+    }
+
+    private var draftRecoveryTokens: [DraftRecoveryToken]? {
+        for case let .draftRecoveryRequired(tokens) in recoveryActions {
+            return tokens
+        }
+        return nil
     }
 
     private func exportBackup() {
-        guard store.phase == .ready else { return }
+        guard BackupRecoveryPolicy.allowsReadOnlyBackup(from: store.phase) else { return }
         let panel = NSSavePanel()
         panel.title = "导出 Jelly 备份"
         panel.message = "导出可用于本应用恢复的完整工作空间备份。"
@@ -58,7 +99,7 @@ struct BackupCommands: Commands {
     }
 
     private func exportRawRecoveryCopy() {
-        guard BackupRecoveryPolicy.actions(for: store.phase).contains(.exportRawRecoveryCopy) else { return }
+        guard recoveryActions.contains(.exportRawRecoveryCopy) else { return }
         let panel = NSSavePanel()
         panel.title = "导出 Jelly 原始恢复副本"
         panel.message = "此副本保留当前无法解析或读取的原始数据，仅用于后续恢复分析。"
@@ -79,6 +120,28 @@ struct BackupCommands: Commands {
                     message: "原始数据没有写入目标位置。请确认目标位置可写后重试。"
                 )
             }
+        }
+    }
+
+    private func exportDraftRecoveryMarkdown(_ token: DraftRecoveryToken, ordinal: Int) {
+        guard case .needsDraftRecovery = store.phase else { return }
+        let panel = NSSavePanel()
+        panel.title = "导出草稿恢复副本"
+        panel.message = "导出当前第 \(ordinal) 条草稿恢复记录的只读 Markdown 副本；这不会确认、保存或丢弃该记录。"
+        panel.nameFieldStringValue = "Jelly草稿恢复-\(ordinal)-\(backupTimestamp()).md"
+        panel.allowedContentTypes = [.plainText]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        do {
+            let markdown = try store.draftRecoveryMarkdown(token)
+            let data = Data(markdown.utf8)
+            try FoundationAtomicFileWriter().replaceAtomically(data: data, at: destination)
+            guard try Data(contentsOf: destination) == data else {
+                throw WorkspacePersistenceError.atomicWriteFailed
+            }
+            showInformation(title: "草稿恢复副本已导出", message: "已保存到：\n\(destination.path)\n\n恢复记录仍未被确认或丢弃。")
+        } catch {
+            showError(title: "无法导出草稿恢复副本", message: "副本没有写入，恢复记录保持不变。请确认目标位置可写后重试。")
         }
     }
 
@@ -106,14 +169,15 @@ struct BackupCommands: Commands {
     private func retryJournalCleanup(_ identity: DraftJournalIdentity, step: JournalCleanupStep) {
         Task { @MainActor in
             let status = await store.retryJournalCleanup(identity)
-            let message = BackupRecoveryPolicy.message(for: status)
+            let message = BackupRecoveryPolicy.message(for: status, completing: step)
+            let title = journalCleanupTitle(for: step)
             switch status {
             case .clean:
-                showInformation(title: "草稿清理结果", message: message)
+                showInformation(title: title, message: message)
             case .cleanupPending:
                 let detail = BackupRecoveryPolicy.cleanupDetail(for: status) ?? ""
                 showError(
-                    title: "草稿清理结果",
+                    title: title,
                     message: "\(message)\n\n\(detail)"
                 )
             }
@@ -189,6 +253,22 @@ struct BackupCommands: Commands {
         formatter.timeZone = .current
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         return formatter.string(from: Date())
+    }
+
+    private func journalCleanupTitle(for step: JournalCleanupStep) -> String {
+        switch step {
+        case .discardRecovery, .markRecoveryCompletion, .discardRecoveryCompletion, .abandonRecoveryCompletion:
+            "草稿恢复处理结果"
+        case .record, .acknowledge, .unbind, .clear:
+            "草稿清理结果"
+        }
+    }
+
+    private func showDraftRecoveryRequired(_ tokens: [DraftRecoveryToken]) {
+        showError(
+            title: "需要先处理草稿恢复",
+            message: "检测到 \(tokens.count) 条受保护草稿。请先在草稿恢复流程中选择恢复、另存为新笔记或保留当前内容；备份恢复和重新载入会在此之前保持锁定。"
+        )
     }
 
     private func showInformation(title: String, message: String) {

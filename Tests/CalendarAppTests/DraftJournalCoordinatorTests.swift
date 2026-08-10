@@ -167,6 +167,36 @@ struct DraftJournalCoordinatorTests {
         #expect(try await journal.current()?.records.first?.pendingReceipt == receipt)
     }
 
+    @Test func recoveryDiscardFailureRetainsTheExactTokenForRetry() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("jelly-10a-recovery-discard-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = SwitchableJournalWriter()
+        let note = Note.empty(id: NoteID(UUID()), categoryID: UUID(), now: .distantPast)
+        let submission = submission(for: note)
+        let journal = DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"), writer: writer)
+        let entry = try DraftJournalCoordinator.entry(submission: submission, workspaceRevision: 0, clock: { .distantPast })
+        try await journal.persist(entry)
+        let token = DraftRecoveryToken(
+            identityAndGeneration: .init(identity: .init(noteID: note.id, editSessionID: entry.editSessionID), draftGeneration: entry.draftGeneration),
+            noteSnapshotChecksum: entry.noteSnapshotChecksum,
+            journalChecksum: entry.journalChecksum
+        )
+        writer.shouldFail = true
+
+        #expect(await DraftJournalCoordinator.discardRecovery(token, journal: journal) == .cleanupPending(
+            identity: token.identityAndGeneration.identity,
+            step: .discardRecovery(token)
+        ))
+        writer.shouldFail = false
+        #expect(await DraftJournalCoordinator.retryCleanup(
+            token.identityAndGeneration.identity,
+            step: .discardRecovery(token),
+            receipt: nil,
+            journal: journal
+        ) == .clean)
+        #expect(try await journal.current()?.records.isEmpty == true)
+    }
+
     private func submission(for note: Note) -> NoteDraftSubmission {
         NoteDraftSubmission(
             noteID: note.id, editSessionID: UUID(uuidString: "00000000-0000-0000-0000-000000006022")!,
