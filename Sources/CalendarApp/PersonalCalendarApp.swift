@@ -41,7 +41,8 @@ struct PersonalCalendarApp: App {
                 store: environment.store,
                 features: environment.features,
                 routeState: routeState,
-                newItemRouter: newItemRouter
+                newItemRouter: newItemRouter,
+                focusRegistry: editorFocusRegistry
             )
                 .preferredColorScheme(appearancePreference.preferredColorScheme)
                 .task { await environment.store.load() }

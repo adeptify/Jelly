@@ -10,6 +10,7 @@ struct BlockEditorView: View {
     private let focusRegistry: EditorFocusRegistry
     private let onDocumentChange: (BlockDocument) -> Void
     private let requestLinkURL: () -> URL?
+    private let sessionSink: ((BlockEditorSession) -> Void)?
 
     init(
         noteID: NoteID,
@@ -18,7 +19,8 @@ struct BlockEditorView: View {
         initialSelection: BlockEditorSelection,
         focusRegistry: EditorFocusRegistry,
         onDocumentChange: @escaping (BlockDocument) -> Void,
-        requestLinkURL: @escaping () -> URL? = { BlockLinkPrompt.requestURL() }
+        requestLinkURL: @escaping () -> URL? = { BlockLinkPrompt.requestURL() },
+        sessionSink: ((BlockEditorSession) -> Void)? = nil
     ) {
         key = .init(noteID: noteID, editSessionID: editSessionID)
         self.initialDocument = initialDocument
@@ -26,6 +28,7 @@ struct BlockEditorView: View {
         self.focusRegistry = focusRegistry
         self.onDocumentChange = onDocumentChange
         self.requestLinkURL = requestLinkURL
+        self.sessionSink = sessionSink
     }
 
     var body: some View {
@@ -35,7 +38,8 @@ struct BlockEditorView: View {
             initialSelection: initialSelection,
             focusRegistry: focusRegistry,
             onDocumentChange: onDocumentChange,
-            requestLinkURL: requestLinkURL
+            requestLinkURL: requestLinkURL,
+            sessionSink: sessionSink
         )
         .id(key)
     }
@@ -50,6 +54,7 @@ private struct BlockEditorKey: Hashable {
 private struct BlockEditorSessionHost: View {
     @StateObject private var session: BlockEditorSession
     private let requestLinkURL: () -> URL?
+    private let sessionSink: ((BlockEditorSession) -> Void)?
 
     init(
         key: BlockEditorKey,
@@ -57,7 +62,8 @@ private struct BlockEditorSessionHost: View {
         initialSelection: BlockEditorSelection,
         focusRegistry: EditorFocusRegistry,
         onDocumentChange: @escaping (BlockDocument) -> Void,
-        requestLinkURL: @escaping () -> URL?
+        requestLinkURL: @escaping () -> URL?,
+        sessionSink: ((BlockEditorSession) -> Void)?
     ) {
         _session = StateObject(wrappedValue: BlockEditorSession(
             noteID: key.noteID,
@@ -68,6 +74,7 @@ private struct BlockEditorSessionHost: View {
             onDocumentChange: onDocumentChange
         ))
         self.requestLinkURL = requestLinkURL
+        self.sessionSink = sessionSink
     }
 
     var body: some View {
@@ -114,6 +121,8 @@ private struct BlockEditorSessionHost: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("结构化笔记编辑器")
+        .onAppear { sessionSink?(session) }
+        .onChange(of: session.document) { _, _ in sessionSink?(session) }
     }
 
     private func rowHeight(for kind: BlockKind) -> CGFloat {

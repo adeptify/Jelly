@@ -205,6 +205,27 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
 
     var isComposing: Bool { composition != nil }
 
+    /// Force the live IME candidate into the authoritative document through the
+    /// same commit path as `unmarkText`. Returns false only when a live host
+    /// still reports a composition that could not be committed.
+    @discardableResult
+    func terminallyFinalizeNativeComposition() -> Bool {
+        guard let composition else { return true }
+        guard let lease = hosts[composition.hostToken],
+              let textView = lease.textView else {
+            cancelComposition(hostToken: composition.hostToken)
+            return true
+        }
+        if textView.hasMarkedText() {
+            textView.unmarkText()
+        } else if isComposing {
+            // Marked buffer already cleared but session still holds composition.
+            commitComposition(textView.string, hostToken: composition.hostToken)
+        }
+        projectAuthoritativeState()
+        return !isComposing
+    }
+
     var slashOptions: [BlockKind] {
         [.paragraph, .heading1, .heading2, .heading3, .bullet, .ordered, .task, .quote, .code, .divider]
     }
@@ -631,6 +652,7 @@ private extension BlockUndoAction {
         switch self {
         case .enter: "换行"
         case .softBreak: "软换行"
+        case .documentIngest: "导入文档"
         case .backspace, .deletion: "删除"
         case .indentation: "缩进"
         case .conversion: "转换"

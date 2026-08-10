@@ -31,6 +31,11 @@ enum BlockVerticalDirection: Equatable, Sendable {
     case down
 }
 
+enum BlockDocumentIngestMode: Equatable, Sendable {
+    case replace
+    case append
+}
+
 enum BlockInputCommand: Equatable, Sendable {
     case insertText(String)
     case insertTextApplyingMarkdownShortcut(String)
@@ -51,6 +56,9 @@ enum BlockInputCommand: Equatable, Sendable {
     case replaceSelection(BlockPastePayload)
     case deleteSelection
     case moveBlockRoots([BlockID], before: BlockID?)
+    /// Dedicated Markdown/document ingestion path. Clipboard paste stays completion-free;
+    /// this command may carry exact checked-task `completedAt` values.
+    case applyDocumentBlocks(blocks: [DocumentBlock], mode: BlockDocumentIngestMode)
 }
 
 struct BlockInputEnvironment: Sendable {
@@ -100,6 +108,7 @@ enum BlockUndoAction: Equatable, Sendable {
     case paste
     case deletion
     case drag
+    case documentIngest
 }
 
 struct BlockInputResult: Equatable, Sendable {

@@ -65,6 +65,8 @@ enum BlockInputReducer {
             return try context.deleteSelection(action: .deletion)
         case let .moveBlockRoots(roots, before: target):
             return try context.moveBlockRoots(roots, before: target)
+        case let .applyDocumentBlocks(blocks, mode):
+            return try context.applyDocumentBlocks(blocks, mode: mode)
         }
     }
 
@@ -99,7 +101,8 @@ private extension BlockInputCommand {
              .moveHorizontal, .moveVertical, .applyMarkdownShortcut, .applySlashConversion:
             true
         case .indent, .outdent, .convert, .toggleInlineMark, .setLink,
-             .copySelection, .cutSelection, .replaceSelection, .deleteSelection, .moveBlockRoots:
+             .copySelection, .cutSelection, .replaceSelection, .deleteSelection, .moveBlockRoots,
+             .applyDocumentBlocks:
             false
         }
     }
@@ -1380,6 +1383,53 @@ private extension ReductionContext {
             mutation: .document,
             effect: .handled,
             undo: .atomic(.drag)
+        )
+    }
+
+    /// Full-document ingestion used by Markdown 导入. Validates IDs and schema
+    /// before any effect, and preserves exact checked-task timestamps.
+    mutating func applyDocumentBlocks(
+        _ blocks: [DocumentBlock],
+        mode: BlockDocumentIngestMode
+    ) throws -> BlockInputResult {
+        guard !blocks.isEmpty else { throw BlockInputError.invalidCandidate }
+        var seen = Set<BlockID>()
+        for block in blocks {
+            if !seen.insert(block.id).inserted {
+                throw BlockInputError.duplicateBlockID(block.id)
+            }
+        }
+        let nextBlocks: [DocumentBlock]
+        switch mode {
+        case .replace:
+            nextBlocks = blocks
+        case .append:
+            let existingIDs = Set(document.blocks.map(\.id))
+            for block in blocks where existingIDs.contains(block.id) {
+                throw BlockInputError.duplicateBlockID(block.id)
+            }
+            nextBlocks = document.blocks + blocks
+        }
+        let candidate = BlockDocument(schemaVersion: document.schemaVersion, blocks: nextBlocks)
+        do {
+            try BlockDocumentValidator.validate(candidate)
+        } catch {
+            throw BlockInputError.invalidCandidate
+        }
+        let focus = nextBlocks[nextBlocks.count - 1]
+        let caretOffset = focus.kind == .divider ? 0 : focus.text.count
+        let nextSelection = BlockEditorSelection.text(
+            anchor: .init(blockID: focus.id, graphemeOffset: caretOffset),
+            focus: .init(blockID: focus.id, graphemeOffset: caretOffset),
+            preferredColumn: nil,
+            typingAttributes: .init(marks: [], linkURL: nil)
+        )
+        return .init(
+            document: candidate,
+            selection: nextSelection,
+            mutation: .document,
+            effect: .handled,
+            undo: .atomic(.documentIngest)
         )
     }
 }

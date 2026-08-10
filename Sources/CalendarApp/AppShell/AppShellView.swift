@@ -62,6 +62,7 @@ private final class WorkspaceModuleLifetimeToken {}
 struct AppShellView: View {
     let store: WorkspaceStore
     let features: WorkspaceFeatures
+    let focusRegistry: EditorFocusRegistry
     @ObservedObject var routeState: WorkspaceRouteState
     @ObservedObject var newItemRouter: WorkspaceNewItemRouter
     @StateObject private var moduleHosts: WorkspaceModuleHostStore
@@ -71,10 +72,12 @@ struct AppShellView: View {
         features: WorkspaceFeatures,
         routeState: WorkspaceRouteState,
         newItemRouter: WorkspaceNewItemRouter,
+        focusRegistry: EditorFocusRegistry = EditorFocusRegistry(),
         moduleHostBuilder: ((WorkspaceRoute) -> WorkspaceModuleHost)? = nil
     ) {
         self.store = store
         self.features = features
+        self.focusRegistry = focusRegistry
         self.routeState = routeState
         self.newItemRouter = newItemRouter
 
@@ -89,7 +92,18 @@ struct AppShellView: View {
                     )),
                     lifetimeToken: WorkspaceModuleLifetimeToken()
                 )
-            case .notes, .inspiration:
+            case .notes:
+                // Production notes remains feature-gated false until Task 10D.
+                // The host is only built when features.notes is true.
+                WorkspaceModuleHost(
+                    route: .notes,
+                    content: AnyView(NotesSplitView(
+                        store: store,
+                        focusRegistry: focusRegistry
+                    )),
+                    lifetimeToken: WorkspaceModuleLifetimeToken()
+                )
+            case .inspiration:
                 fatalError("尚未完成的模块不能被生产外壳实例化")
             }
         }
