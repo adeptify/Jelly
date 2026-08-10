@@ -109,14 +109,32 @@ struct MonthViewTodayRefreshPolicyTests {
             window.contentView = nil
         }
         host.layoutSubtreeIfNeeded()
-        try await Task.sleep(for: .milliseconds(250))
-
-        let stream = try #require(descendants(of: host, as: NSScrollView.self).first)
-        let maxOriginY = max(0, stream.documentView!.bounds.height - stream.contentView.bounds.height)
-        let originalOriginY = stream.contentView.bounds.origin.y
         let targetDocumentCenterY = CGFloat(
             try #require(initialWeekStream.weekStarts.firstIndex(of: targetWeek))
         ) * WeekRowMetrics.defaultHeight + WeekRowMetrics.defaultHeight / 2
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        var hostedStream: NSScrollView?
+        repeat {
+            host.layoutSubtreeIfNeeded()
+            hostedStream = descendants(of: host, as: NSScrollView.self).first
+            if let stream = hostedStream, let documentView = stream.documentView {
+                let originY = stream.contentView.bounds.origin.y
+                let maxOriginY = max(0, documentView.bounds.height - stream.contentView.bounds.height)
+                let viewportCenterY = targetDocumentCenterY - originY
+                if originY > 252,
+                   originY < maxOriginY - 252,
+                   abs(viewportCenterY - stream.contentView.bounds.height / 2) <= 1 {
+                    break
+                }
+            }
+            guard clock.now < deadline else { break }
+            try await Task.sleep(for: .milliseconds(20))
+        } while true
+
+        let stream = try #require(hostedStream)
+        let maxOriginY = max(0, stream.documentView!.bounds.height - stream.contentView.bounds.height)
+        let originalOriginY = stream.contentView.bounds.origin.y
         let targetViewportCenterY = targetDocumentCenterY - originalOriginY
 
         #expect(originalOriginY > 252)
