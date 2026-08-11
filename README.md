@@ -39,4 +39,4 @@ Install notes for sharing a build: [docs/Jelly-安装说明.md](docs/Jelly-安�
 
 ## Status
 
-The Workspace V1 source is under acceptance review. Automated tests and release compilation pass, but this is not yet a release-readiness claim: live GUI checks, Task Block and cross-module navigation paths, and several accessibility/regression checks remain open. The inspiration inbox is implemented; the AI/digest/knowledge-base layer is not.
+Workspace V1 已通过自动化门禁和隔离数据下的真实应用交互验收，可作为内部可用版本。公开发行仍需 Developer ID 签名、公证和安装升级演练；AI、摘要与知识库层不在 V1 范围内。完整证据见 [Workspace V1 验收记录](docs/validation/workspace-v3/acceptance.md)。

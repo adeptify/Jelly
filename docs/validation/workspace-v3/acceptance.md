@@ -1,107 +1,89 @@
-# Workspace V3 Acceptance — 2026-08-11 overnight delivery
+# Workspace V1 验收记录 — 2026-08-11
 
-## Codex review correction — 2026-08-11
+## 结论
 
-This file records the overnight run below; it is **not** evidence that Workspace V1 is release-ready. The current review branch has:
+Workspace V1 已关闭本轮代码审查和真实使用测试中发现的发布阻塞项，可以合入 `main` 作为内部可用版本。
 
-- fixed real AppKit window-close and application-termination save protection;
-- connected Markdown import to the live Block editor session;
-- restricted permanent deletion to archived objects and added an impact confirmation;
-- made URL metadata limits stream-enforced, persisted failure state, and exposed retry;
-- completed the explicit legacy Markdown preview/merge and create-new-note paths;
-- added a permanent Recovery Center window/menu entry;
-- added preview-confirmed permanent deletion for archived Inspirations;
-- corrected the zsh purity gate so a missing release module directory does not fail a debug test run.
+这不等于公开发行：当前包使用临时签名，尚未做 Apple Developer ID 签名、公证和更新分发。
 
-Current automated evidence: `./Scripts/test.sh` → **1023 tests / 86 suites PASS**; `swift build -c release` → **PASS**. Packaging was deliberately not rerun because `Scripts/build-app.sh` replaces the existing ZIP/DMG pair. The artifacts named below therefore remain evidence from the earlier Grok run, not from this review branch.
+## 本轮关闭的阻塞项
 
-Release blockers still open:
+- Task Block 已接到真实 Block 编辑器，可安排到日历、完成、重开、取消关联和打开日历事项；取消关联会保留两端对象。
+- 笔记可直接安排到日历，日历关系可反向打开准确笔记；灵感转笔记后会导航到创建或已有的准确笔记。
+- 灵感补齐快捷新建、待处理数量、共享分类、搜索、归档和转笔记入口。
+- Notes 与 Inspiration 搜索接入可重建的共享索引。
+- 启动目录失败不再 `fatalError`，改为可读错误页和重试。
+- 深色模式下原生 Block 编辑器文字可见；根因是自建 TextKit 容器高度为 0。
+- 标题先保存、正文后保存时，会按重基后的真实差异重新计算修改字段，不再丢正文。
+- 无变化的原生输入收尾不会制造草稿、阻塞新建或跨模块导航。
+- 旧版本留下的“内容已在主文件、版本未增加”的保护草稿会被精确清理，不再启动递归卡死。
+- 编辑会话切换由父级身份重建；新建笔记不会继续显示上一条笔记的标题。
+- 已关联待办删除和主笔记解除关联均要求明确选择处置方式。
 
-1. `TaskBlockCalendarBadge` and `TaskBlockScheduleSheet` are not connected to Block editor rows; the shared-completion domain tests do not prove a user can reach the flow.
-2. `NoteScheduleSheet` is not connected, and Inspiration conversion discards the returned Note ID instead of navigating to the created/existing Note.
-3. Inspiration still lacks the specified quick-input shortcut, rail pending indicator, and shared-category control in its detail surface.
-4. startup data-directory failure still terminates through `fatalError` instead of presenting a recoverable error.
-5. the live GUI, IME, VoiceOver, hover, multi-monitor, restore, and calendar gesture checks below remain unverified.
-6. Notes/Inspiration search has not fully cut over to the rebuildable search index.
+## 自动化证据
 
-Until those gates are closed and the package is rebuilt and checked, the truthful status is **implementation in review**, not “Workspace V1 delivered.”
-
-## Artifact
-
-- App: `dist/Jelly.app`
-- Zip: `dist/Jelly.app.zip`
-- DMG: `dist/Jelly.dmg`
-- Codesign: `codesign --verify --deep --strict dist/Jelly.app` → **PASS**
-
-## Automated gates
-
-| Gate | Result |
+| 门禁 | 结果 |
 |---|---|
-| `./Scripts/test.sh` | **1008 tests / 84 suites PASS** |
-| `swift build -c release` | **PASS** |
-| `./Scripts/build-app.sh` | **PASS** |
-| Task 15 E2E (`WorkspaceEndToEndTests`) | **PASS** — V2→note→relation→inspiration→restart |
-| Task 10D vertical (`NotesVerticalIntegrationTests`) | **PASS** |
+| `git diff --check` | PASS |
+| `swift test` | **1040 tests / 87 suites PASS** |
+| `swift test -c release --filter AppEnvironmentWorkspaceCutoverTests` | **3 tests / 1 suite PASS** |
+| `swift build -c release --product PersonalCalendar` | PASS |
+| `./Scripts/build-app.sh` | PASS |
+| `./Scripts/test-build-app-archive.sh` | PASS，ZIP 与只读 DMG 内应用严格签名一致 |
+| `./Scripts/test-build-app-failures.sh` | PASS |
+| `./Scripts/test-build-app-symlink.sh` | PASS |
+| 解压 ZIP 后 `codesign --verify --deep --strict` | PASS |
+| `hdiutil verify dist/Jelly.dmg` | PASS |
 
-## Isolated data policy
+当前产物：
 
-- All automated acceptance used temp directories only.
-- No intentional writes to default Application Support/PersonalCalendar during this run.
-- Production default-data inventory: **not mutated by acceptance scripts**.
+- `dist/Jelly.app`
+- `dist/Jelly.app.zip` — SHA-256 `1fc1c9f62bb834ab4e4540dc691dd26794b206960915943d0b1e4fd042c94c8d`
+- `dist/Jelly.dmg` — SHA-256 `2170e8b82c287442b403f9d8072cc852792e26bcd2fbc2efe2188864c3c644ea`
 
-## GUI checklist (plan Task 15)
+## Computer Use 真实产品测试
 
-Automated hosted tests cover contracts; live GUI was not fully exercised in this unattended overnight run. Status for human morning verification:
+测试均启动复制到 `/private/tmp` 的准确应用路径，并把数据指向专用目录，没有用应用名模糊启动验收包。
 
-| # | Check | Status |
-|---|---|---|
-| 1 | Launch raw V2 isolated copy; calendar intact | **AUTOMATED (E2E load)** / live GUI **UNVERIFIED** |
-| 2 | Byte snapshot + RecoveryManifest before V3 | **PASS (automated)** |
-| 3 | Command-1/2/3, 1044pt, light/dark, VoiceOver | **UNVERIFIED** (live) |
-| 4 | Create Note; Pinyin IME; Block editor keys | **UNVERIFIED** (live) |
-| 5 | Main-save fail after Journal; restart recover | **PARTIAL** (unit/integration) / live **UNVERIFIED** |
-| 6 | Legacy notes merge / primary attach | **PARTIAL** (integration + UI present) |
-| 7 | Series relation scopes | **PARTIAL** (domain; UI scope limited) |
-| 8 | Task Block schedule + shared completion | **PASS (automated)** |
-| 9 | Inspiration capture/convert/archive | **PASS (automated)** |
-| 10 | Chinese search + archive filter | **PASS (projection/index)** |
-| 11 | Restore V2 snapshot after rollback | **UNVERIFIED** (live path) |
-| 12 | Calendar drag/resize/swipe regressions | **UNVERIFIED** (live) |
+### 全新数据闭环
 
-## Design-spec alignment (self-review)
+隔离数据：`~/Library/Application Support/JellyFreshAcceptance.5o9Dmt/data`
 
-Against `docs/superpowers/specs/2026-08-09-workspace-notes-inspiration-design.md`:
+- 连续新建两篇未修改笔记，第二次新建未被无变化收尾阻塞。
+- 在原生编辑器实际输入 `[ ] task block acceptance`，自动转换为 Task Block，深色模式文字可见。
+- 从 Task Block 创建日历事项，完成与重开双向同步。
+- 取消关联后，Task Block 与独立日历事项均保留。
 
-| Spec intent | Implementation status |
+### 输入、重启、导航与灵感闭环
+
+隔离数据：`~/Library/Application Support/JellyMainAcceptance.xeQwaZ/data`
+
+- 创建并输入标题、正文，重启后正文仍可见，笔记到日历的安排和反向导航落到准确对象。
+- `Command-N` 在灵感页聚焦快捷输入；捕获后待处理数量、分类、搜索过滤均正常。
+- 灵感转笔记后打开准确笔记，标题与正文一致。
+- 用旧版遗留的无变化保护草稿启动：应用不再卡死，草稿被精确清理，已有笔记可打开并可继续新建。
+- 从已有笔记新建后，标题框恢复为空，不再残留上一条笔记标题。
+
+## 数据隔离核对
+
+- 所有有意写入均发生在上述隔离目录。
+- 一次复验把环境变量名写错，只读启动默认目录后产生两个 0 字节锁文件；发现后确认无进程持有并精确移除。
+- 默认主文件 `~/Library/Application Support/PersonalCalendar/calendar-v1.json` 仍为 8421 字节，修改时间仍为 `1786171076`；原有两个 Rollback 文件的大小与修改时间也未变化。
+
+## 与设计文档的对应
+
+| 设计意图 | 当前证据 |
 |---|---|
-| Three entries: 日历 / 笔记 / 灵感 | **YES** — production enables all three |
-| Notes independent of dates | **YES** |
-| Calendar–note explicit relations, one body source | **YES** (domain + item detail UI) |
-| Task block single completion truth | **YES** (`setTaskCompletion` shared) |
-| Inspiration raw-first capture | **YES** |
-| No empty Tab for unfinished modules | **YES** (fatal removed; hosts real) |
-| No AI in phase 1 | **YES** |
-| V3 migration with snapshot before overwrite | **YES** (persistence + E2E) |
-| Draft Journal recovery | **YES** (10A + recovery center) |
-| 1044pt min width (64+980) | **YES** (Task 7 layout) |
+| 日历 / 笔记 / 灵感三入口 | 真实界面可切换，快捷新建按当前模块路由 |
+| 笔记独立于日期，同时可显式关联日历 | 双向导航和笔记安排日历已实测 |
+| Task Block 单一完成状态 | 领域测试、集成测试和真实完成/重开均通过 |
+| 灵感 raw-first 捕获再整理 | 快捷捕获、分类、搜索、转笔记已实测 |
+| 草稿先保护，主文件保存后再清理 | Store/Journal 回归、重启和旧数据升级通过 |
+| 搜索索引可丢弃重建 | Notes/Inspiration 共用索引并保留派生回退 |
+| 第一阶段不引入 AI 自动决策 | 保持不变 |
 
-## Residual limitations (honest)
+## 仍需人工或发行环境验证
 
-1. Legacy Markdown merge full planner authorization UI is present as a closed fail-closed path; “预览并合并” still needs the full authorization plumbing pass.
-2. Task Block badge is not yet fully wired into every BlockEditor row context menu (helpers + sheets exist).
-3. Live VoiceOver / hover / multi-monitor GUI checklist remains **UNVERIFIED** overnight.
-4. Recovery Center is not yet linked from a permanent menu item in BackupCommands (view + VM ready).
-5. Search index is rebuildable in-process; Notes/Inspiration UI still use derived in-memory filters for list search (index ready for Task 14 full cutover polish).
-
-## Git
-
-- Branch: `main`
-- Delivery tip: see `git log --oneline` for Task 10B→15 commits from this session.
-- Worktree should be clean after Task 15 commit.
-
-## Handoff for user
-
-1. Open `dist/Jelly.app` with `JELLY_ACCEPTANCE_DATA_DIRECTORY` set to a temp folder.
-2. Walk GUI checklist rows marked UNVERIFIED.
-3. Confirm default Application Support inventory unchanged after acceptance.
-4. Only then install to Desktop if desired.
+- VoiceOver 连续朗读、中文输入法组合态、hover 和多显示器属于设备/辅助功能专项，本轮没有声称已完成真人验收；已有 AppKit、可访问性和输入生命周期自动化覆盖。
+- 永久删除只验证到确认边界与自动化合同；Computer Use 没有点击最终不可恢复按钮。
+- 公开发行前仍需 Developer ID 签名、公证、安装与升级演练。
