@@ -44,6 +44,85 @@ struct CalendarNoteIntegrationTests {
         #expect(store.state.calendarNoteRelations.baselines[.item(item.id)]?.primaryNoteID == nil)
     }
 
+    @Test func explicitLegacyPreviewCanMergeIntoTheChosenExistingNote() async throws {
+        var calendar = makeEmptyState()
+        var item = try makeItem(categoryID: calendar.uncategorizedID)
+        item.notes = "# 旧随记\n\n- [x] 已完成"
+        calendar.items[item.id] = item
+        let note = Note.empty(id: NoteID(), categoryID: calendar.uncategorizedID, now: .distantPast)
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let completedAt = Date(timeIntervalSince1970: 1_700_001_000)
+        let model = CalendarNoteIntegrationModel(
+            target: .item(item.id),
+            store: store,
+            clock: { completedAt }
+        )
+
+        #expect(try await model.chooseExistingPrimary(note.id) == false)
+        #expect(model.legacyMigrationPreview != nil)
+        #expect(try await model.mergeLegacyIntoExistingPrimary(note.id))
+
+        #expect(model.primaryNote?.id == note.id)
+        #expect(store.calendarState.items[item.id]?.notes == "")
+        #expect(store.state.notes[note.id]?.document.blocks.contains {
+            $0.inlineContent.spans.map(\.text).joined() == "旧随记"
+        } == true)
+    }
+
+    @Test func explicitLegacyPreviewCanCreateANewPrimaryNote() async throws {
+        var calendar = makeEmptyState()
+        var item = try makeItem(categoryID: calendar.uncategorizedID)
+        item.notes = "需要安全迁移的正文"
+        calendar.items[item.id] = item
+        let existing = Note.empty(id: NoteID(), categoryID: calendar.uncategorizedID, now: .distantPast)
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        _ = try await store.sendWorkspace(.createNote(.init(note: existing)))
+        let model = CalendarNoteIntegrationModel(target: .item(item.id), store: store)
+
+        #expect(try await model.chooseExistingPrimary(existing.id) == false)
+        #expect(try await model.createPrimaryNoteFromLegacyPreview())
+
+        let primary = try #require(model.primaryNote)
+        #expect(primary.id != existing.id)
+        #expect(primary.document.blocks.first?.inlineContent.spans.map(\.text).joined() == "需要安全迁移的正文")
+        #expect(store.calendarState.items[item.id]?.notes == "")
+    }
+
+    @Test func staleLegacySourceKeepsTheSheetOpenWithARefreshedPreview() async throws {
+        var calendar = makeEmptyState()
+        var item = try makeItem(categoryID: calendar.uncategorizedID)
+        item.notes = "第一次预览"
+        calendar.items[item.id] = item
+        let note = Note.empty(id: NoteID(), categoryID: calendar.uncategorizedID, now: .distantPast)
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let model = CalendarNoteIntegrationModel(target: .item(item.id), store: store)
+        #expect(try await model.chooseExistingPrimary(note.id) == false)
+        let firstChecksum = try #require(model.legacyMigrationPreview?.sourceChecksum)
+
+        var changed = try #require(store.calendarState.items[item.id])
+        changed.notes = "源内容已变化"
+        _ = try await store.sendWorkspace(.calendar(.updateItem(changed)))
+
+        #expect(try await model.mergeLegacyIntoExistingPrimary(note.id) == false)
+        #expect(model.presentedSheet == .legacyNotesResolution(note.id))
+        #expect(model.legacyMigrationPreview?.sourceChecksum != firstChecksum)
+        #expect(store.state.calendarNoteRelations.baselines[.item(item.id)]?.primaryNoteID == nil)
+    }
+
     @Test func attachReferenceAndDetachPreserveBothObjects() async throws {
         let calendar = try makeStateWithOneItem()
         let item = try #require(calendar.items.values.first)

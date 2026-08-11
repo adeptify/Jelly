@@ -18,6 +18,9 @@ enum CalendarNotePresentedSheet: Equatable, Sendable {
     private(set) var resolved: ResolvedCalendarNoteRelation?
     private(set) var presentedSheet: CalendarNotePresentedSheet?
     private(set) var statusMessage: String?
+    private(set) var legacyMigrationPreview: LegacyMarkdownMigrationPreview?
+    private var legacyPreviewNoteRevision: Int64?
+    private var legacyPreviewCheckedTaskCompletedAt: Date?
 
     init(
         target: CalendarTargetID,
@@ -115,11 +118,100 @@ enum CalendarNotePresentedSheet: Equatable, Sendable {
     @discardableResult
     func chooseExistingPrimary(_ noteID: NoteID) async throws -> Bool {
         if hasLegacyMarkdown {
+            let prepared = try prepareLegacyMigrationPreview()
+            legacyMigrationPreview = prepared.preview
+            legacyPreviewCheckedTaskCompletedAt = prepared.checkedTaskCompletedAt
+            legacyPreviewNoteRevision = store.state.notes[noteID]?.revision
             presentedSheet = .legacyNotesResolution(noteID)
             // Domain forbids attaching primary while legacy markdown remains.
             return false
         }
         return try await attachPrimary(noteID, legacyResolution: nil)
+    }
+
+    @discardableResult
+    func mergeLegacyIntoExistingPrimary(_ noteID: NoteID) async throws -> Bool {
+        guard let preview = legacyMigrationPreview,
+              let expectedRevision = legacyPreviewNoteRevision,
+              let checkedTaskCompletedAt = legacyPreviewCheckedTaskCompletedAt,
+              store.state.notes[noteID] != nil
+        else {
+            statusMessage = "迁移预览已失效，请重新选择笔记。"
+            return false
+        }
+        let outcome: Bool
+        do {
+            let transaction = try await store.sendWorkspace(
+                .attachPrimaryNote(.init(
+                    scope: scopeForItemActions(),
+                    noteID: noteID,
+                    legacyResolution: .previewAndMerge(
+                        expectedNoteRevision: expectedRevision,
+                        importAuthorization: authorization(
+                            for: preview,
+                            checkedTaskCompletedAt: checkedTaskCompletedAt
+                        )
+                    ),
+                    replacing: resolved?.noteSet.primaryNoteID != nil ? .detachOldPrimary : nil,
+                    linkedTaskDisposition: nil
+                )),
+                undoLabel: "迁移旧随记"
+            )
+            refresh()
+            outcome = isCommitted(transaction)
+        } catch {
+            statusMessage = "旧随记合并失败，原文和目标笔记均未被替换。"
+            throw error
+        }
+        if outcome {
+            clearLegacyPreview()
+        } else {
+            statusMessage = "旧随记或目标笔记已变化，请重新预览。"
+            try refreshLegacyPreview(for: noteID)
+        }
+        return outcome
+    }
+
+    @discardableResult
+    func createPrimaryNoteFromLegacyPreview() async throws -> Bool {
+        guard let preview = legacyMigrationPreview,
+              let checkedTaskCompletedAt = legacyPreviewCheckedTaskCompletedAt
+        else {
+            statusMessage = "迁移预览已失效，请重新开始。"
+            return false
+        }
+        let now = clock()
+        var note = Note.empty(
+            id: NoteID(),
+            categoryID: store.calendarState.uncategorizedID,
+            now: now
+        )
+        note.title = "旧随记"
+        note.document = preview.document
+        let outcome: WorkspaceTransactionOutcome
+        do {
+            outcome = try await store.sendWorkspace(
+                .createPrimaryNoteForCalendar(.init(
+                    scope: scopeForItemActions(),
+                    note: note,
+                    legacyImportAuthorization: authorization(
+                        for: preview,
+                        checkedTaskCompletedAt: checkedTaskCompletedAt
+                    )
+                )),
+                undoLabel: "迁移旧随记"
+            )
+        } catch {
+            statusMessage = "新建主笔记失败，旧随记仍保留在原处。"
+            throw error
+        }
+        refresh()
+        guard isCommitted(outcome) else {
+            statusMessage = "旧随记已变化，请重新预览。"
+            return false
+        }
+        clearLegacyPreview()
+        return true
     }
 
     @discardableResult
@@ -179,6 +271,58 @@ enum CalendarNotePresentedSheet: Equatable, Sendable {
 
     func dismissSheet() {
         presentedSheet = nil
+        clearLegacyPreview()
+    }
+
+    private func prepareLegacyMigrationPreview() throws -> (
+        preview: LegacyMarkdownMigrationPreview,
+        checkedTaskCompletedAt: Date
+    ) {
+        let completedAt = clock()
+        let initial = try BlockMarkdownCodec.importMarkdown(
+            legacyMarkdown,
+            checkedTaskCompletedAt: completedAt
+        )
+        let preview = try LegacyMarkdownMigrationPlanner.preview(
+            scope: scopeForItemActions(),
+            in: store.state,
+            injectedBlockIDs: initial.document.blocks.map(\.id),
+            checkedTaskCompletedAt: completedAt
+        )
+        return (preview, completedAt)
+    }
+
+    private func authorization(
+        for preview: LegacyMarkdownMigrationPreview,
+        checkedTaskCompletedAt: Date
+    ) -> LegacyMarkdownImportAuthorization {
+        LegacyMarkdownImportAuthorization(
+            expectedSourceChecksum: preview.sourceChecksum,
+            injectedBlockIDs: preview.document.blocks.map(\.id),
+            checkedTaskCompletedAt: checkedTaskCompletedAt,
+            diagnostics: preview.diagnostics.isEmpty
+                ? .rejectIfPresent
+                : .accept(expectedDiagnosticsChecksum: preview.diagnosticsChecksum)
+        )
+    }
+
+    private func clearLegacyPreview() {
+        legacyMigrationPreview = nil
+        legacyPreviewNoteRevision = nil
+        legacyPreviewCheckedTaskCompletedAt = nil
+        presentedSheet = nil
+    }
+
+    private func refreshLegacyPreview(for noteID: NoteID) throws {
+        guard hasLegacyMarkdown else {
+            clearLegacyPreview()
+            return
+        }
+        let prepared = try prepareLegacyMigrationPreview()
+        legacyMigrationPreview = prepared.preview
+        legacyPreviewCheckedTaskCompletedAt = prepared.checkedTaskCompletedAt
+        legacyPreviewNoteRevision = store.state.notes[noteID]?.revision
+        presentedSheet = .legacyNotesResolution(noteID)
     }
 
     private func isCommitted(_ outcome: WorkspaceTransactionOutcome) -> Bool {

@@ -2,10 +2,8 @@ import SwiftUI
 import WorkspaceDomain
 
 /// When legacy item notes are nonempty, attaching an existing primary requires
-/// an explicit merge / create-new / cancel choice. Full preview checksum
-/// authorization is completed in a later hardening pass when the planner UI
-/// is expanded; for now cancel and create-new stay available without silent
-/// data loss.
+/// an explicit merge / create-new / cancel choice. The model holds the exact
+/// preview IDs, source checksum and target note revision until the user acts.
 struct LegacyNotesMigrationSheet: View {
     let model: CalendarNoteIntegrationModel
     let noteID: NoteID
@@ -25,23 +23,34 @@ struct LegacyNotesMigrationSheet: View {
                 }
                 .frame(maxHeight: 160)
             }
+            if let preview = model.legacyMigrationPreview,
+               !preview.diagnostics.isEmpty {
+                GroupBox("转换提示") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(preview.diagnostics.enumerated()), id: \.offset) { _, diagnostic in
+                            Text("第 \(diagnostic.lineNumber) 行：\(diagnostic.message)")
+                                .font(.caption)
+                        }
+                    }
+                }
+            }
+            if let status = model.statusMessage {
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
             HStack {
                 Button("取消", action: onCancel)
                 Spacer()
                 Button("另建主笔记") {
                     Task {
-                        // Refuse attach-without-authorization; create empty primary
-                        // is blocked while legacy remains — surface the contract.
-                        model.dismissSheet()
-                        _ = try? await model.createPrimaryNote()
+                        _ = try? await model.createPrimaryNoteFromLegacyPreview()
                     }
                 }
-                Button("预览并合并…") {
-                    // Full LegacyMarkdownMigrationPlanner preview/authorization
-                    // is available in Domain; UI confirmation path that builds
-                    // exact authorization will land with Task 11 hardening.
-                    // Until then, keep closed rather than drop legacy text.
-                    model.dismissSheet()
+                Button("合并到所选笔记") {
+                    Task {
+                        _ = try? await model.mergeLegacyIntoExistingPrimary(noteID)
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
             }
