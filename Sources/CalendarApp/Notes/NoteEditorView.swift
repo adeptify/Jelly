@@ -23,7 +23,9 @@ struct NoteEditorView: View {
     var onRequestMarkdownImport: () -> Void
     var onRequestMarkdownExport: () -> Void
     var onArchive: () -> Void
+    var onRestore: () -> Void
     var onPermanentDelete: () -> Void
+    var sessionSink: (BlockEditorSession?) -> Void
     var nativeFinalizerHook: Binding<NoteNativeInputFinalizer?>
 
     @State private var title: String
@@ -44,7 +46,9 @@ struct NoteEditorView: View {
         onRequestMarkdownImport: @escaping () -> Void,
         onRequestMarkdownExport: @escaping () -> Void,
         onArchive: @escaping () -> Void = {},
+        onRestore: @escaping () -> Void = {},
         onPermanentDelete: @escaping () -> Void = {},
+        sessionSink: @escaping (BlockEditorSession?) -> Void,
         nativeFinalizerHook: Binding<NoteNativeInputFinalizer?>
     ) {
         self.identity = identity
@@ -59,7 +63,9 @@ struct NoteEditorView: View {
         self.onRequestMarkdownImport = onRequestMarkdownImport
         self.onRequestMarkdownExport = onRequestMarkdownExport
         self.onArchive = onArchive
+        self.onRestore = onRestore
         self.onPermanentDelete = onPermanentDelete
+        self.sessionSink = sessionSink
         self.nativeFinalizerHook = nativeFinalizerHook
         _title = State(initialValue: note.title)
     }
@@ -89,8 +95,10 @@ struct NoteEditorView: View {
                     Divider()
                     if note.archivedAt == nil {
                         Button("归档", action: onArchive)
+                    } else {
+                        Button("恢复", action: onRestore)
+                        Button("永久删除…", role: .destructive, action: onPermanentDelete)
                     }
-                    Button("永久删除…", role: .destructive, action: onPermanentDelete)
                 }
                 .accessibilityLabel("笔记更多操作")
             }
@@ -125,7 +133,10 @@ struct NoteEditorView: View {
                         _ = try? autosave.update(document: document)
                         onDocumentCommitted(document)
                     },
-                    sessionSink: { editorSession = $0 }
+                    sessionSink: {
+                        editorSession = $0
+                        sessionSink($0)
+                    }
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -135,6 +146,7 @@ struct NoteEditorView: View {
         .onAppear { installNativeFinalizer() }
         .onChange(of: identity) { _, _ in installNativeFinalizer() }
         .onDisappear {
+            sessionSink(nil)
             if nativeFinalizerHook.wrappedValue != nil {
                 // Only clear when this identity still owns the hook.
                 nativeFinalizerHook.wrappedValue = nil

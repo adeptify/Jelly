@@ -7,5 +7,6 @@ struct CalendarAppCommandPolicyTests {
     @Test func backupCommandsRemainSingleGroupAcrossWindowFocus() {
         #expect(CalendarAppCommandPolicy.installsBackupCommands(in: .mainCalendar))
         #expect(CalendarAppCommandPolicy.installsBackupCommands(in: .categoryManager) == false)
+        #expect(CalendarAppCommandPolicy.installsBackupCommands(in: .recoveryCenter) == false)
     }
 }

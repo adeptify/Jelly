@@ -90,8 +90,11 @@ extension WorkspaceReducer {
         authorization: PermanentDeleteAuthorization,
         in candidate: inout WorkspaceState
     ) throws -> WorkspaceCommandControl {
-        guard candidate.inspirations[id] != nil else {
+        guard let inspiration = candidate.inspirations[id] else {
             throw WorkspaceReducerError.missingInspiration(id)
+        }
+        guard inspiration.lifecycle == .archived else {
+            throw WorkspaceReducerError.permanentDeleteRequiresArchivedSubject
         }
         let subject = PermanentDeleteSubject.inspiration(id, deletedAt: deletedAt)
         let preview = try PermanentDeletePlanner.preview(subject, in: candidate)

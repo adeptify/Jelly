@@ -8,12 +8,16 @@ import WorkspaceDomain
 
 @MainActor
 struct BackupCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
     let store: WorkspaceStore
     let rollbackDirectory: URL
 
     var body: some Commands {
         CommandGroup(after: .newItem) {
             Divider()
+            Button("打开恢复中心") {
+                openWindow(id: CalendarAppWindowID.recoveryCenter)
+            }
             Button("导出备份…", action: exportBackup)
                 .disabled(!BackupRecoveryPolicy.allowsReadOnlyBackup(from: store.phase))
             if canRestore {

@@ -255,7 +255,10 @@ extension WorkspaceReducer {
         authorization: PermanentDeleteAuthorization,
         in candidate: inout WorkspaceState
     ) throws -> WorkspaceCommandControl {
-        guard candidate.notes[id] != nil else { throw WorkspaceReducerError.missingNote(id) }
+        guard let note = candidate.notes[id] else { throw WorkspaceReducerError.missingNote(id) }
+        guard note.archivedAt != nil else {
+            throw WorkspaceReducerError.permanentDeleteRequiresArchivedSubject
+        }
         let subject = PermanentDeleteSubject.note(id)
         let preview = try PermanentDeletePlanner.preview(subject, in: candidate)
         guard authorization.subject == subject,

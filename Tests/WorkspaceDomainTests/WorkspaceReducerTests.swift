@@ -740,6 +740,7 @@ struct WorkspaceReducerTests {
 
     @Test func permanentDeletePreviewIsCanonicalAndStaleAuthorizationIsNoChange() throws {
         var workspace = try Task4Fixture.workspaceWithLinkedTask()
+        workspace.notes[Task4Fixture.noteID]?.archivedAt = Task4Fixture.archiveAt
         workspace.calendarNoteRelations.baselines[.item(Task4Fixture.itemID)]?.referenceNoteIDs.insert(Task4Fixture.otherNoteID)
         workspace.inspirationNoteLinks.insert(.init(
             source: .live(Task4Fixture.inspirationID),
@@ -779,6 +780,24 @@ struct WorkspaceReducerTests {
         #expect(state.taskBlockLinks.isEmpty)
         #expect(state.inspirationNoteLinks.isEmpty)
         #expect(state.calendarNoteRelations.baselines[.item(Task4Fixture.itemID)]?.primaryNoteID == nil)
+    }
+
+    @Test func permanentDeleteRejectsAnActiveNoteEvenWithAnExactAuthorization() throws {
+        let workspace = try Task4Fixture.workspace()
+        let preview = try PermanentDeletePlanner.preview(.note(Task4Fixture.noteID), in: workspace)
+        let authorization = PermanentDeleteAuthorization(
+            subject: preview.subject,
+            sourceWorkspaceRevision: preview.sourceWorkspaceRevision,
+            impactChecksum: preview.checksum
+        )
+
+        #expect(throws: WorkspaceReducerError.permanentDeleteRequiresArchivedSubject) {
+            try WorkspaceReducer.reduce(
+                workspace,
+                command: .permanentlyDeleteNote(Task4Fixture.noteID, authorization: authorization),
+                now: Task4Fixture.later
+            )
+        }
     }
 
     @Test func consistencyInspectorRepairsAllEdgesAndRejectsPartialOrStalePayloads() throws {

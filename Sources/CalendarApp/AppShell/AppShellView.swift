@@ -63,6 +63,7 @@ struct AppShellView: View {
     let store: WorkspaceStore
     let features: WorkspaceFeatures
     let focusRegistry: EditorFocusRegistry
+    let terminationCoordinator: NotesApplicationTerminationCoordinator?
     @ObservedObject var routeState: WorkspaceRouteState
     @ObservedObject var newItemRouter: WorkspaceNewItemRouter
     @ObservedObject var transitionCoordinator: WorkspaceRouteTransitionCoordinator
@@ -75,11 +76,13 @@ struct AppShellView: View {
         newItemRouter: WorkspaceNewItemRouter,
         focusRegistry: EditorFocusRegistry = EditorFocusRegistry(),
         transitionCoordinator: WorkspaceRouteTransitionCoordinator? = nil,
+        terminationCoordinator: NotesApplicationTerminationCoordinator? = nil,
         moduleHostBuilder: ((WorkspaceRoute) -> WorkspaceModuleHost)? = nil
     ) {
         self.store = store
         self.features = features
         self.focusRegistry = focusRegistry
+        self.terminationCoordinator = terminationCoordinator
         self.routeState = routeState
         self.newItemRouter = newItemRouter
         let coordinator = transitionCoordinator
@@ -103,7 +106,8 @@ struct AppShellView: View {
                     content: AnyView(NotesSplitView(
                         store: store,
                         focusRegistry: focusRegistry,
-                        transitionCoordinator: coordinator
+                        transitionCoordinator: coordinator,
+                        terminationCoordinator: terminationCoordinator
                     )),
                     lifetimeToken: WorkspaceModuleLifetimeToken()
                 )

@@ -226,6 +226,7 @@ struct InspirationLifecycleTests {
 
     @Test func permanentDeleteTombstonesEveryLiveLinkAndPreservesDerivedNotes() throws {
         var workspace = try Task4Fixture.workspace()
+        workspace.inspirations[Task4Fixture.inspirationID]?.lifecycle = .archived
         workspace.inspirationNoteLinks = [
             .init(source: .live(Task4Fixture.inspirationID), noteID: Task4Fixture.noteID, createdAt: Task4Fixture.now),
             .init(source: .live(Task4Fixture.inspirationID), noteID: Task4Fixture.otherNoteID, createdAt: Task4Fixture.later)
@@ -262,5 +263,31 @@ struct InspirationLifecycleTests {
             )
         })
         try WorkspaceValidator.validate(state)
+    }
+
+    @Test func permanentDeleteRejectsAnActiveInspirationEvenWithAnExactAuthorization() throws {
+        let workspace = try Task4Fixture.workspace()
+        let subject = PermanentDeleteSubject.inspiration(
+            Task4Fixture.inspirationID,
+            deletedAt: Task4Fixture.archiveAt
+        )
+        let preview = try PermanentDeletePlanner.preview(subject, in: workspace)
+        let authorization = PermanentDeleteAuthorization(
+            subject: preview.subject,
+            sourceWorkspaceRevision: preview.sourceWorkspaceRevision,
+            impactChecksum: preview.checksum
+        )
+
+        #expect(throws: WorkspaceReducerError.permanentDeleteRequiresArchivedSubject) {
+            try WorkspaceReducer.reduce(
+                workspace,
+                command: .permanentlyDeleteInspiration(
+                    Task4Fixture.inspirationID,
+                    at: Task4Fixture.archiveAt,
+                    authorization: authorization
+                ),
+                now: Task4Fixture.archiveAt
+            )
+        }
     }
 }

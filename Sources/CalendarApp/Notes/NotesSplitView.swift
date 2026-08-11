@@ -11,6 +11,7 @@ struct NotesSplitView: View {
     let store: WorkspaceStore
     let focusRegistry: EditorFocusRegistry
     let transitionCoordinator: WorkspaceRouteTransitionCoordinator?
+    let terminationCoordinator: NotesApplicationTerminationCoordinator?
     let clock: @Sendable () -> Date
 
     @State private var viewModel: NotesWorkspaceViewModel
@@ -25,16 +26,19 @@ struct NotesSplitView: View {
     @State private var pendingImportPlan: NoteMarkdownImportPlan?
     @State private var statusBanner: String?
     @State private var activeEditorSession: BlockEditorSession?
+    @State private var pendingPermanentDelete: PendingNotePermanentDelete?
 
     init(
         store: WorkspaceStore,
         focusRegistry: EditorFocusRegistry,
         transitionCoordinator: WorkspaceRouteTransitionCoordinator? = nil,
+        terminationCoordinator: NotesApplicationTerminationCoordinator? = nil,
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.store = store
         self.focusRegistry = focusRegistry
         self.transitionCoordinator = transitionCoordinator
+        self.terminationCoordinator = terminationCoordinator
         self.clock = clock
         let autosave = NoteAutosaveCoordinator(store: store)
         let viewModel = NotesWorkspaceViewModel(store: store, autosave: autosave, clock: clock)
@@ -121,6 +125,27 @@ struct NotesSplitView: View {
                 Text("选择如何应用导入的 Markdown。")
             }
         }
+        .confirmationDialog(
+            "永久删除这篇笔记？",
+            isPresented: Binding(
+                get: { pendingPermanentDelete != nil },
+                set: { if !$0 { pendingPermanentDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("永久删除", role: .destructive) {
+                guard let request = pendingPermanentDelete else { return }
+                pendingPermanentDelete = nil
+                Task { await confirmPermanentDelete(request) }
+            }
+            Button("取消", role: .cancel) { pendingPermanentDelete = nil }
+        } message: {
+            if let request = pendingPermanentDelete {
+                Text(request.preview.effects.isEmpty
+                    ? "删除后无法恢复。"
+                    : "删除后无法恢复，并会解除 \(request.preview.effects.count) 条关联。")
+            }
+        }
         .onAppear {
             registerRouteBridge()
             refreshRecoveryPresentation()
@@ -156,7 +181,16 @@ struct NotesSplitView: View {
                 onRequestMarkdownImport: importMarkdown,
                 onRequestMarkdownExport: exportMarkdown,
                 onArchive: { Task { await archiveSelected() } },
-                onPermanentDelete: { Task { await permanentDeleteSelected() } },
+                onRestore: { Task { await restoreSelected() } },
+                onPermanentDelete: requestPermanentDeleteSelected,
+                sessionSink: { session in
+                    if let session {
+                        activeEditorSession = session
+                    } else if activeEditorSession?.noteID == identity.noteID,
+                              activeEditorSession?.editSessionID == identity.editSessionID {
+                        activeEditorSession = nil
+                    }
+                },
                 nativeFinalizerHook: $nativeFinalizer
             )
         } else {
@@ -177,6 +211,9 @@ struct NotesSplitView: View {
 
     private func registerRouteBridge() {
         transitionCoordinator?.attachNotesCloseBridge(closeBridge, finalizer: nativeFinalizer)
+        terminationCoordinator?.updateDecision {
+            await closeBridge.decision(for: .termination, finalizer: nativeFinalizer)
+        }
     }
 
     private func selectNote(_ noteID: NoteID) async {
@@ -230,16 +267,36 @@ struct NotesSplitView: View {
         }
     }
 
-    private func permanentDeleteSelected() async {
+    private func restoreSelected() async {
+        guard let noteID = viewModel.selectedNoteID else { return }
+        do {
+            _ = try await viewModel.restore(noteID)
+            if let selected = viewModel.selectedNoteID {
+                editorIdentity = .init(noteID: selected, editSessionID: UUID())
+            }
+        } catch {
+            statusBanner = "恢复笔记未完成。"
+        }
+    }
+
+    private func requestPermanentDeleteSelected() {
         guard let noteID = viewModel.selectedNoteID else { return }
         do {
             let preview = try viewModel.permanentDeletePreview(for: noteID)
+            pendingPermanentDelete = .init(noteID: noteID, preview: preview)
+        } catch {
+            statusBanner = "无法生成删除影响预览。"
+        }
+    }
+
+    private func confirmPermanentDelete(_ request: PendingNotePermanentDelete) async {
+        do {
             let authorization = PermanentDeleteAuthorization(
-                subject: preview.subject,
-                sourceWorkspaceRevision: preview.sourceWorkspaceRevision,
-                impactChecksum: preview.checksum
+                subject: request.preview.subject,
+                sourceWorkspaceRevision: request.preview.sourceWorkspaceRevision,
+                impactChecksum: request.preview.checksum
             )
-            _ = try await viewModel.permanentlyDelete(noteID, authorization: authorization)
+            _ = try await viewModel.permanentlyDelete(request.noteID, authorization: authorization)
             if let selected = viewModel.selectedNoteID {
                 editorIdentity = .init(noteID: selected, editSessionID: UUID())
             } else {
@@ -360,18 +417,7 @@ extension DraftRecoveryCandidate: Identifiable {
     var id: DraftRecoveryToken { token }
 }
 
-/// Placeholder host for future AppKit windowShouldClose wiring (Task 10D).
-/// Close truth is enforced through `NoteCloseProtectionBridge` unit tests and
-/// the production delegate installed when Notes is feature-activated.
-private struct NotesWindowCloseMonitor: NSViewRepresentable {
-    let bridge: NoteCloseProtectionBridge
-    let finalizer: NoteNativeInputFinalizer?
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        view.setAccessibilityElement(false)
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {}
+private struct PendingNotePermanentDelete {
+    let noteID: NoteID
+    let preview: PermanentDeletePreview
 }

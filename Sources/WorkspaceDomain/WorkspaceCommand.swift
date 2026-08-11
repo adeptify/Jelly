@@ -352,6 +352,7 @@ public enum WorkspaceReducerError: Error, Equatable, Sendable {
     case legacyDiagnosticsRequireConfirmation
     case invalidLegacyAuthorization
     case invalidPermanentDeleteAuthorization
+    case permanentDeleteRequiresArchivedSubject
     case invalidConsistencyRepair
     case fatalConsistencyIssues
     case invalidRestoreMetadata

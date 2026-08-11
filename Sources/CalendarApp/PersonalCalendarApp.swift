@@ -3,6 +3,11 @@ import SwiftUI
 enum CalendarAppWindow {
     case mainCalendar
     case categoryManager
+    case recoveryCenter
+}
+
+enum CalendarAppWindowID {
+    static let recoveryCenter = "recovery-center"
 }
 
 enum CalendarAppCommandPolicy {
@@ -14,6 +19,8 @@ enum CalendarAppCommandPolicy {
 @MainActor
 @main
 struct PersonalCalendarApp: App {
+    @NSApplicationDelegateAdaptor(NotesApplicationTerminationCoordinator.self)
+    private var terminationCoordinator
     @State private var environment: AppEnvironment
     @StateObject private var routeState: WorkspaceRouteState
     @StateObject private var newItemRouter: WorkspaceNewItemRouter
@@ -47,7 +54,8 @@ struct PersonalCalendarApp: App {
                 routeState: routeState,
                 newItemRouter: newItemRouter,
                 focusRegistry: editorFocusRegistry,
-                transitionCoordinator: transitionCoordinator
+                transitionCoordinator: transitionCoordinator,
+                terminationCoordinator: terminationCoordinator
             )
                 .preferredColorScheme(appearancePreference.preferredColorScheme)
                 .task { await environment.store.load() }
@@ -71,6 +79,12 @@ struct PersonalCalendarApp: App {
                 BackupCommands(store: environment.store, rollbackDirectory: environment.dataURLs.rollbackDirectory)
             }
         }
+
+        Window("恢复中心", id: CalendarAppWindowID.recoveryCenter) {
+            RecoveryCenterView(store: environment.store)
+                .preferredColorScheme(appearancePreference.preferredColorScheme)
+        }
+        .defaultSize(width: 560, height: 440)
 
         // Category manager is presented as a sheet on the main calendar window so it
         // always appears on the same display (separate Window scenes often restore to
