@@ -1,7 +1,7 @@
 #!/bin/sh
 set -euo pipefail
 if [[ -n "${ZSH_VERSION:-}" ]]; then
-  setopt typesetsilent
+  setopt typesetsilent nonomatch
 fi
 
 fail() {

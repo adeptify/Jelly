@@ -1,5 +1,31 @@
 # Workspace V3 Acceptance — 2026-08-11 overnight delivery
 
+## Codex review correction — 2026-08-11
+
+This file records the overnight run below; it is **not** evidence that Workspace V1 is release-ready. The current review branch has:
+
+- fixed real AppKit window-close and application-termination save protection;
+- connected Markdown import to the live Block editor session;
+- restricted permanent deletion to archived objects and added an impact confirmation;
+- made URL metadata limits stream-enforced, persisted failure state, and exposed retry;
+- completed the explicit legacy Markdown preview/merge and create-new-note paths;
+- added a permanent Recovery Center window/menu entry;
+- added preview-confirmed permanent deletion for archived Inspirations;
+- corrected the zsh purity gate so a missing release module directory does not fail a debug test run.
+
+Current automated evidence: `./Scripts/test.sh` → **1023 tests / 86 suites PASS**; `swift build -c release` → **PASS**. Packaging was deliberately not rerun because `Scripts/build-app.sh` replaces the existing ZIP/DMG pair. The artifacts named below therefore remain evidence from the earlier Grok run, not from this review branch.
+
+Release blockers still open:
+
+1. `TaskBlockCalendarBadge` and `TaskBlockScheduleSheet` are not connected to Block editor rows; the shared-completion domain tests do not prove a user can reach the flow.
+2. `NoteScheduleSheet` is not connected, and Inspiration conversion discards the returned Note ID instead of navigating to the created/existing Note.
+3. Inspiration still lacks the specified quick-input shortcut, rail pending indicator, and shared-category control in its detail surface.
+4. startup data-directory failure still terminates through `fatalError` instead of presenting a recoverable error.
+5. the live GUI, IME, VoiceOver, hover, multi-monitor, restore, and calendar gesture checks below remain unverified.
+6. Notes/Inspiration search has not fully cut over to the rebuildable search index.
+
+Until those gates are closed and the package is rebuilt and checked, the truthful status is **implementation in review**, not “Workspace V1 delivered.”
+
 ## Artifact
 
 - App: `dist/Jelly.app`
