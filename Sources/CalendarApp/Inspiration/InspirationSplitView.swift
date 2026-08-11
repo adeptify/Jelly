@@ -108,6 +108,8 @@ struct InspirationCaptureView: View {
 struct InspirationDetailView: View {
     @Bindable var model: InspirationViewModel
     let store: WorkspaceStore
+    @State private var pendingPermanentDelete: InspirationPermanentDeleteRequest?
+    @State private var deleteStatus: String?
 
     var body: some View {
         if let inspiration = model.selected {
@@ -135,9 +137,18 @@ struct InspirationDetailView: View {
                 if let status = model.statusMessage {
                     Text(status).font(.caption).foregroundStyle(.orange)
                 }
+                if let deleteStatus {
+                    Text(deleteStatus).font(.caption).foregroundStyle(.orange)
+                }
                 HStack {
                     Button("转成笔记") {
                         Task { _ = try? await model.convertSelectedToNote() }
+                    }
+                    if inspiration.rawURL != nil,
+                       inspiration.resolvedMetadata?.fetchStatus == .failed {
+                        Button("重试元数据") {
+                            Task { await model.retrySelectedMetadata() }
+                        }
                     }
                     Button(inspiration.lifecycle == .archived ? "恢复" : "归档") {
                         Task {
@@ -145,6 +156,16 @@ struct InspirationDetailView: View {
                                 _ = try? await model.restoreSelected()
                             } else {
                                 _ = try? await model.archiveSelected()
+                            }
+                        }
+                    }
+                    if inspiration.lifecycle == .archived {
+                        Button("永久删除…", role: .destructive) {
+                            do {
+                                pendingPermanentDelete = try model.permanentDeleteRequest(for: inspiration.id)
+                                deleteStatus = nil
+                            } catch {
+                                deleteStatus = "无法生成删除影响预览。"
                             }
                         }
                     }
@@ -158,6 +179,42 @@ struct InspirationDetailView: View {
                 Spacer()
             }
             .padding(20)
+            .confirmationDialog(
+                "永久删除这条灵感？",
+                isPresented: Binding(
+                    get: { pendingPermanentDelete != nil },
+                    set: { if !$0 { pendingPermanentDelete = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("永久删除", role: .destructive) {
+                    guard let request = pendingPermanentDelete else { return }
+                    pendingPermanentDelete = nil
+                    Task {
+                        let authorization = PermanentDeleteAuthorization(
+                            subject: request.preview.subject,
+                            sourceWorkspaceRevision: request.preview.sourceWorkspaceRevision,
+                            impactChecksum: request.preview.checksum
+                        )
+                        do {
+                            let deleted = try await model.permanentlyDelete(
+                                request,
+                                authorization: authorization
+                            )
+                            if !deleted { deleteStatus = "删除影响已变化，请重新确认。" }
+                        } catch {
+                            deleteStatus = "永久删除未完成，原始灵感仍然保留。"
+                        }
+                    }
+                }
+                Button("取消", role: .cancel) { pendingPermanentDelete = nil }
+            } message: {
+                if let request = pendingPermanentDelete {
+                    Text(request.preview.effects.isEmpty
+                        ? "删除后无法恢复。"
+                        : "删除后无法恢复，并会把 \(request.preview.effects.count) 条笔记来源关系改为“原始灵感已删除”。")
+                }
+            }
         } else {
             ContentUnavailableView("选择一条灵感", systemImage: "lightbulb", description: Text("左侧列表选择，或在上方捕获。"))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

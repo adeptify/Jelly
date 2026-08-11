@@ -1,6 +1,12 @@
 import Foundation
 import WorkspaceDomain
 
+struct InspirationPermanentDeleteRequest: Equatable, Sendable {
+    let inspirationID: InspirationID
+    let deletedAt: Date
+    let preview: PermanentDeletePreview
+}
+
 @MainActor
 @Observable final class InspirationViewModel {
     private let store: WorkspaceStore
@@ -142,22 +148,113 @@ import WorkspaceDomain
         return false
     }
 
-    private func enrichURL(id: InspirationID, url: URL) async {
-        guard let current = store.state.inspirations[id] else { return }
+    func permanentDeleteRequest(
+        for id: InspirationID
+    ) throws -> InspirationPermanentDeleteRequest {
+        let deletedAt = clock()
+        let preview = try PermanentDeletePlanner.preview(
+            .inspiration(id, deletedAt: deletedAt),
+            in: store.state
+        )
+        return .init(inspirationID: id, deletedAt: deletedAt, preview: preview)
+    }
+
+    @discardableResult
+    func permanentlyDelete(
+        _ request: InspirationPermanentDeleteRequest,
+        authorization: PermanentDeleteAuthorization
+    ) async throws -> Bool {
+        let outcome = try await store.sendWorkspace(
+            .permanentlyDeleteInspiration(
+                request.inspirationID,
+                at: request.deletedAt,
+                authorization: authorization
+            ),
+            undoLabel: "永久删除灵感"
+        )
+        guard case .committed = outcome else { return false }
+        if selectedID == request.inspirationID { selectedID = nil }
+        statusMessage = nil
+        refresh()
+        return true
+    }
+
+    func retrySelectedMetadata() async {
+        guard let id = selectedID,
+              let current = store.state.inspirations[id],
+              let url = current.rawURL,
+              current.resolvedMetadata?.fetchStatus == .failed
+        else { return }
+
+        var loadingMetadata = current.resolvedMetadata ?? SourceMetadata(
+            title: nil,
+            siteName: nil,
+            domain: url.host,
+            thumbnailURL: nil,
+            fetchStatus: .loading
+        )
+        loadingMetadata.fetchStatus = .loading
+        let checksum = WorkspaceChecksum.inspirationSourceChecksum(current)
         do {
-            let result = try await metadataResolver.resolve(url)
-            let checksum = WorkspaceChecksum.inspirationSourceChecksum(current)
             _ = try await store.sendWorkspace(
                 .updateInspirationMetadata(
                     id,
                     expectedSource: .init(sourceChecksum: checksum),
+                    metadata: loadingMetadata,
+                    resolvedKind: current.resolvedSourceKind
+                )
+            )
+            statusMessage = nil
+            refresh()
+            Task { await enrichURL(id: id, url: url) }
+        } catch {
+            statusMessage = "重试未能启动，请稍后再试。"
+            refresh()
+        }
+    }
+
+    private func enrichURL(id: InspirationID, url: URL) async {
+        guard let current = store.state.inspirations[id] else { return }
+        let sourceChecksum = WorkspaceChecksum.inspirationSourceChecksum(current)
+        do {
+            let result = try await metadataResolver.resolve(url)
+            _ = try await store.sendWorkspace(
+                .updateInspirationMetadata(
+                    id,
+                    expectedSource: .init(sourceChecksum: sourceChecksum),
                     metadata: result.metadata,
                     resolvedKind: result.resolvedKind
                 )
             )
+            statusMessage = nil
             refresh()
         } catch {
             statusMessage = "链接元数据获取失败，原文已保存。"
+            if let latest = store.state.inspirations[id],
+               WorkspaceChecksum.inspirationSourceChecksum(latest) == sourceChecksum {
+                var failedMetadata = latest.resolvedMetadata ?? SourceMetadata(
+                    title: nil,
+                    siteName: nil,
+                    domain: latest.rawURL?.host,
+                    thumbnailURL: nil,
+                    fetchStatus: .failed
+                )
+                failedMetadata.fetchStatus = .failed
+                do {
+                    _ = try await store.sendWorkspace(
+                        .updateInspirationMetadata(
+                            id,
+                            expectedSource: .init(sourceChecksum: sourceChecksum),
+                            metadata: failedMetadata,
+                            resolvedKind: latest.resolvedSourceKind
+                        )
+                    )
+                } catch {
+                    statusMessage = "链接元数据获取失败，原文已保存；失败状态未能写入。"
+                }
+            } else {
+                statusMessage = nil
+            }
             refresh()
         }
     }

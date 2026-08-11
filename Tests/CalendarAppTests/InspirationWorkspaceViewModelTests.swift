@@ -36,6 +36,64 @@ struct InspirationWorkspaceViewModelTests {
         #expect(resolver.startedURLs.count == 1)
     }
 
+    @Test func metadataFailureIsPersistedInsteadOfRemainingLoadingForever() async throws {
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let resolver = SuspendedURLMetadataResolver()
+        let model = InspirationViewModel(store: store, metadataResolver: resolver)
+        let id = try await model.capture("https://example.com/failure")
+        #expect(await waitUntil { resolver.startedURLs.count == 1 })
+
+        resolver.fail(URLMetadataResolverError.httpFailure)
+
+        #expect(await waitUntil {
+            store.state.inspirations[id]?.resolvedMetadata?.fetchStatus == .failed
+        })
+        #expect(model.statusMessage == "链接元数据获取失败，原文已保存。")
+    }
+
+    @Test func failedMetadataCanBeRetriedAndRecovered() async throws {
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let resolver = SuspendedURLMetadataResolver()
+        let model = InspirationViewModel(store: store, metadataResolver: resolver)
+        let id = try await model.capture("https://example.com/retry")
+        #expect(await waitUntil { resolver.startedURLs.count == 1 })
+        resolver.fail(URLMetadataResolverError.httpFailure)
+        #expect(await waitUntil {
+            store.state.inspirations[id]?.resolvedMetadata?.fetchStatus == .failed
+        })
+
+        model.select(id)
+        await model.retrySelectedMetadata()
+        #expect(await waitUntil { resolver.startedURLs.count == 2 })
+        #expect(store.state.inspirations[id]?.resolvedMetadata?.fetchStatus == .loading)
+
+        resolver.resume(with: .init(
+            metadata: .init(
+                title: "重试成功",
+                siteName: "Example",
+                domain: "example.com",
+                thumbnailURL: nil,
+                fetchStatus: .succeeded
+            ),
+            resolvedKind: .article
+        ))
+        #expect(await waitUntil {
+            store.state.inspirations[id]?.resolvedMetadata?.fetchStatus == .succeeded
+        })
+        #expect(store.state.inspirations[id]?.resolvedMetadata?.title == "重试成功")
+        #expect(model.statusMessage == nil)
+    }
+
     @Test func convertToNoteIsIdempotentAndOpensExisting() async throws {
         let calendar = makeEmptyState()
         let store = WorkspaceStore(
@@ -68,6 +126,30 @@ struct InspirationWorkspaceViewModelTests {
         #expect(model.archived.map(\.id).contains(id))
         #expect(try await model.restoreSelected())
         #expect(model.pending.map(\.id).contains(id))
+    }
+
+    @Test func archivedInspirationCanBePreviewedAndPermanentlyDeleted() async throws {
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let deletedAt = Date(timeIntervalSince1970: 1_700_002_000)
+        let model = InspirationViewModel(store: store, clock: { deletedAt })
+        let id = try await model.capture("准备删除的灵感")
+        model.select(id)
+        #expect(try await model.archiveSelected())
+
+        let request = try model.permanentDeleteRequest(for: id)
+        let authorization = PermanentDeleteAuthorization(
+            subject: request.preview.subject,
+            sourceWorkspaceRevision: request.preview.sourceWorkspaceRevision,
+            impactChecksum: request.preview.checksum
+        )
+        #expect(try await model.permanentlyDelete(request, authorization: authorization))
+        #expect(store.state.inspirations[id] == nil)
+        #expect(model.selectedID == nil)
     }
 }
 

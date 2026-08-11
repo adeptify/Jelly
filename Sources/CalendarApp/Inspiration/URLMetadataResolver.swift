@@ -8,8 +8,12 @@ final class URLMetadataResolver: URLMetadataResolving, @unchecked Sendable {
     private let timeout: TimeInterval
     private let maxBytes: Int
 
-    init(timeout: TimeInterval = 8, maxBytes: Int = 256_000) {
-        let config = URLSessionConfiguration.ephemeral
+    init(
+        timeout: TimeInterval = 8,
+        maxBytes: Int = 256_000,
+        configuration: URLSessionConfiguration = .ephemeral
+    ) {
+        let config = configuration
         config.timeoutIntervalForRequest = timeout
         config.timeoutIntervalForResource = timeout
         config.httpCookieAcceptPolicy = .never
@@ -23,12 +27,27 @@ final class URLMetadataResolver: URLMetadataResolving, @unchecked Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
-        let (data, response) = try await session.data(for: request)
+        let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) else {
             throw URLMetadataResolverError.httpFailure
         }
-        let limited = data.prefix(maxBytes)
-        let html = String(decoding: limited, as: UTF8.self)
+        guard let mimeType = http.mimeType?.lowercased(),
+              mimeType == "text/html" || mimeType == "application/xhtml+xml"
+        else {
+            throw URLMetadataResolverError.unsupportedContentType
+        }
+        if http.expectedContentLength > Int64(maxBytes) {
+            throw URLMetadataResolverError.responseTooLarge
+        }
+        var data = Data()
+        data.reserveCapacity(min(maxBytes, max(0, Int(http.expectedContentLength))))
+        for try await byte in bytes {
+            guard data.count < maxBytes else {
+                throw URLMetadataResolverError.responseTooLarge
+            }
+            data.append(byte)
+        }
+        let html = String(decoding: data, as: UTF8.self)
         let title = Self.extractTitle(from: html) ?? url.host
         let metadata = SourceMetadata(
             title: title,
@@ -50,8 +69,10 @@ final class URLMetadataResolver: URLMetadataResolving, @unchecked Sendable {
     }
 }
 
-enum URLMetadataResolverError: Error {
+enum URLMetadataResolverError: Error, Equatable {
     case httpFailure
+    case unsupportedContentType
+    case responseTooLarge
 }
 
 /// Deterministic resolver for tests and offline fixtures.
