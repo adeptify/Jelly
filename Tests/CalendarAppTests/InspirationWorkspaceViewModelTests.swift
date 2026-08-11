@@ -128,6 +128,24 @@ struct InspirationWorkspaceViewModelTests {
         #expect(model.pending.map(\.id).contains(id))
     }
 
+    @Test func selectedInspirationCanMoveToASharedCalendarCategory() async throws {
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let category = makeCategory(name: "产品")
+        _ = try await store.sendWorkspace(.createCategory(category))
+        let model = InspirationViewModel(store: store, clock: { .distantFuture })
+        let id = try await model.capture("待分类灵感")
+        model.select(id)
+
+        #expect(try await model.changeSelectedCategory(to: category.id))
+        #expect(store.state.inspirations[id]?.categoryID == category.id)
+        #expect(store.state.inspirations[id]?.updatedAt == .distantFuture)
+    }
+
     @Test func archivedInspirationCanBePreviewedAndPermanentlyDeleted() async throws {
         let calendar = makeEmptyState()
         let store = WorkspaceStore(

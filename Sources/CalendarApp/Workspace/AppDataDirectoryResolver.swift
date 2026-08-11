@@ -9,6 +9,7 @@ struct AppDataURLs: Equatable, Sendable {
     let draftJournal: URL
     let rollbackDirectory: URL
     let automaticRecoveryDirectory: URL
+    let searchIndex: URL
 }
 
 enum AppDataDirectoryResolverError: Error, Equatable, Sendable { case invalidOverride, inaccessibleDirectory }
@@ -64,7 +65,8 @@ enum AppDataDirectoryResolver {
             recoveryManifest: root.appendingPathComponent("calendar-v1.recovery-manifest.json"),
             draftJournal: root.appendingPathComponent("calendar-v1.draft-journal.json"),
             rollbackDirectory: root.appendingPathComponent("restore-rollbacks", isDirectory: true),
-            automaticRecoveryDirectory: root.appendingPathComponent("automatic-recovery", isDirectory: true)
+            automaticRecoveryDirectory: root.appendingPathComponent("automatic-recovery", isDirectory: true),
+            searchIndex: root.appendingPathComponent("workspace-search-v1.json")
         )
     }
 

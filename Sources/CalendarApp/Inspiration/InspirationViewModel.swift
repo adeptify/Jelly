@@ -12,8 +12,10 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
     private let store: WorkspaceStore
     private let clock: @Sendable () -> Date
     private let metadataResolver: any URLMetadataResolving
+    private let searchIndex: WorkspaceSearchIndex
 
     var captureText = ""
+    var searchText = "" { didSet { refresh() } }
     private(set) var pending: [Inspiration] = []
     private(set) var converted: [Inspiration] = []
     private(set) var archived: [Inspiration] = []
@@ -23,10 +25,12 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
     init(
         store: WorkspaceStore,
         metadataResolver: any URLMetadataResolving = URLMetadataResolver(),
+        searchIndex: WorkspaceSearchIndex = WorkspaceSearchIndex(),
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.store = store
         self.metadataResolver = metadataResolver
+        self.searchIndex = searchIndex
         self.clock = clock
         refresh()
     }
@@ -38,7 +42,29 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
     var pendingCount: Int { pending.count }
 
     func refresh() {
-        let all = Array(store.state.inspirations.values)
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let all: [Inspiration]
+        if query.isEmpty {
+            all = Array(store.state.inspirations.values)
+        } else {
+            let records: [WorkspaceSearchRecord]
+            do {
+                records = try searchIndex.search(
+                    query: query,
+                    kind: .inspiration,
+                    includeArchived: true,
+                    in: store.state
+                )
+            } catch {
+                records = WorkspaceSearchProjection.build(from: store.state)
+                    .search(query: query, kind: .inspiration, includeArchived: true)
+            }
+            let ids = Set(records.compactMap { record -> InspirationID? in
+                if case let .inspiration(id) = record.objectID { return id }
+                return nil
+            })
+            all = store.state.inspirations.values.filter { ids.contains($0.id) }
+        }
         let linked = Set(store.state.inspirationNoteLinks.compactMap { link -> InspirationID? in
             if case let .live(id) = link.source { return id }
             return nil
@@ -53,6 +79,18 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
 
     func select(_ id: InspirationID?) {
         selectedID = id
+    }
+
+    @discardableResult
+    func changeSelectedCategory(to categoryID: UUID) async throws -> Bool {
+        guard let id = selectedID else { return false }
+        let outcome = try await store.sendWorkspace(
+            .changeInspirationCategory(id, categoryID: categoryID, at: clock()),
+            undoLabel: "调整灵感分类"
+        )
+        refresh()
+        if case .committed = outcome { return true }
+        return false
     }
 
     @discardableResult

@@ -4,19 +4,32 @@ import WorkspaceDomain
 
 struct InspirationSplitView: View {
     let store: WorkspaceStore
+    @ObservedObject var newItemRouter: WorkspaceNewItemRouter
+    let transitionCoordinator: WorkspaceRouteTransitionCoordinator?
+    let deepLinkRouter: WorkspaceDeepLinkRouter?
     @State private var model: InspirationViewModel
     @State private var showCategoryManager = false
+    @FocusState private var captureFocused: Bool
 
-    init(store: WorkspaceStore) {
+    init(
+        store: WorkspaceStore,
+        newItemRouter: WorkspaceNewItemRouter = WorkspaceNewItemRouter(),
+        transitionCoordinator: WorkspaceRouteTransitionCoordinator? = nil,
+        deepLinkRouter: WorkspaceDeepLinkRouter? = nil,
+        searchIndex: WorkspaceSearchIndex = WorkspaceSearchIndex()
+    ) {
         self.store = store
-        _model = State(initialValue: InspirationViewModel(store: store))
+        self.newItemRouter = newItemRouter
+        self.transitionCoordinator = transitionCoordinator
+        self.deepLinkRouter = deepLinkRouter
+        _model = State(initialValue: InspirationViewModel(store: store, searchIndex: searchIndex))
     }
 
     var body: some View {
         HSplitView {
-            InspirationInboxView(model: model)
+            InspirationInboxView(model: model, captureFocused: $captureFocused)
                 .frame(minWidth: 240, idealWidth: 280, maxWidth: 360)
-            InspirationDetailView(model: model, store: store)
+            InspirationDetailView(model: model, store: store, onOpenNote: openNote)
                 .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
         }
         .toolbar {
@@ -30,16 +43,41 @@ struct InspirationSplitView: View {
         .onChange(of: store.statePublicationGeneration) { _, _ in
             model.refresh()
         }
+        .onAppear { consumeNewItemRequest(newItemRouter.pendingRequest) }
+        .onChange(of: newItemRouter.pendingRequest) { _, request in
+            consumeNewItemRequest(request)
+        }
+    }
+
+    private func consumeNewItemRequest(_ request: WorkspaceNewItemRequest?) {
+        guard let request,
+              request.route == .inspiration,
+              newItemRouter.consume(request.id, route: .inspiration) != nil else { return }
+        captureFocused = true
+    }
+
+    private func openNote(_ noteID: NoteID) {
+        guard let transitionCoordinator, let deepLinkRouter else { return }
+        Task {
+            guard await transitionCoordinator.requestActivation(.notes) else { return }
+            deepLinkRouter.request(.note(noteID))
+        }
     }
 }
 
 struct InspirationInboxView: View {
     @Bindable var model: InspirationViewModel
+    var captureFocused: FocusState<Bool>.Binding
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            InspirationCaptureView(model: model)
+            InspirationCaptureView(model: model, isFocused: captureFocused)
                 .padding(12)
+            TextField("搜索灵感", text: $model.searchText)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
+                .accessibilityLabel("搜索灵感")
             List {
                 Section("待处理") {
                     rows(model.pending, empty: "暂无待处理灵感")
@@ -89,11 +127,13 @@ struct InspirationInboxView: View {
 
 struct InspirationCaptureView: View {
     @Bindable var model: InspirationViewModel
+    var isFocused: FocusState<Bool>.Binding
 
     var body: some View {
         HStack {
             TextField("粘贴文字或链接，回车捕获", text: $model.captureText)
                 .textFieldStyle(.roundedBorder)
+                .focused(isFocused)
                 .onSubmit { Task { _ = try? await model.capture(model.captureText) } }
             Button("捕获") {
                 Task { _ = try? await model.capture(model.captureText) }
@@ -108,6 +148,7 @@ struct InspirationCaptureView: View {
 struct InspirationDetailView: View {
     @Bindable var model: InspirationViewModel
     let store: WorkspaceStore
+    var onOpenNote: (NoteID) -> Void = { _ in }
     @State private var pendingPermanentDelete: InspirationPermanentDeleteRequest?
     @State private var deleteStatus: String?
 
@@ -115,6 +156,20 @@ struct InspirationDetailView: View {
         if let inspiration = model.selected {
             VStack(alignment: .leading, spacing: 12) {
                 Text("灵感详情").font(.title3.weight(.semibold))
+                Picker("分类", selection: Binding(
+                    get: { inspiration.categoryID },
+                    set: { categoryID in
+                        Task { _ = try? await model.changeSelectedCategory(to: categoryID) }
+                    }
+                )) {
+                    ForEach(store.calendarState.categories.values.sorted {
+                        $0.name.localizedStandardCompare($1.name) == .orderedAscending
+                    }, id: \.id) { category in
+                        Text(category.name).tag(category.id)
+                    }
+                }
+                .frame(maxWidth: 220, alignment: .leading)
+                .accessibilityLabel("灵感分类")
                 GroupBox("原始内容") {
                     if let text = inspiration.rawText {
                         Text(text).textSelection(.enabled)
@@ -142,7 +197,11 @@ struct InspirationDetailView: View {
                 }
                 HStack {
                     Button("转成笔记") {
-                        Task { _ = try? await model.convertSelectedToNote() }
+                        Task {
+                            if let noteID = try? await model.convertSelectedToNote() {
+                                onOpenNote(noteID)
+                            }
+                        }
                     }
                     if inspiration.rawURL != nil,
                        inspiration.resolvedMetadata?.fetchStatus == .failed {

@@ -1,5 +1,6 @@
 import Testing
 import SwiftUI
+import WorkspaceDomain
 @testable import CalendarApp
 
 @Suite("WorkspaceNavigationTests")
@@ -144,6 +145,21 @@ struct WorkspaceNavigationTests {
         #expect(hosts.presentation(for: .notes, activeRoute: .calendar) == .inactive)
         #expect(hosts.presentation(for: .notes, activeRoute: .calendar).allowsHitTesting == false)
         #expect(hosts.presentation(for: .notes, activeRoute: .calendar).accessibilityHidden)
+    }
+
+    @Test func deepLinksDeclareTheirDestinationRouteAndAreConsumedExactlyOnce() throws {
+        let router = WorkspaceDeepLinkRouter()
+        let calendarID = UUID()
+        let calendarRequest = router.request(.calendarItem(calendarID))
+        #expect(calendarRequest.target.route == .calendar)
+        #expect(router.consume(calendarRequest.id, target: .calendarItem(calendarID)) == calendarRequest)
+        #expect(router.consume(calendarRequest.id, target: .calendarItem(calendarID)) == nil)
+
+        let noteID = NoteID()
+        let noteRequest = router.request(.note(noteID))
+        #expect(noteRequest.target.route == .notes)
+        #expect(router.consume(noteRequest.id, target: .note(noteID)) == noteRequest)
+        #expect(router.pendingRequest == nil)
     }
 }
 

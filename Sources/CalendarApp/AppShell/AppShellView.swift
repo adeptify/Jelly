@@ -63,9 +63,11 @@ struct AppShellView: View {
     let store: WorkspaceStore
     let features: WorkspaceFeatures
     let focusRegistry: EditorFocusRegistry
+    let searchIndex: WorkspaceSearchIndex
     let terminationCoordinator: NotesApplicationTerminationCoordinator?
     @ObservedObject var routeState: WorkspaceRouteState
     @ObservedObject var newItemRouter: WorkspaceNewItemRouter
+    @ObservedObject var deepLinkRouter: WorkspaceDeepLinkRouter
     @ObservedObject var transitionCoordinator: WorkspaceRouteTransitionCoordinator
     @StateObject private var moduleHosts: WorkspaceModuleHostStore
 
@@ -74,6 +76,8 @@ struct AppShellView: View {
         features: WorkspaceFeatures,
         routeState: WorkspaceRouteState,
         newItemRouter: WorkspaceNewItemRouter,
+        deepLinkRouter: WorkspaceDeepLinkRouter = WorkspaceDeepLinkRouter(),
+        searchIndex: WorkspaceSearchIndex = WorkspaceSearchIndex(),
         focusRegistry: EditorFocusRegistry = EditorFocusRegistry(),
         transitionCoordinator: WorkspaceRouteTransitionCoordinator? = nil,
         terminationCoordinator: NotesApplicationTerminationCoordinator? = nil,
@@ -82,9 +86,11 @@ struct AppShellView: View {
         self.store = store
         self.features = features
         self.focusRegistry = focusRegistry
+        self.searchIndex = searchIndex
         self.terminationCoordinator = terminationCoordinator
         self.routeState = routeState
         self.newItemRouter = newItemRouter
+        self.deepLinkRouter = deepLinkRouter
         let coordinator = transitionCoordinator
             ?? WorkspaceRouteTransitionCoordinator(routeState: routeState, features: features)
         self.transitionCoordinator = coordinator
@@ -96,7 +102,8 @@ struct AppShellView: View {
                     route: .calendar,
                     content: AnyView(CalendarModuleView(
                         store: store,
-                        newItemRouter: newItemRouter
+                        newItemRouter: newItemRouter,
+                        deepLinkRouter: deepLinkRouter
                     )),
                     lifetimeToken: WorkspaceModuleLifetimeToken()
                 )
@@ -107,6 +114,9 @@ struct AppShellView: View {
                         store: store,
                         focusRegistry: focusRegistry,
                         transitionCoordinator: coordinator,
+                        deepLinkRouter: deepLinkRouter,
+                        newItemRouter: newItemRouter,
+                        searchIndex: searchIndex,
                         terminationCoordinator: terminationCoordinator
                     )),
                     lifetimeToken: WorkspaceModuleLifetimeToken()
@@ -114,7 +124,13 @@ struct AppShellView: View {
             case .inspiration:
                 WorkspaceModuleHost(
                     route: .inspiration,
-                    content: AnyView(InspirationSplitView(store: store)),
+                    content: AnyView(InspirationSplitView(
+                        store: store,
+                        newItemRouter: newItemRouter,
+                        transitionCoordinator: coordinator,
+                        deepLinkRouter: deepLinkRouter,
+                        searchIndex: searchIndex
+                    )),
                     lifetimeToken: WorkspaceModuleLifetimeToken()
                 )
             }
@@ -128,6 +144,7 @@ struct AppShellView: View {
     var body: some View {
         HStack(spacing: 0) {
             WorkspaceNavigationRail(
+                store: store,
                 features: features,
                 routeState: routeState,
                 transitionCoordinator: transitionCoordinator

@@ -7,6 +7,7 @@ import WorkspaceDomain
 struct AppEnvironment {
     let store: WorkspaceStore
     let dataURLs: AppDataURLs
+    let searchIndex: WorkspaceSearchIndex
     /// The production application stays calendar-only until a module has its
     /// complete real loop. Feature state is deliberately not user preference data.
     let features: WorkspaceFeatures
@@ -32,18 +33,15 @@ struct AppEnvironment {
         return AppEnvironment(
             store: WorkspaceStore(initialState: seed, repository: repository, journal: journal),
             dataURLs: dataURLs,
+            searchIndex: WorkspaceSearchIndex(fileURL: dataURLs.searchIndex),
             features: .production
         )
     }
 
-    /// Retained only as the App entry point's diagnostic boundary.  Every
-    /// actual persistence dependency is composed above exactly once.
-    static func liveOrTerminate() -> AppEnvironment {
-        let fileManager = FileManager.default
-        do {
-            return try live(fileManager: fileManager)
-        } catch {
-            fatalError("无法创建 Jelly 数据目录：\(error.localizedDescription)")
-        }
+    static func loadLive(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default
+    ) -> Result<AppEnvironment, Error> {
+        Result { try live(environment: environment, fileManager: fileManager) }
     }
 }

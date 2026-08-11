@@ -32,4 +32,19 @@ struct AppEnvironmentWorkspaceCutoverTests {
         #expect(environment.store.phase == .ready)
         #expect(environment.store.calendarState.uncategorizedID != UUID())
     }
+
+    @Test func startupFailureIsReturnedForPresentationInsteadOfTerminatingTheProcess() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-startup-file-\(UUID().uuidString)")
+        try Data("not a directory".utf8).write(to: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let result = AppEnvironment.loadLive(environment: [
+            "JELLY_ACCEPTANCE_DATA_DIRECTORY": root.path
+        ])
+        guard case .failure = result else {
+            Issue.record("数据根路径不可用时必须返回失败，由 UI 呈现")
+            return
+        }
+    }
 }
