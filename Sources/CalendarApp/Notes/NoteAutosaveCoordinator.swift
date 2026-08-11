@@ -427,6 +427,11 @@ final class NoteAutosaveCoordinator {
         consumedPermitNonce = permit.nonce
         activePermit = nil
         autosaveState = .editable
+        let changesDraft = edit.title.map { $0 != session.draft.title } == true
+            || edit.document.map { $0 != session.draft.document } == true
+            || edit.categoryID.map { $0 != session.draft.categoryID } == true
+            || !edit.linkedBlockDeletionDispositions.isEmpty
+        guard changesDraft else { return true }
         return (try? update(
             title: edit.title,
             document: edit.document,

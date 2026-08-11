@@ -768,6 +768,135 @@ struct BlockEditorAccessibilityTests {
             !$0.accessibilityIdentifier().hasPrefix("block-format-")
         })
     }
+
+    @Test func taskBlockExposesTheCalendarSchedulingEntryInsideTheProductionEditor() async throws {
+        _ = NSApplication.shared
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let noteID = NoteID()
+        let blockID = BlockID()
+        let document = BlockDocument(blocks: [try .task(id: blockID, text: "安排复盘")])
+
+        let hosting = NSHostingView(rootView: BlockEditorView(
+            noteID: noteID,
+            editSessionID: UUID(),
+            initialDocument: document,
+            initialSelection: projectionCaret(blockID, 0),
+            focusRegistry: EditorFocusRegistry(),
+            onDocumentChange: { _ in },
+            taskCalendarContext: .init(store: store, now: { .distantPast }, onOpenItem: { _ in })
+        ))
+        hosting.frame = .init(x: 0, y: 0, width: 640, height: 240)
+        hosting.layoutSubtreeIfNeeded()
+
+        #expect(accessibilityDescendants(of: hosting, as: NSButton.self).contains {
+            $0.accessibilityLabel() == "安排待办到日历"
+        })
+    }
+
+    @Test func darkAppearanceProjectsAConcreteReadableForegroundColor() throws {
+        let blockID = BlockID()
+        let view = BlockEditorTextView()
+        view.appearance = NSAppearance(named: .darkAqua)
+        view.applyAuthoritativeProjection(
+            block: .init(
+                id: blockID,
+                kind: .paragraph,
+                inlineContent: .plain("深色正文"),
+                taskState: nil,
+                indentLevel: 0
+            ),
+            selectedRange: .init(location: 0, length: 0)
+        )
+
+        let color = try #require(view.textStorage?.attribute(
+            .foregroundColor,
+            at: 0,
+            effectiveRange: nil
+        ) as? NSColor)
+        let rgb = try #require(color.usingColorSpace(.deviceRGB))
+        #expect(rgb.brightnessComponent > 0.7)
+    }
+
+    @Test func hostedDarkEditorPropagatesItsSchemeIntoTheNativeTextView() throws {
+        _ = NSApplication.shared
+        let blockID = BlockID()
+        let document = BlockDocument(blocks: [
+            .init(
+                id: blockID,
+                kind: .paragraph,
+                inlineContent: .plain("可见正文"),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let hosting = NSHostingView(rootView: BlockEditorView(
+            noteID: NoteID(),
+            editSessionID: UUID(),
+            initialDocument: document,
+            initialSelection: projectionCaret(blockID, 0),
+            focusRegistry: EditorFocusRegistry(),
+            onDocumentChange: { _ in }
+        ).preferredColorScheme(.dark))
+        hosting.frame = .init(x: 0, y: 0, width: 500, height: 180)
+        hosting.layoutSubtreeIfNeeded()
+
+        let textView = try #require(accessibilityDescendants(
+            of: hosting,
+            as: BlockEditorTextView.self
+        ).first)
+        #expect(textView.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+        let color = try #require(textView.textStorage?.attribute(
+            .foregroundColor,
+            at: 0,
+            effectiveRange: nil
+        ) as? NSColor)
+        var resolved: NSColor?
+        textView.effectiveAppearance.performAsCurrentDrawingAppearance {
+            resolved = color.usingColorSpace(.deviceRGB)
+        }
+        #expect(try #require(resolved).brightnessComponent > 0.7)
+
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 500, height: 180),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.backgroundColor = .windowBackgroundColor
+        window.contentView = hosting
+        window.displayIfNeeded()
+        #expect(textView.bounds.width > 100)
+        #expect(textView.bounds.height > 20)
+        #expect(textView.textStorage?.length == 4)
+        #expect(textView.layoutManager?.numberOfGlyphs == 4)
+        #expect(textView.isHidden == false)
+        #expect(textView.alphaValue == 1)
+        let textContainer = try #require(textView.textContainer)
+        #expect(textContainer.textView === textView)
+        #expect(textContainer.containerSize.width > 100)
+        #expect(textContainer.containerSize.height > 20)
+        let usedRect = try #require(textView.layoutManager?.usedRect(for: textContainer))
+        #expect(usedRect.width > 10)
+        #expect(usedRect.height > 10)
+        let bitmap = try #require(textView.bitmapImageRepForCachingDisplay(in: textView.bounds))
+        textView.cacheDisplay(in: textView.bounds, to: bitmap)
+        var lightPixels = 0
+        for x in 0..<bitmap.pixelsWide {
+            for y in 0..<bitmap.pixelsHigh {
+                guard let pixel = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if pixel.alphaComponent > 0.1, pixel.brightnessComponent > 0.7 {
+                    lightPixels += 1
+                }
+            }
+        }
+        #expect(lightPixels > 20)
+    }
 }
 
 @MainActor

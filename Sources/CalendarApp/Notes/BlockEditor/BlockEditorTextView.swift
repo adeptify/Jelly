@@ -61,6 +61,10 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
         drawsBackground = false
         isHorizontallyResizable = false
         isVerticallyResizable = true
+        textContainer?.containerSize = .init(
+            width: bounds.width,
+            height: .greatestFiniteMagnitude
+        )
         textContainer?.widthTracksTextView = true
         textContainerInset = .init(width: 0, height: 4)
         setAccessibilityRole(.textArea)

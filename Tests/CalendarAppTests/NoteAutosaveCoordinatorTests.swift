@@ -31,6 +31,46 @@ struct NoteAutosaveCoordinatorTests {
         #expect(submission.modifiedFields == [.title])
     }
 
+    @Test func bodyGenerationPersistsAfterAnEarlierTitleGenerationWasRebased() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-autosave-rebase-fields-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let calendar = makeEmptyState()
+        let note = makeAutosaveTestNote(categoryID: calendar.uncategorizedID)
+        var initial = WorkspaceState.empty(calendar: calendar)
+        initial.notes[note.id] = note
+        let seeded = initial
+        let repository = JSONWorkspaceRepository(
+            documentURL: directory.appendingPathComponent("workspace.json"),
+            seed: { seeded }
+        )
+        let journal = DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"))
+        let store = WorkspaceStore(initialState: initial, repository: repository, journal: journal)
+        await store.load()
+        let coordinator = NoteAutosaveCoordinator(store: store, scheduler: AutosaveImmediateScheduler())
+        try coordinator.beginSession(
+            note,
+            linkedTaskBlockLinks: [],
+            editSessionID: UUID(),
+            activeHostToken: UUID()
+        )
+
+        _ = try coordinator.update(title: "真实输入验收笔记")
+        let titleTriple = try #require(coordinator.currentTriple)
+        #expect(await coordinator.flushLatest() == .persisted(titleTriple))
+
+        var body = note.document
+        body.blocks[0].inlineContent = .plain("keyboard")
+        _ = try coordinator.update(document: body)
+        let bodyTriple = try #require(coordinator.currentTriple)
+        #expect(await coordinator.flushLatest() == .persisted(bodyTriple))
+        #expect(store.state.notes[note.id]?.title == "真实输入验收笔记")
+        #expect(store.state.notes[note.id]?.document == body)
+        #expect(try await journal.current()?.records.isEmpty == true)
+    }
+
     @Test func newerEditCancelsOnlyTheOlderUnfiredTimersBeforeAnyOldStoreIOStarts() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("jelly-10b-timer-\(UUID().uuidString)", isDirectory: true)
@@ -129,6 +169,31 @@ struct NoteAutosaveCoordinatorTests {
         try coordinator.beginSession(note, linkedTaskBlockLinks: [], editSessionID: UUID(), activeHostToken: UUID())
         #expect(await coordinator.flushLatest() == .clean)
         #expect(coordinator.currentTriple == nil)
+    }
+
+    @Test func identicalNativeFinalizerSnapshotDoesNotManufactureANoChangeDraft() async throws {
+        let calendar = makeEmptyState()
+        let note = makeAutosaveTestNote(categoryID: calendar.uncategorizedID)
+        let repository = InMemoryWorkspaceRepository(initialState: calendar)
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let persisted = try #require(store.state.notes[note.id])
+        let coordinator = NoteAutosaveCoordinator(store: store, scheduler: AutosaveImmediateScheduler())
+        try coordinator.beginSession(
+            persisted,
+            linkedTaskBlockLinks: [],
+            editSessionID: UUID(),
+            activeHostToken: UUID()
+        )
+
+        let evidence = await coordinator.flushLatest { permit, apply in
+            apply(permit, .init(title: persisted.title, document: persisted.document))
+        }
+
+        #expect(evidence == .clean)
+        #expect(coordinator.currentTriple == nil)
+        #expect(store.state.notes[note.id] == persisted)
     }
 
     @Test func concurrentLifecycleFlushesShareOneNativePermitAndOneFinalizerResult() async throws {

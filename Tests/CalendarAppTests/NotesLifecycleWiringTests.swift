@@ -1,4 +1,5 @@
 import AppKit
+import CalendarPersistence
 import SwiftUI
 import Testing
 import WorkspaceDomain
@@ -90,6 +91,182 @@ struct NotesLifecycleWiringTests {
 
         #expect(await waitUntil { session != nil })
     }
+
+    @Test func mountedNotesHostConsumesADeepLinkRequestedAfterItsInitialAppearance() async throws {
+        let calendar = makeEmptyState()
+        var first = Note.empty(categoryID: calendar.uncategorizedID, now: .distantPast)
+        first.title = "已有笔记"
+        var target = Note.empty(categoryID: calendar.uncategorizedID, now: .distantPast)
+        target.title = "灵感转成的笔记"
+        let repository = InMemoryWorkspaceRepository(initialState: calendar)
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
+        _ = try await store.sendWorkspace(.createNote(.init(note: first)))
+        _ = try await store.sendWorkspace(.createNote(.init(note: target)))
+        let router = WorkspaceDeepLinkRouter()
+        let root = NotesSplitView(
+            store: store,
+            focusRegistry: EditorFocusRegistry(),
+            deepLinkRouter: router,
+            newItemRouter: WorkspaceNewItemRouter(),
+            searchIndex: WorkspaceSearchIndex()
+        )
+        let hosting = NSHostingView(rootView: root)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        hosting.layoutSubtreeIfNeeded()
+        await Task.yield()
+        await Task.yield()
+
+        let request = router.request(.note(target.id))
+
+        #expect(await waitUntil { router.pendingRequest?.id != request.id })
+        #expect(await waitUntil {
+            hosting.layoutSubtreeIfNeeded()
+            return notesDescendants(of: hosting, as: NSTextField.self).contains {
+                $0.stringValue == "灵感转成的笔记"
+            }
+        })
+    }
+
+    @Test func creatingANoteRebuildsTheTitleFieldForTheNewEditorIdentity() async throws {
+        let calendar = makeEmptyState()
+        var existing = Note.empty(categoryID: calendar.uncategorizedID, now: .distantPast)
+        existing.title = "上一条笔记"
+        let repository = InMemoryWorkspaceRepository(initialState: calendar)
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
+        _ = try await store.sendWorkspace(.createNote(.init(note: existing)))
+        let deepLinkRouter = WorkspaceDeepLinkRouter()
+        let newItemRouter = WorkspaceNewItemRouter()
+        let root = NotesSplitView(
+            store: store,
+            focusRegistry: EditorFocusRegistry(),
+            deepLinkRouter: deepLinkRouter,
+            newItemRouter: newItemRouter,
+            searchIndex: WorkspaceSearchIndex()
+        )
+        let hosting = NSHostingView(rootView: root)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        hosting.layoutSubtreeIfNeeded()
+        _ = deepLinkRouter.request(.note(existing.id))
+        #expect(await waitUntil {
+            hosting.layoutSubtreeIfNeeded()
+            return notesDescendants(of: hosting, as: NSTextField.self).contains {
+                $0.placeholderString == "标题" && $0.stringValue == "上一条笔记"
+            }
+        })
+
+        _ = newItemRouter.requestNewItem(route: .notes, features: .production)
+
+        #expect(await waitUntil { store.state.notes.count == 2 })
+        #expect(await waitUntil {
+            hosting.layoutSubtreeIfNeeded()
+            return notesDescendants(of: hosting, as: NSTextField.self).contains {
+                $0.placeholderString == "标题" && $0.stringValue.isEmpty
+            }
+        })
+    }
+
+    @Test func mountedNotesHostCompletesAsyncStartupLoadForAnAlreadyPersistedDraft() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-notes-startup-recovery-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let documentURL = directory.appendingPathComponent("workspace.json")
+        let journalURL = directory.appendingPathComponent("workspace.draft-journal.json")
+        let initial = WorkspaceState.empty(calendar: makeEmptyState())
+        let writerRepository = JSONWorkspaceRepository(documentURL: documentURL, seed: { initial })
+        let writer = WorkspaceStore(initialState: initial, repository: writerRepository)
+        await writer.load()
+        var note = Note.empty(categoryID: initial.calendar.uncategorizedID, now: .distantPast)
+        note.title = "启动恢复验收"
+        _ = try await writer.sendWorkspace(.createNote(.init(note: note)))
+        let persisted = try #require(writer.state.notes[note.id])
+        let journal = DraftJournalRepository(fileURL: journalURL)
+        try await journal.persist(try identicalRecoveryEntry(
+            note: persisted,
+            workspaceRevision: writer.state.revision
+        ))
+
+        let readerRepository = JSONWorkspaceRepository(documentURL: documentURL, seed: { initial })
+        let reader = WorkspaceStore(initialState: initial, repository: readerRepository, journal: journal)
+        let root = NotesSplitView(
+            store: reader,
+            focusRegistry: EditorFocusRegistry(),
+            newItemRouter: WorkspaceNewItemRouter(),
+            searchIndex: WorkspaceSearchIndex()
+        )
+        let hosting = NSHostingView(rootView: root)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        defer {
+            for sheet in window.sheets {
+                window.endSheet(sheet)
+                sheet.orderOut(nil)
+            }
+            window.orderOut(nil)
+        }
+        hosting.layoutSubtreeIfNeeded()
+
+        await reader.load()
+
+        #expect(reader.phase == .ready)
+        #expect(try await journal.current()?.records.isEmpty == true)
+        #expect(window.sheets.isEmpty)
+    }
+}
+
+private func identicalRecoveryEntry(note: Note, workspaceRevision: Int64) throws -> DraftJournalEntry {
+    let snapshotChecksum = try WorkspaceChecksum.noteSnapshotChecksum(note)
+    let unsigned = DraftJournalEntry(
+        noteID: note.id,
+        editSessionID: .editor(UUID()),
+        baseWorkspaceRevision: workspaceRevision,
+        baseNoteRevision: note.revision,
+        draftGeneration: 1,
+        noteSnapshot: note,
+        updatedAt: .distantPast,
+        noteSnapshotChecksum: snapshotChecksum,
+        journalChecksum: ""
+    )
+    return DraftJournalEntry(
+        noteID: unsigned.noteID,
+        editSessionID: unsigned.editSessionID,
+        baseWorkspaceRevision: unsigned.baseWorkspaceRevision,
+        baseNoteRevision: unsigned.baseNoteRevision,
+        draftGeneration: unsigned.draftGeneration,
+        noteSnapshot: unsigned.noteSnapshot,
+        updatedAt: unsigned.updatedAt,
+        noteSnapshotChecksum: unsigned.noteSnapshotChecksum,
+        journalChecksum: try DraftJournal.entryChecksum(for: unsigned)
+    )
+}
+
+@MainActor
+private func notesDescendants<T: NSView>(of view: NSView, as type: T.Type) -> [T] {
+    var result = view as? T == nil ? [] : [view as! T]
+    for child in view.subviews {
+        result.append(contentsOf: notesDescendants(of: child, as: type))
+    }
+    return result
 }
 
 @MainActor

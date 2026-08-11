@@ -971,7 +971,24 @@ enum DraftRecoveryAction: Equatable, Sendable {
                     )
                     switch try await repository.verifyPersistedDraft(context) {
                     case let .verified(receipt):
-                        let resolution = await DraftJournalCoordinator.acknowledgeAndClear(receipt, journal: journal)
+                        let resolution: DraftRecoveryJournalResolution
+                        if receipt.persistedNoteRevision == record.entry.baseNoteRevision {
+                            // Older builds could protect an unchanged native finalizer snapshot.
+                            // Its exact bytes are already durable, so no revision bump exists for
+                            // acknowledgeAlreadyPersisted to bind. Discard only this still-bare,
+                            // checksum-bound record instead of recursively rescanning forever.
+                            let token = DraftRecoveryToken(
+                                identityAndGeneration: .init(
+                                    identity: record.identity,
+                                    draftGeneration: record.entry.draftGeneration
+                                ),
+                                noteSnapshotChecksum: record.entry.noteSnapshotChecksum,
+                                journalChecksum: record.entry.journalChecksum
+                            )
+                            resolution = await DraftJournalCoordinator.discardRecovery(token, journal: journal)
+                        } else {
+                            resolution = await DraftJournalCoordinator.acknowledgeAndClear(receipt, journal: journal)
+                        }
                         if case .cleanupPending = resolution {
                             parkJournalCleanup(
                                 resolution.journalStatus,
@@ -1615,6 +1632,11 @@ enum DraftRecoveryAction: Equatable, Sendable {
             let result = try NoteDraftSequenceRebasePlanner.plan(
                 previousAccepted: previous.accepted, next: submission, latest: latest
             )
+            var rebasedModifiedFields = Set<NoteDraftField>()
+            if result.rebasedBase.title != result.rebasedSnapshot.title { rebasedModifiedFields.insert(.title) }
+            if result.rebasedBase.document != result.rebasedSnapshot.document { rebasedModifiedFields.insert(.document) }
+            if result.rebasedBase.categoryID != result.rebasedSnapshot.categoryID { rebasedModifiedFields.insert(.categoryID) }
+            if result.rebasedBase.archivedAt != result.rebasedSnapshot.archivedAt { rebasedModifiedFields.insert(.archivedAt) }
             let rebased = NoteDraftSubmission(
                 noteID: submission.noteID,
                 editSessionID: submission.editSessionID,
@@ -1625,7 +1647,7 @@ enum DraftRecoveryAction: Equatable, Sendable {
                 draftGeneration: submission.draftGeneration,
                 snapshot: result.rebasedSnapshot,
                 noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(result.rebasedSnapshot),
-                modifiedFields: submission.modifiedFields,
+                modifiedFields: rebasedModifiedFields,
                 linkedBlockDeletionDispositions: submission.linkedBlockDeletionDispositions
             )
             return .updateNote(rebased)
