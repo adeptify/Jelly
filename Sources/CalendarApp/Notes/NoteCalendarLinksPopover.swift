@@ -6,6 +6,7 @@ import WorkspaceDomain
 struct NoteCalendarLinksPopover: View {
     let store: WorkspaceStore
     let noteID: NoteID
+    var onOpenItem: (UUID) -> Void = { _ in }
 
     private var linkedItemIDs: [UUID] {
         var ids: [UUID] = []
@@ -30,7 +31,8 @@ struct NoteCalendarLinksPopover: View {
             } else {
                 ForEach(linkedItemIDs, id: \.self) { itemID in
                     let title = store.calendarState.items[itemID]?.title ?? itemID.uuidString
-                    Text(title)
+                    Button(title) { onOpenItem(itemID) }
+                        .buttonStyle(.plain)
                         .lineLimit(1)
                 }
             }

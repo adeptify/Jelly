@@ -250,6 +250,20 @@ extension WorkspaceReducer {
         return .proceed
     }
 
+    static func unlinkTaskBlock(
+        noteID: NoteID,
+        blockID: BlockID,
+        in candidate: inout WorkspaceState
+    ) -> WorkspaceCommandControl {
+        guard let link = candidate.taskBlockLinks.first(where: {
+            $0.noteID == noteID && $0.blockID == blockID
+        }) else {
+            return .result(.noChange(.identical))
+        }
+        candidate.taskBlockLinks.remove(link)
+        return .proceed
+    }
+
     static func permanentlyDeleteNote(
         _ id: NoteID,
         authorization: PermanentDeleteAuthorization,

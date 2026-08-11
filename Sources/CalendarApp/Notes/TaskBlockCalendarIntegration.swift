@@ -54,6 +54,17 @@ enum TaskBlockCalendarIntegration {
         )
     }
 
+    static func unlinkFromBlock(
+        store: WorkspaceStore,
+        noteID: NoteID,
+        blockID: BlockID
+    ) async throws -> WorkspaceTransactionOutcome {
+        try await store.sendWorkspace(
+            .unlinkTaskBlock(noteID: noteID, blockID: blockID),
+            undoLabel: "取消待办日历关联"
+        )
+    }
+
     static func link(for store: WorkspaceStore, noteID: NoteID, blockID: BlockID) -> TaskBlockCalendarLink? {
         store.state.taskBlockLinks.first { $0.noteID == noteID && $0.blockID == blockID }
     }

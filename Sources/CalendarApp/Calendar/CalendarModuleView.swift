@@ -3,6 +3,7 @@ import SwiftUI
 struct CalendarModuleView: View {
     let store: WorkspaceStore
     @ObservedObject var newItemRouter: WorkspaceNewItemRouter
+    @ObservedObject var deepLinkRouter: WorkspaceDeepLinkRouter
 
     var body: some View {
         MonthView(
@@ -10,6 +11,10 @@ struct CalendarModuleView: View {
             newItemRequest: newItemRouter.pendingRequest,
             consumeNewItemRequest: { requestID, route in
                 newItemRouter.consume(requestID, route: route)
+            },
+            deepLinkRequest: deepLinkRouter.pendingRequest,
+            consumeDeepLinkRequest: { requestID, target in
+                deepLinkRouter.consume(requestID, target: target)
             }
         )
         .frame(

@@ -89,6 +89,27 @@ struct TaskBlockCalendarLinkTests {
         #expect(workspace.taskBlockLinks.count == 1)
     }
 
+    @Test func explicitUnlinkPreservesTheBlockItemCompletionAndPrimaryNote() throws {
+        let workspace = try Task4Fixture.workspaceWithLinkedTask(completedAt: Task4Fixture.completedAt)
+
+        let result = try WorkspaceReducer.reduce(
+            workspace,
+            command: .unlinkTaskBlock(
+                noteID: Task4Fixture.noteID,
+                blockID: Task4Fixture.taskBlockID
+            ),
+            now: Task4Fixture.latest
+        )
+
+        let change = try #require(result.change)
+        #expect(change.state.taskBlockLinks.isEmpty)
+        #expect(change.state.calendar.items[Task4Fixture.itemID]?.completedAt == Task4Fixture.completedAt)
+        #expect(change.state.notes[Task4Fixture.noteID]?.document.blocks.first?.taskState?.completedAt == Task4Fixture.completedAt)
+        #expect(change.state.calendarNoteRelations.baselines[.item(Task4Fixture.itemID)]?.primaryNoteID == Task4Fixture.noteID)
+        #expect(change.state.revision == workspace.revision + 1)
+        #expect(change.changedNoteIDs.isEmpty)
+    }
+
     @Test func repeatedScheduleRejectsBlockOrItemEndpointCollisionsAtomically() throws {
         let workspace = try Task4Fixture.workspaceWithLinkedTask()
         let differentItem = try Task4Fixture.item(id: Task4Fixture.otherItemID, title: "另一个事项")

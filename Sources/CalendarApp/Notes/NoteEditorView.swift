@@ -25,6 +25,7 @@ struct NoteEditorView: View {
     var onArchive: () -> Void
     var onRestore: () -> Void
     var onPermanentDelete: () -> Void
+    var onOpenCalendarItem: (UUID) -> Void
     var sessionSink: (BlockEditorSession?) -> Void
     var nativeFinalizerHook: Binding<NoteNativeInputFinalizer?>
 
@@ -32,6 +33,10 @@ struct NoteEditorView: View {
     @State private var titleOwnerID = UUID()
     @State private var titleCoordinator: NoteTitleTextField.Coordinator?
     @State private var editorSession: BlockEditorSession?
+    @State private var showCalendarLinks = false
+    @State private var showScheduleSheet = false
+    @State private var lastAcceptedDocument: BlockDocument
+    @State private var pendingLinkedTaskDeletion: PendingLinkedTaskDeletion?
 
     init(
         identity: NoteEditorIdentity,
@@ -48,6 +53,7 @@ struct NoteEditorView: View {
         onArchive: @escaping () -> Void = {},
         onRestore: @escaping () -> Void = {},
         onPermanentDelete: @escaping () -> Void = {},
+        onOpenCalendarItem: @escaping (UUID) -> Void = { _ in },
         sessionSink: @escaping (BlockEditorSession?) -> Void,
         nativeFinalizerHook: Binding<NoteNativeInputFinalizer?>
     ) {
@@ -65,9 +71,11 @@ struct NoteEditorView: View {
         self.onArchive = onArchive
         self.onRestore = onRestore
         self.onPermanentDelete = onPermanentDelete
+        self.onOpenCalendarItem = onOpenCalendarItem
         self.sessionSink = sessionSink
         self.nativeFinalizerHook = nativeFinalizerHook
         _title = State(initialValue: note.title)
+        _lastAcceptedDocument = State(initialValue: note.document)
     }
 
     var body: some View {
@@ -88,6 +96,18 @@ struct NoteEditorView: View {
                     coordinatorSink: { titleCoordinator = $0 }
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button("安排到日历…") { showScheduleSheet = true }
+                    .accessibilityLabel("从笔记安排到日历")
+
+                Button("日历关系") { showCalendarLinks = true }
+                    .popover(isPresented: $showCalendarLinks) {
+                        NoteCalendarLinksPopover(
+                            store: store,
+                            noteID: identity.noteID,
+                            onOpenItem: onOpenCalendarItem
+                        )
+                    }
 
                 Menu("更多") {
                     Button("导入 Markdown…", action: onRequestMarkdownImport)
@@ -129,20 +149,54 @@ struct NoteEditorView: View {
                     initialDocument: note.document,
                     initialSelection: defaultSelection(in: note.document),
                     focusRegistry: focusRegistry,
-                    onDocumentChange: { document in
-                        _ = try? autosave.update(document: document)
-                        onDocumentCommitted(document)
-                    },
+                    onDocumentChange: handleDocumentChange,
                     sessionSink: {
                         editorSession = $0
                         sessionSink($0)
-                    }
+                    },
+                    taskCalendarContext: .init(
+                        store: store,
+                        onOpenItem: onOpenCalendarItem
+                    )
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(20)
-        .id(identity)
+        .sheet(isPresented: $showScheduleSheet) {
+            NoteScheduleSheet(
+                store: store,
+                noteID: identity.noteID,
+                onCancel: { showScheduleSheet = false },
+                onScheduled: { itemID in
+                    showScheduleSheet = false
+                    onOpenCalendarItem(itemID)
+                }
+            )
+        }
+        .confirmationDialog(
+            "删除已关联待办？",
+            isPresented: Binding(
+                get: { pendingLinkedTaskDeletion != nil },
+                set: { if !$0 { cancelLinkedTaskDeletion() } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("保留独立日历事项") {
+                confirmLinkedTaskDeletion(.keepCalendarItem)
+            }
+            Button("一起删除", role: .destructive) {
+                confirmLinkedTaskDeletion(.deleteCalendarItem)
+            }
+            Button("取消", role: .cancel) {
+                cancelLinkedTaskDeletion()
+            }
+        } message: {
+            let count = pendingLinkedTaskDeletion?.blockIDs.count ?? 0
+            Text(count > 1
+                ? "这次删除包含 \(count) 个已关联待办。请选择对应日历事项的处理方式。"
+                : "这个待办已关联日历事项。请选择日历事项的处理方式。")
+        }
         .onAppear { installNativeFinalizer() }
         .onChange(of: identity) { _, _ in installNativeFinalizer() }
         .onDisappear {
@@ -175,6 +229,52 @@ struct NoteEditorView: View {
         }
     }
 
+    private func handleDocumentChange(_ document: BlockDocument) {
+        guard pendingLinkedTaskDeletion == nil else { return }
+        let linkedBlocks = TaskBlockDeletionConfirmation.requiredLinkedBlocks(
+            noteID: identity.noteID,
+            before: lastAcceptedDocument,
+            after: document,
+            links: store.state.taskBlockLinks
+        )
+        guard !linkedBlocks.isEmpty else {
+            acceptDocument(document, dispositions: [:])
+            return
+        }
+        pendingLinkedTaskDeletion = .init(document: document, blockIDs: linkedBlocks)
+    }
+
+    private func confirmLinkedTaskDeletion(_ disposition: LinkedTaskBlockDeletionDisposition) {
+        guard let pending = pendingLinkedTaskDeletion else { return }
+        pendingLinkedTaskDeletion = nil
+        acceptDocument(
+            pending.document,
+            dispositions: Dictionary(uniqueKeysWithValues: pending.blockIDs.map { ($0, disposition) })
+        )
+    }
+
+    private func cancelLinkedTaskDeletion() {
+        guard pendingLinkedTaskDeletion != nil else { return }
+        pendingLinkedTaskDeletion = nil
+        editorSession?.undoManager.undo()
+    }
+
+    private func acceptDocument(
+        _ document: BlockDocument,
+        dispositions: [BlockID: LinkedTaskBlockDeletionDisposition]
+    ) {
+        do {
+            _ = try autosave.update(
+                document: document,
+                linkedBlockDeletionDispositions: dispositions
+            )
+            lastAcceptedDocument = document
+            onDocumentCommitted(document)
+        } catch {
+            editorSession?.autosaveDidResolve(.failed("无法保存这次正文修改。"))
+        }
+    }
+
     private func defaultSelection(in document: BlockDocument) -> BlockEditorSelection {
         let block = document.blocks.first ?? DocumentBlock(
             id: BlockID(),
@@ -190,4 +290,9 @@ struct NoteEditorView: View {
             typingAttributes: .init(marks: [], linkURL: nil)
         )
     }
+}
+
+private struct PendingLinkedTaskDeletion {
+    let document: BlockDocument
+    let blockIDs: [BlockID]
 }

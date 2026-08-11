@@ -84,6 +84,25 @@ extension WorkspaceReducer {
         candidate.inspirations[id] = inspiration
     }
 
+    static func changeInspirationCategory(
+        _ id: InspirationID,
+        categoryID: UUID,
+        in candidate: inout WorkspaceState,
+        now: Date
+    ) throws -> WorkspaceCommandControl {
+        guard var inspiration = candidate.inspirations[id],
+              candidate.calendar.categories[categoryID] != nil else {
+            throw WorkspaceReducerError.invalidInspiration
+        }
+        guard inspiration.categoryID != categoryID else {
+            return .result(.noChange(.identical))
+        }
+        inspiration.categoryID = categoryID
+        inspiration.updatedAt = now
+        candidate.inspirations[id] = inspiration
+        return .proceed
+    }
+
     static func permanentlyDeleteInspiration(
         _ id: InspirationID,
         deletedAt: Date,

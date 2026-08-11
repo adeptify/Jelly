@@ -11,6 +11,7 @@ struct BlockEditorView: View {
     private let onDocumentChange: (BlockDocument) -> Void
     private let requestLinkURL: () -> URL?
     private let sessionSink: ((BlockEditorSession) -> Void)?
+    private let taskCalendarContext: TaskBlockCalendarContext?
 
     init(
         noteID: NoteID,
@@ -20,7 +21,8 @@ struct BlockEditorView: View {
         focusRegistry: EditorFocusRegistry,
         onDocumentChange: @escaping (BlockDocument) -> Void,
         requestLinkURL: @escaping () -> URL? = { BlockLinkPrompt.requestURL() },
-        sessionSink: ((BlockEditorSession) -> Void)? = nil
+        sessionSink: ((BlockEditorSession) -> Void)? = nil,
+        taskCalendarContext: TaskBlockCalendarContext? = nil
     ) {
         key = .init(noteID: noteID, editSessionID: editSessionID)
         self.initialDocument = initialDocument
@@ -29,6 +31,7 @@ struct BlockEditorView: View {
         self.onDocumentChange = onDocumentChange
         self.requestLinkURL = requestLinkURL
         self.sessionSink = sessionSink
+        self.taskCalendarContext = taskCalendarContext
     }
 
     var body: some View {
@@ -39,7 +42,8 @@ struct BlockEditorView: View {
             focusRegistry: focusRegistry,
             onDocumentChange: onDocumentChange,
             requestLinkURL: requestLinkURL,
-            sessionSink: sessionSink
+            sessionSink: sessionSink,
+            taskCalendarContext: taskCalendarContext
         )
         .id(key)
     }
@@ -55,6 +59,8 @@ private struct BlockEditorSessionHost: View {
     @StateObject private var session: BlockEditorSession
     private let requestLinkURL: () -> URL?
     private let sessionSink: ((BlockEditorSession) -> Void)?
+    private let taskCalendarContext: TaskBlockCalendarContext?
+    @State private var scheduleRequest: TaskBlockScheduleRequest?
 
     init(
         key: BlockEditorKey,
@@ -63,7 +69,8 @@ private struct BlockEditorSessionHost: View {
         focusRegistry: EditorFocusRegistry,
         onDocumentChange: @escaping (BlockDocument) -> Void,
         requestLinkURL: @escaping () -> URL?,
-        sessionSink: ((BlockEditorSession) -> Void)?
+        sessionSink: ((BlockEditorSession) -> Void)?,
+        taskCalendarContext: TaskBlockCalendarContext?
     ) {
         _session = StateObject(wrappedValue: BlockEditorSession(
             noteID: key.noteID,
@@ -75,6 +82,7 @@ private struct BlockEditorSessionHost: View {
         ))
         self.requestLinkURL = requestLinkURL
         self.sessionSink = sessionSink
+        self.taskCalendarContext = taskCalendarContext
     }
 
     var body: some View {
@@ -96,6 +104,29 @@ private struct BlockEditorSessionHost: View {
                         .frame(minHeight: rowHeight(for: block.kind))
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier(block.id.rawValue.uuidString)
+                    if block.kind == .task, let taskCalendarContext {
+                        TaskBlockCalendarBadge(
+                            store: taskCalendarContext.store,
+                            noteID: session.noteID,
+                            blockID: block.id,
+                            onSchedule: {
+                                scheduleRequest = .init(blockID: block.id)
+                            },
+                            onUnlink: {
+                                Task {
+                                    _ = try? await TaskBlockCalendarIntegration.unlinkFromBlock(
+                                        store: taskCalendarContext.store,
+                                        noteID: session.noteID,
+                                        blockID: block.id
+                                    )
+                                }
+                            },
+                            onOpenItem: taskCalendarContext.onOpenItem,
+                            onToggleCompletion: {
+                                toggleTaskCompletion(blockID: block.id, context: taskCalendarContext)
+                            }
+                        )
+                    }
                 }
                 .onDrop(
                     of: [BlockDragDropHandler.pasteboardType],
@@ -123,6 +154,42 @@ private struct BlockEditorSessionHost: View {
         .accessibilityLabel("结构化笔记编辑器")
         .onAppear { sessionSink?(session) }
         .onChange(of: session.document) { _, _ in sessionSink?(session) }
+        .sheet(item: $scheduleRequest) { request in
+            if let taskCalendarContext {
+                TaskBlockScheduleSheet(
+                    store: taskCalendarContext.store,
+                    noteID: session.noteID,
+                    blockID: request.blockID,
+                    now: taskCalendarContext.now(),
+                    onCancel: { scheduleRequest = nil },
+                    onScheduled: { scheduleRequest = nil }
+                )
+            }
+        }
+    }
+
+    private func toggleTaskCompletion(blockID: BlockID, context: TaskBlockCalendarContext) {
+        Task {
+            guard let link = TaskBlockCalendarIntegration.link(
+                for: context.store,
+                noteID: session.noteID,
+                blockID: blockID
+            ), let item = context.store.calendarState.items[link.calendarItemID] else { return }
+            if item.completedAt == nil {
+                _ = try? await TaskBlockCalendarIntegration.completeFromBlock(
+                    store: context.store,
+                    noteID: session.noteID,
+                    blockID: blockID,
+                    at: context.now()
+                )
+            } else {
+                _ = try? await TaskBlockCalendarIntegration.reopenFromBlock(
+                    store: context.store,
+                    noteID: session.noteID,
+                    blockID: blockID
+                )
+            }
+        }
     }
 
     private func rowHeight(for kind: BlockKind) -> CGFloat {
@@ -134,6 +201,11 @@ private struct BlockEditorSessionHost: View {
         case .paragraph, .bullet, .ordered, .task, .quote, .code, .link: 26
         }
     }
+}
+
+private struct TaskBlockScheduleRequest: Identifiable {
+    let id = UUID()
+    let blockID: BlockID
 }
 
 private struct BlockFormattingControls: View {

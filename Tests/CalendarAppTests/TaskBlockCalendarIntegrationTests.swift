@@ -74,4 +74,51 @@ struct TaskBlockCalendarIntegrationTests {
         #expect(store.calendarState.items[item.id]?.completedAt == completedAt)
         #expect(store.state.notes[note.id]?.document.blocks.first { $0.id == blockID }?.taskState?.completedAt == completedAt)
     }
+
+    @Test func unlinkFromBlockPreservesBothObjects() async throws {
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let blockID = BlockID()
+        var note = Note.empty(id: NoteID(), categoryID: calendar.uncategorizedID, now: .distantPast)
+        note.document = .init(blocks: [try .task(id: blockID, text: "保留两端")])
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let item = try CalendarItem(
+            id: UUID(), kind: .task, title: "保留两端", categoryID: calendar.uncategorizedID,
+            schedule: try CalendarSchedule(
+                startDate: CalendarDate(year: 2026, month: 8, day: 17)!,
+                endDate: CalendarDate(year: 2026, month: 8, day: 17)!,
+                startTime: nil,
+                endTime: nil
+            ),
+            completedAt: nil, createdAt: .distantPast, updatedAt: .distantPast
+        )
+        _ = try await store.sendWorkspace(
+            .scheduleTaskBlock(.init(noteID: note.id, blockID: blockID, item: item))
+        )
+
+        let outcome = try await TaskBlockCalendarIntegration.unlinkFromBlock(
+            store: store,
+            noteID: note.id,
+            blockID: blockID
+        )
+
+        #expect({ if case .committed = outcome { true } else { false } }())
+        #expect(store.state.taskBlockLinks.isEmpty)
+        #expect(store.state.notes[note.id]?.document.blocks.contains { $0.id == blockID } == true)
+        #expect(store.calendarState.items[item.id] != nil)
+    }
+
+    @Test func schedulingDefaultsToTheLocalCivilDayInsteadOfABuildDate() {
+        let instant = Date(timeIntervalSince1970: 1_754_998_200)
+        let zone = TimeZone(secondsFromGMT: 8 * 60 * 60)!
+
+        #expect(
+            TaskBlockScheduleDefaults.day(now: instant, timeZone: zone)
+                == CalendarDate.localDay(containing: instant, in: zone)
+        )
+    }
 }

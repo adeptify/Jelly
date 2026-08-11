@@ -223,6 +223,8 @@ struct MonthView: View {
     let store: WorkspaceStore
     private let newItemRequest: WorkspaceNewItemRequest?
     private let consumeNewItemRequest: ((UUID, WorkspaceRoute) -> WorkspaceNewItemRequest?)?
+    private let deepLinkRequest: WorkspaceDeepLinkRequest?
+    private let consumeDeepLinkRequest: ((UUID, WorkspaceDeepLinkTarget) -> WorkspaceDeepLinkRequest?)?
     private let todayRefreshPolicy: MonthViewTodayRefreshPolicy
     private let todayRefreshController: MonthViewTodayRefreshController
     @Environment(\.scenePhase) private var scenePhase
@@ -272,11 +274,15 @@ struct MonthView: View {
         store: WorkspaceStore,
         todayRefreshPolicy: MonthViewTodayRefreshPolicy = .live,
         newItemRequest: WorkspaceNewItemRequest? = nil,
-        consumeNewItemRequest: ((UUID, WorkspaceRoute) -> WorkspaceNewItemRequest?)? = nil
+        consumeNewItemRequest: ((UUID, WorkspaceRoute) -> WorkspaceNewItemRequest?)? = nil,
+        deepLinkRequest: WorkspaceDeepLinkRequest? = nil,
+        consumeDeepLinkRequest: ((UUID, WorkspaceDeepLinkTarget) -> WorkspaceDeepLinkRequest?)? = nil
     ) {
         self.store = store
         self.newItemRequest = newItemRequest
         self.consumeNewItemRequest = consumeNewItemRequest
+        self.deepLinkRequest = deepLinkRequest
+        self.consumeDeepLinkRequest = consumeDeepLinkRequest
         self.todayRefreshPolicy = todayRefreshPolicy
         todayRefreshController = MonthViewTodayRefreshController(policy: todayRefreshPolicy)
         let initialWeekStream = MonthViewInitialWeekStream(today: todayRefreshPolicy.today)
@@ -402,9 +408,13 @@ struct MonthView: View {
                 hiddenCategoryIDs = CategoryFilterView.decode(storedHiddenCategoryIDs)
                 refreshProjection()
                 consumeCalendarNewItemRequest(newItemRequest)
+                consumeCalendarDeepLinkRequest(deepLinkRequest)
             }
             .onChange(of: newItemRequest) { _, request in
                 consumeCalendarNewItemRequest(request)
+            }
+            .onChange(of: deepLinkRequest) { _, request in
+                consumeCalendarDeepLinkRequest(request)
             }
             .onReceive(NotificationCenter.default.publisher(
                 for: MonthViewTodayRefreshPolicy.calendarDayChangedNotification
@@ -1002,6 +1012,14 @@ struct MonthView: View {
             return
         }
         openQuickCreate(on: date)
+    }
+
+    private func consumeCalendarDeepLinkRequest(_ request: WorkspaceDeepLinkRequest?) {
+        guard let request,
+              case let .calendarItem(itemID) = request.target,
+              let item = store.calendarState.items[itemID],
+              consumeDeepLinkRequest?(request.id, request.target) != nil else { return }
+        openEditor(for: .item(item))
     }
 
     private func openEditor(for item: ProjectedItem) {

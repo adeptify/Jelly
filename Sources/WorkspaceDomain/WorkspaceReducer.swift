@@ -102,6 +102,8 @@ public enum WorkspaceReducer {
             try scheduleNote(payload, in: &candidate, now: now, metadata: &metadata)
         case let .scheduleTaskBlock(payload):
             try scheduleTaskBlock(payload, in: &candidate, now: now, metadata: &metadata)
+        case let .unlinkTaskBlock(noteID, blockID):
+            return unlinkTaskBlock(noteID: noteID, blockID: blockID, in: &candidate)
         case let .setTaskCompletion(target, value):
             return try setTaskCompletion(target, value: value, in: &candidate, now: now)
         case let .createInspiration(payload):
@@ -117,6 +119,8 @@ public enum WorkspaceReducer {
             )
         case let .convertInspirationToNote(payload):
             return try convertInspiration(payload, in: &candidate, now: now)
+        case let .changeInspirationCategory(id, categoryID, at):
+            return try changeInspirationCategory(id, categoryID: categoryID, in: &candidate, now: at)
         case let .archiveInspiration(id, at):
             try setInspirationLifecycle(id, lifecycle: .archived, in: &candidate, now: at)
         case let .restoreInspiration(id, at):

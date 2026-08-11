@@ -28,7 +28,13 @@ struct NotesWorkspaceViewModelTests {
             store: store,
             scheduler: NotesImmediateAutosaveScheduler()
         )
-        let viewModel = NotesWorkspaceViewModel(store: store, autosave: autosave, clock: { now })
+        let searchIndex = WorkspaceSearchIndex()
+        let viewModel = NotesWorkspaceViewModel(
+            store: store,
+            autosave: autosave,
+            searchIndex: searchIndex,
+            clock: { now }
+        )
 
         viewModel.searchText = "客户"
         viewModel.categoryFilterID = work.id
@@ -37,6 +43,7 @@ struct NotesWorkspaceViewModelTests {
         #expect(viewModel.recentNotes.map(\.id) == [note.id])
         #expect(viewModel.allNotes.map(\.id) == [note.id])
         #expect(viewModel.archivedNotes.isEmpty)
+        #expect(searchIndex.projection.workspaceRevision == store.state.revision)
     }
 
     @Test func autosaveCommitPublishesTheLatestTitleToBrowserSearchWithoutManualRefresh() async throws {

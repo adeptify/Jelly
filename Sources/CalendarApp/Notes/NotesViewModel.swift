@@ -27,6 +27,7 @@ enum NotesBrowserPartition: Equatable, Sendable {
 
     private let store: WorkspaceStore
     private let autosave: NoteAutosaveCoordinator
+    private let searchIndex: WorkspaceSearchIndex
     private let clock: @Sendable () -> Date
     private var pendingSelectionMutation: PendingSelectionMutation?
 
@@ -41,10 +42,12 @@ enum NotesBrowserPartition: Equatable, Sendable {
     init(
         store: WorkspaceStore,
         autosave: NoteAutosaveCoordinator,
+        searchIndex: WorkspaceSearchIndex = WorkspaceSearchIndex(),
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.store = store
         self.autosave = autosave
+        self.searchIndex = searchIndex
         self.clock = clock
         refreshBrowser()
         observeStorePublication()
@@ -60,7 +63,7 @@ enum NotesBrowserPartition: Equatable, Sendable {
     }
 
     func refreshBrowser() {
-        let matching = store.state.notes.values.filter(matchesFilter(_:))
+        let matching = searchableNotes().filter(matchesCategory(_:))
         let active = matching.filter { $0.archivedAt == nil }.sorted(by: Self.browserOrder(_:_:))
         recentNotes = active
         allNotes = active
@@ -235,15 +238,30 @@ enum NotesBrowserPartition: Equatable, Sendable {
         }
     }
 
-    private func matchesFilter(_ note: Note) -> Bool {
-        guard categoryFilterID == nil || note.categoryID == categoryFilterID else { return false }
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !query.isEmpty else { return true }
-        let body = note.document.blocks
-            .flatMap(\.inlineContent.spans)
-            .map(\.text)
-            .joined(separator: "\n")
-        return note.title.lowercased().contains(query) || body.lowercased().contains(query)
+    private func matchesCategory(_ note: Note) -> Bool {
+        categoryFilterID == nil || note.categoryID == categoryFilterID
+    }
+
+    private func searchableNotes() -> [Note] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return Array(store.state.notes.values) }
+        let records: [WorkspaceSearchRecord]
+        do {
+            records = try searchIndex.search(
+                query: query,
+                kind: .note,
+                includeArchived: true,
+                in: store.state
+            )
+        } catch {
+            records = WorkspaceSearchProjection.build(from: store.state)
+                .search(query: query, kind: .note, includeArchived: true)
+        }
+        let ids = Set(records.compactMap { record -> NoteID? in
+            if case let .note(id) = record.objectID { return id }
+            return nil
+        })
+        return store.state.notes.values.filter { ids.contains($0.id) }
     }
 
     private func didCommit(_ outcome: WorkspaceTransactionOutcome) -> Bool {

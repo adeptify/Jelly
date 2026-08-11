@@ -7,6 +7,7 @@ struct CalendarNoteRelationPopover: View {
     @Bindable var model: CalendarNoteIntegrationModel
     let store: WorkspaceStore
     var onOpenNote: (NoteID) -> Void
+    @State private var pendingLinkedTaskDetach: NoteID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -15,7 +16,11 @@ struct CalendarNoteRelationPopover: View {
 
             if let primary = model.primaryNote {
                 noteRow(primary, badge: "主笔记") {
-                    Task { _ = try? await model.detach(primary.id) }
+                    if model.requiresTaskUnlinkBeforeDetaching(primary.id) {
+                        pendingLinkedTaskDetach = primary.id
+                    } else {
+                        Task { _ = try? await model.detach(primary.id) }
+                    }
                 }
             } else {
                 Text("尚未关联主笔记")
@@ -81,6 +86,28 @@ struct CalendarNoteRelationPopover: View {
             } onCancel: {
                 model.dismissSheet()
             }
+        }
+        .confirmationDialog(
+            "先解除待办与日历的联动？",
+            isPresented: Binding(
+                get: { pendingLinkedTaskDetach != nil },
+                set: { if !$0 { pendingLinkedTaskDetach = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("解除联动并取消主笔记", role: .destructive) {
+                guard let noteID = pendingLinkedTaskDetach else { return }
+                pendingLinkedTaskDetach = nil
+                Task {
+                    _ = try? await model.detach(
+                        noteID,
+                        linkedTaskDisposition: .unlinkPreservingCompletion
+                    )
+                }
+            }
+            Button("取消", role: .cancel) { pendingLinkedTaskDetach = nil }
+        } message: {
+            Text("这篇主笔记里有待办与当前日历事项联动。解除后两边内容和完成状态都会保留，但之后各自独立。")
         }
     }
 

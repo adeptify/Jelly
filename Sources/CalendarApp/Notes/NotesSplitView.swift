@@ -11,6 +11,9 @@ struct NotesSplitView: View {
     let store: WorkspaceStore
     let focusRegistry: EditorFocusRegistry
     let transitionCoordinator: WorkspaceRouteTransitionCoordinator?
+    @ObservedObject var deepLinkRouter: WorkspaceDeepLinkRouter
+    @ObservedObject var newItemRouter: WorkspaceNewItemRouter
+    let searchIndex: WorkspaceSearchIndex
     let terminationCoordinator: NotesApplicationTerminationCoordinator?
     let clock: @Sendable () -> Date
 
@@ -32,16 +35,27 @@ struct NotesSplitView: View {
         store: WorkspaceStore,
         focusRegistry: EditorFocusRegistry,
         transitionCoordinator: WorkspaceRouteTransitionCoordinator? = nil,
+        deepLinkRouter: WorkspaceDeepLinkRouter = WorkspaceDeepLinkRouter(),
+        newItemRouter: WorkspaceNewItemRouter = WorkspaceNewItemRouter(),
+        searchIndex: WorkspaceSearchIndex = WorkspaceSearchIndex(),
         terminationCoordinator: NotesApplicationTerminationCoordinator? = nil,
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.store = store
         self.focusRegistry = focusRegistry
         self.transitionCoordinator = transitionCoordinator
+        self.deepLinkRouter = deepLinkRouter
+        self.newItemRouter = newItemRouter
+        self.searchIndex = searchIndex
         self.terminationCoordinator = terminationCoordinator
         self.clock = clock
         let autosave = NoteAutosaveCoordinator(store: store)
-        let viewModel = NotesWorkspaceViewModel(store: store, autosave: autosave, clock: clock)
+        let viewModel = NotesWorkspaceViewModel(
+            store: store,
+            autosave: autosave,
+            searchIndex: searchIndex,
+            clock: clock
+        )
         _autosave = State(initialValue: autosave)
         _viewModel = State(initialValue: viewModel)
         _closeBridge = State(initialValue: NoteCloseProtectionBridge(coordinator: autosave))
@@ -149,6 +163,8 @@ struct NotesSplitView: View {
         .onAppear {
             registerRouteBridge()
             refreshRecoveryPresentation()
+            consumeNoteDeepLink(deepLinkRouter.pendingRequest)
+            consumeNoteNewItemRequest(newItemRouter.pendingRequest)
         }
         .onChange(of: editorIdentity) { _, _ in
             registerRouteBridge()
@@ -159,6 +175,12 @@ struct NotesSplitView: View {
         }
         .onChange(of: store.phase) { _, _ in
             refreshRecoveryPresentation()
+        }
+        .onChange(of: deepLinkRouter.pendingRequest) { _, request in
+            consumeNoteDeepLink(request)
+        }
+        .onChange(of: newItemRouter.pendingRequest) { _, request in
+            consumeNoteNewItemRequest(request)
         }
         .background(NotesWindowCloseMonitor(bridge: closeBridge, finalizer: nativeFinalizer))
     }
@@ -183,6 +205,7 @@ struct NotesSplitView: View {
                 onArchive: { Task { await archiveSelected() } },
                 onRestore: { Task { await restoreSelected() } },
                 onPermanentDelete: requestPermanentDeleteSelected,
+                onOpenCalendarItem: openCalendarItem,
                 sessionSink: { session in
                     if let session {
                         activeEditorSession = session
@@ -193,6 +216,7 @@ struct NotesSplitView: View {
                 },
                 nativeFinalizerHook: $nativeFinalizer
             )
+            .id(identity)
         } else {
             ContentUnavailableView(
                 "选择或新建笔记",
@@ -229,6 +253,29 @@ struct NotesSplitView: View {
         }
         editorIdentity = .init(noteID: noteID, editSessionID: sessionID)
         statusBanner = nil
+    }
+
+    private func openCalendarItem(_ itemID: UUID) {
+        guard let transitionCoordinator else { return }
+        Task {
+            guard await transitionCoordinator.requestActivation(.calendar) else { return }
+            deepLinkRouter.request(.calendarItem(itemID))
+        }
+    }
+
+    private func consumeNoteDeepLink(_ request: WorkspaceDeepLinkRequest?) {
+        guard let request,
+              case let .note(noteID) = request.target,
+              store.state.notes[noteID] != nil,
+              deepLinkRouter.consume(request.id, target: request.target) != nil else { return }
+        Task { await selectNote(noteID) }
+    }
+
+    private func consumeNoteNewItemRequest(_ request: WorkspaceNewItemRequest?) {
+        guard let request,
+              request.route == .notes,
+              newItemRouter.consume(request.id, route: .notes) != nil else { return }
+        Task { await createNote() }
     }
 
     private func createNote() async {

@@ -246,9 +246,25 @@ enum CalendarNotePresentedSheet: Equatable, Sendable {
     }
 
     @discardableResult
-    func detach(_ noteID: NoteID) async throws -> Bool {
+    func requiresTaskUnlinkBeforeDetaching(_ noteID: NoteID) -> Bool {
+        guard primaryNote?.id == noteID,
+              case let .item(itemID) = target else { return false }
+        return store.state.taskBlockLinks.contains {
+            $0.noteID == noteID && $0.calendarItemID == itemID
+        }
+    }
+
+    @discardableResult
+    func detach(
+        _ noteID: NoteID,
+        linkedTaskDisposition: TaskBlockPrimaryChangeDisposition? = nil
+    ) async throws -> Bool {
         let outcome = try await store.sendWorkspace(
-            .detachNote(scopeForItemActions(), noteID, linkedTaskDisposition: nil),
+            .detachNote(
+                scopeForItemActions(),
+                noteID,
+                linkedTaskDisposition: linkedTaskDisposition
+            ),
             undoLabel: "取消关联笔记"
         )
         refresh()

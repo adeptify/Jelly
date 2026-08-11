@@ -169,4 +169,43 @@ struct CalendarNoteIntegrationTests {
         #expect(store.calendarState.items[item.id] != nil)
         #expect(store.state.calendarNoteRelations.baselines[.item(item.id)]?.primaryNoteID == note.id)
     }
+
+    @Test func noteScheduleDefaultsToTheUsersCurrentLocalDay() {
+        let timeZone = TimeZone(secondsFromGMT: 8 * 60 * 60)!
+        let now = Date(timeIntervalSince1970: 1_754_860_200)
+        #expect(NoteScheduleDefaults.day(now: now, timeZone: timeZone)
+            == CalendarDate.localDay(containing: now, in: timeZone))
+    }
+
+    @Test func detachingAPrimaryThatOwnsATaskLinkRequiresAndAcceptsExplicitUnlink() async throws {
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let blockID = BlockID()
+        var note = Note.empty(id: NoteID(), categoryID: calendar.uncategorizedID, now: .distantPast)
+        note.document = .init(blocks: [try .task(id: blockID, text: "关联待办")])
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let day = CalendarDate(year: 2026, month: 8, day: 18)!
+        let item = try CalendarItem(
+            id: UUID(), kind: .task, title: "关联待办", categoryID: calendar.uncategorizedID,
+            schedule: try CalendarSchedule(startDate: day, endDate: day, startTime: nil, endTime: nil),
+            completedAt: nil, createdAt: .distantPast, updatedAt: .distantPast
+        )
+        _ = try await store.sendWorkspace(
+            .scheduleTaskBlock(.init(noteID: note.id, blockID: blockID, item: item))
+        )
+        let model = CalendarNoteIntegrationModel(target: .item(item.id), store: store)
+
+        #expect(model.requiresTaskUnlinkBeforeDetaching(note.id))
+        #expect(try await model.detach(
+            note.id,
+            linkedTaskDisposition: .unlinkPreservingCompletion
+        ))
+        #expect(store.state.taskBlockLinks.isEmpty)
+        #expect(store.state.notes[note.id] != nil)
+        #expect(store.calendarState.items[item.id] != nil)
+    }
 }

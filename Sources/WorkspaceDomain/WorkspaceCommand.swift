@@ -233,6 +233,7 @@ public enum WorkspaceCommand: Sendable {
     case detachNote(CalendarRelationScope, NoteID, linkedTaskDisposition: TaskBlockPrimaryChangeDisposition?)
     case scheduleNoteOnCalendar(ScheduleNoteOnCalendarPayload)
     case scheduleTaskBlock(ScheduleTaskBlockPayload)
+    case unlinkTaskBlock(noteID: NoteID, blockID: BlockID)
     case setTaskCompletion(TaskCompletionTarget, value: TaskCompletionValue)
     case createInspiration(CreateInspirationPayload)
     case updateInspirationMetadata(
@@ -242,6 +243,7 @@ public enum WorkspaceCommand: Sendable {
         resolvedKind: ResolvedSourceKind
     )
     case convertInspirationToNote(ConvertInspirationToNotePayload)
+    case changeInspirationCategory(InspirationID, categoryID: UUID, at: Date)
     case archiveInspiration(InspirationID, at: Date)
     case restoreInspiration(InspirationID, at: Date)
     case permanentlyDeleteInspiration(

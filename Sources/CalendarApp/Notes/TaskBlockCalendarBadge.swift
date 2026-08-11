@@ -1,6 +1,24 @@
+import AppKit
 import CalendarDomain
 import SwiftUI
 import WorkspaceDomain
+
+@MainActor
+struct TaskBlockCalendarContext {
+    let store: WorkspaceStore
+    let now: @Sendable () -> Date
+    let onOpenItem: (UUID) -> Void
+
+    init(
+        store: WorkspaceStore,
+        now: @escaping @Sendable () -> Date = Date.init,
+        onOpenItem: @escaping (UUID) -> Void
+    ) {
+        self.store = store
+        self.now = now
+        self.onOpenItem = onOpenItem
+    }
+}
 
 /// Inline, unobtrusive calendar badge for a linked Task Block.
 struct TaskBlockCalendarBadge: View {
@@ -36,9 +54,8 @@ struct TaskBlockCalendarBadge: View {
                 Button("取消关联", role: .destructive, action: onUnlink)
                     .controlSize(.mini)
             } else {
-                Button("安排到日历", action: onSchedule)
-                    .controlSize(.mini)
-                    .accessibilityLabel("安排待办到日历")
+                TaskBlockScheduleButton(action: onSchedule)
+                    .frame(minWidth: 84, minHeight: 20)
             }
         }
     }
@@ -46,5 +63,41 @@ struct TaskBlockCalendarBadge: View {
     private func dateLabel(_ item: CalendarItem) -> String {
         let d = item.schedule.startDate
         return String(format: "%04d-%02d-%02d", d.year, d.month, d.day)
+    }
+}
+
+private struct TaskBlockScheduleButton: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(
+            title: "安排到日历",
+            target: context.coordinator,
+            action: #selector(Coordinator.performAction)
+        )
+        button.bezelStyle = .roundRect
+        button.controlSize = .mini
+        button.setAccessibilityLabel("安排待办到日历")
+        button.setAccessibilityIdentifier("task-block-schedule-calendar")
+        return button
+    }
+
+    func updateNSView(_ button: NSButton, context: Context) {
+        context.coordinator.action = action
+        button.setAccessibilityLabel("安排待办到日历")
+        button.setAccessibilityIdentifier("task-block-schedule-calendar")
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var action: () -> Void
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+
+        @objc func performAction() { action() }
     }
 }

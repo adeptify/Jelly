@@ -2,16 +2,41 @@ import CalendarDomain
 import SwiftUI
 import WorkspaceDomain
 
+enum TaskBlockScheduleDefaults {
+    static func day(now: Date, timeZone: TimeZone) -> CalendarDate {
+        CalendarDate.localDay(containing: now, in: timeZone)
+    }
+}
+
 struct TaskBlockScheduleSheet: View {
     let store: WorkspaceStore
     let noteID: NoteID
     let blockID: BlockID
     let onCancel: () -> Void
     let onScheduled: () -> Void
+    private let timeZone: TimeZone
 
     @State private var title = ""
-    @State private var day = CalendarDate(year: 2026, month: 8, day: 11)!
+    @State private var selectedDate: Date
     @State private var error: String?
+
+    init(
+        store: WorkspaceStore,
+        noteID: NoteID,
+        blockID: BlockID,
+        now: Date = Date(),
+        timeZone: TimeZone = .autoupdatingCurrent,
+        onCancel: @escaping () -> Void,
+        onScheduled: @escaping () -> Void
+    ) {
+        self.store = store
+        self.noteID = noteID
+        self.blockID = blockID
+        self.timeZone = timeZone
+        self.onCancel = onCancel
+        self.onScheduled = onScheduled
+        _selectedDate = State(initialValue: now)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -19,6 +44,7 @@ struct TaskBlockScheduleSheet: View {
                 .font(.headline)
             TextField("事项标题", text: $title)
                 .textFieldStyle(.roundedBorder)
+            EditorDateChip(date: $selectedDate)
             if let error {
                 Text(error).font(.caption).foregroundStyle(.red)
             }
@@ -51,7 +77,12 @@ struct TaskBlockScheduleSheet: View {
                 kind: .task,
                 title: title.isEmpty ? "待办" : title,
                 categoryID: note.categoryID,
-                schedule: try CalendarSchedule(startDate: day, endDate: day, startTime: nil, endTime: nil),
+                schedule: try CalendarSchedule(
+                    startDate: TaskBlockScheduleDefaults.day(now: selectedDate, timeZone: timeZone),
+                    endDate: TaskBlockScheduleDefaults.day(now: selectedDate, timeZone: timeZone),
+                    startTime: nil,
+                    endTime: nil
+                ),
                 completedAt: nil,
                 createdAt: .now,
                 updatedAt: .now

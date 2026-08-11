@@ -2,15 +2,40 @@ import CalendarDomain
 import SwiftUI
 import WorkspaceDomain
 
+enum NoteScheduleDefaults {
+    static func day(now: Date, timeZone: TimeZone) -> CalendarDate {
+        CalendarDate.localDay(containing: now, in: timeZone)
+    }
+}
+
 struct NoteScheduleSheet: View {
     let store: WorkspaceStore
     let noteID: NoteID
     let onCancel: () -> Void
-    let onScheduled: () -> Void
+    let onScheduled: (UUID) -> Void
+    private let timeZone: TimeZone
+    private let clock: @Sendable () -> Date
 
     @State private var title: String = ""
-    @State private var day = CalendarDate(year: 2026, month: 8, day: 11)!
+    @State private var selectedDate: Date
     @State private var error: String?
+
+    init(
+        store: WorkspaceStore,
+        noteID: NoteID,
+        now: @escaping @Sendable () -> Date = Date.init,
+        timeZone: TimeZone = .autoupdatingCurrent,
+        onCancel: @escaping () -> Void,
+        onScheduled: @escaping (UUID) -> Void
+    ) {
+        self.store = store
+        self.noteID = noteID
+        self.onCancel = onCancel
+        self.onScheduled = onScheduled
+        self.timeZone = timeZone
+        clock = now
+        _selectedDate = State(initialValue: now())
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -18,6 +43,7 @@ struct NoteScheduleSheet: View {
                 .font(.headline)
             TextField("事项标题", text: $title)
                 .textFieldStyle(.roundedBorder)
+            EditorDateChip(date: $selectedDate)
             if let error {
                 Text(error).font(.caption).foregroundStyle(.red)
             }
@@ -44,27 +70,28 @@ struct NoteScheduleSheet: View {
                 error = "笔记不存在。"
                 return
             }
+            let timestamp = clock()
             let item = try CalendarItem(
                 id: UUID(),
                 kind: .task,
                 title: title.isEmpty ? (note.title.isEmpty ? "未命名" : note.title) : title,
                 categoryID: note.categoryID,
                 schedule: try CalendarSchedule(
-                    startDate: day,
-                    endDate: day,
+                    startDate: NoteScheduleDefaults.day(now: selectedDate, timeZone: timeZone),
+                    endDate: NoteScheduleDefaults.day(now: selectedDate, timeZone: timeZone),
                     startTime: nil,
                     endTime: nil
                 ),
                 completedAt: nil,
-                createdAt: .now,
-                updatedAt: .now
+                createdAt: timestamp,
+                updatedAt: timestamp
             )
             let outcome = try await store.sendWorkspace(
                 .scheduleNoteOnCalendar(.init(noteID: noteID, item: item)),
                 undoLabel: "从笔记安排到日历"
             )
             if case .committed = outcome {
-                onScheduled()
+                onScheduled(item.id)
             } else {
                 error = "安排未完成。"
             }
