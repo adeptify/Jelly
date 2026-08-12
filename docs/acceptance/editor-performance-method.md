@@ -41,20 +41,20 @@
 
 | 数据集 | 阶段 | p95 | max | 结果 |
 |---|---|---:|---:|---|
-| Daily | Reducer | 0.011ms | 0.017ms | PASS |
-| Daily | 投影 | 0.217ms | 0.286ms | PASS |
-| Daily | 按键可见 | 2.526ms | 2.629ms | PASS |
-| Daily | 停顿后完整排版 | 3.927ms | 4.041ms | PASS |
-| Daily | 打开 | 7.283ms | 7.299ms | PASS |
-| Long | Reducer | 0.087ms | 0.093ms | PASS |
-| Long | 投影 | 2.155ms | 2.204ms | PASS |
-| Long | 按键可见 | 21.852ms | 24.251ms | PASS |
-| Long | 停顿后完整排版 | 35.722ms | 47.678ms | PASS |
-| Long | 打开 | 72.269ms | 73.367ms | PASS |
-| Stress | Reducer | 0.211ms | 0.222ms | PASS |
-| Stress | 投影 | 5.150ms | 5.222ms | PASS |
-| Stress | 按键可见 | 48.171ms | 48.427ms | PASS |
-| Stress | 停顿后完整排版 | 90.551ms | 110.651ms | PASS |
-| Stress | 打开 | 184.915ms | 193.658ms | PASS |
+| Daily | Reducer | 0.011ms | 0.016ms | PASS |
+| Daily | 投影 | 0.215ms | 0.225ms | PASS |
+| Daily | 按键可见 | 2.434ms | 2.943ms | PASS |
+| Daily | 停顿后完整排版 | 3.821ms | 3.920ms | PASS |
+| Daily | 打开 | 7.051ms | 7.192ms | PASS |
+| Long | Reducer | 0.093ms | 0.111ms | PASS |
+| Long | 投影 | 2.117ms | 2.366ms | PASS |
+| Long | 按键可见 | 20.133ms | 25.816ms | PASS |
+| Long | 停顿后完整排版 | 33.998ms | 34.303ms | PASS |
+| Long | 打开 | 72.830ms | 73.332ms | PASS |
+| Stress | Reducer | 0.217ms | 0.235ms | PASS |
+| Stress | 投影 | 5.360ms | 5.617ms | PASS |
+| Stress | 按键可见 | 48.753ms | 50.364ms | PASS |
+| Stress | 停顿后完整排版 | 85.314ms | 85.686ms | PASS |
+| Stress | 打开 | 174.547ms | 180.655ms | PASS |
 
 结果只证明这台机器、这个提交和上述测量口径下通过固定门槛。长文滚动手感、输入法候选窗和显示器真实刷新仍由最终打包 App 验收补充，不能由这张表替代。
