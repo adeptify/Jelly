@@ -13,7 +13,7 @@ struct WorkspaceRouteTransitionTests {
         #expect(WorkspaceRoute.visibleRoutes(.production) == [.calendar, .notes, .inspiration])
     }
 
-    @Test func protectedOnlyNotesDraftBlocksRouteActivation() async throws {
+    @Test func protectedOnlyDraftCanLeaveTheStillMountedNotesModule() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("jelly-10d-route-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -43,8 +43,8 @@ struct WorkspaceRouteTransitionTests {
         let coordinator = WorkspaceRouteTransitionCoordinator(routeState: routeState, features: features)
         coordinator.attachNotesCloseBridge(bridge)
 
-        #expect(await coordinator.requestActivation(.calendar) == false)
-        #expect(routeState.route == .notes)
+        #expect(await coordinator.requestActivation(.calendar))
+        #expect(routeState.route == .calendar)
         #expect(await bridge.decision(for: NoteCloseProtectionReason.route) == .keepOpen)
     }
 
@@ -81,6 +81,47 @@ struct WorkspaceRouteTransitionTests {
         coordinator.attachNotesCloseBridge(bridge)
         #expect(await coordinator.requestActivation(.calendar) == true)
         #expect(routeState.route == .calendar)
+    }
+
+    @Test func editedNotesRouteActivatesBeforeThePendingDiskSaveFinishes() async throws {
+        let calendar = makeEmptyState()
+        let note = Note.empty(
+            id: NoteID(),
+            categoryID: calendar.uncategorizedID,
+            now: Date(timeIntervalSince1970: 1)
+        )
+        let repository = InMemoryWorkspaceRepository(initialState: calendar)
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: repository
+        )
+        await store.load()
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let autosave = NoteAutosaveCoordinator(store: store, scheduler: RouteTestImmediateScheduler())
+        try autosave.beginSession(
+            note,
+            linkedTaskBlockLinks: [],
+            editSessionID: UUID(),
+            activeHostToken: UUID()
+        )
+        await repository.suspendNextSave()
+        _ = try autosave.update(title: "切页不能等磁盘")
+        let bridge = NoteCloseProtectionBridge(coordinator: autosave)
+        let features = WorkspaceFeatures(notes: true, inspiration: true)
+        let routeState = WorkspaceRouteState(
+            features: features,
+            preferences: SpyWorkspaceRoutePreferenceStore(initial: "notes")
+        )
+        let coordinator = WorkspaceRouteTransitionCoordinator(routeState: routeState, features: features)
+        coordinator.attachNotesCloseBridge(bridge)
+
+        let activation = Task { await coordinator.requestActivation(.inspiration) }
+        await repository.waitForSaveToStart()
+        await Task.yield()
+
+        #expect(routeState.route == .inspiration)
+        await repository.resumeSave()
+        #expect(await activation.value)
     }
 }
 

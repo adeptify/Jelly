@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 import Testing
@@ -166,6 +167,336 @@ struct ContinuousBlockEditorHostTests {
         ) as? String == BlockKind.paragraph.rawValue)
     }
 
+    @Test @MainActor func focusedTypingRequestsCaretRevealAgainAfterDeferredHeightGrowth() async throws {
+        let block = continuousBlock(id: 53, text: "")
+        let fixture = continuousFixture(blocks: [block], selection: continuousCaret(block.id, 0))
+        fixture.host.frame = .init(x: 0, y: 0, width: 320, height: 80)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 320, height: 120),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = fixture.host
+        window.makeKeyAndOrderFront(nil)
+        #expect(window.makeFirstResponder(fixture.view))
+        let revealCount = fixture.view.selectionRevealRequestCount
+
+        fixture.view.insertText("第一行\n第二行\n第三行", replacementRange: .init(location: NSNotFound, length: 0))
+
+        #expect(fixture.view.selectionRevealRequestCount == revealCount + 1)
+        try await Task.sleep(for: .milliseconds(350))
+        #expect(fixture.view.selectionRevealRequestCount >= revealCount + 2)
+        window.orderOut(nil)
+    }
+
+    @Test @MainActor func clickingTheFormattingBarKeepsTheWholeNativeSelection() throws {
+        let last = continuousBlock(id: 55, text: "")
+        let session = BlockEditorSession(
+            noteID: NoteID(),
+            editSessionID: UUID(),
+            initialDocument: .init(blocks: [last]),
+            initialSelection: continuousCaret(last.id, 0),
+            focusRegistry: EditorFocusRegistry(),
+            onDocumentChange: { _ in }
+        )
+        let root = VStack {
+            ContinuousBlockEditorRepresentable(session: session, appearance: CalendarTheme.light)
+            BlockFormattingBar(session: session)
+        }
+        let hosting = NSHostingView(rootView: root)
+        hosting.frame = .init(x: 0, y: 0, width: 640, height: 240)
+        let window = NSWindow(
+            contentRect: hosting.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        hosting.layoutSubtreeIfNeeded()
+        let textView = try #require(continuousDescendants(
+            of: hosting,
+            as: ContinuousBlockEditorTextView.self
+        ).first)
+        #expect(window.makeFirstResponder(textView))
+        textView.insertText(
+            "alpha JellyFormatProbe omega",
+            replacementRange: .init(location: NSNotFound, length: 0)
+        )
+        let nativeRange = NSRange(
+            location: "alpha ".utf16.count,
+            length: "JellyFormatProbe".utf16.count
+        )
+        textView.setAccessibilitySelectedTextRange(nativeRange)
+        #expect(textView.selectedRange == nativeRange)
+        let bold = try #require(continuousDescendants(of: hosting, as: NSButton.self).first {
+            $0.accessibilityIdentifier() == BlockFormattingAction.bold.accessibilityIdentifier
+        })
+        #expect(bold.acceptsFirstResponder)
+        #expect(window.firstResponder === textView)
+        session.prepareAuxiliaryControlAction()
+        // AppKit can publish this transient caret while a non-focusable
+        // toolbar control is activating. It must not replace the user's range.
+        textView.selectedRange = .init(location: nativeRange.location, length: 0)
+
+        bold.performClick(bold)
+
+        #expect(window.firstResponder === textView)
+        let spans = session.document.blocks[0].inlineContent.spans
+        #expect(spans.map(\.text).joined() == "alpha JellyFormatProbe omega")
+        #expect(spans.filter { $0.marks.contains(.bold) }.map(\.text) == ["JellyFormatProbe"])
+        let expectedProjection = BlockDocumentTextProjection(
+            document: session.document,
+            appearance: CalendarTheme.light
+        )
+        for offset in nativeRange.location..<NSMaxRange(nativeRange) {
+            let actualFont = try #require(textView.textStorage?.attribute(
+                .font,
+                at: offset,
+                effectiveRange: nil
+            ) as? NSFont)
+            let expectedFont = try #require(expectedProjection.attributedString.attribute(
+                .font,
+                at: offset,
+                effectiveRange: nil
+            ) as? NSFont)
+            #expect(actualFont == expectedFont)
+        }
+        window.orderOut(nil)
+    }
+
+    @Test @MainActor func structuralFormattingBarConvertsASelectedLineAndKeepsItSelected() throws {
+        let block = continuousBlock(id: 58, text: "Task")
+        let selection = BlockEditorSelection.text(
+            anchor: .init(blockID: block.id, graphemeOffset: 0),
+            focus: .init(blockID: block.id, graphemeOffset: 4),
+            preferredColumn: nil,
+            typingAttributes: .init(marks: [], linkURL: nil)
+        )
+        let session = BlockEditorSession(
+            noteID: NoteID(),
+            editSessionID: UUID(),
+            initialDocument: .init(blocks: [block]),
+            initialSelection: selection,
+            focusRegistry: EditorFocusRegistry(),
+            onDocumentChange: { _ in }
+        )
+        let root = VStack {
+            ContinuousBlockEditorRepresentable(session: session, appearance: CalendarTheme.light)
+            BlockFormattingBar(session: session)
+        }
+        let hosting = NSHostingView(rootView: root)
+        hosting.frame = .init(x: 0, y: 0, width: 640, height: 240)
+        let window = NSWindow(
+            contentRect: hosting.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        hosting.layoutSubtreeIfNeeded()
+        let textView = try #require(continuousDescendants(
+            of: hosting,
+            as: ContinuousBlockEditorTextView.self
+        ).first)
+        let task = try #require(continuousDescendants(of: hosting, as: NSButton.self).first {
+            $0.accessibilityIdentifier() == BlockFormattingAction.task.accessibilityIdentifier
+        })
+
+        task.performClick(task)
+
+        #expect(session.document.blocks[0].kind == .task)
+        #expect(textView.selectedRange == .init(location: 0, length: 4))
+        #expect(window.firstResponder === textView)
+        window.orderOut(nil)
+    }
+
+    @Test @MainActor func repeatedNativeSelectionNotificationDoesNotRepublishEditorState() throws {
+        let block = continuousBlock(id: 56, text: "alpha JellyFormatProbe omega")
+        let fixture = continuousFixture(
+            blocks: [block],
+            selection: continuousCaret(block.id, 28)
+        )
+        let range = NSRange(
+            location: "alpha ".utf16.count,
+            length: "JellyFormatProbe".utf16.count
+        )
+        try fixture.session.adoptSelectionFromNativeTextView(
+            range,
+            typingAttributes: .init(marks: [], linkURL: nil)
+        )
+        var publicationCount = 0
+        let observation = fixture.session.objectWillChange.sink { _ in publicationCount += 1 }
+
+        try fixture.session.adoptSelectionFromNativeTextView(
+            range,
+            typingAttributes: .init(marks: [], linkURL: nil)
+        )
+
+        #expect(publicationCount == 0)
+        withExtendedLifetime(observation) {}
+    }
+
+    @Test @MainActor func deferredAccessibilitySelectionStillWinsBeforeFormatting() throws {
+        let last = continuousBlock(id: 57, text: "")
+        let session = BlockEditorSession(
+            noteID: NoteID(),
+            editSessionID: UUID(),
+            initialDocument: .init(blocks: [last]),
+            initialSelection: continuousCaret(last.id, 0),
+            focusRegistry: EditorFocusRegistry(),
+            onDocumentChange: { _ in }
+        )
+        let root = VStack {
+            ContinuousBlockEditorRepresentable(session: session, appearance: CalendarTheme.light)
+            BlockFormattingBar(session: session)
+        }
+        let hosting = NSHostingView(rootView: root)
+        hosting.frame = .init(x: 0, y: 0, width: 640, height: 300)
+        let window = NSWindow(
+            contentRect: hosting.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        hosting.layoutSubtreeIfNeeded()
+        let textView = try #require(continuousDescendants(
+            of: hosting,
+            as: ContinuousBlockEditorTextView.self
+        ).first)
+        #expect(window.makeFirstResponder(textView))
+        textView.insertText(
+            "alpha JellyFormatProbe omega",
+            replacementRange: .init(location: NSNotFound, length: 0)
+        )
+        let nativeRange = NSRange(
+            location: "alpha ".utf16.count,
+            length: "JellyFormatProbe".utf16.count
+        )
+        textView.setAccessibilitySelectedTextRange(nativeRange)
+        // Match the delayed single-character AX notification observed in the
+        // packaged app after the visual selection already spans the phrase.
+        textView.setAccessibilitySelectedTextRange(.init(location: nativeRange.location, length: 1))
+
+        let bold = try #require(continuousDescendants(of: hosting, as: NSButton.self).first {
+            $0.accessibilityIdentifier() == BlockFormattingAction.bold.accessibilityIdentifier
+        })
+        bold.performClick(bold)
+
+        let spans = session.document.blocks[0].inlineContent.spans
+        #expect(spans.filter { $0.marks.contains(.bold) }.map(\.text) == ["JellyFormatProbe"])
+        window.orderOut(nil)
+    }
+
+    @Test @MainActor func nativeArrowMovementDoesNotReprojectTheDocument() {
+        let first = continuousBlock(id: 49, text: "甲")
+        let second = continuousBlock(id: 50, text: "乙")
+        let session = BlockEditorSession(
+            noteID: NoteID(),
+            editSessionID: UUID(),
+            initialDocument: .init(blocks: [first, second]),
+            initialSelection: continuousCaret(first.id, 0),
+            focusRegistry: EditorFocusRegistry(),
+            onDocumentChange: { _ in }
+        )
+        let host = CountingContinuousHost()
+        session.attach(host: host, hostToken: UUID())
+        let projectionCount = host.applyCount
+
+        host.textView.doCommand(by: #selector(NSResponder.moveRight(_:)))
+
+        #expect(host.textView.selectedRange == .init(location: 1, length: 0))
+        #expect(session.selection == continuousCaret(first.id, 1))
+        #expect(host.applyCount == projectionCount)
+    }
+
+    @Test @MainActor func collapsingANativeSelectionRecomputesTypingMarksAtTheCaret() throws {
+        let block = DocumentBlock(
+            id: BlockID(),
+            kind: .paragraph,
+            inlineContent: .init(spans: [
+                .init(text: "alpha "),
+                .init(text: "bold", marks: [.bold]),
+                .init(text: " omega")
+            ]),
+            taskState: nil,
+            indentLevel: 0
+        )
+        let boldRange = NSRange(location: 6, length: 4)
+        let fixture = continuousFixture(
+            blocks: [block],
+            selection: .text(
+                anchor: .init(blockID: block.id, graphemeOffset: 6),
+                focus: .init(blockID: block.id, graphemeOffset: 10),
+                preferredColumn: nil,
+                typingAttributes: .init(marks: [.bold], linkURL: nil)
+            )
+        )
+        fixture.view.selectedRange = boldRange
+
+        try fixture.session.adoptSelectionFromNativeTextView(
+            .init(location: 6, length: 0),
+            typingAttributes: .init(marks: [.bold], linkURL: nil)
+        )
+        #expect(fixture.session.currentTypingAttributes.marks.isEmpty)
+
+        fixture.view.insertText("X", replacementRange: .init(location: NSNotFound, length: 0))
+        let inserted = try #require(fixture.session.document.blocks[0].inlineContent.spans.first {
+            $0.text.contains("X")
+        })
+        #expect(inserted.marks.isEmpty)
+    }
+
+    @Test @MainActor func repeatedCaretNotificationPreservesAnExplicitTypingMark() throws {
+        let block = continuousBlock(id: 57, text: "")
+        let fixture = continuousFixture(
+            blocks: [block],
+            selection: continuousCaret(block.id, 0)
+        )
+        _ = fixture.session.dispatchTextCommand(.toggleInlineMark(.bold))
+        #expect(fixture.session.currentTypingAttributes.marks == [.bold])
+
+        try fixture.session.adoptSelectionFromNativeTextView(
+            .init(location: 0, length: 0),
+            typingAttributes: fixture.session.currentTypingAttributes
+        )
+
+        #expect(fixture.session.currentTypingAttributes.marks == [.bold])
+    }
+
+    @Test @MainActor func repeatedSwiftUIAttachmentOfTheSameHostIsProjectionNeutral() {
+        let block = continuousBlock(id: 52, text: "不重复投影")
+        let session = BlockEditorSession(
+            noteID: NoteID(),
+            editSessionID: UUID(),
+            initialDocument: .init(blocks: [block]),
+            initialSelection: continuousCaret(block.id, 0),
+            focusRegistry: EditorFocusRegistry(),
+            onDocumentChange: { _ in }
+        )
+        let host = CountingContinuousHost()
+        let token = UUID()
+        session.attach(host: host, hostToken: token)
+        let projectionCount = host.applyCount
+
+        session.attach(host: host, hostToken: token)
+
+        #expect(host.applyCount == projectionCount)
+    }
+
+    @Test @MainActor func clickingPastTheLastGlyphPlacesTheCaretAtTheLineEnd() {
+        let block = continuousBlock(id: 51, text: "abc")
+        let fixture = continuousFixture(blocks: [block], selection: continuousCaret(block.id, 0))
+        fixture.host.frame = .init(x: 0, y: 0, width: 320, height: 100)
+        fixture.host.layoutSubtreeIfNeeded()
+
+        #expect(fixture.view.utf16Offset(at: .init(x: 300, y: 18)) == 3)
+    }
+
     @Test @MainActor func markedCandidatesPublishOnlyOnceAtTerminalCommitAndUndoOnce() throws {
         let block = continuousBlock(id: 50, text: "")
         var publications: [BlockDocument] = []
@@ -270,6 +601,22 @@ struct ContinuousBlockEditorHostTests {
 }
 
 @MainActor
+private final class CountingContinuousHost: ContinuousBlockEditorHost {
+    let textView = ContinuousBlockEditorTextView(frame: .init(x: 0, y: 0, width: 400, height: 120))
+    let semanticAppearance = CalendarTheme.light
+    private(set) var applyCount = 0
+
+    func apply(
+        diff: BlockDocumentProjectionDiff?,
+        projection: BlockDocumentTextProjection,
+        selectedRange: NSRange
+    ) {
+        applyCount += 1
+        textView.apply(diff: diff, projection: projection, selectedRange: selectedRange)
+    }
+}
+
+@MainActor
 private func continuousFixture(
     blocks: [DocumentBlock],
     selection: BlockEditorSelection,
@@ -288,10 +635,14 @@ private func continuousFixture(
     return (session, host, host.textView)
 }
 
-private func continuousBlock(id: Int, text: String) -> DocumentBlock {
+private func continuousBlock(
+    id: Int,
+    text: String,
+    kind: BlockKind = .paragraph
+) -> DocumentBlock {
     .init(
         id: BlockID(UUID(uuidString: String(format: "00000000-0000-0000-0002-%012d", id))!),
-        kind: .paragraph,
+        kind: kind,
         inlineContent: .plain(text),
         taskState: nil,
         indentLevel: 0

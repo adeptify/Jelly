@@ -495,6 +495,40 @@ struct NoteAutosaveCoordinatorTests {
         #expect(try await journal.current()?.records.isEmpty == true)
     }
 
+    @Test func routePreparationStartsDraftProtectionWithoutWaitingForTheDebounce() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-route-protection-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let calendar = makeEmptyState()
+        let note = makeAutosaveTestNote(categoryID: calendar.uncategorizedID)
+        let repository = InMemoryWorkspaceRepository(initialState: calendar)
+        let journal = DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"))
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: repository,
+            journal: journal
+        )
+        await store.load()
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let scheduler = GateAutosaveScheduler()
+        let coordinator = NoteAutosaveCoordinator(store: store, scheduler: scheduler)
+        try coordinator.beginSession(
+            note,
+            linkedTaskBlockLinks: [],
+            editSessionID: UUID(),
+            activeHostToken: UUID()
+        )
+        _ = try coordinator.update(title: "切页也立刻保护")
+        await scheduler.waitForSleepCount(2)
+
+        #expect(await coordinator.finalizeNativeInputForRoute(nil))
+        for _ in 0..<20 { await Task.yield() }
+        #expect(try await journal.current()?.records.count == 1)
+        #expect(store.state.notes[note.id]?.title != "切页也立刻保护")
+    }
+
     @Test func realJournalProtectionAt150ThenSuspended650CommitAndCloseShareTheExactBarrier() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("jelly-10b-150-650-close-\(UUID().uuidString)", isDirectory: true)

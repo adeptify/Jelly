@@ -49,7 +49,7 @@ final class WorkspaceRouteTransitionCoordinator: ObservableObject {
                 // Notes host not mounted yet — refuse rather than drop drafts.
                 return false
             }
-            let decision = await bridge.decision(for: .route, finalizer: notesFinalizer)
+            let decision = await bridge.prepareForRoute(finalizer: notesFinalizer)
             switch decision {
             case .allow:
                 break

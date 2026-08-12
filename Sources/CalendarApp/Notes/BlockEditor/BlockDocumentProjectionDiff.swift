@@ -42,7 +42,7 @@ struct BlockDocumentProjectionDiff: Equatable {
         let newMiddleEnd = new.segments.count - suffix
         let changedIDs = Set(old.segments[prefix..<oldMiddleEnd].map(\.blockID))
             .union(new.segments[prefix..<newMiddleEnd].map(\.blockID))
-        let regions = replacementRegions(
+        let coarseRegions = replacementRegions(
             old: old,
             new: new,
             prefix: prefix,
@@ -50,10 +50,64 @@ struct BlockDocumentProjectionDiff: Equatable {
             newMiddleEnd: newMiddleEnd,
             hasSuffix: suffix > 0
         )
+        let regions = trimEqualEdges(
+            old: old.attributedString,
+            oldRange: coarseRegions.old,
+            new: new.attributedString,
+            newRange: coarseRegions.new
+        )
         return .init(
             oldRange: regions.old,
             replacement: new.attributedString.attributedSubstring(from: regions.new),
             changedBlockIDs: changedIDs
+        )
+    }
+
+    /// Block identity bounds the structural change; this second pass bounds the
+    /// actual TextKit mutation to changed composed characters and attributes.
+    /// A normal keystroke must not replace and restyle the whole paragraph.
+    private static func trimEqualEdges(
+        old: NSAttributedString,
+        oldRange: NSRange,
+        new: NSAttributedString,
+        newRange: NSRange
+    ) -> (old: NSRange, new: NSRange) {
+        var oldStart = oldRange.location
+        var newStart = newRange.location
+        var oldEnd = NSMaxRange(oldRange)
+        var newEnd = NSMaxRange(newRange)
+        let oldString = old.string as NSString
+        let newString = new.string as NSString
+
+        while oldStart < oldEnd, newStart < newEnd {
+            let oldUnit = oldString.rangeOfComposedCharacterSequence(at: oldStart)
+            let newUnit = newString.rangeOfComposedCharacterSequence(at: newStart)
+            guard NSMaxRange(oldUnit) <= oldEnd,
+                  NSMaxRange(newUnit) <= newEnd,
+                  old.attributedSubstring(from: oldUnit).isEqual(
+                      to: new.attributedSubstring(from: newUnit)
+                  )
+            else { break }
+            oldStart = NSMaxRange(oldUnit)
+            newStart = NSMaxRange(newUnit)
+        }
+
+        while oldEnd > oldStart, newEnd > newStart {
+            let oldUnit = oldString.rangeOfComposedCharacterSequence(at: oldEnd - 1)
+            let newUnit = newString.rangeOfComposedCharacterSequence(at: newEnd - 1)
+            guard oldUnit.location >= oldStart,
+                  newUnit.location >= newStart,
+                  old.attributedSubstring(from: oldUnit).isEqual(
+                      to: new.attributedSubstring(from: newUnit)
+                  )
+            else { break }
+            oldEnd = oldUnit.location
+            newEnd = newUnit.location
+        }
+
+        return (
+            .init(location: oldStart, length: oldEnd - oldStart),
+            .init(location: newStart, length: newEnd - newStart)
         )
     }
 

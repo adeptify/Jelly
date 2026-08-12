@@ -20,6 +20,8 @@ final class ContinuousBlockEditorHostView: NSView, ContinuousBlockEditorHost {
         didSet { needsLayout = true }
     }
     private var measuredHeight: CGFloat = 80
+    private var measuredWidth: CGFloat?
+    private var deferredLayoutTask: Task<Void, Never>?
 
     init(appearance: CalendarSemanticAppearance) {
         semanticAppearance = appearance
@@ -48,8 +50,10 @@ final class ContinuousBlockEditorHostView: NSView, ContinuousBlockEditorHost {
         let width = max(1, bounds.width)
         textView.frame = .init(x: 0, y: 0, width: width, height: max(measuredHeight, bounds.height))
         taskCheckboxOverlay.frame = textView.frame
-        taskCheckboxOverlay.updateFrames()
-        updateMeasuredHeight(width: width)
+        if measuredWidth.map({ abs($0 - width) > 0.5 }) ?? true {
+            updateMeasuredHeight(width: width)
+            taskCheckboxOverlay.updateFrames()
+        }
     }
 
     func apply(
@@ -58,11 +62,22 @@ final class ContinuousBlockEditorHostView: NSView, ContinuousBlockEditorHost {
         selectedRange: NSRange
     ) {
         textView.apply(diff: diff, projection: projection, selectedRange: selectedRange)
-        taskCheckboxOverlay.apply(document: projection.document, textView: textView)
-        updateMeasuredHeight(width: max(1, bounds.width))
+        let needsImmediateLayout = diff == nil
+        taskCheckboxOverlay.apply(
+            document: projection.document,
+            textView: textView,
+            updateFramesImmediately: needsImmediateLayout
+        )
+        if needsImmediateLayout {
+            deferredLayoutTask?.cancel()
+            updateMeasuredHeight(width: max(1, bounds.width))
+        } else {
+            scheduleDeferredContentLayout()
+        }
     }
 
     private func updateMeasuredHeight(width: CGFloat) {
+        measuredWidth = width
         let next = max(80, textView.measuredContentHeight(for: width))
         guard abs(next - measuredHeight) > 0.5 else { return }
         measuredHeight = next
@@ -70,5 +85,29 @@ final class ContinuousBlockEditorHostView: NSView, ContinuousBlockEditorHost {
         taskCheckboxOverlay.frame.size.height = next
         taskCheckboxOverlay.updateFrames()
         invalidateIntrinsicContentSize()
+        // The first reveal request happens before the debounced full height is
+        // known. Once the outer SwiftUI ScrollView receives the new intrinsic
+        // height, ask again so the actual caret—not the old document frame—is
+        // brought into view after a burst of typing.
+        textView.requestSelectionRevealIfFocused()
+    }
+
+    private func scheduleDeferredContentLayout() {
+        deferredLayoutTask?.cancel()
+        deferredLayoutTask = Task { @MainActor [weak self] in
+            do {
+                // Height and checkbox geometry are maintenance work, not part
+                // of showing the typed character. Debounce them so a burst of
+                // keystrokes performs one whole-document layout after typing
+                // pauses instead of one layout per character.
+                try await Task.sleep(for: .milliseconds(250))
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.updateMeasuredHeight(width: max(1, self.bounds.width))
+            self.taskCheckboxOverlay.updateFrames()
+            self.deferredLayoutTask = nil
+        }
     }
 }

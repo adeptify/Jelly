@@ -393,6 +393,20 @@ final class NoteAutosaveCoordinator {
         return await task.value
     }
 
+    /// Switching workspace tabs does not destroy the mounted Notes module. It
+    /// only needs to settle native composition into the in-memory draft; the
+    /// main-file save continues in background. Protection starts immediately
+    /// so a fast switch followed by termination is still recoverable, without
+    /// making the route transition wait on disk I/O.
+    func finalizeNativeInputForRoute(_ finalizer: NoteNativeInputFinalizer?) async -> Bool {
+        guard await finalizeNativeInputIfNeeded(finalizer) else { return false }
+        guard let submission = latestSubmission else { return true }
+        let triple = NoteAutosaveTriple(submission: submission)
+        let operation = operation(for: submission)
+        _ = startProtection(for: triple, operation: operation)
+        return true
+    }
+
     private func performFlushLatest(
         finalizer: NoteNativeInputFinalizer?
     ) async -> NoteAutosaveBarrierEvidence {
@@ -642,6 +656,7 @@ final class NoteAutosaveCoordinator {
             activeHostToken: session.activeHostToken,
             nonce: UUID()
         )
+        let stateBeforeFinalization = autosaveState
         activePermit = permit
         consumedPermitNonce = nil
         autosaveState = .finalizingNativeInput(permit)
@@ -656,6 +671,9 @@ final class NoteAutosaveCoordinator {
                 autosaveState = .editable
             }
             return false
+        }
+        if autosaveState == .finalizingNativeInput(permit) {
+            autosaveState = stateBeforeFinalization
         }
         return true
     }

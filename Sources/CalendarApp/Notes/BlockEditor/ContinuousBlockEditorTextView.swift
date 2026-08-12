@@ -11,6 +11,9 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
     private var projectedDocumentIsVisiblyEmpty = true
     private var currentProjection: BlockDocumentTextProjection?
     private var finishingComposition = false
+    private var processingDirectSelectionInput = false
+    private var pendingDirectSelectionRange: NSRange?
+    private var auxiliaryControlSelectionRange: NSRange?
     private var markedCandidate: String?
     private var pointerAnchorUTF16Offset: Int?
     private let ownedTextStorage: NSTextStorage
@@ -18,6 +21,8 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
     private let ownedTextContainer: NSTextContainer
     private(set) var fullProjectionApplyCount = 0
     private(set) var diffProjectionApplyCount = 0
+    private(set) var selectionRevealRequestCount = 0
+    private var selectionRevealTask: Task<Void, Never>?
 
     convenience init() { self.init(frame: .zero) }
 
@@ -81,7 +86,12 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
            !finishingComposition,
            !hasMarkedText(),
            NSMaxRange(diff.oldRange) <= (textStorage?.length ?? 0) {
-            textStorage?.replaceCharacters(in: diff.oldRange, with: diff.replacement)
+            applyBoundedProjectionDiff(diff)
+            // NSTextStorage is allowed to add private typing/layout
+            // attributes, so whole attributed-string equality is not a sound
+            // signal that a bounded edit failed. Character equality is the
+            // structural invariant; the changed run and caret neighbourhood
+            // are restored from the authoritative projection below.
             if textStorage?.string == projection.attributedString.string {
                 diffProjectionApplyCount += 1
             } else {
@@ -92,18 +102,15 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
             textStorage?.setAttributedString(projection.attributedString)
             fullProjectionApplyCount += 1
         }
-        setAccessibilityValue(try? projection.plainText(
-            in: .init(location: 0, length: projection.attributedString.length)
-        ))
         if isValid(selectedRange, length: projection.attributedString.length) {
             self.selectedRange = selectedRange
             restoreAuthoritativeAttributes(
                 projection: projection,
-                changedBlockIDs: diff?.changedBlockIDs ?? Set(projection.segments.map(\.blockID)),
                 selectedRange: selectedRange
             )
         }
         needsDisplay = true
+        requestSelectionRevealIfFocused()
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -133,7 +140,11 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
                 orderedIndex = 0
             }
             let line = lineFragmentRect(forBlockAt: index)
-            let baseline = NSPoint(x: textContainerOrigin.x + 1, y: line.minY + textContainerOrigin.y)
+            let structuralIndent = CGFloat(block.indentLevel * 20)
+            let baseline = NSPoint(
+                x: textContainerOrigin.x + structuralIndent + 1,
+                y: line.minY + textContainerOrigin.y
+            )
             switch block.kind {
             case .bullet:
                 ("•" as NSString).draw(at: baseline, withAttributes: markerAttributes(color: color))
@@ -144,7 +155,7 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
             case .quote:
                 color.setFill()
                 NSBezierPath(rect: .init(
-                    x: textContainerOrigin.x + 4,
+                    x: textContainerOrigin.x + structuralIndent + 4,
                     y: line.minY + textContainerOrigin.y,
                     width: 2,
                     height: max(18, line.height)
@@ -201,9 +212,22 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
         guard !string.isEmpty else { return 0 }
         let origin = textContainerOrigin
         let containerPoint = NSPoint(x: point.x - origin.x, y: point.y - origin.y)
-        let glyph = ownedLayoutManager.glyphIndex(for: containerPoint, in: ownedTextContainer)
+        var fraction: CGFloat = 0
+        let glyph = ownedLayoutManager.glyphIndex(
+            for: containerPoint,
+            in: ownedTextContainer,
+            fractionOfDistanceThroughGlyph: &fraction
+        )
+        let characterRange = ownedLayoutManager.characterRange(
+            forGlyphRange: .init(location: glyph, length: 1),
+            actualGlyphRange: nil
+        )
+        // The exact glyph midpoint belongs to the leading insertion point;
+        // only the trailing half advances. This keeps hit-testing stable for
+        // composed emoji while still sending far-right clicks to line end.
+        let insertion = fraction > 0.5 ? NSMaxRange(characterRange) : characterRange.location
         return min(
-            max(ownedLayoutManager.characterIndexForGlyph(at: glyph), 0),
+            max(insertion, 0),
             string.utf16.count
         )
     }
@@ -281,38 +305,39 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
         }
     }
 
+    override func keyDown(with event: NSEvent) {
+        if let hostToken { editorSession?.beginNativeInputEvent(hostToken: hostToken) }
+        if pendingDirectSelectionRange != nil {
+            editorSession?.synchronizePendingDirectSelection()
+        }
+        processingDirectSelectionInput = true
+        defer { processingDirectSelectionInput = false }
+        super.keyDown(with: event)
+    }
+
     override func mouseDown(with event: NSEvent) {
-        guard event.clickCount == 1,
-              let offset = utf16Offset(at: convert(event.locationInWindow, from: nil)) else {
-            super.mouseDown(with: event)
-            return
-        }
-        let handled = event.modifierFlags.contains(.shift)
-            ? extendSelectionWithShift(toUTF16Offset: offset)
-            : beginPointerSelection(atUTF16Offset: offset)
-        if handled {
-            window?.makeFirstResponder(self)
-            return
-        }
+        processingDirectSelectionInput = true
+        defer { processingDirectSelectionInput = false }
         super.mouseDown(with: event)
     }
 
-    override func mouseDragged(with event: NSEvent) {
-        guard let offset = utf16Offset(at: convert(event.locationInWindow, from: nil)),
-              extendPointerSelection(toUTF16Offset: offset) else {
-            super.mouseDragged(with: event)
-            return
+    override func setAccessibilitySelectedTextRange(_ selectedTextRange: NSRange) {
+        rememberDirectSelection(selectedTextRange)
+        processingDirectSelectionInput = true
+        defer { processingDirectSelectionInput = false }
+        super.setAccessibilitySelectedTextRange(selectedTextRange)
+    }
+
+    @available(macOS, deprecated: 10.10)
+    override func accessibilitySetValue(_ value: Any?, forAttribute attribute: NSAccessibility.Attribute) {
+        if attribute == .selectedTextRange,
+           let value = value as? NSValue {
+            let range = value.rangeValue
+            MainActor.assumeIsolated {
+                rememberDirectSelection(range)
+            }
         }
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        pointerAnchorUTF16Offset = nil
-        super.mouseUp(with: event)
-    }
-
-    override func keyDown(with event: NSEvent) {
-        if let hostToken { editorSession?.beginNativeInputEvent(hostToken: hostToken) }
-        super.keyDown(with: event)
+        super.accessibilitySetValue(value, forAttribute: attribute)
     }
 
     override func becomeFirstResponder() -> Bool {
@@ -328,10 +353,24 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
-        guard !applyingProjection, !finishingComposition, editorSession?.isComposing != true else { return }
-        try? editorSession?.adoptNativeSelection(
+        guard !applyingProjection,
+              !finishingComposition,
+              auxiliaryControlSelectionRange == nil,
+              editorSession?.isComposing != true else { return }
+        if selectedRange.length > 0,
+           pendingDirectSelectionRange?.length ?? -1 < selectedRange.length {
+            // Mouse drag and some AX clients report a growing sequence of
+            // native ranges through the delegate rather than the setter.
+            pendingDirectSelectionRange = selectedRange
+        }
+        // AppKit can publish a transient caret while a formatting control is
+        // activating. Only a direct editor mouse/key/AX action may collapse a
+        // non-empty authoritative range.
+        guard selectedRange.length > 0
+            || processingDirectSelectionInput
+            || !authoritativeSelectionIsNonEmpty else { return }
+        try? editorSession?.adoptSelectionFromNativeTextView(
             selectedRange,
-            direction: .forward,
             typingAttributes: editorSession?.currentTypingAttributes ?? .init(marks: [], linkURL: nil)
         )
     }
@@ -406,6 +445,10 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
             return
         }
         if editorSession?.handleSlashSelector(selector) == true { return }
+        if Self.isNativeSelectionCommand(selector) {
+            super.doCommand(by: selector)
+            return
+        }
         if let command = Self.command(for: selector), let editorSession {
             if let outcome = editorSession.dispatchTextCommandOutcome(command) {
                 if outcome.commandHandled { return }
@@ -423,12 +466,14 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func copy(_ sender: Any?) {
+        if pendingDirectSelectionRange != nil { editorSession?.synchronizePendingDirectSelection() }
         if editorSession?.copy() == true { return }
         super.copy(sender)
     }
 
     override func cut(_ sender: Any?) {
         if let editorSession {
+            if pendingDirectSelectionRange != nil { editorSession.synchronizePendingDirectSelection() }
             _ = editorSession.cut()
             editorSession.projectAuthoritativeState()
             return
@@ -453,10 +498,13 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
         }
         switch character {
         case "b":
+            editorSession?.synchronizePendingDirectSelection()
             _ = editorSession?.dispatchTextCommandOutcome(.toggleInlineMark(.bold))
         case "i":
+            editorSession?.synchronizePendingDirectSelection()
             _ = editorSession?.dispatchTextCommandOutcome(.toggleInlineMark(.italic))
         case "c" where event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift):
+            editorSession?.synchronizePendingDirectSelection()
             _ = editorSession?.dispatchTextCommandOutcome(.toggleInlineMark(.code))
         default:
             return super.performKeyEquivalent(with: event)
@@ -478,6 +526,84 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
         setAccessibilityLabel("笔记正文")
         setAccessibilityPlaceholderValue("开始写点什么…")
         delegate = self
+    }
+
+    private var authoritativeSelectionIsNonEmpty: Bool {
+        guard let editorSession,
+              let currentProjection,
+              let range = try? currentProjection.nsRange(for: editorSession.selection) else { return false }
+        return range.length > 0
+    }
+
+    func consumePendingDirectSelection() -> NSRange? {
+        defer { pendingDirectSelectionRange = nil }
+        return pendingDirectSelectionRange
+    }
+
+    func beginAuxiliaryControlActivation() -> NSRange {
+        if let auxiliaryControlSelectionRange { return auxiliaryControlSelectionRange }
+        let range = consumePendingDirectSelection() ?? selectedRange
+        auxiliaryControlSelectionRange = range
+        return range
+    }
+
+    func endAuxiliaryControlActivation() {
+        auxiliaryControlSelectionRange = nil
+        pendingDirectSelectionRange = nil
+    }
+
+    var isHandlingAuxiliaryControl: Bool { auxiliaryControlSelectionRange != nil }
+
+    private func rememberDirectSelection(_ range: NSRange) {
+        if range.length == 0 {
+            pendingDirectSelectionRange = range
+        } else if pendingDirectSelectionRange?.length ?? -1 < range.length {
+            // AX text selection can arrive as a full range followed by one or
+            // more smaller fragments. Keep the largest range from that direct
+            // interaction until the user's next command consumes it.
+            pendingDirectSelectionRange = range
+        }
+    }
+
+    private func applyBoundedProjectionDiff(_ diff: BlockDocumentProjectionDiff) {
+        guard let textStorage else { return }
+        let existing = textStorage.attributedSubstring(from: diff.oldRange)
+        if diff.oldRange.length == diff.replacement.length,
+           existing.string == diff.replacement.string {
+            textStorage.beginEditing()
+            diff.replacement.enumerateAttributes(
+                in: NSRange(location: 0, length: diff.replacement.length),
+                options: []
+            ) { attributes, range, _ in
+                textStorage.setAttributes(
+                    attributes,
+                    range: NSRange(
+                        location: diff.oldRange.location + range.location,
+                        length: range.length
+                    )
+                )
+            }
+            textStorage.endEditing()
+        } else {
+            textStorage.replaceCharacters(in: diff.oldRange, with: diff.replacement)
+        }
+    }
+
+    func requestSelectionRevealIfFocused() {
+        guard window?.firstResponder === self else { return }
+        selectionRevealRequestCount += 1
+        selectionRevealTask?.cancel()
+        selectionRevealTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self,
+                  !Task.isCancelled,
+                  self.window?.firstResponder === self else { return }
+            // scrollRangeToVisible asks TextKit for the caret's local layout.
+            // Forcing ensureLayout on the entire 50k-character container here
+            // made every focused keystroke pay the whole-document cost.
+            self.scrollRangeToVisible(self.selectedRange)
+            self.selectionRevealTask = nil
+        }
     }
 
     private struct TextSystem {
@@ -505,15 +631,10 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
 
     private func restoreAuthoritativeAttributes(
         projection: BlockDocumentTextProjection,
-        changedBlockIDs: Set<BlockID>,
         selectedRange: NSRange
     ) {
         guard let textStorage, projection.attributedString.length > 0 else { return }
-        var ranges = projection.segments.compactMap { segment in
-            changedBlockIDs.contains(segment.blockID) && segment.displayRange.length > 0
-                ? segment.displayRange
-                : nil
-        }
+        var ranges: [NSRange] = []
         let selectionStart = max(0, selectedRange.location - 1)
         let selectionEnd = min(
             projection.attributedString.length,
@@ -546,16 +667,12 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
         case "deleteBackward:": .backspace
         case "insertTab:": .indent
         case "insertBacktab:": .outdent
-        case "moveLeft:": .moveHorizontal(.backward, extending: false)
-        case "moveRight:": .moveHorizontal(.forward, extending: false)
-        case "moveUp:": .moveVertical(.up, extending: false)
-        case "moveDown:": .moveVertical(.down, extending: false)
-        case "moveLeftAndModifySelection:": .moveHorizontal(.backward, extending: true)
-        case "moveRightAndModifySelection:": .moveHorizontal(.forward, extending: true)
-        case "moveUpAndModifySelection:": .moveVertical(.up, extending: true)
-        case "moveDownAndModifySelection:": .moveVertical(.down, extending: true)
         default: nil
         }
+    }
+
+    private static func isNativeSelectionCommand(_ selector: Selector) -> Bool {
+        selector.description.hasPrefix("move")
     }
 
     private static func string(from value: Any) -> String? {

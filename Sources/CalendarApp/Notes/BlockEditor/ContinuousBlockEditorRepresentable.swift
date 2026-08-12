@@ -13,9 +13,13 @@ struct ContinuousBlockEditorRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ host: ContinuousBlockEditorHostView, context: Context) {
-        host.semanticAppearance = appearance
-        context.coordinator.session.attach(host: host, hostToken: context.coordinator.hostToken)
-        context.coordinator.session.projectAuthoritativeState()
+        let appearanceChanged = host.semanticAppearance != appearance
+        if appearanceChanged { host.semanticAppearance = appearance }
+        if host.textView.attachedSession !== context.coordinator.session {
+            context.coordinator.session.attach(host: host, hostToken: context.coordinator.hostToken)
+        } else if appearanceChanged {
+            context.coordinator.session.projectAuthoritativeState()
+        }
     }
 
     static func dismantleNSView(_ host: ContinuousBlockEditorHostView, coordinator: Coordinator) {

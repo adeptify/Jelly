@@ -94,6 +94,9 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
     }
 
     func attach(host: any ContinuousBlockEditorHost, hostToken: UUID) {
+        if continuousHost === host, continuousHostToken == hostToken {
+            return
+        }
         if let previousToken = continuousHostToken, previousToken != hostToken {
             if composition?.hostToken == previousToken {
                 cancelComposition(hostToken: previousToken)
@@ -391,14 +394,106 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         typingAttributes: BlockTypingAttributes
     ) throws {
         guard composition == nil, let projection = currentContinuousProjection() else { return }
+        let resolvedAttributes = try resolvedTypingAttributes(
+            for: range,
+            direction: direction,
+            projection: projection,
+            fallback: typingAttributes
+        )
         closeTypingCoalescing()
         try selectionController.adoptGlobalRange(
             range,
             direction: direction,
             projection: projection,
-            typingAttributes: typingAttributes
+            typingAttributes: resolvedAttributes
         )
+        guard selectionController.selection != selection else { return }
         applySelection(selectionController.selection, incrementingRevision: true, project: true)
+    }
+
+    func adoptSelectionFromNativeTextView(
+        _ range: NSRange,
+        typingAttributes: BlockTypingAttributes
+    ) throws {
+        guard composition == nil, let projection = currentContinuousProjection() else { return }
+        let direction: SelectionDirection
+        if case let .text(anchor, _, _, _) = selection,
+           range.length > 0,
+           try projection.utf16Offset(for: anchor) == NSMaxRange(range) {
+            direction = .reverse
+        } else {
+            direction = .forward
+        }
+        let resolvedAttributes = try resolvedTypingAttributes(
+            for: range,
+            direction: direction,
+            projection: projection,
+            fallback: typingAttributes
+        )
+        closeTypingCoalescing()
+        try selectionController.adoptGlobalRange(
+            range,
+            direction: direction,
+            projection: projection,
+            typingAttributes: resolvedAttributes
+        )
+        guard selectionController.selection != selection else { return }
+        // NSTextView has already displayed this selection. Publishing the
+        // semantic endpoints must not rebuild attributed text or move the caret.
+        applySelection(selectionController.selection, incrementingRevision: true, project: false)
+    }
+
+    private func resolvedTypingAttributes(
+        for range: NSRange,
+        direction: SelectionDirection,
+        projection: BlockDocumentTextProjection,
+        fallback: BlockTypingAttributes
+    ) throws -> BlockTypingAttributes {
+        guard range.length == 0,
+              (try? projection.nsRange(for: selection)) != range else { return fallback }
+        let position = try projection.textPosition(
+            atUTF16Offset: range.location,
+            affinity: direction == .forward ? .downstream : .upstream
+        )
+        guard let block = document.blocks.first(where: { $0.id == position.blockID }),
+              block.kind != .divider,
+              block.kind != .code else {
+            return .init(marks: [], linkURL: nil)
+        }
+        if position.graphemeOffset > 0,
+           let span = inlineSpan(
+               in: block.inlineContent,
+               containingGrapheme: position.graphemeOffset - 1
+           ) {
+            return .init(
+                marks: span.marks,
+                linkURL: BlockURLValidator.isValid(span.linkURL) ? span.linkURL : nil
+            )
+        }
+        if let span = inlineSpan(
+            in: block.inlineContent,
+            containingGrapheme: position.graphemeOffset
+        ) {
+            return .init(
+                marks: span.marks,
+                linkURL: BlockURLValidator.isValid(span.linkURL) ? span.linkURL : nil
+            )
+        }
+        return .init(marks: [], linkURL: nil)
+    }
+
+    private func inlineSpan(
+        in content: InlineContent,
+        containingGrapheme target: Int
+    ) -> InlineSpan? {
+        guard target >= 0 else { return nil }
+        var cursor = 0
+        for span in content.spans {
+            let count = span.text.count
+            if target >= cursor, target < cursor + count { return span }
+            cursor += count
+        }
+        return nil
     }
 
     func extendNativeSelection(
@@ -555,12 +650,54 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
     }
 
     /// Auxiliary controls temporarily become first responder while they run.
-    /// Always restore the authoritative selection endpoint afterwards so the
-    /// editor's UndoManager remains the focused command owner, including when
-    /// a modal action is cancelled without producing a reducer mutation.
+    /// Accessibility-driven selection can update NSTextView without sending
+    /// the delegate callback before a toolbar click. Pull that exact native
+    /// range first, then restore the editor as command owner afterwards.
+    func prepareAuxiliaryControlAction() {
+        if let textView = continuousHost?.textView {
+            let pendingRange = textView.beginAuxiliaryControlActivation()
+            try? adoptSelectionFromNativeTextView(
+                pendingRange,
+                typingAttributes: currentTypingAttributes
+            )
+            return
+        }
+        synchronizeContinuousNativeSelection()
+    }
+
     func performAuxiliaryControlAction(_ action: () -> Void) {
+        let textView = continuousHost?.textView
+        if textView?.isHandlingAuxiliaryControl != true {
+            prepareAuxiliaryControlAction()
+        }
         action()
+        textView?.endAuxiliaryControlActivation()
         focusSelectionEndpoint()
+    }
+
+    func synchronizePendingDirectSelection() {
+        guard let textView = continuousHost?.textView,
+              let range = textView.consumePendingDirectSelection() else { return }
+        try? adoptSelectionFromNativeTextView(
+            range,
+            typingAttributes: currentTypingAttributes
+        )
+    }
+
+    private func synchronizeContinuousNativeSelection() {
+        guard composition == nil,
+              let textView = continuousHost?.textView,
+              let projection = currentContinuousProjection(),
+              let projected = try? projection.nsRange(for: selection),
+              projected != textView.selectedRange else { return }
+        if projected.length > 0,
+           textView.selectedRange.length == 0 {
+            return
+        }
+        try? adoptSelectionFromNativeTextView(
+            textView.selectedRange,
+            typingAttributes: currentTypingAttributes
+        )
     }
 
     @discardableResult

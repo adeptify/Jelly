@@ -98,13 +98,14 @@ enum BlockTextStyle {
         }
     }
 
-    static func paragraphStyle(for kind: BlockKind) -> NSParagraphStyle {
+    static func paragraphStyle(for kind: BlockKind, indentLevel: Int = 0) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.lineHeightMultiple = 1.45
         style.paragraphSpacing = kind == .divider ? 8 : 5
         if [.bullet, .ordered, .task, .quote].contains(kind) {
-            style.firstLineHeadIndent = 22
-            style.headIndent = 22
+            let structuralIndent = CGFloat(max(0, indentLevel) * 20)
+            style.firstLineHeadIndent = 22 + structuralIndent
+            style.headIndent = 22 + structuralIndent
         }
         return style
     }
@@ -132,7 +133,10 @@ enum BlockTextStyle {
             .jellyBlockID: block.id.rawValue.uuidString,
             .jellyBlockKind: block.kind.rawValue
         ]
-        attributes[.paragraphStyle] = paragraphStyle(for: block.kind)
+        attributes[.paragraphStyle] = paragraphStyle(
+            for: block.kind,
+            indentLevel: block.indentLevel
+        )
         if block.kind == .code {
             attributes[.backgroundColor] = codeBackground(appearance: appearance)
         }

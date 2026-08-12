@@ -36,6 +36,30 @@ struct BlockDocumentTextProjectionTests {
         }
     }
 
+    @Test func nestedListTextUsesTheSameTwentyPointIndentStepAsItsControls() throws {
+        let root = projectionBlock(id: 12, kind: .bullet, text: "父项")
+        var nestedBullet = projectionBlock(id: 13, kind: .bullet, text: "子项")
+        nestedBullet.indentLevel = 1
+        var nestedTask = projectionBlock(id: 14, kind: .task, text: "子任务")
+        nestedTask.indentLevel = 2
+        let projection = BlockDocumentTextProjection(
+            document: .init(blocks: [root, nestedBullet, nestedTask]),
+            appearance: CalendarTheme.light
+        )
+
+        func paragraphStyle(at segment: Int) throws -> NSParagraphStyle {
+            try #require(projection.attributedString.attribute(
+                .paragraphStyle,
+                at: projection.segments[segment].contentRange.location,
+                effectiveRange: nil
+            ) as? NSParagraphStyle)
+        }
+
+        #expect(try paragraphStyle(at: 0).headIndent == 22)
+        #expect(try paragraphStyle(at: 1).headIndent == 42)
+        #expect(try paragraphStyle(at: 2).headIndent == 62)
+    }
+
     @Test func everyGraphemeBoundaryRoundTripsThroughTheGlobalUTF16CoordinateSpace() throws {
         let samples = ["ASCII", "中文", "e\u{301}", "🇨🇳", "👍🏽", "👨‍👩‍👧‍👦", "软\n换行"]
         for (index, sample) in samples.enumerated() {
@@ -165,7 +189,7 @@ struct BlockDocumentTextProjectionTests {
         }
     }
 
-    @Test func oneCharacterEditInFiveHundredBlocksProducesOneBoundedReplacement() throws {
+    @Test func oneCharacterEditInFiveHundredBlocksReplacesOnlyThatCharacter() throws {
         let oldBlocks = (0..<500).map {
             projectionBlock(id: 1_000 + $0, kind: .paragraph, text: "第\($0)段")
         }
@@ -182,8 +206,11 @@ struct BlockDocumentTextProjectionTests {
 
         let diff = try #require(BlockDocumentProjectionDiff.make(from: old, to: new))
         #expect(diff.changedBlockIDs == [oldBlocks[250].id])
-        #expect(diff.oldRange == old.segments[250].displayRange)
-        #expect(diff.replacement.string == "第250段！")
+        #expect(diff.oldRange == .init(
+            location: NSMaxRange(old.segments[250].displayRange),
+            length: 0
+        ))
+        #expect(diff.replacement.string == "！")
         let rebuilt = NSMutableAttributedString(attributedString: old.attributedString)
         rebuilt.replaceCharacters(in: diff.oldRange, with: diff.replacement)
         #expect(rebuilt.isEqual(to: new.attributedString))

@@ -111,6 +111,7 @@ struct BlockFormattingBar: View {
                 title: isExpanded ? "‹" : "›",
                 identifier: "block-format-toggle",
                 accessibilityLabel: isExpanded ? "收起格式栏" : "展开格式栏",
+                prepareAction: { session?.prepareAuxiliaryControlAction() },
                 action: toggleExpanded
             )
             .frame(width: 30, height: 28)
@@ -123,6 +124,7 @@ struct BlockFormattingBar: View {
                                 title: action.title,
                                 identifier: action.accessibilityIdentifier,
                                 accessibilityLabel: action.accessibilityLabel,
+                                prepareAction: { session?.prepareAuxiliaryControlAction() },
                                 action: { perform(action) }
                             )
                             .frame(minWidth: action == .paragraph || action == .link ? 46 : 30, minHeight: 28)
@@ -183,24 +185,27 @@ struct BlockFormattingButtonRepresentable: NSViewRepresentable {
     let title: String
     let identifier: String
     let accessibilityLabel: String
+    let prepareAction: () -> Void
     let action: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(action: action) }
 
-    func makeNSView(context: Context) -> NSButton {
-        let button = NSButton(
+    func makeNSView(context: Context) -> SelectionPreservingFormattingButton {
+        let button = SelectionPreservingFormattingButton(
             title: title,
             target: context.coordinator,
             action: #selector(Coordinator.performAction)
         )
+        button.prepareAction = prepareAction
         button.bezelStyle = .recessed
         button.controlSize = .small
         configure(button)
         return button
     }
 
-    func updateNSView(_ button: NSButton, context: Context) {
+    func updateNSView(_ button: SelectionPreservingFormattingButton, context: Context) {
         button.title = title
+        button.prepareAction = prepareAction
         context.coordinator.action = action
         configure(button)
     }
@@ -220,6 +225,21 @@ struct BlockFormattingButtonRepresentable: NSViewRepresentable {
         }
 
         @objc func performAction() { action() }
+    }
+}
+
+@MainActor
+final class SelectionPreservingFormattingButton: NSButton {
+    var prepareAction: () -> Void = {}
+
+    override func mouseDown(with event: NSEvent) {
+        prepareAction()
+        super.mouseDown(with: event)
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        prepareAction()
+        return super.accessibilityPerformPress()
     }
 }
 

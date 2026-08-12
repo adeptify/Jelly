@@ -15,7 +15,11 @@ final class TaskBlockCheckboxOverlay: NSView {
         return nil
     }
 
-    func apply(document: BlockDocument, textView: ContinuousBlockEditorTextView) {
+    func apply(
+        document: BlockDocument,
+        textView: ContinuousBlockEditorTextView,
+        updateFramesImmediately: Bool = true
+    ) {
         session = textView.attachedSession
         self.textView = textView
         let tasks = document.blocks.filter { $0.kind == .task }
@@ -28,7 +32,7 @@ final class TaskBlockCheckboxOverlay: NSView {
             let button = buttons[task.id] ?? makeButton(blockID: task.id)
             configure(button, completed: task.taskState?.completedAt != nil)
         }
-        updateFrames()
+        if updateFramesImmediately { updateFrames() }
     }
 
     func updateFrames() {

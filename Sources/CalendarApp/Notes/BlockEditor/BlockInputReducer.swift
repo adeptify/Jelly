@@ -754,8 +754,39 @@ private extension ReductionContext {
     }
 
     mutating func convert(to kind: BlockKind, slash: Bool) throws -> BlockInputResult {
-        guard case let .text(anchor, focus, _, _ ) = selection,
-              anchor == focus,
+        guard case let .text(anchor, focus, _, typingAttributes) = selection,
+              let range = normalizedTextRange() else {
+            return noChange(.unsupportedBlockKind)
+        }
+        if !slash, anchor != focus {
+            var candidate = document
+            for index in range.startIndex...range.endIndex {
+                let block = candidate.blocks[index]
+                guard let converted = convertedBlock(
+                    block,
+                    kind: kind,
+                    content: block.inlineContent
+                ) else {
+                    return noChange(.unsupportedBlockKind)
+                }
+                candidate.blocks[index] = converted
+            }
+            let nextSelection = BlockEditorSelection.text(
+                anchor: anchor,
+                focus: focus,
+                preferredColumn: nil,
+                typingAttributes: candidate.attributes(
+                    at: focus,
+                    fallback: typingAttributes
+                )
+            )
+            return try documentResult(
+                candidate,
+                selection: nextSelection,
+                undo: .atomic(.conversion)
+            )
+        }
+        guard anchor == focus,
               let index = document.blocks.firstIndex(where: { $0.id == anchor.blockID }) else {
             return noChange(.unsupportedBlockKind)
         }

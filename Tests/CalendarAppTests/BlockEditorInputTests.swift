@@ -130,6 +130,26 @@ struct BlockEditorInputTests {
         #expect(result.undo == .atomic(.formatting))
     }
 
+    @Test func structuralFormattingConvertsEveryBlockTouchedByATextSelection() throws {
+        let first = blockID(2001)
+        let second = blockID(2002)
+        let third = blockID(2003)
+        let document = doc([
+            block(first, .paragraph, "一"),
+            block(second, .paragraph, "二"),
+            block(third, .paragraph, "三")
+        ])
+        let selection = textSelection(first, 0, second, 1)
+
+        let result = try reduce(document, selection, .convert(.task))
+
+        #expect(result.document.blocks.map(\.kind) == [.task, .task, .paragraph])
+        #expect(result.document.blocks[0].taskState?.completedAt == nil)
+        #expect(result.document.blocks[1].taskState?.completedAt == nil)
+        #expect(result.selection == selection)
+        #expect(result.undo == .atomic(.conversion))
+    }
+
     @Test func invalidSelectionsAndDocumentsThrowTypedErrorsWithoutIDs() throws {
         let id = blockID(3)
         let duplicate = doc([block(id, .paragraph, "甲"), block(id, .paragraph, "乙")])

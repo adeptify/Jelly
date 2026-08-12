@@ -27,6 +27,7 @@ struct BlockEditorPerformanceTests {
             )
         }
         let hosted = hostedDistribution(fixture: fixture)
+        let settledLayout = settledLayoutDistribution(fixture: fixture)
         let open = BlockEditorPerformanceProbe.measure(warmups: 3, iterations: 20) {
             autoreleasepool {
                 let session = BlockEditorSession(
@@ -48,11 +49,13 @@ struct BlockEditorPerformanceTests {
         report(dataset, "reducer", reducer)
         report(dataset, "projection", projection)
         report(dataset, "key-visible", hosted)
+        report(dataset, "settled-layout", settledLayout)
         report(dataset, "open", open)
         #expect(reducer.p95Milliseconds <= dataset.reducerP95, Comment(rawValue: failure("reducer", reducer, dataset.reducerP95)))
         #expect(projection.p95Milliseconds <= dataset.projectionP95, Comment(rawValue: failure("projection", projection, dataset.projectionP95)))
         #expect(hosted.p95Milliseconds <= dataset.keyVisibleP95, Comment(rawValue: failure("key-visible p95", hosted, dataset.keyVisibleP95)))
         #expect(hosted.maxMilliseconds <= dataset.keyVisibleMax, Comment(rawValue: failure("key-visible max", hosted, dataset.keyVisibleMax)))
+        #expect(settledLayout.p95Milliseconds <= dataset.settledLayoutP95, Comment(rawValue: failure("settled-layout", settledLayout, dataset.settledLayoutP95)))
         #expect(open.p95Milliseconds <= dataset.openP95, Comment(rawValue: failure("open", open, dataset.openP95)))
     }
 
@@ -89,6 +92,22 @@ struct BlockEditorPerformanceTests {
         return BlockEditorPerformanceProbe.measure {
             host.textView.insertText("x", replacementRange: .init(location: NSNotFound, length: 0))
             host.layoutSubtreeIfNeeded()
+        }
+    }
+
+    private func settledLayoutDistribution(
+        fixture: EditorPerformanceFixture
+    ) -> BlockEditorPerformanceDistribution {
+        let session = BlockEditorSession(
+            noteID: NoteID(), editSessionID: UUID(), initialDocument: fixture.document,
+            initialSelection: fixture.selection, focusRegistry: EditorFocusRegistry(),
+            onDocumentChange: { _ in }
+        )
+        let host = ContinuousBlockEditorHostView(appearance: CalendarTheme.light)
+        host.frame = .init(x: 0, y: 0, width: 720, height: 80)
+        session.attach(host: host, hostToken: UUID())
+        return BlockEditorPerformanceProbe.measure {
+            host.textView.insertText("x", replacementRange: .init(location: NSNotFound, length: 0))
             _ = host.textView.measuredContentHeight(for: 720)
         }
     }
@@ -128,6 +147,7 @@ enum EditorPerformanceDataset: String, CaseIterable, Sendable {
     var projectionP95: Double { self == .daily ? 8 : self == .long ? 12 : 16 }
     var keyVisibleP95: Double { self == .daily ? 33 : self == .long ? 50 : 75 }
     var keyVisibleMax: Double { self == .stress ? 150 : 100 }
+    var settledLayoutP95: Double { self == .daily ? 33 : self == .long ? 75 : 150 }
     var openP95: Double { self == .daily ? 150 : self == .long ? 300 : 600 }
 }
 

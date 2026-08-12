@@ -48,6 +48,12 @@ final class NoteCloseProtectionBridge {
         return decision(for: reason, evidence: evidence)
     }
 
+    func prepareForRoute(
+        finalizer: NoteNativeInputFinalizer? = nil
+    ) async -> NoteCloseProtectionDecision {
+        await coordinator.finalizeNativeInputForRoute(finalizer) ? .allow : .keepOpen
+    }
+
     func copyOrExportThenDecide(
         for reason: NoteCloseProtectionReason
     ) async -> NoteCloseProtectionDecision {
