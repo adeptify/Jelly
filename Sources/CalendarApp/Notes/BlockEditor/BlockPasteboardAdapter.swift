@@ -143,24 +143,30 @@ extension BlockPastePayload {
     var fallbackPlainText: String {
         switch self {
         case let .plainText(text): text
+        case let .inlineContent(_, fallbackPlainText): fallbackPlainText
         case let .richText(_, fallbackPlainText): fallbackPlainText
         }
     }
 }
 
 private struct Envelope: Codable {
-    static let version = 1
+    static let version = 2
     let version: Int
     let plainText: String
     let blocks: [BlockDTO]
+    let inlineContent: InlineContent?
 
     init(payload: BlockClipboardPayload) {
         version = Self.version
         plainText = payload.plainText
         blocks = payload.richBlocks.map(BlockDTO.init)
+        inlineContent = payload.inlineContent
     }
 
     var payload: BlockPastePayload? {
+        if let inlineContent {
+            return .inlineContent(inlineContent, fallbackPlainText: plainText)
+        }
         guard blocks.allSatisfy(\.isStructurallyValid) else { return nil }
         return .richText(blocks: blocks.map(\.block), fallbackPlainText: plainText)
     }

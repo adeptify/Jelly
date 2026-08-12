@@ -113,7 +113,7 @@ struct BlockEditorAccessibilityTests {
 
         pasteboard.clearContents()
         _ = pasteboard.setString("完整回退文本", forType: .string)
-        _ = pasteboard.setData(Data("{\"version\":2,\"plainText\":\"错误\",\"blocks\":[]}".utf8), forType: BlockPasteboardAdapter.privateType)
+        _ = pasteboard.setData(Data("{\"version\":3,\"plainText\":\"错误\",\"blocks\":[]}".utf8), forType: BlockPasteboardAdapter.privateType)
         #expect(adapter.readPayload() == .plainText("完整回退文本"))
     }
 
@@ -136,6 +136,26 @@ struct BlockEditorAccessibilityTests {
         )
         #expect(customFailure.write(payload: payload))
         #expect(customFailureBoard.string(forType: .string) == "完整文本")
+    }
+
+    @Test func sameBlockTextClipboardRoundTripsAsInlineContent() throws {
+        let pasteboard = NSPasteboard.withUniqueName()
+        let adapter = BlockPasteboardAdapter(pasteboard: pasteboard)
+        let content = InlineContent(spans: [
+            .init(text: "保留", marks: [.bold]),
+            .init(text: "行内", marks: [.italic])
+        ])
+        let payload = BlockClipboardPayload(
+            plainText: "保留行内",
+            richBlocks: [
+                .init(kind: .paragraph, inlineContent: content, indentLevel: 0, codeInfoString: nil)
+            ],
+            inlineContent: content
+        )
+
+        #expect(adapter.write(payload: payload))
+        #expect(adapter.readPayload() == .inlineContent(content, fallbackPlainText: "保留行内"))
+        #expect(pasteboard.string(forType: .string) == "保留行内")
     }
 
     @Test func pasteboardCorruptInvalidAndUnsafeRichDataFallBackWithoutIDsOrUnsupportedStyles() throws {
@@ -556,7 +576,7 @@ struct BlockEditorAccessibilityTests {
         )
         let privateCandidates: [Data] = [
             Data("not json".utf8),
-            Data("{\"version\":2,\"plainText\":\"PRIVATE\",\"blocks\":[]}".utf8),
+            Data("{\"version\":3,\"plainText\":\"PRIVATE\",\"blocks\":[]}".utf8),
             Data("{\"version\":1,\"plainText\":\"PRIVATE\",\"blocks\":[{\"kind\":\"paragraph\",\"spans\":[{\"text\":\"x\",\"marks\":[],\"linkURL\":null}],\"indentLevel\":9,\"codeInfoString\":null}]}".utf8)
         ]
         for data in privateCandidates {

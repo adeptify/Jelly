@@ -20,6 +20,15 @@ enum BlockPasteParser: BlockPasteParsing {
         switch payload {
         case let .plainText(text):
             return .plainLines(normalizedLines(text))
+        case let .inlineContent(content, _):
+            let block = BlockPasteBlock(
+                kind: .paragraph,
+                inlineContent: content,
+                indentLevel: 0,
+                codeInfoString: nil
+            )
+            try validate(block, index: 0)
+            return .richBlocks([block])
         case let .richText(blocks, _):
             for (index, block) in blocks.enumerated() {
                 try validate(block, index: index)

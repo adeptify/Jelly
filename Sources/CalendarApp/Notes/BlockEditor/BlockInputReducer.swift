@@ -609,7 +609,8 @@ private extension ReductionContext {
             let blocks = Array(document.blocks[range])
             return .init(
                 plainText: blocks.map(\.text).joined(separator: "\n"),
-                richBlocks: blocks.map { $0.pasteBlock() }
+                richBlocks: blocks.map { $0.pasteBlock() },
+                inlineContent: nil
             )
         case .text:
             guard let range = normalizedTextRange(), !range.isCollapsed else { return nil }
@@ -627,7 +628,11 @@ private extension ReductionContext {
                 rich.append(fragment)
                 plain.append(middle.plainText)
             }
-            return .init(plainText: plain.joined(separator: "\n"), richBlocks: rich)
+            return .init(
+                plainText: plain.joined(separator: "\n"),
+                richBlocks: rich,
+                inlineContent: range.startIndex == range.endIndex ? rich.first?.inlineContent : nil
+            )
         }
     }
 
@@ -1149,6 +1154,12 @@ private extension ReductionContext {
                 throw BlockInputError.invalidCandidate
             }
             return try replaceWithPlainLines(lines)
+        case let .inlineContent(content, fallback):
+            guard case .text = selection,
+                  let range = normalizedTextRange(),
+                  range.startIndex == range.endIndex
+            else { return try replaceWithFallbackPlainText(fallback) }
+            return try replaceWithInlineContent(content, range: range)
         case let .richText(_, fallback):
             let richBlocks: [BlockPasteBlock]
             do {
@@ -1166,6 +1177,42 @@ private extension ReductionContext {
                 return try replaceWithFallbackPlainText(fallback)
             }
         }
+    }
+
+    mutating func replaceWithInlineContent(
+        _ inserted: InlineContent,
+        range: NormalizedTextRange
+    ) throws -> BlockInputResult {
+        let block = document.blocks[range.startIndex]
+        guard block.isTextCapable else { return noChange(.unsupportedBlockKind) }
+        let (prefix, _) = block.inlineContent.split(at: range.start.graphemeOffset)
+        let (_, suffix) = block.inlineContent.split(at: range.end.graphemeOffset)
+        var replacement = Self.makeBlock(
+            id: block.id,
+            kind: block.kind,
+            content: InlineContent.concatenating([prefix, inserted, suffix]).coalescingAdjacentStyles(),
+            indent: block.indentLevel,
+            completedAt: block.taskState?.completedAt,
+            codeInfo: block.codeInfoString
+        )
+        if replacement.kind == .link, !replacement.inlineContent.containsValidLink {
+            replacement = Self.makeBlock(
+                id: replacement.id,
+                kind: .paragraph,
+                content: replacement.inlineContent
+            )
+        }
+        var candidate = document
+        candidate.blocks[range.startIndex] = replacement
+        let caret = BlockTextPosition(
+            blockID: replacement.id,
+            graphemeOffset: prefix.plainText.count + inserted.plainText.count
+        )
+        return try documentResult(
+            candidate,
+            selection: caretSelection(caret, in: candidate),
+            undo: .atomic(.paste)
+        )
     }
 
     mutating func replaceWithFallbackPlainText(_ fallback: String) throws -> BlockInputResult {
@@ -1513,6 +1560,20 @@ private extension InlineContent {
 
     static func concatenating(_ values: [InlineContent]) -> InlineContent {
         .init(spans: values.flatMap(\.spans))
+    }
+
+    func coalescingAdjacentStyles() -> InlineContent {
+        var merged: [InlineSpan] = []
+        for span in spans {
+            if let last = merged.last,
+               last.marks == span.marks,
+               last.linkURL == span.linkURL {
+                merged[merged.count - 1].text += span.text
+            } else {
+                merged.append(span)
+            }
+        }
+        return .init(spans: merged)
     }
 
     var containsValidLink: Bool {

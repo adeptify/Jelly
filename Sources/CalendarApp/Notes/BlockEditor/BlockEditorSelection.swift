@@ -143,6 +143,7 @@ enum BlockInputError: Error, Equatable, Sendable {
 
 enum BlockPastePayload: Equatable, Sendable {
     case plainText(String)
+    case inlineContent(InlineContent, fallbackPlainText: String)
     case richText(blocks: [BlockPasteBlock], fallbackPlainText: String)
 }
 
@@ -156,6 +157,17 @@ struct BlockPasteBlock: Equatable, Sendable {
 struct BlockClipboardPayload: Equatable, Sendable {
     let plainText: String
     let richBlocks: [BlockPasteBlock]
+    let inlineContent: InlineContent?
+
+    init(
+        plainText: String,
+        richBlocks: [BlockPasteBlock],
+        inlineContent: InlineContent? = nil
+    ) {
+        self.plainText = plainText
+        self.richBlocks = richBlocks
+        self.inlineContent = inlineContent
+    }
 }
 
 enum ParsedBlockPastePayload: Equatable, Sendable {

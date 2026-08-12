@@ -326,6 +326,34 @@ struct BlockEditorInputTests {
         #expect(cut.undo == .atomic(.cut))
     }
 
+    @Test func sameBlockPartialCutAndPasteReturnsInlineWithoutCreatingANewParagraph() throws {
+        let id = blockID(53)
+        let original = doc([block(id, .paragraph, "Cut paste should stay safe")])
+        let cut = try reduce(
+            original,
+            textSelection(id, 17, id, 26),
+            .cutSelection
+        )
+        guard case let .writeClipboard(clipboard) = cut.effect else {
+            Issue.record("cut must publish its exact clipboard payload")
+            return
+        }
+
+        let pasted = try reduce(
+            cut.document,
+            cut.selection,
+            .replaceSelection(.inlineContent(
+                try #require(clipboard.inlineContent),
+                fallbackPlainText: clipboard.plainText
+            ))
+        )
+
+        #expect(pasted.document == original)
+        #expect(pasted.document.blocks.count == 1)
+        #expect(pasted.selection == caret(id, 26, attributes: attributesAt(pasted.document, id, 26)))
+        #expect(pasted.undo == .atomic(.paste))
+    }
+
     @Test func collapsedCopyAndEmptyPasteAreTypedNoChanges() throws {
         let id = blockID(60)
         let document = doc([block(id, .paragraph, "甲")])
