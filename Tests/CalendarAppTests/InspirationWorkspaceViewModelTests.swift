@@ -128,6 +128,24 @@ struct InspirationWorkspaceViewModelTests {
         #expect(model.pending.map(\.id).contains(id))
     }
 
+    @Test func filteredListSelectionAlwaysMatchesAVisibleRowOrClears() async throws {
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let model = InspirationViewModel(store: store)
+        let first = try await model.capture("第一条")
+        _ = try await model.capture("第二条")
+
+        model.alignSelection(with: [first])
+        #expect(model.selectedID == first)
+
+        model.alignSelection(with: [])
+        #expect(model.selectedID == nil)
+    }
+
     @Test func selectedInspirationCanMoveToASharedCalendarCategory() async throws {
         let calendar = makeEmptyState()
         let store = WorkspaceStore(

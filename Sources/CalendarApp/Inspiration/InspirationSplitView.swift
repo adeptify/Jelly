@@ -130,13 +130,15 @@ struct InspirationInboxView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("灵感收件箱")
+            HStack(spacing: 10) {
+                Text("灵光")
                     .font(.system(size: 17, weight: .semibold))
-                Spacer()
+                Spacer(minLength: 0)
                 Button(action: onToggleInbox) {
                     Image(systemName: "sidebar.left")
+                        .font(.system(size: 13, weight: .medium))
                         .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(theme.secondaryText)
@@ -155,7 +157,7 @@ struct InspirationInboxView: View {
             }
                 .padding(.horizontal, 12)
                 .padding(.top, 10)
-                .padding(.bottom, 8)
+                .padding(.bottom, 10)
 
             HStack(spacing: 8) {
                 HStack(spacing: 7) {
@@ -168,7 +170,14 @@ struct InspirationInboxView: View {
                 }
                 .padding(.horizontal, 10)
                 .frame(height: 30)
-                .background(theme.canvas.opacity(0.78), in: RoundedRectangle(cornerRadius: 8))
+                .background(
+                    theme.canvas.opacity(0.78),
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(theme.subtleBorder.opacity(0.5), lineWidth: 0.5)
+                }
                 categoryMenu
             }
             .padding(.horizontal, 12)
@@ -190,9 +199,16 @@ struct InspirationInboxView: View {
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
+            .background(theme.elevatedSurface)
         }
         .background(theme.elevatedSurface)
         .foregroundStyle(theme.primaryText)
+        .onAppear {
+            model.alignSelection(with: visibleItemIDs)
+        }
+        .onChange(of: visibleItemIDs) { _, ids in
+            model.alignSelection(with: ids)
+        }
         .onChange(of: model.selected?.lifecycle) { _, lifecycle in
             guard let lifecycle else { return }
             scope = .preferred(
@@ -214,6 +230,10 @@ struct InspirationInboxView: View {
         }
     }
 
+    private var visibleItemIDs: [InspirationID] {
+        items.map(\.id)
+    }
+
     private var categoryMenu: some View {
         Menu {
             Button("全部分类") { model.categoryFilterID = nil }
@@ -228,7 +248,10 @@ struct InspirationInboxView: View {
                 : "line.3.horizontal.decrease.circle.fill")
                 .foregroundStyle(model.categoryFilterID == nil ? theme.secondaryText : theme.controlAccent)
                 .frame(width: 30, height: 30)
-                .background(theme.canvas.opacity(0.78), in: RoundedRectangle(cornerRadius: 8))
+                .background(
+                    theme.canvas.opacity(0.78),
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -239,23 +262,53 @@ struct InspirationInboxView: View {
     @ViewBuilder
     private func rows(_ items: [Inspiration], empty: String) -> some View {
         if items.isEmpty {
-            Text(empty).font(.caption).foregroundStyle(.secondary)
+            VStack(spacing: 8) {
+                Image(systemName: scope == .archived ? "archivebox" : "lightbulb")
+                    .font(.system(size: 20))
+                Text(empty).font(.caption)
+            }
+            .foregroundStyle(theme.secondaryText)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 28)
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
         } else {
             ForEach(items) { item in
                 Button {
                     onSelect(item.id)
                 } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(rowTitle(item)).lineLimit(1)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(rowTitle(item))
+                            .lineLimit(1)
+                            .font(.system(
+                                size: 13,
+                                weight: model.selectedID == item.id ? .semibold : .regular
+                            ))
+                            .foregroundStyle(theme.primaryText)
+                        if let preview = rowPreview(item) {
+                            Text(preview)
+                                .lineLimit(1)
+                                .font(.system(size: 11))
+                                .foregroundStyle(theme.secondaryText)
+                        }
                         Text(item.createdAt.formatted(date: .abbreviated, time: .shortened))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 10))
+                            .foregroundStyle(theme.secondaryText.opacity(0.82))
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background {
+                        if model.selectedID == item.id {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(theme.rangePreviewFill)
+                        }
+                    }
+                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
                 .buttonStyle(.plain)
-                .listRowBackground(model.selectedID == item.id ? theme.rangePreviewFill : Color.clear)
+                .listRowInsets(.init(top: 2, leading: 8, bottom: 2, trailing: 8))
+                .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
                 .accessibilityLabel(rowTitle(item))
                 .accessibilityAddTraits(model.selectedID == item.id ? .isSelected : [])
@@ -268,26 +321,62 @@ struct InspirationInboxView: View {
         if let text = item.rawText, !text.isEmpty { return text }
         return item.rawURL?.absoluteString ?? "灵感"
     }
+
+    private func rowPreview(_ item: Inspiration) -> String? {
+        if let domain = item.resolvedMetadata?.domain, !domain.isEmpty { return domain }
+        if item.resolvedMetadata?.title != nil,
+           let url = item.rawURL?.absoluteString {
+            return url
+        }
+        return nil
+    }
 }
 
 struct InspirationCaptureView: View {
     @Bindable var model: InspirationViewModel
     var isFocused: FocusState<Bool>.Binding
     var onCaptured: (InspirationID) -> Void = { _ in }
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: CalendarSemanticAppearance {
+        CalendarTheme.appearance(for: colorScheme)
+    }
 
     var body: some View {
-        HStack {
-            TextField("粘贴文字或链接，回车捕获", text: $model.captureText)
-                .textFieldStyle(.roundedBorder)
+        HStack(spacing: 8) {
+            Image(systemName: "plus")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(theme.controlAccent)
+            TextField("记下一闪而过的想法，或粘贴链接", text: $model.captureText)
+                .textFieldStyle(.plain)
                 .focused(isFocused)
                 .onSubmit { capture() }
-            Button("捕获") {
+            Button {
                 capture()
+            } label: {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(canCapture ? theme.controlAccent : theme.secondaryText.opacity(0.38))
             }
-            .disabled(model.captureText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .buttonStyle(.plain)
+            .disabled(!canCapture)
+            .help("收下这条灵感")
+            .accessibilityLabel("收下灵感")
+            .accessibilityIdentifier("inspiration-capture-action")
+        }
+        .padding(.horizontal, 11)
+        .frame(height: 36)
+        .background(theme.canvas.opacity(0.84), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(theme.subtleBorder.opacity(0.58), lineWidth: 0.5)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("灵感快速捕获")
+    }
+
+    private var canCapture: Bool {
+        !model.captureText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func capture() {
@@ -327,6 +416,12 @@ enum InspirationInboxScope: String, CaseIterable, Identifiable {
     }
 }
 
+enum InspirationDetailAction: String, CaseIterable {
+    case primary = "inspiration-primary-action"
+    case archive = "inspiration-archive-action"
+    case copyLink = "inspiration-copy-link-action"
+}
+
 struct InspirationDetailView: View {
     @Bindable var model: InspirationViewModel
     let store: WorkspaceStore
@@ -343,105 +438,24 @@ struct InspirationDetailView: View {
 
     var body: some View {
         if let inspiration = model.selected {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 10) {
-                    if showsInboxButton {
-                        Button(action: onToggleInbox) {
-                            Image(systemName: "sidebar.left").frame(width: 28, height: 28)
+            VStack(alignment: .leading, spacing: 0) {
+                detailToolbar(inspiration)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        contentSection(inspiration)
+                        if let metadata = inspiration.resolvedMetadata {
+                            sourceSection(inspiration, metadata: metadata)
                         }
-                        .buttonStyle(.plain)
-                        .help("显示灵感列表")
-                        .accessibilityLabel("显示灵感列表")
+                        statusSection
                     }
-                    Text("灵感详情").font(.title3.weight(.semibold))
-                    Spacer()
-                    Text(inspiration.createdAt.formatted(date: .abbreviated, time: .shortened))
-                        .font(.caption)
-                        .foregroundStyle(theme.secondaryText)
+                    .frame(maxWidth: 680, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 28)
+                    .padding(.top, 30)
+                    .padding(.bottom, 36)
                 }
-                Picker("分类", selection: Binding(
-                    get: { inspiration.categoryID },
-                    set: { categoryID in
-                        Task { _ = try? await model.changeSelectedCategory(to: categoryID) }
-                    }
-                )) {
-                    ForEach(store.calendarState.categories.values.sorted {
-                        $0.name.localizedStandardCompare($1.name) == .orderedAscending
-                    }, id: \.id) { category in
-                        Text(category.name).tag(category.id)
-                    }
-                }
-                .frame(maxWidth: 220, alignment: .leading)
-                .accessibilityLabel("灵感分类")
-                GroupBox("原始内容") {
-                    if let text = inspiration.rawText {
-                        Text(text).textSelection(.enabled)
-                    } else if let url = inspiration.rawURL {
-                        Text(url.absoluteString).textSelection(.enabled)
-                    } else {
-                        Text("（无原始内容）").foregroundStyle(.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                if let metadata = inspiration.resolvedMetadata {
-                    GroupBox("来源元数据") {
-                        Text(metadata.title ?? "（无标题）")
-                        Text(metadata.domain ?? "")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text("状态：\(metadata.fetchStatus.presentationTitle)")
-                            .font(.caption2)
-                    }
-                }
-                if let status = model.statusMessage {
-                    Text(status).font(.caption).foregroundStyle(.orange)
-                }
-                if let deleteStatus {
-                    Text(deleteStatus).font(.caption).foregroundStyle(.orange)
-                }
-                HStack {
-                    Button(model.selectedPrimaryActionTitle) {
-                        Task {
-                            if let noteID = try? await model.convertSelectedToNote() {
-                                onOpenNote(noteID)
-                            }
-                        }
-                    }
-                    if inspiration.rawURL != nil,
-                       inspiration.resolvedMetadata?.fetchStatus == .failed {
-                        Button("重试元数据") {
-                            Task { await model.retrySelectedMetadata() }
-                        }
-                    }
-                    Button(inspiration.lifecycle == .archived ? "恢复" : "归档") {
-                        Task {
-                            if inspiration.lifecycle == .archived {
-                                _ = try? await model.restoreSelected()
-                            } else {
-                                _ = try? await model.archiveSelected()
-                            }
-                        }
-                    }
-                    if inspiration.lifecycle == .archived {
-                        Button("永久删除…", role: .destructive) {
-                            do {
-                                pendingPermanentDelete = try model.permanentDeleteRequest(for: inspiration.id)
-                                deleteStatus = nil
-                            } catch {
-                                deleteStatus = "无法生成删除影响预览。"
-                            }
-                        }
-                    }
-                    if let url = inspiration.rawURL {
-                        Button("复制链接") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(url.absoluteString, forType: .string)
-                        }
-                    }
-                }
-                Spacer()
+                detailActions(inspiration)
             }
-            .padding(20)
             .background(theme.canvas)
             .foregroundStyle(theme.primaryText)
             .confirmationDialog(
@@ -497,6 +511,218 @@ struct InspirationDetailView: View {
             }
             .background(theme.canvas)
         }
+    }
+
+    private func detailToolbar(_ inspiration: Inspiration) -> some View {
+        HStack(spacing: 10) {
+            if showsInboxButton {
+                Button(action: onToggleInbox) {
+                    Image(systemName: "sidebar.left")
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("显示灵感列表")
+                .accessibilityLabel("显示灵感列表")
+            }
+            Text("灵光详情")
+                .font(.system(size: 17, weight: .semibold))
+            Spacer(minLength: 12)
+            categoryMenu(inspiration)
+        }
+        .padding(.horizontal, 20)
+        .frame(height: CalendarTheme.toolbarHeight)
+        .background(theme.canvas)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(theme.separator.opacity(0.7)).frame(height: 0.5)
+        }
+    }
+
+    private func categoryMenu(_ inspiration: Inspiration) -> some View {
+        Menu {
+            ForEach(sortedCategories, id: \.id) { category in
+                Button {
+                    Task { _ = try? await model.changeSelectedCategory(to: category.id) }
+                } label: {
+                    HStack {
+                        Text(category.name)
+                        if category.id == inspiration.categoryID { Image(systemName: "checkmark") }
+                    }
+                }
+            }
+        } label: {
+            Label(categoryName(for: inspiration.categoryID), systemImage: "tag")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(theme.secondaryText)
+                .padding(.horizontal, 10)
+                .frame(height: 28)
+                .background(theme.elevatedSurface.opacity(0.82), in: Capsule())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .help("分类会与日历和笔记共用")
+        .accessibilityLabel("灵光分类：\(categoryName(for: inspiration.categoryID))")
+    }
+
+    private func contentSection(_ inspiration: Inspiration) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("内容")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(theme.secondaryText)
+                Spacer(minLength: 12)
+                Text(inspiration.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.secondaryText)
+            }
+            Text(primaryContent(inspiration))
+                .font(.system(size: 18, weight: .regular))
+                .lineSpacing(6)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("inspiration-content")
+        }
+    }
+
+    private func sourceSection(
+        _ inspiration: Inspiration,
+        metadata: SourceMetadata
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Divider()
+                .overlay(theme.separator.opacity(0.7))
+                .padding(.vertical, 24)
+            Text("来源")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(theme.secondaryText)
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "link")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(theme.controlAccent)
+                    .frame(width: 30, height: 30)
+                    .background(theme.controlAccent.opacity(0.11), in: Circle())
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(metadata.title ?? inspiration.rawURL?.absoluteString ?? "链接")
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(2)
+                    HStack(spacing: 6) {
+                        if let domain = metadata.domain, !domain.isEmpty {
+                            Text(domain)
+                        }
+                        Text(metadata.fetchStatus.presentationTitle)
+                    }
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.secondaryText)
+                }
+                Spacer(minLength: 12)
+                if inspiration.rawURL != nil, metadata.fetchStatus == .failed {
+                    Button("重试") { Task { await model.retrySelectedMetadata() } }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 12, weight: .medium))
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var statusSection: some View {
+        if let status = model.statusMessage {
+            Text(status)
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .padding(.top, 18)
+        }
+        if let deleteStatus {
+            Text(deleteStatus)
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .padding(.top, 8)
+        }
+    }
+
+    private func detailActions(_ inspiration: Inspiration) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                Task {
+                    if let noteID = try? await model.convertSelectedToNote() {
+                        onOpenNote(noteID)
+                    }
+                }
+            } label: {
+                Label(
+                    model.selectedPrimaryActionTitle,
+                    systemImage: model.selectedConvertedNoteID == nil
+                        ? "note.text.badge.plus"
+                        : "arrow.up.right"
+                )
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(theme.controlAccent)
+            .controlSize(.regular)
+            .accessibilityLabel(model.selectedPrimaryActionTitle)
+            .accessibilityIdentifier(InspirationDetailAction.primary.rawValue)
+
+            Button(inspiration.lifecycle == .archived ? "恢复" : "归档") {
+                Task {
+                    if inspiration.lifecycle == .archived {
+                        _ = try? await model.restoreSelected()
+                    } else {
+                        _ = try? await model.archiveSelected()
+                    }
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
+            .accessibilityIdentifier(InspirationDetailAction.archive.rawValue)
+
+            if let url = inspiration.rawURL {
+                Button("复制链接") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(url.absoluteString, forType: .string)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                .accessibilityIdentifier(InspirationDetailAction.copyLink.rawValue)
+            }
+
+            Spacer(minLength: 0)
+
+            if inspiration.lifecycle == .archived {
+                Button("永久删除…", role: .destructive) {
+                    do {
+                        pendingPermanentDelete = try model.permanentDeleteRequest(for: inspiration.id)
+                        deleteStatus = nil
+                    } catch {
+                        deleteStatus = "无法生成删除影响预览。"
+                    }
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(theme.error)
+            }
+        }
+        .font(.system(size: 12, weight: .medium))
+        .padding(.horizontal, 20)
+        .frame(height: 58)
+        .background(theme.elevatedSurface.opacity(0.82))
+        .overlay(alignment: .top) {
+            Rectangle().fill(theme.separator.opacity(0.7)).frame(height: 0.5)
+        }
+    }
+
+    private var sortedCategories: [CalendarCategory] {
+        store.calendarState.categories.values.sorted {
+            $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+    }
+
+    private func categoryName(for id: UUID) -> String {
+        store.calendarState.categories[id]?.name ?? "未分类"
+    }
+
+    private func primaryContent(_ inspiration: Inspiration) -> String {
+        if let text = inspiration.rawText, !text.isEmpty { return text }
+        if let url = inspiration.rawURL { return url.absoluteString }
+        return "（没有可显示的内容）"
     }
 }
 

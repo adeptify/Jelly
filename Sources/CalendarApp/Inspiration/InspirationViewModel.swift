@@ -97,6 +97,11 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
         selectedID = id
     }
 
+    func alignSelection(with visibleIDs: [InspirationID]) {
+        if let selectedID, visibleIDs.contains(selectedID) { return }
+        selectedID = visibleIDs.first
+    }
+
     @discardableResult
     func changeSelectedCategory(to categoryID: UUID) async throws -> Bool {
         guard let id = selectedID else { return false }

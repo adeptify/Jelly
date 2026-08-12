@@ -83,6 +83,14 @@ struct WorkspaceSurfacePresentationTests {
         #expect(InspirationInboxScope.preferred(lifecycle: .active, isConverted: true) == .converted)
         #expect(InspirationInboxScope.preferred(lifecycle: .archived, isConverted: true) == .archived)
     }
+
+    @Test func inspirationDetailExposesOnePrimaryPathAndSeparateSecondaryActionContracts() {
+        #expect(InspirationDetailAction.allCases.map(\.rawValue) == [
+            "inspiration-primary-action",
+            "inspiration-archive-action",
+            "inspiration-copy-link-action",
+        ])
+    }
 }
 
 private final class FailingSurfaceMetadataResolver: URLMetadataResolving, @unchecked Sendable {
