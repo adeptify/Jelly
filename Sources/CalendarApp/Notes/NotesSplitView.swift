@@ -431,9 +431,31 @@ struct NotesSplitView: View {
 
     private func syncEditorNoteIfNeeded() {
         guard let identity = editorIdentity else { return }
-        if store.state.notes[identity.noteID] == nil {
+        guard let note = store.state.notes[identity.noteID] else {
             editorInitialFocus = nil
             editorIdentity = nil
+            return
+        }
+        guard let activeEditorSession,
+              activeEditorSession.document != note.document,
+              autosave.canReplaceSessionWithPersistedStoreSnapshot
+        else { return }
+        // A route transition has already sealed native input and proved the
+        // current editor generation. Re-keying avoids stale undo/autosave
+        // bases after Calendar changes the same Task Block document.
+        let replacement = NoteEditorIdentity(noteID: note.id, editSessionID: UUID())
+        do {
+            try autosave.beginSession(
+                note,
+                linkedTaskBlockLinks: Set(store.state.taskBlockLinks.filter { $0.noteID == note.id }),
+                editSessionID: replacement.editSessionID,
+                activeHostToken: UUID()
+            )
+            editorInitialFocus = nil
+            editorIdentity = replacement
+            statusBanner = nil
+        } catch {
+            statusBanner = "笔记已在其他页面更新，请完成当前输入后重试。"
         }
     }
 

@@ -1,4 +1,5 @@
 import AppKit
+import CalendarDomain
 import CalendarPersistence
 import SwiftUI
 import Testing
@@ -8,6 +9,92 @@ import WorkspaceDomain
 @Suite("NotesLifecycleWiringTests")
 @MainActor
 struct NotesLifecycleWiringTests {
+    @Test func returningFromCalendarRefreshesAnExternallyCompletedTaskBlock() async throws {
+        _ = NSApplication.shared
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let blockID = BlockID()
+        var note = Note.empty(categoryID: calendar.uncategorizedID, now: .distantPast)
+        note.title = "跨页面完成同步"
+        note.document = .init(blocks: [try .task(id: blockID, text: "从日历完成")])
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let item = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "从日历完成",
+            categoryID: calendar.uncategorizedID,
+            schedule: try .init(
+                startDate: CalendarDate(year: 2026, month: 8, day: 13)!,
+                endDate: CalendarDate(year: 2026, month: 8, day: 13)!,
+                startTime: nil,
+                endTime: nil
+            ),
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        _ = try await store.sendWorkspace(.scheduleTaskBlock(.init(
+            noteID: note.id,
+            blockID: blockID,
+            item: item
+        )))
+        let features = WorkspaceFeatures.production
+        let routeState = WorkspaceRouteState(
+            features: features,
+            preferences: NotesTestRoutePreferenceStore(initial: "notes")
+        )
+        let transition = WorkspaceRouteTransitionCoordinator(routeState: routeState, features: features)
+        let router = WorkspaceDeepLinkRouter()
+        let root = NotesSplitView(
+            store: store,
+            focusRegistry: EditorFocusRegistry(),
+            transitionCoordinator: transition,
+            deepLinkRouter: router,
+            newItemRouter: WorkspaceNewItemRouter(),
+            searchIndex: WorkspaceSearchIndex()
+        )
+        let hosting = NSHostingView(rootView: root)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        hosting.layoutSubtreeIfNeeded()
+        _ = router.request(.note(note.id))
+
+        #expect(await waitUntil {
+            hosting.layoutSubtreeIfNeeded()
+            return notesDescendants(of: hosting, as: NSButton.self).contains {
+                $0.accessibilityIdentifier() == "task-block-checkbox-\(blockID.rawValue.uuidString)"
+                    && $0.state == .off
+            }
+        })
+        #expect(await transition.requestActivation(.calendar))
+        let completedAt = Date(timeIntervalSince1970: 1_786_551_000)
+
+        _ = try await TaskBlockCalendarIntegration.completeFromCalendar(
+            store: store,
+            itemID: item.id,
+            at: completedAt
+        )
+
+        #expect(await waitUntil {
+            hosting.layoutSubtreeIfNeeded()
+            return notesDescendants(of: hosting, as: NSButton.self).contains {
+                $0.accessibilityIdentifier() == "task-block-checkbox-\(blockID.rawValue.uuidString)"
+                    && $0.state == .on
+            }
+        })
+    }
+
     @Test func windowCloseWaitsForPersistenceThenReplaysTheCloseOnce() async {
         var closeCount = 0
         let coordinator = NotesWindowCloseCoordinator(
@@ -258,6 +345,21 @@ struct NotesLifecycleWiringTests {
         #expect(reader.phase == .ready)
         #expect(try await journal.current()?.records.isEmpty == true)
         #expect(window.sheets.isEmpty)
+    }
+}
+
+@MainActor
+private final class NotesTestRoutePreferenceStore: WorkspaceRoutePreferenceStore {
+    private var value: String?
+
+    init(initial: String?) {
+        value = initial
+    }
+
+    var selectedRouteRawValue: String? { value }
+
+    func writeSelectedRouteRawValue(_ rawValue: String) {
+        value = rawValue
     }
 }
 

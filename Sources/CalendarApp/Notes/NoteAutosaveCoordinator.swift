@@ -264,6 +264,16 @@ final class NoteAutosaveCoordinator {
     }
     var debugOperationCount: Int { operations.count }
     var currentSnapshotChecksum: String? { latestSubmission?.noteSnapshotChecksum }
+    var canReplaceSessionWithPersistedStoreSnapshot: Bool {
+        switch latestEvidence {
+        case .clean:
+            return currentTriple == nil
+        case let .persisted(triple):
+            return currentTriple == triple
+        case .protectedOnly, .unsafeLatestUnprotected:
+            return false
+        }
+    }
     var hasUnresolvedNativeInput: Bool {
         if case .nativeInputUnresolved = autosaveState { return true }
         return false
