@@ -61,6 +61,7 @@ enum BlockInputCommand: Equatable, Sendable {
     case applySlashConversion(BlockKind)
     case toggleInlineMark(InlineMark)
     case setLink(URL?)
+    case setTaskCompletion(blockID: BlockID, completedAt: Date?)
     case copySelection
     case cutSelection
     case replaceSelection(BlockPastePayload)
@@ -119,6 +120,7 @@ enum BlockUndoAction: Equatable, Sendable {
     case deletion
     case drag
     case documentIngest
+    case taskCompletion
 }
 
 struct BlockInputResult: Equatable, Sendable {

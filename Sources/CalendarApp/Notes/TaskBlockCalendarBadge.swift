@@ -28,7 +28,6 @@ struct TaskBlockCalendarBadge: View {
     var onSchedule: () -> Void
     var onUnlink: () -> Void
     var onOpenItem: (UUID) -> Void
-    var onToggleCompletion: () -> Void
 
     private var link: TaskBlockCalendarLink? {
         store.state.taskBlockLinks.first { $0.noteID == noteID && $0.blockID == blockID }
@@ -45,11 +44,6 @@ struct TaskBlockCalendarBadge: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("已关联日历事项")
-
-                Button(item.completedAt == nil ? "完成" : "重开") {
-                    onToggleCompletion()
-                }
-                .controlSize(.mini)
 
                 TaskBlockUnlinkButton(action: onUnlink)
                     .frame(minWidth: 92, minHeight: 20)

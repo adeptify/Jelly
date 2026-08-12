@@ -15,6 +15,7 @@ protocol ContinuousBlockEditorHost: AnyObject {
 @MainActor
 final class ContinuousBlockEditorHostView: NSView, ContinuousBlockEditorHost {
     let textView = ContinuousBlockEditorTextView(frame: .zero)
+    let taskCheckboxOverlay = TaskBlockCheckboxOverlay(frame: .zero)
     var semanticAppearance: CalendarSemanticAppearance {
         didSet { needsLayout = true }
     }
@@ -24,6 +25,7 @@ final class ContinuousBlockEditorHostView: NSView, ContinuousBlockEditorHost {
         semanticAppearance = appearance
         super.init(frame: .zero)
         addSubview(textView)
+        addSubview(taskCheckboxOverlay)
         setAccessibilityElement(false)
     }
 
@@ -31,6 +33,7 @@ final class ContinuousBlockEditorHostView: NSView, ContinuousBlockEditorHost {
         semanticAppearance = CalendarTheme.light
         super.init(coder: coder)
         addSubview(textView)
+        addSubview(taskCheckboxOverlay)
         setAccessibilityElement(false)
     }
 
@@ -44,6 +47,8 @@ final class ContinuousBlockEditorHostView: NSView, ContinuousBlockEditorHost {
         super.layout()
         let width = max(1, bounds.width)
         textView.frame = .init(x: 0, y: 0, width: width, height: max(measuredHeight, bounds.height))
+        taskCheckboxOverlay.frame = textView.frame
+        taskCheckboxOverlay.updateFrames()
         updateMeasuredHeight(width: width)
     }
 
@@ -53,6 +58,7 @@ final class ContinuousBlockEditorHostView: NSView, ContinuousBlockEditorHost {
         selectedRange: NSRange
     ) {
         textView.apply(diff: diff, projection: projection, selectedRange: selectedRange)
+        taskCheckboxOverlay.apply(document: projection.document, textView: textView)
         updateMeasuredHeight(width: max(1, bounds.width))
     }
 
@@ -61,6 +67,8 @@ final class ContinuousBlockEditorHostView: NSView, ContinuousBlockEditorHost {
         guard abs(next - measuredHeight) > 0.5 else { return }
         measuredHeight = next
         textView.frame.size.height = next
+        taskCheckboxOverlay.frame.size.height = next
+        taskCheckboxOverlay.updateFrames()
         invalidateIntrinsicContentSize()
     }
 }

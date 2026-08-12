@@ -8,6 +8,32 @@ import WorkspaceDomain
 @Suite("BlockEditorUndoTests")
 @MainActor
 struct BlockEditorUndoTests {
+    @Test @MainActor func localTaskCheckboxCompletionIsOneEditorUndoStepWithoutACalendarLink() throws {
+        let blockID = BlockID()
+        let block = try DocumentBlock.task(id: blockID, text: "先在正文完成")
+        let document = BlockDocument(blocks: [block])
+        var publications: [BlockDocument] = []
+        let session = BlockEditorSession(
+            noteID: NoteID(),
+            editSessionID: UUID(),
+            initialDocument: document,
+            initialSelection: reviewCaret(blockID, 0),
+            focusRegistry: EditorFocusRegistry(),
+            onDocumentChange: { publications.append($0) }
+        )
+        let completedAt = Date(timeIntervalSince1970: 1_755_000_100)
+
+        #expect(session.toggleTaskCompletion(blockID: blockID, at: completedAt))
+        #expect(session.document.blocks[0].taskState?.completedAt == completedAt)
+        #expect(publications.count == 1)
+        session.undoManager.undo()
+        #expect(session.document == document)
+        #expect(publications.count == 2)
+        session.undoManager.redo()
+        #expect(session.document.blocks[0].taskState?.completedAt == completedAt)
+        #expect(publications.count == 3)
+    }
+
     @Test func sessionOwnsOneUndoManagerAndTypingUndoRestoresAuthoritativeSnapshot() throws {
         let fixture = undoFixture()
         var published: [BlockDocument] = []

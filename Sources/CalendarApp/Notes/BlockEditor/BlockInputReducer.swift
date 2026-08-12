@@ -55,6 +55,8 @@ enum BlockInputReducer {
             return try context.toggle(mark)
         case let .setLink(url):
             return try context.setLink(url)
+        case let .setTaskCompletion(blockID, completedAt):
+            return try context.setTaskCompletion(blockID: blockID, completedAt: completedAt)
         case .copySelection:
             return context.copySelection()
         case .cutSelection:
@@ -100,7 +102,7 @@ private extension BlockInputCommand {
         case .insertText, .insertTextApplyingMarkdownShortcut, .enter, .softBreak, .backspace,
              .moveHorizontal, .moveVertical, .applyMarkdownShortcut, .applySlashConversion:
             true
-        case .indent, .outdent, .convert, .toggleInlineMark, .setLink,
+        case .indent, .outdent, .convert, .toggleInlineMark, .setLink, .setTaskCompletion,
              .copySelection, .cutSelection, .replaceSelection, .deleteSelection, .moveBlockRoots,
              .applyDocumentBlocks:
             false
@@ -161,6 +163,24 @@ private struct ReductionContext {
 
     func selectionResult(_ newSelection: BlockEditorSelection) -> BlockInputResult {
         .init(document: document, selection: newSelection, mutation: .selectionOnly, effect: .handled, undo: .none)
+    }
+
+    mutating func setTaskCompletion(blockID: BlockID, completedAt: Date?) throws -> BlockInputResult {
+        guard let index = document.blocks.firstIndex(where: { $0.id == blockID }),
+              document.blocks[index].kind == .task,
+              document.blocks[index].taskState != nil else {
+            return noChange(.unsupportedBlockKind)
+        }
+        guard document.blocks[index].taskState?.completedAt != completedAt else {
+            return noChange(.samePosition)
+        }
+        var candidate = document
+        candidate.blocks[index].taskState?.completedAt = completedAt
+        return try documentResult(
+            candidate,
+            selection: selection,
+            undo: .atomic(.taskCompletion)
+        )
     }
 
     func documentResult(

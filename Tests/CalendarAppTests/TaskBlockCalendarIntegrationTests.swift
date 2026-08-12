@@ -9,6 +9,96 @@ import WorkspaceDomain
 @Suite("TaskBlockCalendarIntegrationTests")
 @MainActor
 struct TaskBlockCalendarIntegrationTests {
+    @Test func productionEditorCheckboxPersistsOneSharedCompletionToLinkedCalendarItem() async throws {
+        _ = NSApplication.shared
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let blockID = BlockID()
+        var note = Note.empty(id: NoteID(), categoryID: calendar.uncategorizedID, now: .distantPast)
+        note.document = .init(blocks: [try .task(id: blockID, text: "正文勾选后同步")])
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let day = CalendarDate(year: 2026, month: 8, day: 18)!
+        let item = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "正文勾选后同步",
+            categoryID: calendar.uncategorizedID,
+            schedule: try .init(startDate: day, endDate: day, startTime: nil, endTime: nil),
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        _ = try await store.sendWorkspace(.scheduleTaskBlock(.init(
+            noteID: note.id,
+            blockID: blockID,
+            item: item
+        )))
+
+        let editSessionID = UUID()
+        let autosave = NoteAutosaveCoordinator(
+            store: store,
+            scheduler: ImmediateTaskBlockScheduler()
+        )
+        let persisted = try #require(store.state.notes[note.id])
+        try autosave.beginSession(
+            persisted,
+            linkedTaskBlockLinks: Set(store.state.taskBlockLinks),
+            editSessionID: editSessionID,
+            activeHostToken: UUID()
+        )
+        var finalizer: NoteNativeInputFinalizer?
+        let host = NSHostingView(rootView: NoteEditorView(
+            identity: .init(noteID: note.id, editSessionID: editSessionID),
+            note: persisted,
+            focusRegistry: EditorFocusRegistry(),
+            autosave: autosave,
+            store: store,
+            categories: Array(calendar.categories.values),
+            onDocumentCommitted: { _ in },
+            onTitleCommitted: { _ in },
+            onCategoryChanged: { _ in },
+            onRequestMarkdownImport: {},
+            onRequestMarkdownExport: {},
+            sessionSink: { _ in },
+            nativeFinalizerHook: Binding(get: { finalizer }, set: { finalizer = $0 })
+        ))
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 900, height: 620),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        host.layoutSubtreeIfNeeded()
+        #expect(await waitForTaskBlock {
+            host.layoutSubtreeIfNeeded()
+            return taskBlockDescendants(of: host, as: NSButton.self).contains {
+                $0.accessibilityIdentifier() == "task-block-checkbox-\(blockID.rawValue.uuidString)"
+            }
+        })
+        let checkbox = try #require(taskBlockDescendants(of: host, as: NSButton.self).first {
+            $0.accessibilityIdentifier() == "task-block-checkbox-\(blockID.rawValue.uuidString)"
+        })
+
+        checkbox.performClick(checkbox)
+
+        #expect(await waitForTaskBlock {
+            store.state.notes[note.id]?.document.blocks.first(where: { $0.id == blockID })?
+                .taskState?.completedAt != nil
+        })
+        let blockCompletion = try #require(
+            store.state.notes[note.id]?.document.blocks.first(where: { $0.id == blockID })?
+                .taskState?.completedAt
+        )
+        #expect(store.calendarState.items[item.id]?.completedAt == blockCompletion)
+        window.orderOut(nil)
+    }
+
     @Test func scheduleTaskBlockCreatesNonRecurringItemAndSharedCompletion() async throws {
         let calendar = makeEmptyState()
         let store = WorkspaceStore(
@@ -192,8 +282,7 @@ struct TaskBlockCalendarIntegrationTests {
             blockID: blockID,
             onSchedule: {},
             onUnlink: {},
-            onOpenItem: { _ in },
-            onToggleCompletion: {}
+            onOpenItem: { _ in }
         ))
         host.frame = .init(x: 0, y: 0, width: 420, height: 80)
         host.layoutSubtreeIfNeeded()
@@ -206,6 +295,25 @@ struct TaskBlockCalendarIntegrationTests {
         }
         #expect(hasNamedButton || hasVisibleLabel)
     }
+}
+
+@MainActor
+private final class ImmediateTaskBlockScheduler: NoteAutosaveScheduling {
+    func sleep(milliseconds: UInt64) async throws {}
+}
+
+@MainActor
+private func waitForTaskBlock(
+    timeout: Duration = .seconds(1),
+    _ condition: @MainActor () -> Bool
+) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while clock.now < deadline {
+        if condition() { return true }
+        await Task.yield()
+    }
+    return condition()
 }
 
 @MainActor

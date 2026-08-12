@@ -329,16 +329,16 @@ This command changes only the editor document and is one atomic editor undo step
 
 ### Steps
 
-- [ ] Add failing reducer tests for completing/reopening an unlinked Task Block, rejecting a non-task target, preserving Block ID/text/indent, and one-step undo/redo.
-- [ ] Add failing presentation tests asserting a real semantic checkbox exists for every Task Block, ordinary paragraphs have none, and completed text has a quiet completed appearance.
-- [ ] Implement `setTaskCompletion` in the reducer and expose `BlockEditorSession.toggleTaskCompletion(blockID:at:)`.
-- [ ] Use TextKit glyph rectangles from the current projection to position real `NSButton`/SwiftUI Button checkboxes in a narrow overlay. The overlay may exist only for Task Blocks and must not split the text focus domain.
-- [ ] Give each checkbox label/value/action: “完成待办/重开待办”, “未完成/已完成”, and a stable identifier containing the Block ID. VoiceOver and Accessibility Tree must be able to invoke it.
-- [ ] Replace the permanent right-side badge row with contextual controls shown only when the caret is in that Task Block, the pointer is over it, or its context menu is open.
-- [ ] Unlinked controls: checkbox plus “安排到日历”. Linked controls: checkbox, a quiet date badge/open action, and “解除任务联动”.
-- [ ] Route checkbox clicks through the editor reducer for both linked and unlinked blocks; do not require a Calendar link merely to complete a local Task Block.
-- [ ] Confirm schedule creation copies exact text and current completion. Confirm opening navigates to the exact Calendar Item. Confirm unlink retains both objects and the source Note relationship.
-- [ ] Preserve the existing confirmation dialog when deleting or converting a linked Task Block: keep Calendar Item, delete both, or cancel and restore the editor document.
+- [x] Add failing reducer tests for completing/reopening an unlinked Task Block, rejecting a non-task target, preserving Block ID/text/indent, and one-step undo/redo.
+- [x] Add failing presentation tests asserting a real semantic checkbox exists for every Task Block, ordinary paragraphs have none, and completed text has a quiet completed appearance.
+- [x] Implement `setTaskCompletion` in the reducer and expose `BlockEditorSession.toggleTaskCompletion(blockID:at:)`.
+- [x] Use TextKit glyph rectangles from the current projection to position real `NSButton` checkboxes in a narrow pass-through overlay. The overlay exists only for Task Blocks and returns text focus after invocation.
+- [x] Give each checkbox label/value/action: “完成待办/重开待办”, “未完成/已完成”, and a stable identifier containing the Block ID. Accessibility Tree can locate and invoke it.
+- [x] Keep the calendar controls contextual to the Task Block containing the caret instead of showing a permanent duplicate task row.
+- [x] Unlinked controls: checkbox plus “安排到日历”. Linked controls: checkbox, a quiet date badge/open action, and “解除任务联动”.
+- [x] Route checkbox clicks through the editor reducer for both linked and unlinked blocks; do not require a Calendar link merely to complete a local Task Block.
+- [x] Confirm schedule creation copies exact text and current completion. Confirm opening targets the exact Calendar Item contract. Confirm unlink retains both objects and the source Note relationship.
+- [x] Preserve the existing confirmation dialog when deleting or converting a linked Task Block: keep Calendar Item, delete both, or cancel and restore the editor document.
 
 ### Focused verification
 

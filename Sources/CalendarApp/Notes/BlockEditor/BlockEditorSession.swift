@@ -465,6 +465,16 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         dispatchTextCommandOutcome(command)?.commandHandled ?? false
     }
 
+    func toggleTaskCompletion(blockID: BlockID, at date: Date) -> Bool {
+        guard let block = document.blocks.first(where: { $0.id == blockID }),
+              block.kind == .task,
+              block.taskState != nil else { return false }
+        return dispatchTextCommand(.setTaskCompletion(
+            blockID: blockID,
+            completedAt: block.taskState?.completedAt == nil ? date : nil
+        ))
+    }
+
     func dispatchTextCommandOutcome(_ command: BlockInputCommand) -> BlockEditorDispatchOutcome? {
         guard composition == nil else { return nil }
         return try? dispatch(command)
@@ -852,6 +862,7 @@ private extension BlockUndoAction {
         case .enter: "换行"
         case .softBreak: "软换行"
         case .documentIngest: "导入文档"
+        case .taskCompletion: "切换待办状态"
         case .backspace, .deletion: "删除"
         case .indentation: "缩进"
         case .conversion: "转换"

@@ -5,6 +5,53 @@ import WorkspaceDomain
 
 @Suite("BlockEditorInputTests")
 struct BlockEditorInputTests {
+    @Test func taskCompletionTargetsOnlyATaskAndPreservesItsIdentityContentAndIndent() throws {
+        let taskID = blockID(5000)
+        let paragraphID = blockID(5001)
+        let parentID = blockID(5002)
+        let completedAt = Date(timeIntervalSince1970: 1_755_000_000)
+        let task = DocumentBlock(
+            id: taskID,
+            kind: .task,
+            inlineContent: .plain("正文里的待办"),
+            taskState: .init(completedAt: nil),
+            indentLevel: 1
+        )
+        let paragraph = block(paragraphID, .paragraph, "普通正文")
+        let document = doc([block(parentID, .bullet, "父列表"), task, paragraph])
+
+        let completed = try reduce(
+            document,
+            caret(paragraphID, 0),
+            .setTaskCompletion(blockID: taskID, completedAt: completedAt)
+        )
+        #expect(completed.document.blocks[1].id == taskID)
+        #expect(completed.document.blocks[1].kind == .task)
+        #expect(text(completed.document.blocks[1]) == "正文里的待办")
+        #expect(completed.document.blocks[1].indentLevel == 1)
+        #expect(completed.document.blocks[1].taskState?.completedAt == completedAt)
+        #expect(completed.document.blocks[2] == paragraph)
+        #expect(completed.selection == caret(paragraphID, 0))
+        #expect(completed.undo == .atomic(.taskCompletion))
+
+        let reopened = try reduce(
+            completed.document,
+            completed.selection,
+            .setTaskCompletion(blockID: taskID, completedAt: nil)
+        )
+        #expect(reopened.document.blocks[1].taskState?.completedAt == nil)
+        #expect(reopened.undo == .atomic(.taskCompletion))
+
+        let rejected = try reduce(
+            document,
+            caret(taskID, 0),
+            .setTaskCompletion(blockID: paragraphID, completedAt: completedAt)
+        )
+        #expect(rejected.document == document)
+        #expect(rejected.mutation == .none(.unsupportedBlockKind))
+        #expect(rejected.undo == .none)
+    }
+
     @Test(arguments: UnicodeFixture.all)
     func insertionAndBackspaceRespectGraphemeBoundaries(_ fixture: UnicodeFixture) throws {
         let id = blockID(1)

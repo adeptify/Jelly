@@ -99,7 +99,7 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
             self.selectedRange = selectedRange
             restoreAuthoritativeAttributes(
                 projection: projection,
-                changedBlockIDs: diff?.changedBlockIDs ?? [],
+                changedBlockIDs: diff?.changedBlockIDs ?? Set(projection.segments.map(\.blockID)),
                 selectedRange: selectedRange
             )
         }
@@ -140,10 +140,7 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
             case .ordered:
                 ("\(orderedIndex)." as NSString).draw(at: baseline, withAttributes: markerAttributes(color: color))
             case .task:
-                ((block.taskState?.completedAt == nil ? "☐" : "☑") as NSString).draw(
-                    at: baseline,
-                    withAttributes: markerAttributes(color: color)
-                )
+                break
             case .quote:
                 color.setFill()
                 NSBezierPath(rect: .init(
@@ -222,6 +219,20 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
         guard !rect.isEmpty else { return nil }
         let origin = textContainerOrigin
         return convert(.init(x: origin.x + rect.midX, y: origin.y + rect.midY), to: nil)
+    }
+
+    func taskCheckboxFrame(for blockID: BlockID) -> NSRect? {
+        guard let projection = currentProjection,
+              let index = projection.document.blocks.firstIndex(where: { $0.id == blockID }),
+              projection.document.blocks[index].kind == .task else { return nil }
+        let block = projection.document.blocks[index]
+        let line = lineFragmentRect(forBlockAt: index)
+        return .init(
+            x: textContainerOrigin.x + CGFloat(block.indentLevel * 20),
+            y: textContainerOrigin.y + line.minY + max(0, (line.height - 18) / 2),
+            width: 18,
+            height: 18
+        )
     }
 
     @discardableResult

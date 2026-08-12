@@ -106,10 +106,7 @@ private struct BlockEditorSessionHost: View {
                             )
                         }
                     },
-                    onOpenItem: taskCalendarContext.onOpenItem,
-                    onToggleCompletion: {
-                        toggleTaskCompletion(blockID: blockID, context: taskCalendarContext)
-                    }
+                    onOpenItem: taskCalendarContext.onOpenItem
                 )
             }
             if let state = session.slashMenuState {
@@ -139,30 +136,6 @@ private struct BlockEditorSessionHost: View {
                     now: taskCalendarContext.now(),
                     onCancel: { scheduleRequest = nil },
                     onScheduled: { scheduleRequest = nil }
-                )
-            }
-        }
-    }
-
-    private func toggleTaskCompletion(blockID: BlockID, context: TaskBlockCalendarContext) {
-        Task {
-            guard let link = TaskBlockCalendarIntegration.link(
-                for: context.store,
-                noteID: session.noteID,
-                blockID: blockID
-            ), let item = context.store.calendarState.items[link.calendarItemID] else { return }
-            if item.completedAt == nil {
-                _ = try? await TaskBlockCalendarIntegration.completeFromBlock(
-                    store: context.store,
-                    noteID: session.noteID,
-                    blockID: blockID,
-                    at: context.now()
-                )
-            } else {
-                _ = try? await TaskBlockCalendarIntegration.reopenFromBlock(
-                    store: context.store,
-                    noteID: session.noteID,
-                    blockID: blockID
                 )
             }
         }
