@@ -16,7 +16,8 @@
 | Notes | Create note; title/body entry points are visible | PASS |
 | Notes | Body search, save, restart persistence | PASS |
 | Notes | Draft recovery sheet on bare Journal | AUTO |
-| Notes | Archive / restore / permanent-delete model transitions | AUTO |
+| Notes | Archive and restore in final packaged app | PASS |
+| Notes | Permanent-delete model transition and menu entry | AUTO；最终删除未执行 |
 | Calendar | Note schedules an item and opens exact relationship | PASS |
 | Calendar | Primary / reference attach & detach | AUTO |
 | Task | Schedule task block; complete both sides | AUTO |
