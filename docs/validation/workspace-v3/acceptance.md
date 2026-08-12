@@ -37,9 +37,10 @@ Workspace V1 已关闭本轮代码审查和真实使用测试中发现的发布�
 
 当前产物：
 
+- 版本：`0.2.0 (2)`
 - `dist/Jelly.app`
-- `dist/Jelly.app.zip` — SHA-256 `1fc1c9f62bb834ab4e4540dc691dd26794b206960915943d0b1e4fd042c94c8d`
-- `dist/Jelly.dmg` — SHA-256 `2170e8b82c287442b403f9d8072cc852792e26bcd2fbc2efe2188864c3c644ea`
+- `dist/Jelly.app.zip` — SHA-256 `37a2ec145587e5be2a3276cec89e22ef8de5f84e4b02ede593c30836e1ebadec`
+- `dist/Jelly.dmg` — SHA-256 `8a5dc17b2ed2f5879f02716ebf34e463be8014d17962634736a78ccadb4ca822`
 
 ## Computer Use 真实产品测试
 
