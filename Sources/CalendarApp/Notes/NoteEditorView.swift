@@ -8,10 +8,16 @@ struct NoteEditorIdentity: Hashable, Sendable {
     let editSessionID: UUID
 }
 
+enum NoteInitialFocus: Equatable, Sendable {
+    case title
+    case bodyStart
+}
+
 /// Right-hand Notes editor surface. Ordinary Store publications keep the same
 /// `EditorKey`; selection changes and recovery/save-as-new mint a new one.
 struct NoteEditorView: View {
     let identity: NoteEditorIdentity
+    let initialFocus: NoteInitialFocus?
     let note: Note
     let focusRegistry: EditorFocusRegistry
     let autosave: NoteAutosaveCoordinator
@@ -39,6 +45,7 @@ struct NoteEditorView: View {
     @State private var showScheduleSheet = false
     @State private var lastAcceptedDocument: BlockDocument
     @State private var pendingLinkedTaskDeletion: PendingLinkedTaskDeletion?
+    @State private var didApplyInitialFocus = false
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: CalendarSemanticAppearance {
@@ -47,6 +54,7 @@ struct NoteEditorView: View {
 
     init(
         identity: NoteEditorIdentity,
+        initialFocus: NoteInitialFocus? = nil,
         note: Note,
         focusRegistry: EditorFocusRegistry,
         autosave: NoteAutosaveCoordinator,
@@ -67,6 +75,7 @@ struct NoteEditorView: View {
         nativeFinalizerHook: Binding<NoteNativeInputFinalizer?>
     ) {
         self.identity = identity
+        self.initialFocus = initialFocus
         self.note = note
         self.focusRegistry = focusRegistry
         self.autosave = autosave
@@ -116,7 +125,11 @@ struct NoteEditorView: View {
                         title = value
                         _ = try? autosave.update(title: value)
                     },
-                    coordinatorSink: { titleCoordinator = $0 }
+                    onReturn: { editorSession?.focusDocumentStart() },
+                    coordinatorSink: { coordinator in
+                        titleCoordinator = coordinator
+                        applyInitialFocusIfReady()
+                    }
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
                 Menu {
@@ -189,19 +202,23 @@ struct NoteEditorView: View {
                     initialSelection: defaultSelection(in: note.document),
                     focusRegistry: focusRegistry,
                     onDocumentChange: handleDocumentChange,
-                    sessionSink: {
-                        editorSession = $0
-                        sessionSink($0)
+                    sessionSink: { session in
+                        editorSession = session
+                        sessionSink(session)
+                        applyInitialFocusIfReady()
                     },
                     taskCalendarContext: .init(
                         store: store,
                         onOpenItem: onOpenCalendarItem
                     )
                 )
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 18)
+                .frame(maxWidth: 720, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.horizontal, 28)
+                .padding(.vertical, 20)
             }
+
+            BlockFormattingBar(session: editorSession)
         }
         .background(theme.canvas)
         .foregroundStyle(theme.primaryText)
@@ -239,7 +256,14 @@ struct NoteEditorView: View {
                 ? "这次删除包含 \(count) 个已关联待办。请选择对应日历事项的处理方式。"
                 : "这个待办已关联日历事项。请选择日历事项的处理方式。")
         }
-        .onAppear { installNativeFinalizer() }
+        .onAppear {
+            installNativeFinalizer()
+            applyInitialFocusIfReady()
+            Task { @MainActor in
+                await Task.yield()
+                applyInitialFocusIfReady()
+            }
+        }
         .onChange(of: identity) { _, _ in installNativeFinalizer() }
         .onDisappear {
             sessionSink(nil)
@@ -248,6 +272,18 @@ struct NoteEditorView: View {
                 nativeFinalizerHook.wrappedValue = nil
             }
         }
+    }
+
+    private func applyInitialFocusIfReady() {
+        guard !didApplyInitialFocus, let initialFocus else { return }
+        switch initialFocus {
+        case .title:
+            guard titleCoordinator?.focus() == true else { return }
+        case .bodyStart:
+            guard let editorSession else { return }
+            guard editorSession.focusDocumentStart() else { return }
+        }
+        didApplyInitialFocus = true
     }
 
     private func installNativeFinalizer() {

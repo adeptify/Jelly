@@ -23,7 +23,8 @@ enum BlockTextStyle {
             return NSAttributedString(
                 string: dividerPlaceholder,
                 attributes: blockAttributes(for: block, appearance: appearance).merging([
-                    .jellyDivider: true
+                    .jellyDivider: true,
+                    .foregroundColor: NSColor.clear
                 ]) { _, new in new }
             )
         }
@@ -79,14 +80,14 @@ enum BlockTextStyle {
 
     static func baseFont(for kind: BlockKind) -> NSFont {
         switch kind {
-        case .heading1: .systemFont(ofSize: 24, weight: .bold)
-        case .heading2: .systemFont(ofSize: 20, weight: .semibold)
-        case .heading3: .systemFont(ofSize: 17, weight: .semibold)
-        case .code: .monospacedSystemFont(ofSize: 13, weight: .regular)
+        case .heading1: .systemFont(ofSize: 26, weight: .bold)
+        case .heading2: .systemFont(ofSize: 22, weight: .semibold)
+        case .heading3: .systemFont(ofSize: 18, weight: .semibold)
+        case .code: .monospacedSystemFont(ofSize: 15, weight: .regular)
         case .quote:
-            NSFontManager.shared.convert(.systemFont(ofSize: 14), toHaveTrait: .italicFontMask)
+            NSFontManager.shared.convert(.systemFont(ofSize: 16), toHaveTrait: .italicFontMask)
         case .paragraph, .bullet, .ordered, .task, .divider, .link:
-            .systemFont(ofSize: 14)
+            .systemFont(ofSize: 16)
         }
     }
 
@@ -104,11 +105,14 @@ enum BlockTextStyle {
         }
     }
 
-    static func paragraphStyle(for kind: BlockKind) -> NSParagraphStyle? {
-        guard [.bullet, .ordered, .task, .quote].contains(kind) else { return nil }
+    static func paragraphStyle(for kind: BlockKind) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
-        style.firstLineHeadIndent = 18
-        style.headIndent = 18
+        style.lineHeightMultiple = 1.45
+        style.paragraphSpacing = kind == .divider ? 8 : 5
+        if [.bullet, .ordered, .task, .quote].contains(kind) {
+            style.firstLineHeadIndent = 22
+            style.headIndent = 22
+        }
         return style
     }
 
@@ -135,9 +139,7 @@ enum BlockTextStyle {
             .jellyBlockID: block.id.rawValue.uuidString,
             .jellyBlockKind: block.kind.rawValue
         ]
-        if let paragraphStyle = paragraphStyle(for: block.kind) {
-            attributes[.paragraphStyle] = paragraphStyle
-        }
+        attributes[.paragraphStyle] = paragraphStyle(for: block.kind)
         if block.kind == .code {
             attributes[.backgroundColor] = codeBackground(appearance: appearance)
         }

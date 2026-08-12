@@ -21,6 +21,7 @@ struct NotesSplitView: View {
     @State private var autosave: NoteAutosaveCoordinator
     @State private var closeBridge: NoteCloseProtectionBridge
     @State private var editorIdentity: NoteEditorIdentity?
+    @State private var editorInitialFocus: NoteInitialFocus?
     @State private var nativeFinalizer: NoteNativeInputFinalizer?
     @State private var showCategoryManager = false
     @State private var browserCollapsed = false
@@ -211,6 +212,7 @@ struct NotesSplitView: View {
         if let identity = editorIdentity, let note = store.state.notes[identity.noteID] {
             NoteEditorView(
                 identity: identity,
+                initialFocus: editorInitialFocus,
                 note: note,
                 focusRegistry: focusRegistry,
                 autosave: autosave,
@@ -279,7 +281,7 @@ struct NotesSplitView: View {
         }
     }
 
-    private func selectNote(_ noteID: NoteID) async {
+    private func selectNote(_ noteID: NoteID, initialFocus: NoteInitialFocus? = nil) async {
         let decision = await closeBridge.decision(for: .selection, finalizer: nativeFinalizer)
         guard decision == .allow else {
             statusBanner = "请先完成当前笔记的保存。"
@@ -290,6 +292,7 @@ struct NotesSplitView: View {
         guard (try? await viewModel.select(noteID, editSessionID: sessionID, activeHostToken: host)) == true else {
             return
         }
+        editorInitialFocus = initialFocus
         editorIdentity = .init(noteID: noteID, editSessionID: sessionID)
         if NotesAdaptiveLayout.isCompact(width: availableWidth) { browserCollapsed = true }
         statusBanner = nil
@@ -308,7 +311,7 @@ struct NotesSplitView: View {
               case let .note(noteID) = request.target,
               store.state.notes[noteID] != nil,
               deepLinkRouter.consume(request.id, target: request.target) != nil else { return }
-        Task { await selectNote(noteID) }
+        Task { await selectNote(noteID, initialFocus: .bodyStart) }
     }
 
     private func consumeNoteNewItemRequest(_ request: WorkspaceNewItemRequest?) {
@@ -327,6 +330,7 @@ struct NotesSplitView: View {
         let note = Note.empty(id: NoteID(), categoryID: store.calendarState.uncategorizedID, now: clock())
         guard (try? await viewModel.create(note)) == true else { return }
         if let selected = viewModel.selectedNoteID {
+            editorInitialFocus = .title
             editorIdentity = .init(noteID: selected, editSessionID: UUID())
             if NotesAdaptiveLayout.isCompact(width: availableWidth) { browserCollapsed = true }
             if let created = store.state.notes[selected] {
@@ -349,8 +353,10 @@ struct NotesSplitView: View {
         }
         _ = try? await viewModel.archive(noteID)
         if let selected = viewModel.selectedNoteID {
+            editorInitialFocus = nil
             editorIdentity = .init(noteID: selected, editSessionID: UUID())
         } else {
+            editorInitialFocus = nil
             editorIdentity = nil
         }
     }
@@ -360,6 +366,7 @@ struct NotesSplitView: View {
         do {
             _ = try await viewModel.restore(noteID)
             if let selected = viewModel.selectedNoteID {
+                editorInitialFocus = nil
                 editorIdentity = .init(noteID: selected, editSessionID: UUID())
             }
         } catch {
@@ -386,8 +393,10 @@ struct NotesSplitView: View {
             )
             _ = try await viewModel.permanentlyDelete(request.noteID, authorization: authorization)
             if let selected = viewModel.selectedNoteID {
+                editorInitialFocus = nil
                 editorIdentity = .init(noteID: selected, editSessionID: UUID())
             } else {
+                editorInitialFocus = nil
                 editorIdentity = nil
             }
         } catch {
@@ -404,8 +413,10 @@ struct NotesSplitView: View {
             recoveryCandidate = nil
             // Recovery and save-as-new always create a new editor key.
             if case let .saveAsNew(noteID, _) = action {
+                editorInitialFocus = nil
                 editorIdentity = .init(noteID: noteID, editSessionID: UUID())
             } else if let noteID = viewModel.selectedNoteID ?? store.state.notes.keys.first {
+                editorInitialFocus = nil
                 editorIdentity = .init(noteID: noteID, editSessionID: UUID())
             }
         } catch {
@@ -421,6 +432,7 @@ struct NotesSplitView: View {
     private func syncEditorNoteIfNeeded() {
         guard let identity = editorIdentity else { return }
         if store.state.notes[identity.noteID] == nil {
+            editorInitialFocus = nil
             editorIdentity = nil
         }
     }

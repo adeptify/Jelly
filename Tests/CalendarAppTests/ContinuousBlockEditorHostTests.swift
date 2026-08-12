@@ -58,6 +58,25 @@ struct ContinuousBlockEditorHostTests {
         #expect(continuousDescendants(of: fixture.host, as: NSScrollView.self).isEmpty)
     }
 
+    @Test @MainActor func emptyDocumentHasOnePresentationOnlyPlaceholderThatCompositionHides() {
+        let block = continuousBlock(id: 26, text: "")
+        let fixture = continuousFixture(blocks: [block], selection: continuousCaret(block.id, 0))
+
+        #expect(fixture.view.isPresentingEmptyDocumentPlaceholder)
+        #expect(fixture.view.string.isEmpty)
+        #expect(continuousText(fixture.session.document.blocks[0]).isEmpty)
+
+        fixture.view.setMarkedText(
+            "pin",
+            selectedRange: .init(location: 3, length: 0),
+            replacementRange: .init(location: NSNotFound, length: 0)
+        )
+        #expect(fixture.view.isPresentingEmptyDocumentPlaceholder == false)
+        #expect(continuousText(fixture.session.document.blocks[0]).isEmpty)
+        fixture.view.cancelOperation(nil)
+        #expect(fixture.view.isPresentingEmptyDocumentPlaceholder)
+    }
+
     @Test @MainActor func nativeCrossThreeBlockSelectionRoundTripsWithReverseDirection() throws {
         let blocks = [
             continuousBlock(id: 30, text: "甲乙"),

@@ -8,6 +8,8 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
     private var hostToken: UUID?
     private var applyingProjection = false
     private var executingComposingTextSystemCommand = false
+    private var projectedDocumentIsVisiblyEmpty = true
+    private var currentProjection: BlockDocumentTextProjection?
     private var finishingComposition = false
     private var markedCandidate: String?
     private var pointerAnchorUTF16Offset: Int?
@@ -52,6 +54,9 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
 
     var authoritativeUndoManager: UndoManager? { editorSession?.undoManager }
     var attachedSession: BlockEditorSession? { editorSession }
+    var isPresentingEmptyDocumentPlaceholder: Bool {
+        projectedDocumentIsVisiblyEmpty && !hasMarkedText()
+    }
 
     func install(session: BlockEditorSession, hostToken: UUID) {
         editorSession = session
@@ -67,6 +72,10 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
         guard !applyingProjection else { return }
         applyingProjection = true
         defer { applyingProjection = false }
+        currentProjection = projection
+        projectedDocumentIsVisiblyEmpty = projection.document.blocks.allSatisfy { block in
+            block.kind == .paragraph && block.inlineContent.spans.allSatisfy(\.text.isEmpty)
+        }
 
         if let diff,
            !finishingComposition,
@@ -95,6 +104,90 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
             )
         }
         needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        if isPresentingEmptyDocumentPlaceholder {
+            ("开始写点什么…" as NSString).draw(
+                at: textContainerOrigin,
+                withAttributes: [
+                    .font: BlockTextStyle.baseFont(for: .paragraph),
+                    .foregroundColor: NSColor.secondaryLabelColor.withAlphaComponent(0.72)
+                ]
+            )
+        }
+        drawStructuralDecorations()
+    }
+
+    private func drawStructuralDecorations() {
+        guard let projectedDocument = currentProjection?.document else { return }
+        let color = NSColor.secondaryLabelColor.withAlphaComponent(0.82)
+        var orderedIndex = 0
+        for (index, block) in projectedDocument.blocks.enumerated() {
+            if block.kind == .ordered {
+                orderedIndex = index > 0 && projectedDocument.blocks[index - 1].kind == .ordered
+                    ? orderedIndex + 1
+                    : 1
+            } else {
+                orderedIndex = 0
+            }
+            let line = lineFragmentRect(forBlockAt: index)
+            let baseline = NSPoint(x: textContainerOrigin.x + 1, y: line.minY + textContainerOrigin.y)
+            switch block.kind {
+            case .bullet:
+                ("•" as NSString).draw(at: baseline, withAttributes: markerAttributes(color: color))
+            case .ordered:
+                ("\(orderedIndex)." as NSString).draw(at: baseline, withAttributes: markerAttributes(color: color))
+            case .task:
+                ((block.taskState?.completedAt == nil ? "☐" : "☑") as NSString).draw(
+                    at: baseline,
+                    withAttributes: markerAttributes(color: color)
+                )
+            case .quote:
+                color.setFill()
+                NSBezierPath(rect: .init(
+                    x: textContainerOrigin.x + 4,
+                    y: line.minY + textContainerOrigin.y,
+                    width: 2,
+                    height: max(18, line.height)
+                )).fill()
+            case .divider:
+                color.withAlphaComponent(0.48).setStroke()
+                let path = NSBezierPath()
+                let y = line.midY + textContainerOrigin.y
+                path.move(to: .init(x: textContainerOrigin.x, y: y))
+                path.line(to: .init(x: max(textContainerOrigin.x, bounds.width - textContainerOrigin.x), y: y))
+                path.lineWidth = 1
+                path.stroke()
+            case .paragraph, .heading1, .heading2, .heading3, .code, .link:
+                break
+            }
+        }
+    }
+
+    private func lineFragmentRect(forBlockAt index: Int) -> NSRect {
+        guard let projection = currentProjection,
+              projection.document.blocks.indices.contains(index) else {
+            return .init(x: 0, y: 0, width: bounds.width, height: 24)
+        }
+        let location = projection.segments[index].displayRange.location
+        guard ownedLayoutManager.numberOfGlyphs > 0, (textStorage?.length ?? 0) > 0 else {
+            return .init(x: 0, y: 0, width: bounds.width, height: 24)
+        }
+        let characterIndex = min(location, max(0, (textStorage?.length ?? 1) - 1))
+        let glyphIndex = ownedLayoutManager.glyphIndexForCharacter(at: characterIndex)
+        return ownedLayoutManager.lineFragmentUsedRect(
+            forGlyphAt: min(glyphIndex, max(0, ownedLayoutManager.numberOfGlyphs - 1)),
+            effectiveRange: nil
+        )
+    }
+
+    private func markerAttributes(color: NSColor) -> [NSAttributedString.Key: Any] {
+        [
+            .font: NSFont.systemFont(ofSize: 15, weight: .medium),
+            .foregroundColor: color
+        ]
     }
 
     func measuredContentHeight(for width: CGFloat) -> CGFloat {

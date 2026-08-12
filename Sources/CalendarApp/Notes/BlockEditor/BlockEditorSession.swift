@@ -178,13 +178,6 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         }
     }
 
-    var showsInlineFormattingControls: Bool {
-        guard let range = normalizedFormattingRange(), range.start != range.end else { return false }
-        return document.blocks[range.lowerIndex...range.upperIndex].allSatisfy {
-            $0.kind != .code && $0.kind != .divider
-        }
-    }
-
     var selectionContainsLink: Bool {
         guard let range = normalizedFormattingRange(), range.start != range.end else { return false }
         for index in range.lowerIndex...range.upperIndex {
@@ -426,8 +419,9 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         )
     }
 
-    func focusDocumentStart() {
-        guard let first = document.blocks.first else { return }
+    @discardableResult
+    func focusDocumentStart() -> Bool {
+        guard let first = document.blocks.first else { return false }
         closeTypingCoalescing()
         applySelection(
             .text(
@@ -439,7 +433,7 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
             incrementingRevision: true,
             project: true
         )
-        focusSelectionEndpoint()
+        return focusSelectionEndpoint()
     }
 
     func focusDocumentEnd() {
@@ -798,19 +792,19 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         if project { projectAuthoritativeState() }
     }
 
-    private func focusSelectionEndpoint() {
-        if let continuousHost,
-           let window = continuousHost.textView.window,
-           window.firstResponder !== continuousHost.textView {
-            _ = window.makeFirstResponder(continuousHost.textView)
-            return
+    @discardableResult
+    private func focusSelectionEndpoint() -> Bool {
+        if let continuousHost {
+            guard let window = continuousHost.textView.window else { return false }
+            if window.firstResponder === continuousHost.textView { return true }
+            return window.makeFirstResponder(continuousHost.textView)
         }
         guard case let .text(_, focus, _, _) = selection,
               let token = activeHostTokens[focus.blockID],
               let view = hosts[token]?.textView,
-              let window = view.window,
-              window.firstResponder !== view else { return }
-        _ = window.makeFirstResponder(view)
+              let window = view.window else { return false }
+        if window.firstResponder === view { return true }
+        return window.makeFirstResponder(view)
     }
 
     private func isActiveHost(_ hostToken: UUID) -> Bool {

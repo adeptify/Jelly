@@ -1156,7 +1156,8 @@ private final class HostedBlockEditorHarness {
 
     let registry = EditorFocusRegistry()
     let window: NSWindow
-    private let hostingView: NSHostingView<BlockEditorView>
+    private let hostingView: NSHostingView<HostedBlockEditorRoot>
+    private let session: BlockEditorSession
     private let sink: DocumentSink
     private let initialDocument: BlockDocument
     private let initialSelection: BlockEditorSelection
@@ -1183,13 +1184,18 @@ private final class HostedBlockEditorHarness {
         self.requestLinkURL = requestLinkURL
         let sink = DocumentSink()
         self.sink = sink
-        let root = BlockEditorView(
-            noteID: noteID, editSessionID: editSessionID, initialDocument: document,
-            initialSelection: selection, focusRegistry: registry,
-            onDocumentChange: { sink.documents.append($0) },
-            requestLinkURL: requestLinkURL
+        session = BlockEditorSession(
+            noteID: noteID,
+            editSessionID: editSessionID,
+            initialDocument: document,
+            initialSelection: selection,
+            focusRegistry: registry,
+            onDocumentChange: { [sink] in sink.documents.append($0) }
         )
-        hostingView = NSHostingView(rootView: root)
+        hostingView = NSHostingView(rootView: HostedBlockEditorRoot(
+            session: session,
+            requestLinkURL: requestLinkURL
+        ))
         window = NSWindow(
             contentRect: .init(x: 80, y: 80, width: 520, height: 360),
             styleMask: [.titled, .closable], backing: .buffered, defer: false
@@ -1293,11 +1299,9 @@ private final class HostedBlockEditorHarness {
         return event
     }
 
-    private func makeRoot() -> BlockEditorView {
-        BlockEditorView(
-            noteID: noteID, editSessionID: editSessionID, initialDocument: initialDocument,
-            initialSelection: initialSelection, focusRegistry: registry,
-            onDocumentChange: { [sink] in sink.documents.append($0) },
+    private func makeRoot() -> HostedBlockEditorRoot {
+        HostedBlockEditorRoot(
+            session: session,
             requestLinkURL: requestLinkURL
         )
     }
@@ -1315,6 +1319,22 @@ private final class HostedBlockEditorHarness {
     private func buttonDescendants(of view: NSView) -> [NSButton] {
         let own = (view as? NSButton).map { [$0] } ?? []
         return own + view.subviews.flatMap(buttonDescendants(of:))
+    }
+}
+
+@MainActor
+private struct HostedBlockEditorRoot: View {
+    @ObservedObject var session: BlockEditorSession
+    let requestLinkURL: () -> URL?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ContinuousBlockEditorRepresentable(
+                session: session,
+                appearance: CalendarTheme.light
+            )
+            BlockFormattingBar(session: session, requestLinkURL: requestLinkURL)
+        }
     }
 }
 

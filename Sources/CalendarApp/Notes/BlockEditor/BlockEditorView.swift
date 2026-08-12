@@ -9,7 +9,6 @@ struct BlockEditorView: View {
     private let initialSelection: BlockEditorSelection
     private let focusRegistry: EditorFocusRegistry
     private let onDocumentChange: (BlockDocument) -> Void
-    private let requestLinkURL: () -> URL?
     private let sessionSink: ((BlockEditorSession) -> Void)?
     private let taskCalendarContext: TaskBlockCalendarContext?
 
@@ -20,7 +19,6 @@ struct BlockEditorView: View {
         initialSelection: BlockEditorSelection,
         focusRegistry: EditorFocusRegistry,
         onDocumentChange: @escaping (BlockDocument) -> Void,
-        requestLinkURL: @escaping () -> URL? = { BlockLinkPrompt.requestURL() },
         sessionSink: ((BlockEditorSession) -> Void)? = nil,
         taskCalendarContext: TaskBlockCalendarContext? = nil
     ) {
@@ -29,7 +27,6 @@ struct BlockEditorView: View {
         self.initialSelection = initialSelection
         self.focusRegistry = focusRegistry
         self.onDocumentChange = onDocumentChange
-        self.requestLinkURL = requestLinkURL
         self.sessionSink = sessionSink
         self.taskCalendarContext = taskCalendarContext
     }
@@ -41,7 +38,6 @@ struct BlockEditorView: View {
             initialSelection: initialSelection,
             focusRegistry: focusRegistry,
             onDocumentChange: onDocumentChange,
-            requestLinkURL: requestLinkURL,
             sessionSink: sessionSink,
             taskCalendarContext: taskCalendarContext
         )
@@ -57,7 +53,6 @@ private struct BlockEditorKey: Hashable {
 @MainActor
 private struct BlockEditorSessionHost: View {
     @StateObject private var session: BlockEditorSession
-    private let requestLinkURL: () -> URL?
     private let sessionSink: ((BlockEditorSession) -> Void)?
     private let taskCalendarContext: TaskBlockCalendarContext?
     @State private var scheduleRequest: TaskBlockScheduleRequest?
@@ -69,7 +64,6 @@ private struct BlockEditorSessionHost: View {
         initialSelection: BlockEditorSelection,
         focusRegistry: EditorFocusRegistry,
         onDocumentChange: @escaping (BlockDocument) -> Void,
-        requestLinkURL: @escaping () -> URL?,
         sessionSink: ((BlockEditorSession) -> Void)?,
         taskCalendarContext: TaskBlockCalendarContext?
     ) {
@@ -81,16 +75,12 @@ private struct BlockEditorSessionHost: View {
             focusRegistry: focusRegistry,
             onDocumentChange: onDocumentChange
         ))
-        self.requestLinkURL = requestLinkURL
         self.sessionSink = sessionSink
         self.taskCalendarContext = taskCalendarContext
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            if session.showsInlineFormattingControls {
-                BlockFormattingControls(session: session, requestLinkURL: requestLinkURL)
-            }
             ContinuousBlockEditorRepresentable(
                 session: session,
                 appearance: CalendarTheme.appearance(for: colorScheme)
@@ -183,113 +173,6 @@ private struct BlockEditorSessionHost: View {
 private struct TaskBlockScheduleRequest: Identifiable {
     let id = UUID()
     let blockID: BlockID
-}
-
-private struct BlockFormattingControls: View {
-    @ObservedObject var session: BlockEditorSession
-    let requestLinkURL: () -> URL?
-
-    var body: some View {
-        HStack(spacing: 6) {
-            formattingButton("B", identifier: "block-format-bold", help: "粗体") {
-                _ = session.dispatchTextCommand(.toggleInlineMark(.bold))
-            }
-            formattingButton("I", identifier: "block-format-italic", help: "斜体") {
-                _ = session.dispatchTextCommand(.toggleInlineMark(.italic))
-            }
-            formattingButton("</>", identifier: "block-format-code", help: "行内代码") {
-                _ = session.dispatchTextCommand(.toggleInlineMark(.code))
-            }
-            formattingButton("Link", identifier: "block-format-link", help: "添加或移除链接") {
-                toggleLink()
-            }
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("文本格式")
-    }
-
-    private func formattingButton(
-        _ title: String,
-        identifier: String,
-        help: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        BlockFormattingButtonRepresentable(
-            title: title,
-            identifier: identifier,
-            help: help,
-            action: { session.performAuxiliaryControlAction(action) }
-        )
-        .frame(minWidth: 30, minHeight: 24)
-    }
-
-    private func toggleLink() {
-        if session.selectionContainsLink {
-            _ = session.dispatchTextCommand(.setLink(nil))
-            return
-        }
-        if let clipboardValue = NSPasteboard.general.string(forType: .string),
-           let clipboardURL = URL(string: clipboardValue),
-           BlockURLValidator.isValid(clipboardURL) {
-            _ = session.dispatchTextCommand(.setLink(clipboardURL))
-            return
-        }
-        guard let url = requestLinkURL(),
-              BlockURLValidator.isValid(url) else { return }
-        _ = session.dispatchTextCommand(.setLink(url))
-    }
-}
-
-@MainActor
-private enum BlockLinkPrompt {
-    static func requestURL() -> URL? {
-        let field = NSTextField(string: "https://")
-        field.frame = .init(x: 0, y: 0, width: 280, height: 24)
-        let alert = NSAlert()
-        alert.messageText = "添加链接"
-        alert.informativeText = "输入所选文本要打开的完整网址。"
-        alert.accessoryView = field
-        alert.addButton(withTitle: "应用")
-        alert.addButton(withTitle: "取消")
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        return URL(string: field.stringValue)
-    }
-}
-
-private struct BlockFormattingButtonRepresentable: NSViewRepresentable {
-    let title: String
-    let identifier: String
-    let help: String
-    let action: () -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
-
-    func makeNSView(context: Context) -> NSButton {
-        let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.performAction))
-        button.bezelStyle = .rounded
-        button.controlSize = .small
-        button.toolTip = help
-        button.setAccessibilityIdentifier(identifier)
-        return button
-    }
-
-    func updateNSView(_ nsView: NSButton, context: Context) {
-        nsView.title = title
-        nsView.toolTip = help
-        nsView.setAccessibilityIdentifier(identifier)
-        context.coordinator.action = action
-    }
-
-    @MainActor
-    final class Coordinator: NSObject {
-        var action: () -> Void
-
-        init(action: @escaping () -> Void) {
-            self.action = action
-        }
-
-        @objc func performAction() { action() }
-    }
 }
 
 private struct BlockDragHandle: View {

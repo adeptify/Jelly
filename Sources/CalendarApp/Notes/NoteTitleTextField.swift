@@ -10,6 +10,7 @@ struct NoteTitleTextField: NSViewRepresentable {
     let ownerID: UUID
     var onCommit: (String) -> Void
     var onEditingChanged: (String) -> Void
+    var onReturn: () -> Void = {}
     var coordinatorSink: ((Coordinator) -> Void)?
 
     func makeCoordinator() -> Coordinator {
@@ -17,7 +18,8 @@ struct NoteTitleTextField: NSViewRepresentable {
             focusRegistry: focusRegistry,
             ownerID: ownerID,
             onCommit: onCommit,
-            onEditingChanged: onEditingChanged
+            onEditingChanged: onEditingChanged,
+            onReturn: onReturn
         )
         coordinatorSink?(coordinator)
         return coordinator
@@ -34,6 +36,8 @@ struct NoteTitleTextField: NSViewRepresentable {
         field.delegate = context.coordinator
         field.lineBreakMode = .byTruncatingTail
         field.cell?.sendsActionOnEndEditing = true
+        field.setAccessibilityIdentifier("note-title")
+        field.setAccessibilityLabel("笔记标题")
         context.coordinator.field = field
         coordinatorSink?(context.coordinator)
         return field
@@ -42,6 +46,7 @@ struct NoteTitleTextField: NSViewRepresentable {
     func updateNSView(_ nsView: NSTextField, context: Context) {
         context.coordinator.onCommit = onCommit
         context.coordinator.onEditingChanged = onEditingChanged
+        context.coordinator.onReturn = onReturn
         coordinatorSink?(context.coordinator)
         if nsView.stringValue != title, context.coordinator.isEditing == false {
             nsView.stringValue = title
@@ -54,6 +59,7 @@ struct NoteTitleTextField: NSViewRepresentable {
         let ownerID: UUID
         var onCommit: (String) -> Void
         var onEditingChanged: (String) -> Void
+        var onReturn: () -> Void
         weak var field: NSTextField?
         private(set) var isEditing = false
 
@@ -61,12 +67,14 @@ struct NoteTitleTextField: NSViewRepresentable {
             focusRegistry: EditorFocusRegistry,
             ownerID: UUID,
             onCommit: @escaping (String) -> Void,
-            onEditingChanged: @escaping (String) -> Void
+            onEditingChanged: @escaping (String) -> Void,
+            onReturn: @escaping () -> Void = {}
         ) {
             self.focusRegistry = focusRegistry
             self.ownerID = ownerID
             self.onCommit = onCommit
             self.onEditingChanged = onEditingChanged
+            self.onReturn = onReturn
         }
 
         func controlTextDidBeginEditing(_ obj: Notification) {
@@ -85,6 +93,25 @@ struct NoteTitleTextField: NSViewRepresentable {
             focusRegistry.clear(ownerID: ownerID)
             guard let field else { return }
             onCommit(field.stringValue)
+        }
+
+        func control(
+            _ control: NSControl,
+            textView: NSTextView,
+            doCommandBy commandSelector: Selector
+        ) -> Bool {
+            guard commandSelector == #selector(NSResponder.insertNewline(_:)), let field else {
+                return false
+            }
+            onCommit(field.stringValue)
+            onReturn()
+            return true
+        }
+
+        @discardableResult
+        func focus() -> Bool {
+            guard let field, let window = field.window else { return false }
+            return window.makeFirstResponder(field)
         }
 
         /// Commit marked IME text in the title field-editor if present.

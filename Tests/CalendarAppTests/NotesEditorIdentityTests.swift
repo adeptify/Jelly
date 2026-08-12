@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Testing
 import WorkspaceDomain
 @testable import CalendarApp
@@ -16,6 +17,37 @@ struct NotesEditorIdentityTests {
         #expect(first == same)
         #expect(first != reopened)
         #expect(first != otherNote)
+    }
+
+    @Test func noteFocusIntentDistinguishesNewCaptureFromAnExistingSelection() {
+        #expect(NoteInitialFocus.title != .bodyStart)
+    }
+
+    @Test @MainActor
+    func titleReturnCommitsWithoutANewlineAndHandsFocusToTheBody() {
+        let registry = EditorFocusRegistry()
+        var committed: [String] = []
+        var returnCount = 0
+        let coordinator = NoteTitleTextField.Coordinator(
+            focusRegistry: registry,
+            ownerID: UUID(),
+            onCommit: { committed.append($0) },
+            onEditingChanged: { _ in },
+            onReturn: { returnCount += 1 }
+        )
+        let field = NSTextField(string: "验收标题")
+        coordinator.field = field
+
+        let handled = coordinator.control(
+            field,
+            textView: NSTextView(),
+            doCommandBy: #selector(NSResponder.insertNewline(_:))
+        )
+
+        #expect(handled)
+        #expect(committed == ["验收标题"])
+        #expect(returnCount == 1)
+        #expect(field.stringValue == "验收标题")
     }
 
     @Test @MainActor

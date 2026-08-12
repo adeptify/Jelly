@@ -267,15 +267,15 @@ enum NoteInitialFocus: Equatable {
 
 ### Steps
 
-- [ ] Add failing integration tests for `Command-N` and the Notes new button sharing one route: create Note, mint a new editor identity, focus title, Enter focuses body start, and typed placeholder text is never persisted.
-- [ ] Add a failing test that inspiration conversion opens the exact generated Note and focuses body when title already exists.
-- [ ] Extend `NoteTitleTextField` with an explicit `onReturn` callback. Return commits the title and asks the current `BlockEditorSession` to focus the body; it must not insert a title newline.
-- [ ] Implement one empty-document placeholder in the continuous text view. Draw “开始写点什么…” only when the complete document has no visible text and no composition; never draw it per empty Block.
-- [ ] Add `BlockFormattingBar` fixed to the bottom of `NoteEditorView`, outside the document layout. It is collapsible and includes paragraph/heading, bold, italic, inline code, bullet, ordered list, task, quote, divider and link using existing reducer commands.
-- [ ] Ensure toolbar actions preserve the current native selection and immediately restore the text view as first responder. Collapsed selection changes typing attributes; non-empty selection formats atomically.
-- [ ] Remove the current selection-dependent inline formatting row. Selection must never cause document layout to move or reveal a floating toolbar.
-- [ ] Add exact Chinese accessibility labels and identifiers for every formatting action and the expand/collapse control.
-- [ ] Constrain content to max 720pt with at least 28pt horizontal safety margin when possible; use 16–17pt body text and theme-derived warm colors without per-Block cards.
+- [x] Keep `Command-N` and the Notes new button on the same `createNote()` route: create Note, mint a new editor identity, focus title, Enter focuses body start, and presentation-only placeholder text is never persisted. The command route and mounted editor identity/focus flow are covered here; the actual button press remains in the packaged GUI matrix.
+- [x] Add a failing test that inspiration conversion opens the exact generated Note and focuses body when title already exists.
+- [x] Extend `NoteTitleTextField` with an explicit `onReturn` callback. Return commits the title and asks the current `BlockEditorSession` to focus the body; it must not insert a title newline.
+- [x] Implement one empty-document placeholder in the continuous text view. Draw “开始写点什么…” only when the complete document has no visible text and no composition; never draw it per empty Block.
+- [x] Add `BlockFormattingBar` fixed to the bottom of `NoteEditorView`, outside the document layout. It is collapsible and includes paragraph/heading, bold, italic, inline code, bullet, ordered list, task, quote, divider and link using existing reducer commands.
+- [x] Ensure toolbar actions preserve the current native selection and immediately restore the text view as first responder. Collapsed selection changes typing attributes; non-empty selection formats atomically.
+- [x] Remove the current selection-dependent inline formatting row. Selection never causes document layout to move or reveal a floating toolbar.
+- [x] Add exact Chinese accessibility labels and identifiers for every formatting action and the expand/collapse control.
+- [x] Constrain content to max 720pt with at least 28pt horizontal safety margin when possible; use 16pt body text, 1.45 line-height and theme-derived warm surfaces without per-Block cards.
 
 ### Focused verification
 

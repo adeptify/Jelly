@@ -8,6 +8,18 @@ import WorkspaceDomain
 @Suite("BlockEditorAccessibilityTests")
 @MainActor
 struct BlockEditorAccessibilityTests {
+    @Test func fixedFormattingBarDefinesEveryHumanAndAgentReadableAction() {
+        let actions = BlockFormattingAction.allCases
+        #expect(actions.map(\.accessibilityIdentifier) == [
+            "block-format-paragraph", "block-format-heading-1", "block-format-heading-2",
+            "block-format-heading-3", "block-format-bold", "block-format-italic",
+            "block-format-code", "block-format-bullet", "block-format-ordered",
+            "block-format-task", "block-format-quote", "block-format-divider", "block-format-link"
+        ])
+        #expect(actions.allSatisfy { !$0.accessibilityLabel.isEmpty })
+        #expect(Set(actions.map(\.accessibilityLabel)).count == actions.count)
+    }
+
     @Test func pasteboardRetainsAllCharactersInPlainFallbackAndDropsUnsupportedStyling() throws {
         let text = "甲\u{FFFC}乙"
         let attributed = NSMutableAttributedString(string: text)
@@ -700,7 +712,7 @@ struct BlockEditorAccessibilityTests {
         #expect(views[ids[9]]?.accessibilityRole() == .splitter)
     }
 
-    @Test func selectedSupportedTextShowsKeyboardReachableFormattingControlsAndCollapsedOrUnsupportedHidesThem() throws {
+    @Test func fixedFormattingBarNeverMovesWithSelectionAndKeepsEveryActionKeyboardReachable() throws {
         _ = NSApplication.shared
         let id = BlockID()
         let link = try #require(URL(string: "https://example.com/control"))
@@ -710,7 +722,7 @@ struct BlockEditorAccessibilityTests {
             taskState: nil, indentLevel: 0
         )])
         var callbacks = 0
-        let root = BlockEditorView(
+        let session = BlockEditorSession(
             noteID: NoteID(), editSessionID: UUID(), initialDocument: document,
             initialSelection: .text(
                 anchor: .init(blockID: id, graphemeOffset: 0),
@@ -718,14 +730,23 @@ struct BlockEditorAccessibilityTests {
                 typingAttributes: .init(marks: [], linkURL: nil)
             ), focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in callbacks += 1 }
         )
+        let root = VStack {
+            ContinuousBlockEditorRepresentable(session: session, appearance: CalendarTheme.light)
+            BlockFormattingBar(session: session, requestLinkURL: { link })
+        }
         let hosting = NSHostingView(rootView: root)
         hosting.frame = .init(x: 0, y: 0, width: 500, height: 240)
         hosting.layoutSubtreeIfNeeded()
         let buttons = accessibilityDescendants(of: hosting, as: NSButton.self)
         let identifiers = Set(buttons.compactMap { $0.accessibilityIdentifier() })
-        #expect(identifiers.isSuperset(of: [
-            "block-format-bold", "block-format-italic", "block-format-code", "block-format-link"
-        ]))
+        #expect(identifiers.isSuperset(of: Set(BlockFormattingAction.allCases.map(\.accessibilityIdentifier))))
+        #expect(identifiers.contains("block-format-toggle"))
+        for action in BlockFormattingAction.allCases {
+            let button = try #require(buttons.first {
+                $0.accessibilityIdentifier() == action.accessibilityIdentifier
+            })
+            #expect(button.accessibilityLabel() == action.accessibilityLabel)
+        }
         let bold = try #require(buttons.first { $0.accessibilityIdentifier() == "block-format-bold" })
         let linkButton = try #require(buttons.first { $0.accessibilityIdentifier() == "block-format-link" })
         #expect(bold.acceptsFirstResponder)
@@ -746,30 +767,44 @@ struct BlockEditorAccessibilityTests {
         refreshedLinkButton.performClick(refreshedLinkButton)
         #expect(callbacks == 2)
 
-        let collapsed = NSHostingView(rootView: BlockEditorView(
-            noteID: NoteID(), editSessionID: UUID(), initialDocument: document,
-            initialSelection: projectionCaret(id, 0), focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in }
-        ))
-        collapsed.frame = hosting.frame
-        collapsed.layoutSubtreeIfNeeded()
-        #expect(accessibilityDescendants(of: collapsed, as: NSButton.self).allSatisfy {
-            !$0.accessibilityIdentifier().hasPrefix("block-format-")
-        })
+        try session.adoptNativeSelection(
+            .init(location: 0, length: 0),
+            direction: .forward,
+            typingAttributes: .init(marks: [], linkURL: nil)
+        )
+        hosting.layoutSubtreeIfNeeded()
+        #expect(Set(accessibilityDescendants(of: hosting, as: NSButton.self).compactMap {
+            $0.accessibilityIdentifier()
+        }).isSuperset(of: Set(BlockFormattingAction.allCases.map(\.accessibilityIdentifier))))
 
         let codeDocument = BlockDocument(blocks: [projectionBlock(id, .code, "code")])
-        let unsupported = NSHostingView(rootView: BlockEditorView(
+        let codeSession = BlockEditorSession(
             noteID: NoteID(), editSessionID: UUID(), initialDocument: codeDocument,
             initialSelection: .text(
                 anchor: .init(blockID: id, graphemeOffset: 0),
                 focus: .init(blockID: id, graphemeOffset: 4), preferredColumn: nil,
                 typingAttributes: .init(marks: [], linkURL: nil)
             ), focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in }
-        ))
+        )
+        let unsupported = NSHostingView(rootView: BlockFormattingBar(session: codeSession))
         unsupported.frame = hosting.frame
         unsupported.layoutSubtreeIfNeeded()
-        #expect(accessibilityDescendants(of: unsupported, as: NSButton.self).allSatisfy {
-            !$0.accessibilityIdentifier().hasPrefix("block-format-")
+        #expect(Set(accessibilityDescendants(of: unsupported, as: NSButton.self).compactMap {
+            $0.accessibilityIdentifier()
+        }).isSuperset(of: Set(BlockFormattingAction.allCases.map(\.accessibilityIdentifier))))
+
+        let toggle = try #require(buttons.first { $0.accessibilityIdentifier() == "block-format-toggle" })
+        toggle.performClick(toggle)
+        hosting.layoutSubtreeIfNeeded()
+        let collapsedIDs = Set(accessibilityDescendants(of: hosting, as: NSButton.self).compactMap {
+            $0.accessibilityIdentifier()
         })
+        #expect(collapsedIDs.contains("block-format-toggle"))
+        #expect(collapsedIDs.isDisjoint(with: Set(BlockFormattingAction.allCases.map(\.accessibilityIdentifier))))
+        let expand = try #require(accessibilityDescendants(of: hosting, as: NSButton.self).first {
+            $0.accessibilityIdentifier() == "block-format-toggle"
+        })
+        #expect(expand.accessibilityLabel() == "展开格式栏")
     }
 
     @Test func taskBlockExposesTheCalendarSchedulingEntryInsideTheProductionEditor() async throws {

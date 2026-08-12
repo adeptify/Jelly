@@ -119,6 +119,7 @@ struct NotesLifecycleWiringTests {
             defer: false
         )
         window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
         hosting.layoutSubtreeIfNeeded()
         await Task.yield()
         await Task.yield()
@@ -132,6 +133,11 @@ struct NotesLifecycleWiringTests {
                 $0.stringValue == "灵感转成的笔记"
             }
         })
+        #expect(await waitUntil {
+            hosting.layoutSubtreeIfNeeded()
+            return window.firstResponder is ContinuousBlockEditorTextView
+        })
+        window.orderOut(nil)
     }
 
     @Test func creatingANoteRebuildsTheTitleFieldForTheNewEditorIdentity() async throws {
@@ -159,6 +165,7 @@ struct NotesLifecycleWiringTests {
             defer: false
         )
         window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
         hosting.layoutSubtreeIfNeeded()
         _ = deepLinkRouter.request(.note(existing.id))
         #expect(await waitUntil {
@@ -177,6 +184,26 @@ struct NotesLifecycleWiringTests {
                 $0.placeholderString == "标题" && $0.stringValue.isEmpty
             }
         })
+        let title = try #require(notesDescendants(of: hosting, as: NSTextField.self).first {
+            $0.placeholderString == "标题" && $0.stringValue.isEmpty
+        })
+        #expect(await waitUntil {
+            window.firstResponder === title || window.firstResponder === title.currentEditor()
+        })
+        let coordinator = try #require(title.delegate as? NoteTitleTextField.Coordinator)
+        let fieldEditor = (title.currentEditor() as? NSTextView) ?? NSTextView()
+        #expect(coordinator.control(
+            title,
+            textView: fieldEditor,
+            doCommandBy: #selector(NSResponder.insertNewline(_:))
+        ))
+        #expect(await waitUntil { window.firstResponder is ContinuousBlockEditorTextView })
+        let body = try #require(notesDescendants(of: hosting, as: ContinuousBlockEditorTextView.self).first)
+        #expect(body.isPresentingEmptyDocumentPlaceholder)
+        #expect(body.string.isEmpty)
+        let created = try #require(store.state.notes.values.first { $0.id != existing.id })
+        #expect(created.document.blocks.flatMap(\.inlineContent.spans).map(\.text).joined().isEmpty)
+        window.orderOut(nil)
     }
 
     @Test func mountedNotesHostCompletesAsyncStartupLoadForAnAlreadyPersistedDraft() async throws {
