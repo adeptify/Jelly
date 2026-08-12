@@ -8,6 +8,48 @@ import WorkspaceDomain
 @Suite("BlockEditorAccessibilityTests")
 @MainActor
 struct BlockEditorAccessibilityTests {
+    @Test func continuousAccessibilityTreeHasOneBodyNoPerBlockStopsAndActionableTasks() throws {
+        let paragraph = projectionBlock(BlockID(), .paragraph, "正文")
+        let task = projectionBlock(BlockID(), .task, "可执行待办")
+        let document = BlockDocument(blocks: [paragraph, task])
+        let session = BlockEditorSession(
+            noteID: NoteID(), editSessionID: UUID(), initialDocument: document,
+            initialSelection: projectionCaret(paragraph.id, 0),
+            focusRegistry: EditorFocusRegistry(), onDocumentChange: { _ in }
+        )
+        let host = ContinuousBlockEditorHostView(appearance: CalendarTheme.light)
+        host.frame = .init(x: 0, y: 0, width: 600, height: 180)
+        session.attach(host: host, hostToken: UUID())
+        host.layoutSubtreeIfNeeded()
+
+        let bodies = accessibilityDescendants(of: host, as: ContinuousBlockEditorTextView.self)
+        let textAreas = accessibilityDescendants(of: host, as: NSTextView.self).filter {
+            $0.accessibilityRole() == .textArea
+        }
+        let buttons = accessibilityDescendants(of: host, as: NSButton.self)
+        let taskButton = try #require(buttons.first)
+        #expect(bodies.count == 1)
+        #expect(textAreas.count == 1)
+        #expect(taskButton.accessibilityRole() == .checkBox)
+        #expect(taskButton.accessibilityLabel() == "完成待办")
+        #expect(taskButton.accessibilityValue() as? String == "未完成")
+
+        taskButton.performClick(taskButton)
+        #expect(session.document.blocks[1].taskState?.completedAt != nil)
+        #expect(taskButton.accessibilityLabel() == "重开待办")
+        #expect(taskButton.accessibilityValue() as? String == "已完成")
+    }
+
+    @Test func reducedMotionKeepsAllEditorStatesAndActionsAvailable() {
+        let reduced = CalendarMotionPolicy(reduceMotion: true)
+        #expect(reduced.snapAnimation == nil)
+        #expect(reduced.overlayAnimation == nil)
+        #expect(reduced.shouldPresentOverlays)
+        #expect(reduced.shouldAlignToWeek)
+        #expect(BlockFormattingAction.allCases.count == 13)
+        #expect(BlockFormattingAction.allCases.allSatisfy { !$0.accessibilityLabel.isEmpty })
+    }
+
     @Test func fixedFormattingBarDefinesEveryHumanAndAgentReadableAction() {
         let actions = BlockFormattingAction.allCases
         #expect(actions.map(\.accessibilityIdentifier) == [

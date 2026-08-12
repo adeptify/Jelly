@@ -11,22 +11,12 @@ extension NSAttributedString.Key {
 }
 
 enum BlockTextStyle {
-    static let dividerPlaceholder = "\u{FFFC}"
-
     static func attributedString(
         for block: DocumentBlock,
-        appearance: CalendarSemanticAppearance?,
-        usesDividerPlaceholder: Bool = false
+        appearance: CalendarSemanticAppearance?
     ) -> NSAttributedString {
         if block.kind == .divider {
-            guard usesDividerPlaceholder else { return NSAttributedString(string: "") }
-            return NSAttributedString(
-                string: dividerPlaceholder,
-                attributes: blockAttributes(for: block, appearance: appearance).merging([
-                    .jellyDivider: true,
-                    .foregroundColor: NSColor.clear
-                ]) { _, new in new }
-            )
+            return NSAttributedString(string: "")
         }
 
         let text = block.inlineContent.spans.map(\.text).joined()
@@ -85,9 +75,12 @@ enum BlockTextStyle {
         case .heading3: .systemFont(ofSize: 18, weight: .semibold)
         case .code: .monospacedSystemFont(ofSize: 15, weight: .regular)
         case .quote:
-            NSFontManager.shared.convert(.systemFont(ofSize: 16), toHaveTrait: .italicFontMask)
+            NSFontManager.shared.convert(
+                .systemFont(ofSize: NoteEditorLayout.bodyPointSize),
+                toHaveTrait: .italicFontMask
+            )
         case .paragraph, .bullet, .ordered, .task, .divider, .link:
-            .systemFont(ofSize: 16)
+            .systemFont(ofSize: NoteEditorLayout.bodyPointSize)
         }
     }
 

@@ -13,6 +13,12 @@ enum NoteInitialFocus: Equatable, Sendable {
     case bodyStart
 }
 
+enum NoteEditorLayout {
+    static let maximumContentWidth: CGFloat = 720
+    static let horizontalSafetyMargin: CGFloat = 28
+    static let bodyPointSize: CGFloat = 16
+}
+
 /// Right-hand Notes editor surface. Ordinary Store publications keep the same
 /// `EditorKey`; selection changes and recovery/save-as-new mint a new one.
 struct NoteEditorView: View {
@@ -212,9 +218,9 @@ struct NoteEditorView: View {
                         onOpenItem: onOpenCalendarItem
                     )
                 )
-                .frame(maxWidth: 720, alignment: .leading)
+                .frame(maxWidth: NoteEditorLayout.maximumContentWidth, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.horizontal, 28)
+                .padding(.horizontal, NoteEditorLayout.horizontalSafetyMargin)
                 .padding(.vertical, 20)
             }
 

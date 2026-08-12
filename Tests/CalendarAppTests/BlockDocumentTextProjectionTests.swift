@@ -20,7 +20,7 @@ struct BlockDocumentTextProjectionTests {
         )
 
         let expected = blocks.map { block in
-            block.kind == .divider ? "\u{FFFC}" : projectionText(block)
+            block.kind == .divider ? "" : projectionText(block)
         }.joined(separator: "\n")
         #expect(projection.attributedString.string == expected)
         #expect(projection.segments.count == blocks.count)
@@ -28,7 +28,7 @@ struct BlockDocumentTextProjectionTests {
             #expect(segment.blockID == blocks[index].id)
             #expect(segment.kind == blocks[index].kind)
             #expect(segment.displayRange.length == (blocks[index].kind == .divider
-                ? 1
+                ? 0
                 : projectionText(blocks[index]).utf16.count))
             #expect(segment.contentRange.length == (blocks[index].kind == .divider
                 ? 0
@@ -120,7 +120,7 @@ struct BlockDocumentTextProjectionTests {
         ) == reverse)
     }
 
-    @Test func dividerUsesAPlaceholderForLayoutButNeverLeaksIntoCopiedPlainText() throws {
+    @Test func dividerUsesItsEmptyLineForLayoutAndNeverLeaksIntoCopiedPlainText() throws {
         let blocks = [
             projectionBlock(id: 60, kind: .paragraph, text: "上\u{FFFC}"),
             projectionBlock(id: 61, kind: .divider, text: ""),
@@ -132,13 +132,13 @@ struct BlockDocumentTextProjectionTests {
         )
         let whole = NSRange(location: 0, length: projection.attributedString.length)
 
-        #expect(projection.attributedString.string == "上\u{FFFC}\n\u{FFFC}\n下")
+        #expect(projection.attributedString.string == "上\u{FFFC}\n\n下")
         #expect(try projection.plainText(in: whole) == "上\u{FFFC}\n\n下")
         #expect(try projection.utf16Offset(for: .init(blockID: blocks[1].id, graphemeOffset: 0)) == 3)
         #expect(try projection.textPosition(atUTF16Offset: 3, affinity: .downstream)
             == .init(blockID: blocks[1].id, graphemeOffset: 0))
         #expect(try projection.textPosition(atUTF16Offset: 4, affinity: .upstream)
-            == .init(blockID: blocks[1].id, graphemeOffset: 0))
+            == .init(blockID: blocks[2].id, graphemeOffset: 0))
     }
 
     @Test func rejectsInvalidGlobalRangesMissingBlocksAndMidGraphemeOffsets() throws {

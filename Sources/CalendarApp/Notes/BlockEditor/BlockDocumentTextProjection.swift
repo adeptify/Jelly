@@ -24,8 +24,7 @@ struct BlockDocumentTextProjection: Equatable {
             let location = output.length
             let blockString = BlockTextStyle.attributedString(
                 for: block,
-                appearance: appearance,
-                usesDividerPlaceholder: true
+                appearance: appearance
             )
             output.append(blockString)
             let displayLength = blockString.length
