@@ -164,6 +164,36 @@ struct BlockEditorBridgeTests {
             #expect(BlockSelectionController(selection: forward).projectedRange(for: id, document: document) == fullRange)
         }
     }
+
+    @Test @MainActor func selectionControllerAdoptsOneGlobalNativeRangeWithoutLosingDirection() throws {
+        let first = bridgeBlockID(80)
+        let second = bridgeBlockID(81)
+        let document = BlockDocument(blocks: [
+            bridgeBlock(id: first, text: "甲乙"),
+            bridgeBlock(id: second, text: "丙丁")
+        ])
+        let projection = BlockDocumentTextProjection(
+            document: document,
+            appearance: CalendarTheme.light
+        )
+        let attributes = BlockTypingAttributes(marks: [.italic], linkURL: nil)
+        let initial = BlockEditorSelection.text(
+            anchor: .init(blockID: second, graphemeOffset: 1),
+            focus: .init(blockID: first, graphemeOffset: 1),
+            preferredColumn: nil,
+            typingAttributes: attributes
+        )
+        let controller = BlockSelectionController(selection: initial)
+
+        #expect(controller.globalRange(in: projection) == .init(location: 1, length: 3))
+        try controller.adoptGlobalRange(
+            .init(location: 1, length: 3),
+            direction: .reverse,
+            projection: projection,
+            typingAttributes: attributes
+        )
+        #expect(controller.selection == initial)
+    }
 }
 
 private func bridgeBlockID(_ value: Int) -> BlockID {

@@ -108,51 +108,7 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
     func applyAuthoritativeProjection(block: DocumentBlock, selectedRange: NSRange, isSelected: Bool = false) {
         projectedKind = block.kind
         projectedTaskCompleted = block.taskState?.completedAt != nil
-        let attributed = NSMutableAttributedString(string: block.inlineContent.spans.map(\.text).joined())
-        let fullRange = NSRange(location: 0, length: attributed.length)
-        if fullRange.length > 0 {
-            let baseFont = Self.baseFont(for: block.kind)
-            var baseAttributes: [NSAttributedString.Key: Any] = [
-                .font: baseFont,
-                .foregroundColor: Self.baseColor(for: block.kind)
-            ]
-            if let paragraphStyle = Self.paragraphStyle(for: block.kind) {
-                baseAttributes[.paragraphStyle] = paragraphStyle
-            }
-            if block.kind == .code {
-                baseAttributes[.backgroundColor] = NSColor.textBackgroundColor.withAlphaComponent(0.7)
-            }
-            if block.kind == .link {
-                baseAttributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
-            }
-            if projectedTaskCompleted {
-                baseAttributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
-            }
-            attributed.addAttributes(baseAttributes, range: fullRange)
-
-            var cursor = 0
-            for span in block.inlineContent.spans {
-                let length = (span.text as NSString).length
-                if length > 0 {
-                    let range = NSRange(location: cursor, length: length)
-                    attributed.addAttribute(.font, value: Self.styledFont(base: baseFont, marks: span.marks), range: range)
-                    if span.marks.contains(.code) {
-                        attributed.addAttribute(
-                            NSAttributedString.Key("com.adeptify.jelly.inline-code"), value: true, range: range
-                        )
-                        attributed.addAttribute(.backgroundColor, value: NSColor.quaternaryLabelColor, range: range)
-                    }
-                    if let link = span.linkURL, BlockURLValidator.isValid(link) {
-                        attributed.addAttributes([
-                            .link: link,
-                            .foregroundColor: NSColor.linkColor,
-                            .underlineStyle: NSUnderlineStyle.single.rawValue
-                        ], range: range)
-                    }
-                }
-                cursor += length
-            }
-        }
+        let attributed = BlockTextStyle.attributedString(for: block, appearance: nil)
         applyAuthoritativeProjection(
             attributedString: attributed,
             selectedRange: selectedRange,
@@ -208,7 +164,7 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
             ("开始写点什么…" as NSString).draw(
                 at: .init(x: textContainerOrigin.x, y: textContainerOrigin.y),
                 withAttributes: [
-                    .font: Self.baseFont(for: projectedKind),
+                    .font: BlockTextStyle.baseFont(for: projectedKind),
                     .foregroundColor: color.withAlphaComponent(0.72)
                 ]
             )
@@ -233,49 +189,6 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
         case .paragraph, .heading1, .heading2, .heading3, .code, .link:
             break
         }
-    }
-
-    private static func baseFont(for kind: BlockKind) -> NSFont {
-        switch kind {
-        case .heading1: return .systemFont(ofSize: 24, weight: .bold)
-        case .heading2: return .systemFont(ofSize: 20, weight: .semibold)
-        case .heading3: return .systemFont(ofSize: 17, weight: .semibold)
-        case .code: return .monospacedSystemFont(ofSize: 13, weight: .regular)
-        case .quote:
-            return NSFontManager.shared.convert(.systemFont(ofSize: 14), toHaveTrait: .italicFontMask)
-        case .paragraph, .bullet, .ordered, .task, .divider, .link:
-            return .systemFont(ofSize: 14)
-        }
-    }
-
-    private static func baseColor(for kind: BlockKind) -> NSColor {
-        switch kind {
-        case .quote: .secondaryLabelColor
-        case .link: .linkColor
-        case .paragraph, .heading1, .heading2, .heading3, .bullet, .ordered, .task, .code, .divider:
-            .labelColor
-        }
-    }
-
-    private static func paragraphStyle(for kind: BlockKind) -> NSParagraphStyle? {
-        guard [.bullet, .ordered, .task, .quote].contains(kind) else { return nil }
-        let style = NSMutableParagraphStyle()
-        style.firstLineHeadIndent = 18
-        style.headIndent = 18
-        return style
-    }
-
-    private static func styledFont(base: NSFont, marks: Set<InlineMark>) -> NSFont {
-        var font = marks.contains(.code)
-            ? NSFont.monospacedSystemFont(ofSize: base.pointSize, weight: .regular)
-            : base
-        if marks.contains(.bold) {
-            font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
-        }
-        if marks.contains(.italic) {
-            font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
-        }
-        return font
     }
 
     var attachedSession: BlockEditorSession? { editorSession }

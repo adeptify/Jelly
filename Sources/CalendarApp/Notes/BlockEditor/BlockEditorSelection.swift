@@ -11,6 +11,16 @@ struct BlockTypingAttributes: Equatable, Sendable {
     var linkURL: URL?
 }
 
+enum SelectionAffinity: Equatable, Sendable {
+    case upstream
+    case downstream
+}
+
+enum SelectionDirection: Equatable, Sendable {
+    case forward
+    case reverse
+}
+
 enum BlockEditorSelection: Equatable, Sendable {
     case text(
         anchor: BlockTextPosition,

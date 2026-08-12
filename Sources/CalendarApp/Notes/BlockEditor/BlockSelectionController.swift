@@ -180,6 +180,23 @@ final class BlockSelectionController {
         selection = .blocks(anchor: anchor, focus: blockID)
     }
 
+    func globalRange(in projection: BlockDocumentTextProjection) -> NSRange? {
+        try? projection.nsRange(for: selection)
+    }
+
+    func adoptGlobalRange(
+        _ range: NSRange,
+        direction: SelectionDirection,
+        projection: BlockDocumentTextProjection,
+        typingAttributes: BlockTypingAttributes
+    ) throws {
+        selection = try projection.selection(
+            for: range,
+            preserving: direction,
+            typingAttributes: typingAttributes
+        )
+    }
+
     /// AppKit gets only the part of a cross-host selection which belongs to its own host.
     /// The original anchor/focus direction remains in `selection` and is never replaced by
     /// a synthetic document-wide NSRange.

@@ -144,12 +144,12 @@ struct BlockDocumentProjectionDiff: Equatable {
 
 ### Steps
 
-- [ ] Write failing round-trip tests for one paragraph, multiple paragraphs, consecutive empty blocks, a trailing empty block, all supported Block kinds, divider, soft breaks, Chinese, combining marks and emoji.
-- [ ] Write failing cross-block forward/reverse selection tests, including exact copy text without internal U+FFFC.
-- [ ] Extract the current font, inline mark, link and paragraph-style logic from `BlockEditorTextView` into `BlockTextStyle`, then make both the legacy host and continuous projection use it during migration; do not keep two visual style sources.
-- [ ] Implement global selection mapping and typed failures for missing blocks, invalid offsets, integer overflow and mid-grapheme boundaries.
-- [ ] Implement minimal diff calculation using equal common Block prefixes/suffixes. A single-block keystroke may replace that Block's display range, not the entire document.
-- [ ] Add tests that a one-character edit in a 500-Block document reports exactly one changed Block and a bounded replacement range.
+- [x] Write failing round-trip tests for one paragraph, multiple paragraphs, consecutive empty blocks, a trailing empty block, all supported Block kinds, divider, soft breaks, Chinese, combining marks and emoji.
+- [x] Write failing cross-block forward/reverse selection tests, including exact copy text without internal U+FFFC.
+- [x] Extract the current font, inline mark, link and paragraph-style logic from `BlockEditorTextView` into `BlockTextStyle`, then make both the legacy host and continuous projection use it during migration; do not keep two visual style sources.
+- [x] Implement global selection mapping and typed failures for missing blocks, invalid offsets, integer overflow and mid-grapheme boundaries.
+- [x] Implement minimal diff calculation using equal common Block prefixes/suffixes. A single-block keystroke may replace that Block's display range, not the entire document.
+- [x] Add tests that a one-character edit in a 500-Block document reports exactly one changed Block and a bounded replacement range.
 
 ### Focused verification
 
