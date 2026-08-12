@@ -16,6 +16,7 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
 
     var captureText = ""
     var searchText = "" { didSet { refresh() } }
+    var categoryFilterID: UUID? { didSet { refresh() } }
     private(set) var pending: [Inspiration] = []
     private(set) var converted: [Inspiration] = []
     private(set) var archived: [Inspiration] = []
@@ -37,6 +38,18 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
 
     var selected: Inspiration? {
         selectedID.flatMap { store.state.inspirations[$0] }
+    }
+
+    var selectedConvertedNoteID: NoteID? {
+        guard let selectedID else { return nil }
+        return store.state.inspirationNoteLinks.first(where: { link in
+            if case let .live(id) = link.source { return id == selectedID }
+            return false
+        })?.noteID
+    }
+
+    var selectedPrimaryActionTitle: String {
+        selectedConvertedNoteID == nil ? "转成笔记" : "打开笔记"
     }
 
     var pendingCount: Int { pending.count }
@@ -65,15 +78,18 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
             })
             all = store.state.inspirations.values.filter { ids.contains($0.id) }
         }
+        let filtered = all.filter { inspiration in
+            categoryFilterID == nil || inspiration.categoryID == categoryFilterID
+        }
         let linked = Set(store.state.inspirationNoteLinks.compactMap { link -> InspirationID? in
             if case let .live(id) = link.source { return id }
             return nil
         })
-        pending = all.filter { $0.lifecycle == .active && !linked.contains($0.id) }
+        pending = filtered.filter { $0.lifecycle == .active && !linked.contains($0.id) }
             .sorted { $0.createdAt > $1.createdAt }
-        converted = all.filter { $0.lifecycle == .active && linked.contains($0.id) }
+        converted = filtered.filter { $0.lifecycle == .active && linked.contains($0.id) }
             .sorted { $0.createdAt > $1.createdAt }
-        archived = all.filter { $0.lifecycle == .archived }
+        archived = filtered.filter { $0.lifecycle == .archived }
             .sorted { $0.updatedAt > $1.updatedAt }
     }
 
