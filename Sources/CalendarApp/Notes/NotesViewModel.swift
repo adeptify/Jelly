@@ -2,10 +2,28 @@ import Foundation
 import Observation
 import WorkspaceDomain
 
-enum NotesBrowserPartition: Equatable, Sendable {
+enum NotesBrowserPartition: String, CaseIterable, Identifiable, Equatable, Sendable {
     case recent
     case all
     case archived
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .recent: "最近"
+        case .all: "全部"
+        case .archived: "归档"
+        }
+    }
+
+    var emptyMessage: String {
+        switch self {
+        case .recent: "还没有最近编辑的笔记"
+        case .all: "还没有笔记"
+        case .archived: "归档为空"
+        }
+    }
 }
 
 /// Main-actor Notes state for the still-dormant Task 10 vertical slice.  It
@@ -236,6 +254,10 @@ enum NotesBrowserPartition: Equatable, Sendable {
         case .all: allNotes
         case .archived: archivedNotes
         }
+    }
+
+    func displayedNotes(in partition: NotesBrowserPartition) -> [Note] {
+        notes(in: partition)
     }
 
     private func matchesCategory(_ note: Note) -> Bool {

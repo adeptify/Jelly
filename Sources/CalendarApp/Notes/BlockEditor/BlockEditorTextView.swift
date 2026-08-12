@@ -68,6 +68,7 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
         textContainer?.widthTracksTextView = true
         textContainerInset = .init(width: 0, height: 4)
         setAccessibilityRole(.textArea)
+        setAccessibilityPlaceholderValue("开始写点什么…")
         delegate = self
     }
 
@@ -203,6 +204,15 @@ final class BlockEditorTextView: NSTextView, NSTextViewDelegate {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         let color = NSColor.secondaryLabelColor
+        if string.isEmpty, projectedKind != .divider {
+            ("开始写点什么…" as NSString).draw(
+                at: .init(x: textContainerOrigin.x, y: textContainerOrigin.y),
+                withAttributes: [
+                    .font: Self.baseFont(for: projectedKind),
+                    .foregroundColor: color.withAlphaComponent(0.72)
+                ]
+            )
+        }
         switch projectedKind {
         case .bullet:
             ("•" as NSString).draw(at: .init(x: 1, y: textContainerOrigin.y), withAttributes: [.foregroundColor: color])

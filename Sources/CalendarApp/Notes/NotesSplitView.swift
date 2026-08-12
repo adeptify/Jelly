@@ -30,6 +30,13 @@ struct NotesSplitView: View {
     @State private var statusBanner: String?
     @State private var activeEditorSession: BlockEditorSession?
     @State private var pendingPermanentDelete: PendingNotePermanentDelete?
+    @State private var availableWidth: CGFloat = .infinity
+
+    enum NotesAdaptiveLayoutMode: Equatable {
+        case browserOnly
+        case editorOnly
+        case split
+    }
 
     init(
         store: WorkspaceStore,
@@ -62,29 +69,13 @@ struct NotesSplitView: View {
     }
 
     var body: some View {
-        HSplitView {
-            if !browserCollapsed {
-                NoteBrowserView(
-                    viewModel: viewModel,
-                    onSelect: { await selectNote($0) },
-                    onCreate: { await createNote() },
-                    onShowCategoryManager: { showCategoryManager = true }
-                )
-                .frame(minWidth: 220, idealWidth: 260, maxWidth: 360)
-            }
-
-            editorColumn
-                .frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .overlay(alignment: .topLeading) {
-            Button {
-                browserCollapsed.toggle()
-            } label: {
-                Image(systemName: browserCollapsed ? "sidebar.left" : "sidebar.squares.left")
-            }
-            .buttonStyle(.borderless)
-            .padding(8)
-            .accessibilityLabel(browserCollapsed ? "显示笔记列表" : "隐藏笔记列表")
+        GeometryReader { proxy in
+            notesContent(mode: NotesAdaptiveLayout.mode(
+                width: proxy.size.width,
+                browserCollapsed: browserCollapsed
+            ))
+            .onAppear { availableWidth = proxy.size.width }
+            .onChange(of: proxy.size.width) { _, width in availableWidth = width }
         }
         .overlay(alignment: .top) {
             if let statusBanner {
@@ -186,7 +177,37 @@ struct NotesSplitView: View {
     }
 
     @ViewBuilder
-    private var editorColumn: some View {
+    private func notesContent(mode: NotesAdaptiveLayoutMode) -> some View {
+        switch mode {
+        case .browserOnly:
+            browserColumn
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .editorOnly:
+            editorColumn(showsBrowserButton: true)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .split:
+            HSplitView {
+                browserColumn
+                    .frame(minWidth: 248, idealWidth: 280, maxWidth: 340)
+                editorColumn(showsBrowserButton: false)
+                    .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+
+    private var browserColumn: some View {
+        NoteBrowserView(
+            viewModel: viewModel,
+            categories: sortedCategories,
+            onSelect: { await selectNote($0) },
+            onCreate: { await createNote() },
+            onToggleBrowser: { browserCollapsed = true },
+            onShowCategoryManager: { showCategoryManager = true }
+        )
+    }
+
+    @ViewBuilder
+    private func editorColumn(showsBrowserButton: Bool) -> some View {
         if let identity = editorIdentity, let note = store.state.notes[identity.noteID] {
             NoteEditorView(
                 identity: identity,
@@ -206,6 +227,8 @@ struct NotesSplitView: View {
                 onRestore: { Task { await restoreSelected() } },
                 onPermanentDelete: requestPermanentDeleteSelected,
                 onOpenCalendarItem: openCalendarItem,
+                showsBrowserButton: showsBrowserButton,
+                onToggleBrowser: { browserCollapsed = false },
                 sessionSink: { session in
                     if let session {
                         activeEditorSession = session
@@ -218,12 +241,28 @@ struct NotesSplitView: View {
             )
             .id(identity)
         } else {
-            ContentUnavailableView(
-                "选择或新建笔记",
-                systemImage: "note.text",
-                description: Text("左侧列表选择一篇笔记，或点击新建。")
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(spacing: 0) {
+                if showsBrowserButton {
+                    HStack {
+                        Button { browserCollapsed = false } label: {
+                            Image(systemName: "sidebar.left")
+                                .frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
+                        .help("显示笔记列表")
+                        .accessibilityLabel("显示笔记列表")
+                        Spacer()
+                    }
+                    .padding(.horizontal, 20)
+                    .frame(height: CalendarTheme.toolbarHeight)
+                }
+                ContentUnavailableView(
+                    "选择或新建笔记",
+                    systemImage: "note.text",
+                    description: Text("打开笔记列表进行选择，或新建一篇笔记。")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
     }
 
@@ -252,6 +291,7 @@ struct NotesSplitView: View {
             return
         }
         editorIdentity = .init(noteID: noteID, editSessionID: sessionID)
+        if NotesAdaptiveLayout.isCompact(width: availableWidth) { browserCollapsed = true }
         statusBanner = nil
     }
 
@@ -288,6 +328,7 @@ struct NotesSplitView: View {
         guard (try? await viewModel.create(note)) == true else { return }
         if let selected = viewModel.selectedNoteID {
             editorIdentity = .init(noteID: selected, editSessionID: UUID())
+            if NotesAdaptiveLayout.isCompact(width: availableWidth) { browserCollapsed = true }
             if let created = store.state.notes[selected] {
                 try? autosave.beginSession(
                     created,
@@ -457,6 +498,22 @@ struct NotesSplitView: View {
                 }
             }
         }
+    }
+}
+
+enum NotesAdaptiveLayout {
+    static let compactThreshold: CGFloat = 760
+
+    static func isCompact(width: CGFloat) -> Bool {
+        width < compactThreshold
+    }
+
+    static func mode(
+        width: CGFloat,
+        browserCollapsed: Bool
+    ) -> NotesSplitView.NotesAdaptiveLayoutMode {
+        if browserCollapsed { return .editorOnly }
+        return isCompact(width: width) ? .browserOnly : .split
     }
 }
 

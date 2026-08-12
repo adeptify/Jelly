@@ -26,6 +26,8 @@ struct NoteEditorView: View {
     var onRestore: () -> Void
     var onPermanentDelete: () -> Void
     var onOpenCalendarItem: (UUID) -> Void
+    var showsBrowserButton: Bool
+    var onToggleBrowser: () -> Void
     var sessionSink: (BlockEditorSession?) -> Void
     var nativeFinalizerHook: Binding<NoteNativeInputFinalizer?>
 
@@ -37,6 +39,11 @@ struct NoteEditorView: View {
     @State private var showScheduleSheet = false
     @State private var lastAcceptedDocument: BlockDocument
     @State private var pendingLinkedTaskDeletion: PendingLinkedTaskDeletion?
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: CalendarSemanticAppearance {
+        CalendarTheme.appearance(for: colorScheme)
+    }
 
     init(
         identity: NoteEditorIdentity,
@@ -54,6 +61,8 @@ struct NoteEditorView: View {
         onRestore: @escaping () -> Void = {},
         onPermanentDelete: @escaping () -> Void = {},
         onOpenCalendarItem: @escaping (UUID) -> Void = { _ in },
+        showsBrowserButton: Bool = false,
+        onToggleBrowser: @escaping () -> Void = {},
         sessionSink: @escaping (BlockEditorSession?) -> Void,
         nativeFinalizerHook: Binding<NoteNativeInputFinalizer?>
     ) {
@@ -72,6 +81,8 @@ struct NoteEditorView: View {
         self.onRestore = onRestore
         self.onPermanentDelete = onPermanentDelete
         self.onOpenCalendarItem = onOpenCalendarItem
+        self.showsBrowserButton = showsBrowserButton
+        self.onToggleBrowser = onToggleBrowser
         self.sessionSink = sessionSink
         self.nativeFinalizerHook = nativeFinalizerHook
         _title = State(initialValue: note.title)
@@ -79,8 +90,20 @@ struct NoteEditorView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: 10) {
+                if showsBrowserButton {
+                    Button(action: onToggleBrowser) {
+                        Image(systemName: "sidebar.left")
+                            .font(.system(size: 13, weight: .medium))
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(theme.secondaryText)
+                    .help("显示笔记列表")
+                    .accessibilityLabel("显示笔记列表")
+                }
                 NoteTitleTextField(
                     title: $title,
                     focusRegistry: focusRegistry,
@@ -96,6 +119,41 @@ struct NoteEditorView: View {
                     coordinatorSink: { titleCoordinator = $0 }
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
+                Menu {
+                    Button("导入 Markdown…", action: onRequestMarkdownImport)
+                    Button("导出 Markdown…", action: onRequestMarkdownExport)
+                    Divider()
+                    if note.archivedAt == nil {
+                        Button("归档", action: onArchive)
+                    } else {
+                        Button("恢复", action: onRestore)
+                        Button("永久删除…", role: .destructive, action: onPermanentDelete)
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .frame(width: 28, height: 28)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .accessibilityLabel("笔记更多操作")
+            }
+            .padding(.horizontal, 20)
+            .frame(height: CalendarTheme.toolbarHeight)
+
+            HStack(spacing: 8) {
+                Picker("分类", selection: Binding(
+                    get: { note.categoryID },
+                    set: { onCategoryChanged($0) }
+                )) {
+                    ForEach(categories, id: \.id) { category in
+                        Text(category.name).tag(category.id)
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 180, alignment: .leading)
+                .accessibilityLabel("笔记分类")
+
+                Spacer(minLength: 12)
 
                 Button("安排到日历…") { showScheduleSheet = true }
                     .accessibilityLabel("从笔记安排到日历")
@@ -108,19 +166,12 @@ struct NoteEditorView: View {
                             onOpenItem: onOpenCalendarItem
                         )
                     }
-
-                Menu("更多") {
-                    Button("导入 Markdown…", action: onRequestMarkdownImport)
-                    Button("导出 Markdown…", action: onRequestMarkdownExport)
-                    Divider()
-                    if note.archivedAt == nil {
-                        Button("归档", action: onArchive)
-                    } else {
-                        Button("恢复", action: onRestore)
-                        Button("永久删除…", role: .destructive, action: onPermanentDelete)
-                    }
-                }
-                .accessibilityLabel("笔记更多操作")
+            }
+            .font(.system(size: 12, weight: .medium))
+            .padding(.horizontal, 20)
+            .padding(.bottom, 10)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(theme.separator.opacity(0.7)).frame(height: 0.5)
             }
 
             if let status = autosave.statusMessage {
@@ -129,18 +180,6 @@ struct NoteEditorView: View {
                     .foregroundStyle(.orange)
                     .accessibilityLabel(status)
             }
-
-            Picker("分类", selection: Binding(
-                get: { note.categoryID },
-                set: { onCategoryChanged($0) }
-            )) {
-                ForEach(categories, id: \.id) { category in
-                    Text(category.name).tag(category.id)
-                }
-            }
-            .labelsHidden()
-            .frame(maxWidth: 220, alignment: .leading)
-            .accessibilityLabel("笔记分类")
 
             ScrollView {
                 BlockEditorView(
@@ -160,9 +199,12 @@ struct NoteEditorView: View {
                     )
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
             }
         }
-        .padding(20)
+        .background(theme.canvas)
+        .foregroundStyle(theme.primaryText)
         .sheet(isPresented: $showScheduleSheet) {
             NoteScheduleSheet(
                 store: store,
