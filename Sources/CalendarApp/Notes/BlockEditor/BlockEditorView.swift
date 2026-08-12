@@ -61,6 +61,7 @@ private struct BlockEditorSessionHost: View {
     private let sessionSink: ((BlockEditorSession) -> Void)?
     private let taskCalendarContext: TaskBlockCalendarContext?
     @State private var scheduleRequest: TaskBlockScheduleRequest?
+    @Environment(\.colorScheme) private var colorScheme
 
     init(
         key: BlockEditorKey,
@@ -90,47 +91,35 @@ private struct BlockEditorSessionHost: View {
             if session.showsInlineFormattingControls {
                 BlockFormattingControls(session: session, requestLinkURL: requestLinkURL)
             }
-            ForEach(Array(session.document.blocks.enumerated()), id: \.element.id) { index, block in
-                let dragHandler = BlockDragDropHandler(session: session)
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    BlockDragHandle(
-                        blockID: block.id,
-                        index: index,
-                        total: session.document.blocks.count,
-                        session: session,
-                        dragHandler: dragHandler
-                    )
-                    BlockEditorTextViewRepresentable(blockID: block.id, session: session)
-                        .frame(minHeight: rowHeight(for: block.kind))
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier(block.id.rawValue.uuidString)
-                    if block.kind == .task, let taskCalendarContext {
-                        TaskBlockCalendarBadge(
-                            store: taskCalendarContext.store,
-                            noteID: session.noteID,
-                            blockID: block.id,
-                            onSchedule: {
-                                scheduleRequest = .init(blockID: block.id)
-                            },
-                            onUnlink: {
-                                Task {
-                                    _ = try? await TaskBlockCalendarIntegration.unlinkFromBlock(
-                                        store: taskCalendarContext.store,
-                                        noteID: session.noteID,
-                                        blockID: block.id
-                                    )
-                                }
-                            },
-                            onOpenItem: taskCalendarContext.onOpenItem,
-                            onToggleCompletion: {
-                                toggleTaskCompletion(blockID: block.id, context: taskCalendarContext)
-                            }
-                        )
+            ContinuousBlockEditorRepresentable(
+                session: session,
+                appearance: CalendarTheme.appearance(for: colorScheme)
+            )
+            .frame(minHeight: 80)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("continuous-block-editor-host")
+            if let taskCalendarContext, let blockID = session.focusedTaskBlockID {
+                TaskBlockCalendarBadge(
+                    store: taskCalendarContext.store,
+                    noteID: session.noteID,
+                    blockID: blockID,
+                    onSchedule: {
+                        scheduleRequest = .init(blockID: blockID)
+                    },
+                    onUnlink: {
+                        Task {
+                            _ = try? await TaskBlockCalendarIntegration.unlinkFromBlock(
+                                store: taskCalendarContext.store,
+                                noteID: session.noteID,
+                                blockID: blockID
+                            )
+                        }
+                    },
+                    onOpenItem: taskCalendarContext.onOpenItem,
+                    onToggleCompletion: {
+                        toggleTaskCompletion(blockID: blockID, context: taskCalendarContext)
                     }
-                }
-                .onDrop(
-                    of: [BlockDragDropHandler.pasteboardType],
-                    delegate: BlockEditorDropDelegate(handler: dragHandler, before: block.id)
                 )
             }
             if let state = session.slashMenuState {
@@ -144,11 +133,8 @@ private struct BlockEditorSessionHost: View {
             Color.clear
                 .frame(height: 20)
                 .contentShape(Rectangle())
-                .accessibilityLabel("移动到文档末尾")
-                .onDrop(
-                    of: [BlockDragDropHandler.pasteboardType],
-                    delegate: BlockEditorDropDelegate(handler: BlockDragDropHandler(session: session), before: nil)
-                )
+                .accessibilityLabel("定位到文档末尾")
+                .onTapGesture { session.focusDocumentEnd() }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("结构化笔记编辑器")
@@ -192,15 +178,6 @@ private struct BlockEditorSessionHost: View {
         }
     }
 
-    private func rowHeight(for kind: BlockKind) -> CGFloat {
-        switch kind {
-        case .heading1: 38
-        case .heading2: 34
-        case .heading3: 30
-        case .divider: 22
-        case .paragraph, .bullet, .ordered, .task, .quote, .code, .link: 26
-        }
-    }
 }
 
 private struct TaskBlockScheduleRequest: Identifiable {

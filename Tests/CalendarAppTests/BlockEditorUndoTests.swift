@@ -267,26 +267,24 @@ struct BlockEditorUndoTests {
         defer { harness.close() }
         let firstView = try harness.textView(for: first)
         let secondView = try harness.textView(for: second)
+        #expect(firstView === secondView)
         #expect(firstView.attachedSession === secondView.attachedSession)
         let session = try #require(firstView.attachedSession)
         let firstPoint = try #require(firstView.windowPoint(forUTF16Offset: 1))
-        let secondPoint = try #require(secondView.windowPoint(forUTF16Offset: 1))
+        let secondPoint = try #require(secondView.windowPoint(forUTF16Offset: 7))
         #expect(firstView.utf16Offset(at: firstView.convert(firstPoint, from: nil)) == 1)
-        #expect(secondView.utf16Offset(at: secondView.convert(secondPoint, from: nil)) == 1)
+        #expect(secondView.utf16Offset(at: secondView.convert(secondPoint, from: nil)) == 7)
 
-        try harness.mouseDown(firstView, at: firstPoint)
-        try harness.mouseDragged(firstView, to: secondPoint)
-        #expect(harness.window.firstResponder === secondView)
-        #expect(firstView.selectedRange == .init(location: 1, length: 4))
-        #expect(secondView.selectedRange == .init(location: 0, length: 1))
+        #expect(firstView.beginPointerSelection(atUTF16Offset: 1))
+        #expect(firstView.extendPointerSelection(toUTF16Offset: 7))
+        #expect(harness.window.makeFirstResponder(firstView))
+        #expect(firstView.selectedRange == .init(location: 1, length: 6))
 
-        try harness.mouseDown(firstView, at: firstPoint)
-        try harness.mouseDown(secondView, at: secondPoint, modifiers: [.shift])
-        #expect(harness.window.firstResponder === secondView)
-        #expect(firstView.selectedRange == .init(location: 1, length: 4))
-        #expect(secondView.selectedRange == .init(location: 0, length: 1))
+        #expect(firstView.beginPointerSelection(atUTF16Offset: 1))
+        #expect(firstView.extendPointerSelection(toUTF16Offset: 7))
+        #expect(firstView.selectedRange == .init(location: 1, length: 6))
 
-        try harness.mouseDown(firstView, at: firstPoint)
+        #expect(firstView.beginPointerSelection(atUTF16Offset: 1))
         firstView.insertText("中", replacementRange: .init(location: NSNotFound, length: 0))
         #expect(harness.documents.count == 1)
         #expect(harness.document.blocks[0].inlineContent.spans.map(\.text).joined() == "甲中👍🏽")
@@ -307,7 +305,7 @@ struct BlockEditorUndoTests {
         #expect(redrawnFirstView === beforeAutosaveView)
         #expect(redrawnFirstView.attachedSession === session)
         #expect(redrawnFirstView.attachedSession?.undoManager === manager)
-        #expect(redrawnFirstView.string == "甲中拼👍🏽")
+        #expect(redrawnFirstView.string == "甲中拼👍🏽\n乙文")
 
         #expect(harness.registry.routeUndo() == .focusedPerformed)
         #expect(harness.document == document)
@@ -729,7 +727,7 @@ struct BlockEditorUndoTests {
         #expect(handler.performDrop(data: Data("corrupt".utf8), before: ids[0]) == false)
     }
 
-    @Test func hostedHandlesEnterForwardReverseBlockSelectionAndExposeKeyboardAccessibilityReorder() throws {
+    @Test func productionContinuousEditorOmitsBlockDragHandlesButKeepsStructuralCommands() throws {
         let ids = (0..<3).map { value in BlockID(UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", 780 + value))!) }
         let document = BlockDocument(blocks: ids.enumerated().map { index, id in
             .init(id: id, kind: .paragraph, inlineContent: .plain("\(index)"), taskState: nil, indentLevel: 0)
@@ -737,51 +735,30 @@ struct BlockEditorUndoTests {
         let selection = BlockEditorSelection.text(anchor: .init(blockID: ids[0], graphemeOffset: 0), focus: .init(blockID: ids[0], graphemeOffset: 0), preferredColumn: nil, typingAttributes: .init(marks: [], linkURL: nil))
         let harness = try HostedBlockEditorHarness(document: document, selection: selection)
         defer { harness.close() }
-        let firstHandle = try harness.handle(for: ids[0])
-        let thirdHandle = try harness.handle(for: ids[2])
         let session = try #require(harness.textView(for: ids[0]).attachedSession)
-
-        try harness.mouseDown(firstHandle, at: harness.centerWindowPoint(of: firstHandle))
-        try harness.mouseDown(thirdHandle, at: harness.centerWindowPoint(of: thirdHandle), modifiers: [.shift])
-        #expect(session.selection == .blocks(anchor: ids[0], focus: ids[2]))
-        #expect(try harness.textView(for: ids[0]).selectedRange == .init(location: 0, length: 1))
-        #expect(try harness.textView(for: ids[2]).selectedRange == .init(location: 0, length: 1))
-
-        try harness.mouseDown(thirdHandle, at: harness.centerWindowPoint(of: thirdHandle))
-        try harness.mouseDown(firstHandle, at: harness.centerWindowPoint(of: firstHandle), modifiers: [.shift])
-        #expect(session.selection == .blocks(anchor: ids[2], focus: ids[0]))
-        let actions = try #require(thirdHandle.accessibilityCustomActions())
-        #expect(actions.map(\.name) == ["Move Up", "Move Down"])
-        #expect(thirdHandle.performAccessibilityAction(named: "Move Up"))
-        #expect(harness.document.blocks.map(\.id) == ids)
-        #expect(session.selection == .blocks(anchor: ids[2], focus: ids[0]))
-        #expect(thirdHandle.performAccessibilityAction(named: "Move Down"))
-        #expect(harness.document.blocks.map(\.id) == ids)
-        harness.redraw()
-        try harness.keyDown(try harness.handle(for: ids[2]), keyCode: 126)
-        #expect(harness.document.blocks.map(\.id) == ids)
+        #expect(harness.blockHandleCount == 0)
+        #expect(try session.dispatch(.enter).commandHandled)
+        #expect(harness.document.blocks.count == 4)
+        #expect(session.undoManager.canUndo)
     }
 
-    @Test func hostedTextViewsExposeStableAccessibilityIdentityValueRoleAndDividerSelection() throws {
+    @Test func hostedContinuousTextViewExposesOneStableReadableAccessibilitySurface() throws {
         let textID = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000790")!)
         let dividerID = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000791")!)
         let document = BlockDocument(blocks: [
             .init(id: textID, kind: .paragraph, inlineContent: .plain("正文"), taskState: nil, indentLevel: 0),
             .init(id: dividerID, kind: .divider, inlineContent: .plain(""), taskState: nil, indentLevel: 0)
         ])
-        let selection = BlockEditorSelection.blocks(anchor: dividerID, focus: dividerID)
+        let selection = reviewCaret(textID, 0)
         let harness = try HostedBlockEditorHarness(document: document, selection: selection)
         defer { harness.close() }
         let textView = try harness.textView(for: textID)
         let dividerView = try harness.textView(for: dividerID)
-        #expect(textView.accessibilityIdentifier() == textID.rawValue.uuidString)
+        #expect(textView === dividerView)
+        #expect(textView.accessibilityIdentifier() == "continuous-block-editor")
         #expect(textView.accessibilityRole() == .textArea)
-        #expect(textView.accessibilityValue() == "正文")
-        #expect(textView.projectedAccessibilitySelected == false)
-        #expect(dividerView.accessibilityIdentifier() == dividerID.rawValue.uuidString)
-        #expect(dividerView.accessibilityRole() == .splitter)
-        #expect(dividerView.accessibilityValue() == "")
-        #expect(dividerView.projectedAccessibilitySelected)
+        #expect(textView.accessibilityLabel() == "笔记正文")
+        #expect(textView.accessibilityValue() == "正文\n")
     }
 
     @Test func crossBlockMovementTransfersFirstResponderAndNSNotFoundTargetsSessionCaret() throws {
@@ -898,11 +875,10 @@ struct BlockEditorUndoTests {
         defer { pointer.close() }
         let pointerFirst = try pointer.textView(for: first)
         let pointerSecond = try pointer.textView(for: second)
-        let firstPoint = try #require(pointerFirst.windowPoint(forUTF16Offset: 1))
-        let secondPoint = try #require(pointerSecond.windowPoint(forUTF16Offset: 1))
-        try pointer.mouseDown(pointerFirst, at: firstPoint)
-        try pointer.mouseDragged(pointerFirst, to: secondPoint)
-        #expect(pointer.window.firstResponder === pointerSecond)
+        #expect(pointerFirst === pointerSecond)
+        #expect(pointerFirst.beginPointerSelection(atUTF16Offset: 1))
+        #expect(pointerFirst.extendPointerSelection(toUTF16Offset: 4))
+        #expect(pointer.window.makeFirstResponder(pointerFirst))
         pointerSecond.insertText("X", replacementRange: .init(location: NSNotFound, length: 0))
         #expect(pointer.document.blocks.map(reviewText) == ["aXd"])
         #expect(pointer.documents.count == 1)
@@ -911,11 +887,10 @@ struct BlockEditorUndoTests {
         defer { shift.close() }
         let shiftFirst = try shift.textView(for: first)
         let shiftSecond = try shift.textView(for: second)
-        let shiftFirstPoint = try #require(shiftFirst.windowPoint(forUTF16Offset: 1))
-        let shiftSecondPoint = try #require(shiftSecond.windowPoint(forUTF16Offset: 1))
-        try shift.mouseDown(shiftSecond, at: shiftSecondPoint)
-        try shift.mouseDown(shiftFirst, at: shiftFirstPoint, modifiers: [.shift])
-        #expect(shift.window.firstResponder === shiftFirst)
+        #expect(shiftFirst === shiftSecond)
+        #expect(shiftSecond.beginPointerSelection(atUTF16Offset: 4))
+        #expect(shiftSecond.extendPointerSelection(toUTF16Offset: 1))
+        #expect(shift.window.makeFirstResponder(shiftSecond))
         shiftFirst.setMarkedText(
             "zhong", selectedRange: .init(location: 5, length: 0),
             replacementRange: .init(location: NSNotFound, length: 0)
@@ -1123,8 +1098,8 @@ private func reviewText(_ document: BlockDocument, _ id: BlockID) -> String {
 }
 
 @MainActor
-private func reviewTextViews(in view: NSView) -> [BlockEditorTextView] {
-    let own = (view as? BlockEditorTextView).map { [$0] } ?? []
+private func reviewTextViews(in view: NSView) -> [ContinuousBlockEditorTextView] {
+    let own = (view as? ContinuousBlockEditorTextView).map { [$0] } ?? []
     return own + view.subviews.flatMap(reviewTextViews(in:))
 }
 
@@ -1191,6 +1166,7 @@ private final class HostedBlockEditorHarness {
 
     var documents: [BlockDocument] { sink.documents }
     var document: BlockDocument { sink.documents.last ?? initialDocument }
+    var blockHandleCount: Int { handleDescendants(of: hostingView).count }
 
     init(
         document: BlockDocument,
@@ -1221,13 +1197,14 @@ private final class HostedBlockEditorHarness {
         window.contentView = hostingView
         window.makeKeyAndOrderFront(nil)
         redraw()
-        guard descendants(of: hostingView).count == document.blocks.count else {
+        guard descendants(of: hostingView).count == 1 else {
             throw HostedHarnessError.missingTextViews
         }
     }
 
-    func textView(for blockID: BlockID) throws -> BlockEditorTextView {
-        guard let textView = descendants(of: hostingView).first(where: { $0.representedBlockID == blockID }) else {
+    func textView(for blockID: BlockID) throws -> ContinuousBlockEditorTextView {
+        guard initialDocument.blocks.contains(where: { $0.id == blockID }),
+              let textView = descendants(of: hostingView).first else {
             throw HostedHarnessError.missingTextViews
         }
         return textView
@@ -1247,7 +1224,7 @@ private final class HostedBlockEditorHarness {
         return button
     }
 
-    func mouseDown(_ view: BlockEditorTextView, at point: NSPoint, modifiers: NSEvent.ModifierFlags = []) throws {
+    func mouseDown(_ view: ContinuousBlockEditorTextView, at point: NSPoint, modifiers: NSEvent.ModifierFlags = []) throws {
         let event = try mouseEvent(type: .leftMouseDown, location: point, modifiers: modifiers)
         view.mouseDown(with: event)
     }
@@ -1257,7 +1234,7 @@ private final class HostedBlockEditorHarness {
         view.mouseDown(with: event)
     }
 
-    func mouseDragged(_ view: BlockEditorTextView, to point: NSPoint) throws {
+    func mouseDragged(_ view: ContinuousBlockEditorTextView, to point: NSPoint) throws {
         let event = try mouseEvent(type: .leftMouseDragged, location: point)
         view.mouseDragged(with: event)
     }
@@ -1325,8 +1302,8 @@ private final class HostedBlockEditorHarness {
         )
     }
 
-    private func descendants(of view: NSView) -> [BlockEditorTextView] {
-        let own = (view as? BlockEditorTextView).map { [$0] } ?? []
+    private func descendants(of view: NSView) -> [ContinuousBlockEditorTextView] {
+        let own = (view as? ContinuousBlockEditorTextView).map { [$0] } ?? []
         return own + view.subviews.flatMap(descendants(of:))
     }
 

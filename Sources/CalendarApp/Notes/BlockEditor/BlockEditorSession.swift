@@ -49,6 +49,9 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
     private let selectionController: BlockSelectionController
     private var hosts: [UUID: HostLease] = [:]
     private var activeHostTokens: [BlockID: UUID] = [:]
+    private weak var continuousHost: (any ContinuousBlockEditorHost)?
+    private var continuousHostToken: UUID?
+    private var continuousProjection: BlockDocumentTextProjection?
     private var typingRecord: TypingUndoRecord?
     private var composition: CompositionBaseline?
     private var compositionGeneration: UInt = 0
@@ -90,6 +93,29 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         projectAuthoritativeState()
     }
 
+    func attach(host: any ContinuousBlockEditorHost, hostToken: UUID) {
+        if let previousToken = continuousHostToken, previousToken != hostToken {
+            if composition?.hostToken == previousToken {
+                cancelComposition(hostToken: previousToken)
+            }
+            focusRegistry.clear(ownerID: previousToken)
+            continuousProjection = nil
+        }
+        continuousHost = host
+        continuousHostToken = hostToken
+        host.textView.install(session: self, hostToken: hostToken)
+        projectAuthoritativeState()
+    }
+
+    func detachContinuousHost(hostToken: UUID) {
+        guard continuousHostToken == hostToken else { return }
+        if composition?.hostToken == hostToken { cancelComposition(hostToken: hostToken) }
+        continuousHost = nil
+        continuousHostToken = nil
+        continuousProjection = nil
+        focusRegistry.clear(ownerID: hostToken)
+    }
+
     func detach(hostToken: UUID) {
         guard let lease = hosts[hostToken] else { return }
         if composition?.hostToken == hostToken { cancelComposition(hostToken: hostToken) }
@@ -99,7 +125,7 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
     }
 
     func focus(hostToken: UUID) {
-        guard isActiveHost(hostToken) else { return }
+        guard isActiveHost(hostToken) || continuousHostToken == hostToken else { return }
         focusRegistry.register(undoManager, ownerID: hostToken)
     }
 
@@ -125,6 +151,19 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         guard !isProjecting else { return }
         isProjecting = true
         defer { isProjecting = false }
+        if let continuousHost {
+            let projection = BlockDocumentTextProjection(
+                document: document,
+                appearance: continuousHost.semanticAppearance
+            )
+            let range = (try? projection.nsRange(for: selection))
+                ?? .init(location: projection.attributedString.length, length: 0)
+            let diff = continuousProjection.map {
+                BlockDocumentProjectionDiff.make(from: $0, to: projection)
+            } ?? nil
+            continuousHost.apply(diff: diff, projection: projection, selectedRange: range)
+            continuousProjection = projection
+        }
         for lease in hosts.values {
             guard let view = lease.textView else { continue }
             guard let block = document.blocks.first(where: { $0.id == lease.blockID }) else { continue }
@@ -163,6 +202,17 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
             }
         }
         return false
+    }
+
+    var focusedTaskBlockID: BlockID? {
+        let blockID: BlockID
+        switch selection {
+        case let .text(_, focus, _, _): blockID = focus.blockID
+        case let .blocks(_, focus): blockID = focus
+        }
+        return document.blocks.first(where: {
+            $0.id == blockID && $0.kind == .task
+        })?.id
     }
 
     @discardableResult
@@ -205,12 +255,29 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
 
     var isComposing: Bool { composition != nil }
 
+    var currentTypingAttributes: BlockTypingAttributes {
+        guard case let .text(_, _, _, attributes) = selection else {
+            return .init(marks: [], linkURL: nil)
+        }
+        return attributes
+    }
+
     /// Force the live IME candidate into the authoritative document through the
     /// same commit path as `unmarkText`. Returns false only when a live host
     /// still reports a composition that could not be committed.
     @discardableResult
     func terminallyFinalizeNativeComposition() -> Bool {
         guard let composition else { return true }
+        if composition.hostToken == continuousHostToken,
+           let textView = continuousHost?.textView {
+            if textView.hasMarkedText() {
+                textView.unmarkText()
+            } else if isComposing {
+                commitComposition(textView.string, hostToken: composition.hostToken)
+            }
+            projectAuthoritativeState()
+            return !isComposing
+        }
         guard let lease = hosts[composition.hostToken],
               let textView = lease.textView else {
             cancelComposition(hostToken: composition.hostToken)
@@ -279,6 +346,120 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
               let selected = compositionSelection(blockID: blockID, replacementRange: replacementRange) else { return false }
         applySelection(selected, incrementingRevision: false, project: false)
         do { return try dispatch(.insertTextApplyingMarkdownShortcut(value)).commandHandled } catch { return false }
+    }
+
+    @discardableResult
+    func beginContinuousComposition(replacementRange: NSRange, hostToken: UUID) -> UInt? {
+        if let composition {
+            return composition.hostToken == hostToken ? composition.token : nil
+        }
+        guard continuousHostToken == hostToken,
+              let replacement = continuousSelection(for: replacementRange) else { return nil }
+        slashMenuState = nil
+        terminalComposition = nil
+        compositionGeneration &+= 1
+        let blockID: BlockID
+        switch replacement {
+        case let .text(_, focus, _, _): blockID = focus.blockID
+        case let .blocks(_, focus): blockID = focus
+        }
+        composition = .init(
+            document: document,
+            originalSelection: selection,
+            replacementSelection: replacement,
+            blockID: blockID,
+            hostToken: hostToken,
+            token: compositionGeneration
+        )
+        return compositionGeneration
+    }
+
+    @discardableResult
+    func dispatchNativeReplacement(range: NSRange, replacement: String, hostToken: UUID) -> Bool {
+        if consumeTerminalDuplicate(value: replacement, hostToken: hostToken) { return true }
+        if composition != nil {
+            commitComposition(replacement, hostToken: hostToken)
+            return true
+        }
+        guard continuousHostToken == hostToken,
+              let selected = continuousSelection(for: range) else { return false }
+        applySelection(selected, incrementingRevision: false, project: false)
+        do {
+            return try dispatch(.insertTextApplyingMarkdownShortcut(replacement)).commandHandled
+        } catch {
+            projectAuthoritativeState()
+            return false
+        }
+    }
+
+    func adoptNativeSelection(
+        _ range: NSRange,
+        direction: SelectionDirection,
+        typingAttributes: BlockTypingAttributes
+    ) throws {
+        guard composition == nil, let projection = currentContinuousProjection() else { return }
+        closeTypingCoalescing()
+        try selectionController.adoptGlobalRange(
+            range,
+            direction: direction,
+            projection: projection,
+            typingAttributes: typingAttributes
+        )
+        applySelection(selectionController.selection, incrementingRevision: true, project: true)
+    }
+
+    func extendNativeSelection(
+        toUTF16Offset offset: Int,
+        typingAttributes: BlockTypingAttributes
+    ) throws {
+        guard case let .text(anchor, _, _, _) = selection,
+              let projection = currentContinuousProjection() else { return }
+        let anchorOffset = try projection.utf16Offset(for: anchor)
+        let range = NSRange(
+            location: min(anchorOffset, offset),
+            length: max(anchorOffset, offset) - min(anchorOffset, offset)
+        )
+        try adoptNativeSelection(
+            range,
+            direction: offset >= anchorOffset ? .forward : .reverse,
+            typingAttributes: typingAttributes
+        )
+    }
+
+    func focusDocumentStart() {
+        guard let first = document.blocks.first else { return }
+        closeTypingCoalescing()
+        applySelection(
+            .text(
+                anchor: .init(blockID: first.id, graphemeOffset: 0),
+                focus: .init(blockID: first.id, graphemeOffset: 0),
+                preferredColumn: nil,
+                typingAttributes: .init(marks: [], linkURL: nil)
+            ),
+            incrementingRevision: true,
+            project: true
+        )
+        focusSelectionEndpoint()
+    }
+
+    func focusDocumentEnd() {
+        guard let last = document.blocks.last else { return }
+        closeTypingCoalescing()
+        let offset = last.kind == .divider ? 0 : Self.text(last).count
+        applySelection(
+            .text(
+                anchor: .init(blockID: last.id, graphemeOffset: offset),
+                focus: .init(blockID: last.id, graphemeOffset: offset),
+                preferredColumn: nil,
+                typingAttributes: .init(marks: [], linkURL: nil)
+            ),
+            incrementingRevision: true,
+            project: true
+        )
+        if last.kind == .divider {
+            _ = dispatchTextCommand(.enter)
+        }
+        focusSelectionEndpoint()
     }
 
     func beginNativeInputEvent(hostToken: UUID) {
@@ -564,6 +745,24 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         return .text(anchor: range.start, focus: range.end, preferredColumn: nil, typingAttributes: attributes)
     }
 
+    private func continuousSelection(for range: NSRange) -> BlockEditorSelection? {
+        if range.location == NSNotFound { return selection }
+        guard let projection = currentContinuousProjection() else { return nil }
+        return try? projection.selection(
+            for: range,
+            preserving: .forward,
+            typingAttributes: currentTypingAttributes
+        )
+    }
+
+    private func currentContinuousProjection() -> BlockDocumentTextProjection? {
+        if let continuousProjection, continuousProjection.document == document {
+            return continuousProjection
+        }
+        guard let appearance = continuousHost?.semanticAppearance else { return nil }
+        return BlockDocumentTextProjection(document: document, appearance: appearance)
+    }
+
     private static func text(_ block: DocumentBlock) -> String { block.inlineContent.spans.map(\.text).joined() }
 
     private func normalizedFormattingRange() -> (
@@ -600,6 +799,12 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
     }
 
     private func focusSelectionEndpoint() {
+        if let continuousHost,
+           let window = continuousHost.textView.window,
+           window.firstResponder !== continuousHost.textView {
+            _ = window.makeFirstResponder(continuousHost.textView)
+            return
+        }
         guard case let .text(_, focus, _, _) = selection,
               let token = activeHostTokens[focus.blockID],
               let view = hosts[token]?.textView,

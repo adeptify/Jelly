@@ -207,17 +207,17 @@ final class BlockEditorSession: ObservableObject {
 
 ### Steps
 
-- [ ] Add a failing hosted-view test asserting that a 20-Block document creates exactly one editable `NSTextView`, one native selection and one editor undo manager.
-- [ ] Add failing tests for cross-three-paragraph mouse selection, left/right movement over one Block boundary, Enter split, Shift-Enter soft break, Backspace merge and deleting the last visible character.
-- [ ] Add failing IME tests for repeated `setMarkedText`, candidate replacement, `unmarkText`, cancel, Enter/Backspace during composition, Chinese and emoji. Candidate updates must not publish a `BlockDocument`; terminal commit must publish once and create one undo record.
-- [ ] Refactor `BlockEditorSession` from per-Block host leases to one document host lease. Preserve the existing reducer-consumption legality matrix, typing coalescing and session-owned undo manager.
-- [ ] Implement `ContinuousBlockEditorTextView` event routing for `insertText`, selectors, selection changes, copy/cut/paste, undo/redo and marked text. Native storage is temporary presentation during composition only; all committed text goes through `BlockInputReducer`.
-- [ ] Apply `BlockDocumentProjectionDiff` to `NSTextStorage` with `replaceCharacters(in:with:)`; restore only the affected attributes and selection. Do not call `setAttributedString` for an ordinary single-Block keystroke.
-- [ ] Make the native view vertically resize inside the existing Notes scroll surface. `ContinuousBlockEditorHostView` reports used TextKit height without creating a nested scroll view.
-- [ ] Replace `ForEach(session.document.blocks)` in `BlockEditorView` with one `ContinuousBlockEditorRepresentable`.
-- [ ] Remove ordinary Block drag handles and their drop gutters from the production UI. Keep reducer drag commands and non-UI tests because future explicit reorder work may reuse them.
-- [ ] Make the area below the last laid-out line focus the last editable Block; if the document ends in Divider, dispatch one Enter-equivalent to create a single trailing paragraph.
-- [ ] Delete the legacy per-Block representable and update tests to assert the new one-host production path. Retain shared style/clipboard helpers only where used.
+- [x] Add a failing hosted-view test asserting that a 20-Block document creates exactly one editable `NSTextView`, one native selection and one editor undo manager.
+- [x] Add failing tests for cross-three-paragraph mouse selection, left/right movement over one Block boundary, Enter split, Shift-Enter soft break, Backspace merge and deleting the last visible character.
+- [x] Add failing IME tests for repeated `setMarkedText`, candidate replacement, `unmarkText`, cancel, Enter/Backspace during composition, Chinese and emoji. Candidate updates must not publish a `BlockDocument`; terminal commit must publish once and create one undo record.
+- [x] Refactor the production path of `BlockEditorSession` from per-Block host leases to one document host lease. Preserve the existing reducer-consumption legality matrix, typing coalescing and session-owned undo manager; retain direct native-host seams only for isolated legacy regression tests.
+- [x] Implement `ContinuousBlockEditorTextView` event routing for `insertText`, selectors, selection changes, copy/cut/paste, undo/redo and marked text. Native storage is temporary presentation during composition only; all committed text goes through `BlockInputReducer`.
+- [x] Apply `BlockDocumentProjectionDiff` to `NSTextStorage` with `replaceCharacters(in:with:)`; restore only the affected attributes and selection. Do not call `setAttributedString` for an ordinary single-Block keystroke.
+- [x] Make the native view vertically resize inside the existing Notes scroll surface. `ContinuousBlockEditorHostView` reports used TextKit height without creating a nested scroll view.
+- [x] Replace `ForEach(session.document.blocks)` in `BlockEditorView` with one `ContinuousBlockEditorRepresentable`.
+- [x] Remove ordinary Block drag handles and their drop gutters from the production UI. Keep reducer drag commands and non-UI tests because future explicit reorder work may reuse them.
+- [x] Make the area below the last laid-out line focus the last editable Block; if the document ends in Divider, dispatch one Enter-equivalent to create a single trailing paragraph.
+- [x] Delete the legacy per-Block production representable and update tests to assert the new one-host production path. Retain legacy native test seams plus shared style/clipboard helpers only where regression coverage still uses them.
 
 ### Focused verification
 

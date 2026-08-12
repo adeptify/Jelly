@@ -731,7 +731,10 @@ struct BlockEditorAccessibilityTests {
         #expect(bold.acceptsFirstResponder)
         #expect(linkButton.acceptsFirstResponder)
         bold.performClick(bold)
-        let textView = try #require(accessibilityDescendants(of: hosting, as: BlockEditorTextView.self).first)
+        let textView = try #require(accessibilityDescendants(
+            of: hosting,
+            as: ContinuousBlockEditorTextView.self
+        ).first)
         #expect(textView.beginPointerSelection(atUTF16Offset: 0))
         #expect(textView.extendPointerSelection(toUTF16Offset: 4))
         hosting.layoutSubtreeIfNeeded()
@@ -847,7 +850,7 @@ struct BlockEditorAccessibilityTests {
 
         let textView = try #require(accessibilityDescendants(
             of: hosting,
-            as: BlockEditorTextView.self
+            as: ContinuousBlockEditorTextView.self
         ).first)
         #expect(textView.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
         let color = try #require(textView.textStorage?.attribute(
