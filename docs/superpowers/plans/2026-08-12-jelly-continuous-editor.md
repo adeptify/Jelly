@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- 正确仓库固定为 `/Users/oreal/adeptify-home/repos/Jelly`，工作分支固定为 `codex/jelly-editor-fluidity`。
+- 正确仓库固定为 `/Users/oreal/adeptify-home/repos/Jelly`。实现最初在 `codex/jelly-editor-fluidity` 开展，现已按用户决定落到 `main`；后续验收以 `main` 为准。
 - 本轮不新增独立 `Task` 聚合对象，不实现 Goal/Task 拆解、自然语言日期识别、AI 建议或新的 Block 类型。
 - 数据层继续 Block 化；用户正文必须只有一个连续文字焦点域。普通 Block 不显示拖拽柄、卡片、独立边框或永久操作按钮。
 - 保留现有 reducer、Markdown codec、草稿保护、恢复中心和已关联 Task 删除处置合同；迁移 UI 不重写已经验证过的领域逻辑。
@@ -418,14 +418,14 @@ git commit -m "test(editor): preserve autosave recovery and markdown contracts"
 
 ### Steps
 
-- [ ] Build deterministic fixtures for all three datasets with mixed Chinese, English, emoji, headings, lists, tasks, quotes and code.
-- [ ] Add reducer and projection benchmarks with 10 warmups and at least 100 measured edits. Compute p95 from sorted monotonic-clock samples and fail with the measured distribution in the error message.
-- [ ] Add a hosted AppKit benchmark that measures native event dispatch through TextKit layout completion. Record p95, max and open time; assert the table above.
-- [ ] Add an instrumentation assertion that 200 sequential ordinary characters do not call full-document `setAttributedString` per key and do not report more than the changed Block in the projection diff.
-- [ ] Make `Scripts/test-editor-performance.sh` build release test artifacts, run only the performance suite, and print a compact table suitable for acceptance evidence.
-- [ ] Add visual contract tests for one placeholder only, max content width, no ordinary drag handles, fixed toolbar outside document flow, Task-only checkbox gutter and readable semantic colors in light/dark appearance.
-- [ ] Add accessibility-tree tests proving there is one body text area, no per-Block Tab stops, every visible icon button has a Chinese name, Task checkboxes expose status/action, and reduced-motion mode does not rely on positional animation.
-- [ ] Document machine model, macOS version, build configuration, sampling method and cold/warm distinction in `docs/acceptance/editor-performance-method.md`; thresholds without this context are not accepted as evidence.
+- [x] Build deterministic fixtures for all three datasets with mixed Chinese, English, emoji, headings, lists, tasks, quotes and code.
+- [x] Add reducer and projection benchmarks with 10 warmups and at least 100 measured edits. Compute p95 from sorted monotonic-clock samples and fail with the measured distribution in the error message.
+- [x] Add a hosted AppKit benchmark that measures native event dispatch through TextKit layout completion. Record p95, max and open time; assert the table above.
+- [x] Add an instrumentation assertion that 200 sequential ordinary characters do not call full-document `setAttributedString` per key and do not report more than the changed Block in the projection diff.
+- [x] Make `Scripts/test-editor-performance.sh` build release test artifacts, run only the performance suite, and print a compact table suitable for acceptance evidence.
+- [x] Add visual contract tests for one placeholder only, max content width, no ordinary drag handles, fixed toolbar outside document flow, Task-only checkbox gutter and readable semantic colors in light/dark appearance.
+- [x] Add accessibility-tree tests proving there is one body text area, no per-Block Tab stops, every visible icon button has a Chinese name, Task checkboxes expose status/action, and reduced-motion mode does not rely on positional animation.
+- [x] Document machine model, macOS version, build configuration, sampling method and cold/warm distinction in `docs/acceptance/editor-performance-method.md`; thresholds without this context are not accepted as evidence.
 
 ### Focused verification
 
@@ -455,25 +455,25 @@ git commit -m "test(editor): add performance visual and accessibility gates"
 
 ### Automated gates
 
-- [ ] Run all focused suites again after a clean build.
-- [ ] Run the full debug suite and release build:
+- [x] Run all focused suites again after a clean build.
+- [x] Run the full debug suite and release build:
 
 ```bash
 swift test
 swift build -c release --product PersonalCalendar
 ```
 
-- [ ] Build the distributable app and verify its executable/signature using the existing script:
+- [x] Build the distributable app and verify its executable/signature using the existing script:
 
 ```bash
 Scripts/build-app.sh
 ```
 
-- [ ] Record exact commit, app version/build number, artifact checksum and test counts in the acceptance document.
+- [x] Record exact implementation commits, app version/build number, artifact checksum and test counts in the acceptance document.
 
 ### Real packaged-App flows
 
-- [ ] Launch the newly packaged `Jelly.app`, not an older installed copy. Record the executable path and About/version evidence.
+- [x] Launch the newly packaged `Jelly.app`, not an older installed copy. Record the executable path and version evidence.
 - [ ] Keyboard-only new-note path: `Command-2 → Command-N → title → Enter → body`; repeat for two blank notes and verify no state/undo leakage.
 - [ ] Empty and continuous editing: one placeholder, click below content, type at least 20 mixed-language paragraphs, Enter/Shift-Enter/Backspace, arrows across boundaries, forward/reverse cross-three-paragraph selection, copy/cut/paste, undo/redo.
 - [ ] System Chinese Pinyin: enter at least ten sentences with candidate changes, Enter/Backspace during composition, emoji and cancellation; verify no duplicates, loss or caret jump.
@@ -487,8 +487,10 @@ Scripts/build-app.sh
 
 ### Defect loop
 
-- [ ] For every defect found in packaged-App testing, first add the smallest failing automated regression where feasible, implement the fix, rerun its focused suite, rebuild the package and replay the exact failed product flow.
-- [ ] Do not mark a flow passed based on source tests after its packaged build failed; only the rebuilt artifact can close it.
+- [x] For every defect found in packaged-App testing, first add the smallest failing automated regression where feasible, implement the fix, rerun its focused suite, rebuild the package and replay the exact failed product flow.
+- [x] Do not mark a flow passed based on source tests after its packaged build failed; only the rebuilt artifact can close it.
+
+Build 11 的本轮实操覆盖、性能数据和明确未覆盖项见 `docs/acceptance/editor-build-11.md`。上方仍未勾选的超大矩阵（系统拼音候选窗、Task ↔ Calendar 全处置矩阵、深浅色与窄窗全截图、不可恢复删除）不得被 Build 11 的局部验收结论替代。
 
 ### Final verification
 
@@ -505,7 +507,7 @@ Scripts/build-app.sh
 ```bash
 git add docs/acceptance Sources Tests Scripts
 git commit -m "test(editor): record packaged app acceptance"
-git push origin codex/jelly-editor-fluidity
+git push origin main
 ```
 
 ---

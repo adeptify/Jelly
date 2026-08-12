@@ -1,7 +1,9 @@
 # Jelly 编辑器性能门禁与测量方法
 
-测量日期：2026-08-12（Asia/Shanghai）  
-代码分支：`codex/jelly-editor-fluidity`  
+测量日期：2026-08-13（Asia/Shanghai）
+
+代码分支：`main`（实现提交 `db316c3`）
+
 构建配置：SwiftPM `release`
 
 ## 测试机器
@@ -14,11 +16,11 @@
 
 ## 固定数据集和门槛
 
-| 数据集 | 规模 | Reducer p95 | 投影 p95 | 按键到 TextKit 布局完成 p95 / max | 编辑器打开 p95 |
-|---|---:|---:|---:|---:|---:|
-| Daily | 20 Blocks / 2,000 字符 | 2ms | 8ms | 33ms / 100ms | 150ms |
-| Long | 200 Blocks / 20,000 字符 | 4ms | 12ms | 50ms / 100ms | 300ms |
-| Stress | 500 Blocks / 50,000 字符 | 8ms | 16ms | 75ms / 150ms | 600ms |
+| 数据集 | 规模 | Reducer p95 | 投影 p95 | 按键可见 p95 / max | 停顿后完整排版 p95 | 编辑器打开 p95 |
+|---|---:|---:|---:|---:|---:|---:|
+| Daily | 20 Blocks / 2,000 字符 | 2ms | 8ms | 33ms / 100ms | 33ms | 150ms |
+| Long | 200 Blocks / 20,000 字符 | 4ms | 12ms | 50ms / 100ms | 75ms | 300ms |
+| Stress | 500 Blocks / 50,000 字符 | 8ms | 16ms | 75ms / 150ms | 150ms | 600ms |
 
 夹具按固定次序混合中文、英文、emoji、标题、列表、Task、引用、代码和分割线。三个规模分别用于日常记录、较长笔记和压力边界，不把压力数据集当成典型用户文档。
 
@@ -27,28 +29,32 @@
 - Reducer、文档投影和原生宿主按键路径：先预热 10 次，再连续记录 100 次。
 - 编辑器打开：先预热 3 次，再记录 20 次。
 - 每个样本使用 `DispatchTime.now().uptimeNanoseconds` 单调时钟，换算为毫秒；p95 取排序后向上取整的第 95 百分位样本。
-- “按键到可见更新”从 `NSTextView.insertText` 开始，覆盖 reducer、连续文档投影、局部 `NSTextStorage` 更新、宿主布局和 TextKit `usedRect` 计算。它没有包含显示器刷新等待，因此准确名称是“按键到 TextKit 布局完成”，最终打包 App 的主观可见反馈另做真实 GUI 验收。
+- `key-visible` 从 `NSTextView.insertText` 开始，覆盖 reducer、连续文档投影、局部 `NSTextStorage` 更新和当前宿主布局。它不强迫 TextKit 重算整篇内容高度，也不包含显示器刷新等待，因此只能表示“按键产生局部可见更新”的进程内上界。
+- `settled-layout` 在相同输入后显式计算完整 TextKit 内容高度，代表输入停顿后的维护成本。产品路径会把高度、Task 复选框位置等全篇维护合并到 250ms 停顿后执行，避免每个按键都支付整篇排版成本。
 - “打开”测量进程内新建编辑会话、宿主、投影、布局和内容高度，不等同于 App 冷启动。
 - 本表是 Release 二进制和已热 SwiftPM 构建缓存下的进程内暖数据。首次 Release 编译属于构建时间，不计入编辑器产品性能。
 - 自动化同时要求连续输入 200 个普通字符全部使用局部投影，不允许每键调用整篇 `setAttributedString`。
 
-## 2026-08-12 Release 结果
+## 2026-08-13 最终 Release 结果
 
 命令：`Scripts/test-editor-performance.sh`
 
 | 数据集 | 阶段 | p95 | max | 结果 |
 |---|---|---:|---:|---|
-| Daily | Reducer | 0.012ms | 0.016ms | PASS |
-| Daily | 投影 | 0.215ms | 0.284ms | PASS |
-| Daily | 按键到 TextKit 布局完成 | 2.473ms | 2.587ms | PASS |
-| Daily | 打开 | 8.192ms | 8.205ms | PASS |
-| Long | Reducer | 0.094ms | 0.113ms | PASS |
-| Long | 投影 | 2.047ms | 2.072ms | PASS |
-| Long | 按键到 TextKit 布局完成 | 22.181ms | 22.441ms | PASS |
-| Long | 打开 | 81.932ms | 82.001ms | PASS |
-| Stress | Reducer | 0.217ms | 0.240ms | PASS |
-| Stress | 投影 | 5.024ms | 5.052ms | PASS |
-| Stress | 按键到 TextKit 布局完成 | 55.144ms | 55.598ms | PASS |
-| Stress | 打开 | 207.872ms | 211.498ms | PASS |
+| Daily | Reducer | 0.011ms | 0.017ms | PASS |
+| Daily | 投影 | 0.217ms | 0.286ms | PASS |
+| Daily | 按键可见 | 2.526ms | 2.629ms | PASS |
+| Daily | 停顿后完整排版 | 3.927ms | 4.041ms | PASS |
+| Daily | 打开 | 7.283ms | 7.299ms | PASS |
+| Long | Reducer | 0.087ms | 0.093ms | PASS |
+| Long | 投影 | 2.155ms | 2.204ms | PASS |
+| Long | 按键可见 | 21.852ms | 24.251ms | PASS |
+| Long | 停顿后完整排版 | 35.722ms | 47.678ms | PASS |
+| Long | 打开 | 72.269ms | 73.367ms | PASS |
+| Stress | Reducer | 0.211ms | 0.222ms | PASS |
+| Stress | 投影 | 5.150ms | 5.222ms | PASS |
+| Stress | 按键可见 | 48.171ms | 48.427ms | PASS |
+| Stress | 停顿后完整排版 | 90.551ms | 110.651ms | PASS |
+| Stress | 打开 | 184.915ms | 193.658ms | PASS |
 
 结果只证明这台机器、这个提交和上述测量口径下通过固定门槛。长文滚动手感、输入法候选窗和显示器真实刷新仍由最终打包 App 验收补充，不能由这张表替代。
