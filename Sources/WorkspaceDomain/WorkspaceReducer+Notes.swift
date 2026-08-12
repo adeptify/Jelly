@@ -119,8 +119,12 @@ extension WorkspaceReducer {
                     metadata: &metadata
                 )
             }
-            let oldTitle = oldBlock.inlineContent.spans.map(\.text).joined()
-            let newTitle = newBlock.inlineContent.spans.map(\.text).joined()
+            let oldTitle = TaskBlockCalendarTitle.normalized(
+                oldBlock.inlineContent.spans.map(\.text).joined()
+            )
+            let newTitle = TaskBlockCalendarTitle.normalized(
+                newBlock.inlineContent.spans.map(\.text).joined()
+            )
             if oldTitle != newTitle,
                var item = candidate.calendar.items[link.calendarItemID] {
                 item.title = newTitle
@@ -207,7 +211,9 @@ extension WorkspaceReducer {
         guard block.taskState?.completedAt == payload.item.completedAt else {
             throw WorkspaceReducerError.taskCompletionMismatch
         }
-        guard block.inlineContent.spans.map(\.text).joined() == payload.item.title else {
+        guard TaskBlockCalendarTitle.normalized(
+            block.inlineContent.spans.map(\.text).joined()
+        ) == payload.item.title else {
             throw WorkspaceReducerError.taskTitleMismatch
         }
         try applyCalendar(.createItem(payload.item), to: &candidate, now: now, metadata: &metadata)

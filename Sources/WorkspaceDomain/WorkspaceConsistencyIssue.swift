@@ -223,7 +223,9 @@ public enum WorkspaceConsistencyInspector {
                 != link.noteID {
                 return true
             }
-            if item.title != block.inlineContent.spans.map(\.text).joined() { return true }
+            if item.title != TaskBlockCalendarTitle.normalized(
+                block.inlineContent.spans.map(\.text).joined()
+            ) { return true }
             if item.completedAt != block.taskState?.completedAt { return true }
         }
         return false

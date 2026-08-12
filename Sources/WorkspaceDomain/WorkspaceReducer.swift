@@ -197,7 +197,9 @@ public enum WorkspaceReducer {
            let blockIndex = note.document.blocks.firstIndex(where: {
                $0.id == link.blockID && $0.kind == .task
            }),
-           note.document.blocks[blockIndex].inlineContent.spans.map(\.text).joined() != updatedTitle {
+           TaskBlockCalendarTitle.normalized(
+               note.document.blocks[blockIndex].inlineContent.spans.map(\.text).joined()
+           ) != updatedTitle {
             note.document.blocks[blockIndex].inlineContent = .plain(updatedTitle)
             note.updatedAt = now
             candidate.notes[note.id] = note

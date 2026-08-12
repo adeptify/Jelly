@@ -152,7 +152,9 @@ public enum WorkspaceValidator {
                 throw WorkspaceValidationError.taskBlockMissingPrimaryNote(link.noteID, link.calendarItemID)
             }
             guard state.calendar.items[link.calendarItemID]?.title
-                == block.inlineContent.spans.map(\.text).joined() else {
+                == TaskBlockCalendarTitle.normalized(
+                    block.inlineContent.spans.map(\.text).joined()
+                ) else {
                 throw WorkspaceValidationError.taskTitleMismatch(
                     link.noteID,
                     link.blockID,

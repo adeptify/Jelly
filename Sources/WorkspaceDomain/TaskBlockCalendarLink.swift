@@ -1,5 +1,11 @@
 import Foundation
 
+enum TaskBlockCalendarTitle {
+    static func normalized(_ title: String) -> String {
+        title.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 public struct TaskBlockCalendarLink: Hashable, Codable, Sendable {
     public let noteID: NoteID
     public let blockID: BlockID
