@@ -6,6 +6,46 @@ import WorkspaceDomain
 @Suite("WorkspaceSearchIndexTests")
 @MainActor
 struct WorkspaceSearchIndexTests {
+    @Test func noteSearchReadsChineseEnglishAndLinkFromDomainContent() throws {
+        let category = makeEmptyState().uncategorizedID
+        let url = try #require(URL(string: "https://example.com/jelly-editor"))
+        let note = Note(
+            id: NoteID(),
+            title: "中文验收标题",
+            document: .init(blocks: [
+                .init(
+                    id: BlockID(),
+                    kind: .paragraph,
+                    inlineContent: .init(spans: [
+                        .init(text: "流畅记录 mixed language "),
+                        .init(text: "官方链接", linkURL: url)
+                    ]),
+                    taskState: nil,
+                    indentLevel: 0
+                )
+            ]),
+            categoryID: category,
+            archivedAt: nil,
+            revision: 1,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        var state = WorkspaceState.empty(calendar: makeEmptyState())
+        state.revision = 1
+        state.notes[note.id] = note
+        let index = WorkspaceSearchIndex()
+        try index.rebuild(from: state)
+
+        for query in ["中文验收", "流畅记录", "mixed language", "jelly-editor"] {
+            #expect(try index.search(
+                query: query,
+                kind: .note,
+                includeArchived: false,
+                in: state
+            ).map(\.objectID) == [.note(note.id)])
+        }
+    }
+
     @Test func rebuildAndSearchDropsMissingIDs() throws {
         let category = makeEmptyState().uncategorizedID
         let note = Note(

@@ -760,8 +760,10 @@ extension NoteAutosaveState {
             "保存失败—草稿未保护"
         case .commitPending:
             "保存结果尚未确认，当前为只读状态。"
-        case .cleanupPending:
-            "内容已写入，但草稿清理尚未完成；当前为只读状态。"
+        case let .cleanupPending(_, _, step):
+            step == .unbind
+                ? "保存失败—草稿已保护；清理尚未完成，当前为只读状态。"
+                : "内容已写入，但草稿清理尚未完成；当前为只读状态。"
         case .externalSourceChanged:
             "检测到外部数据变化，当前草稿未保存。"
         case .persistenceBlocked:

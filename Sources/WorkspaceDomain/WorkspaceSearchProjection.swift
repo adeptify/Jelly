@@ -33,7 +33,7 @@ public struct WorkspaceSearchRecord: Codable, Equatable, Sendable {
 }
 
 public struct WorkspaceSearchProjection: Codable, Equatable, Sendable {
-    public static let schemaVersion = 1
+    public static let schemaVersion = 2
     public let schemaVersion: Int
     public let workspaceRevision: Int64
     public let records: [WorkspaceSearchRecord]
@@ -49,7 +49,9 @@ public struct WorkspaceSearchProjection: Codable, Equatable, Sendable {
         for note in state.notes.values {
             let body = note.document.blocks
                 .flatMap(\.inlineContent.spans)
-                .map(\.text)
+                .flatMap { span in
+                    [span.text, span.linkURL?.absoluteString].compactMap { $0 }
+                }
                 .joined(separator: "\n")
             let text = "\(note.title)\n\(body)".lowercased()
             records.append(.init(

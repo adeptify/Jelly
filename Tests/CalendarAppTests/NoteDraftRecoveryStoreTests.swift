@@ -8,6 +8,87 @@ import WorkspaceDomain
 @Suite("NoteDraftRecoveryStoreTests")
 @MainActor
 struct NoteDraftRecoveryStoreTests {
+    @Test func continuousEditorRecoveryPreservesSoftBreaksFormattingEmptyBlocksAndLinkedTasks() async throws {
+        let categoryID = UUID()
+        let noteID = NoteID()
+        let richID = BlockID()
+        let emptyID = BlockID()
+        let linkedID = BlockID()
+        let localID = BlockID()
+        let completedAt = Date(timeIntervalSince1970: 1_755_001_000)
+        let item = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "已联动待办",
+            categoryID: categoryID,
+            schedule: .init(
+                startDate: .init(year: 2026, month: 8, day: 19)!,
+                endDate: .init(year: 2026, month: 8, day: 19)!,
+                startTime: nil,
+                endTime: nil
+            ),
+            completedAt: completedAt,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        var persisted = Note.empty(id: noteID, categoryID: categoryID, now: .distantPast)
+        persisted.document = .init(blocks: [
+            try .task(id: linkedID, text: "已联动待办", completedAt: completedAt)
+        ])
+        persisted.revision = 1
+        var draft = persisted
+        draft.title = "连续编辑器恢复"
+        draft.document = .init(blocks: [
+            .init(
+                id: richID,
+                kind: .paragraph,
+                inlineContent: .init(spans: [
+                    .init(text: "第一行", marks: [.bold]),
+                    .init(text: "\n第二行", marks: [.italic])
+                ]),
+                taskState: nil,
+                indentLevel: 0
+            ),
+            .init(
+                id: emptyID,
+                kind: .paragraph,
+                inlineContent: .plain(""),
+                taskState: nil,
+                indentLevel: 0
+            ),
+            try .task(id: linkedID, text: "已联动待办", completedAt: completedAt),
+            try .task(id: localID, text: "仅本地待办")
+        ])
+        var state = WorkspaceState.empty(calendar: .empty(uncategorizedID: categoryID, now: .distantPast))
+        state.revision = 1
+        state.calendar.items[item.id] = item
+        state.notes[noteID] = persisted
+        state.taskBlockLinks = [.init(noteID: noteID, blockID: linkedID, calendarItemID: item.id)]
+        state.calendarNoteRelations.baselines[.item(item.id)] = .init(
+            primaryNoteID: noteID,
+            referenceNoteIDs: []
+        )
+        let fixture = try await recoveryFixture(state: state, draft: draft)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let candidate = try #require(recoveryCandidate(from: fixture.store.phase))
+        #expect(candidate.draft == draft)
+
+        guard case .committed = try await fixture.store.resolveDraftRecovery(
+            candidate.token,
+            action: .restoreAsCurrent
+        ) else {
+            Issue.record("复杂连续正文草稿必须能够原样恢复")
+            return
+        }
+        let restored = try #require(fixture.store.state.notes[noteID])
+        #expect(restored.document == draft.document)
+        #expect(restored.document.blocks[0].inlineContent.spans[0].marks == [.bold])
+        #expect(restored.document.blocks[0].inlineContent.spans[1].text == "\n第二行")
+        #expect(restored.document.blocks[1].inlineContent.spans.map(\.text).joined().isEmpty)
+        #expect(restored.document.blocks[2].taskState?.completedAt == completedAt)
+        #expect(restored.document.blocks[3].taskState?.completedAt == nil)
+    }
+
     @Test func protectedCapabilityCommitsItsFrozenSubmissionExactlyOnce() async throws {
         let categoryID = UUID()
         let base = Note.empty(id: NoteID(UUID()), categoryID: categoryID, now: .distantPast)

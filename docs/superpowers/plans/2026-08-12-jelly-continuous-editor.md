@@ -372,12 +372,12 @@ git commit -m "feat(tasks): make task blocks directly actionable"
 
 ### Steps
 
-- [ ] Add integration coverage for typing then immediately switching to Calendar, selecting another Note, closing the window and quitting. Each path must terminally finalize IME, protect the latest draft and use the existing close barrier.
-- [ ] Add recovery coverage for a protected continuous-editor document containing soft breaks, inline formatting, empty blocks and linked/unlinked Task Blocks.
-- [ ] Add failure coverage showing a main-save failure keeps journal recovery evidence and exposes a clear Chinese status; normal successful saves remain visually quiet.
-- [ ] Run search tests for Chinese title, English/Chinese body and URL after the projection migration; search must read domain data, never attributed presentation text.
-- [ ] Run Markdown round-trip tests for every supported Block kind, inline marks, checked tasks, soft breaks and unsupported-structure diagnostics.
-- [ ] Change production code only for failures caused by the new host boundary. Do not simplify or replace the typed draft/recovery state machine.
+- [x] Re-run the existing lifecycle integration coverage for immediate module switch, Note selection, window close and termination. Each path terminally finalizes IME, protects the latest draft and uses the existing close barrier.
+- [x] Add recovery coverage for a protected continuous-editor document containing soft breaks, inline formatting, empty blocks and linked/unlinked Task Blocks.
+- [x] Add failure coverage showing a main-save failure keeps journal recovery evidence and exposes a precise Chinese protected-draft status; normal successful saves remain visually quiet.
+- [x] Run search tests for Chinese title, English/Chinese body and URL after the projection migration; search reads domain data and now includes inline link destinations, never attributed presentation text.
+- [x] Run Markdown round-trip tests for every supported Block kind, inline marks, checked tasks, soft breaks and unsupported-structure diagnostics.
+- [x] Keep the typed draft/recovery state machine intact; production changes are limited to the truthful cleanup status and rebuildable search projection.
 
 ### Focused verification
 

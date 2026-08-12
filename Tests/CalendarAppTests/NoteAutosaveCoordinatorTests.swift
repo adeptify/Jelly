@@ -625,6 +625,8 @@ struct NoteAutosaveCoordinatorTests {
         let triple = try #require(coordinator.currentTriple)
 
         #expect(await coordinator.flushLatest() == .protectedOnly(triple))
+        #expect(coordinator.statusMessage == "保存失败—草稿已保护；清理尚未完成，当前为只读状态。")
+        #expect(try await journal.current()?.records.isEmpty == false)
         guard case let .cleanupPending(actualTriple, _, step) = coordinator.autosaveState else {
             Issue.record("main failure plus a failed Journal cleanup must remain typed and read-only")
             return
