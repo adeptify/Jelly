@@ -27,7 +27,7 @@ struct BlockEditorPerformanceTests {
             )
         }
         let hosted = hostedDistribution(fixture: fixture)
-        let open = try BlockEditorPerformanceProbe.measure(warmups: 3, iterations: 20) {
+        let open = BlockEditorPerformanceProbe.measure(warmups: 3, iterations: 20) {
             autoreleasepool {
                 let session = BlockEditorSession(
                     noteID: NoteID(),
