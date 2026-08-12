@@ -49,12 +49,13 @@ struct NotesLifecycleWiringTests {
         )
         let transition = WorkspaceRouteTransitionCoordinator(routeState: routeState, features: features)
         let router = WorkspaceDeepLinkRouter()
+        let newItemRouter = WorkspaceNewItemRouter()
         let root = NotesSplitView(
             store: store,
             focusRegistry: EditorFocusRegistry(),
             transitionCoordinator: transition,
             deepLinkRouter: router,
-            newItemRouter: WorkspaceNewItemRouter(),
+            newItemRouter: newItemRouter,
             searchIndex: WorkspaceSearchIndex()
         )
         let hosting = NSHostingView(rootView: root)
@@ -91,6 +92,107 @@ struct NotesLifecycleWiringTests {
             return notesDescendants(of: hosting, as: NSButton.self).contains {
                 $0.accessibilityIdentifier() == "task-block-checkbox-\(blockID.rawValue.uuidString)"
                     && $0.state == .on
+            }
+        })
+    }
+
+    @Test func reopeningLinkedTaskThenCreatingNoteShowsTheNewEditor() async throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-notes-linked-create-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let calendar = makeEmptyState()
+        let seed = WorkspaceState.empty(calendar: calendar)
+        let repository = JSONWorkspaceRepository(
+            documentURL: directory.appendingPathComponent("calendar-v1.json"),
+            seed: { seed }
+        )
+        let journal = DraftJournalRepository(
+            fileURL: directory.appendingPathComponent("calendar-v1.draft-journal.json")
+        )
+        let store = WorkspaceStore(initialState: seed, repository: repository, journal: journal)
+        await store.load()
+        let blockID = BlockID()
+        var note = Note.empty(categoryID: calendar.uncategorizedID, now: .distantPast)
+        note.title = "跨页面后继续新建"
+        note.document = .init(blocks: [try .task(id: blockID, text: "任务")])
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let item = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "任务",
+            categoryID: calendar.uncategorizedID,
+            schedule: try .init(
+                startDate: CalendarDate(year: 2026, month: 8, day: 13)!,
+                endDate: CalendarDate(year: 2026, month: 8, day: 13)!,
+                startTime: nil,
+                endTime: nil
+            ),
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        _ = try await store.sendWorkspace(.scheduleTaskBlock(.init(
+            noteID: note.id,
+            blockID: blockID,
+            item: item
+        )))
+        let features = WorkspaceFeatures.production
+        let routeState = WorkspaceRouteState(
+            features: features,
+            preferences: NotesTestRoutePreferenceStore(initial: "notes")
+        )
+        let transition = WorkspaceRouteTransitionCoordinator(routeState: routeState, features: features)
+        let router = WorkspaceDeepLinkRouter()
+        let newItemRouter = WorkspaceNewItemRouter()
+        let root = NotesSplitView(
+            store: store,
+            focusRegistry: EditorFocusRegistry(),
+            transitionCoordinator: transition,
+            deepLinkRouter: router,
+            newItemRouter: newItemRouter,
+            searchIndex: WorkspaceSearchIndex()
+        )
+        let hosting = NSHostingView(rootView: root)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        hosting.layoutSubtreeIfNeeded()
+        _ = router.request(.note(note.id))
+        #expect(await waitUntil {
+            hosting.layoutSubtreeIfNeeded()
+            return notesDescendants(of: hosting, as: NSButton.self).contains {
+                $0.accessibilityIdentifier() == "task-block-checkbox-\(blockID.rawValue.uuidString)"
+            }
+        })
+        #expect(await transition.requestActivation(.calendar))
+        _ = try await TaskBlockCalendarIntegration.completeFromCalendar(
+            store: store,
+            itemID: item.id,
+            at: Date(timeIntervalSince1970: 1_786_551_000)
+        )
+        #expect(await transition.requestActivation(.notes))
+        let checkbox = try #require(notesDescendants(of: hosting, as: NSButton.self).first {
+            $0.accessibilityIdentifier() == "task-block-checkbox-\(blockID.rawValue.uuidString)"
+        })
+        checkbox.performClick(checkbox)
+        #expect(await waitUntil {
+            store.state.notes[note.id]?.document.blocks.first?.taskState?.completedAt == nil
+        })
+        _ = newItemRouter.requestNewItem(route: .notes, features: .production)
+
+        #expect(await waitUntil { store.state.notes.count == 2 })
+        #expect(await waitUntil {
+            hosting.layoutSubtreeIfNeeded()
+            return notesDescendants(of: hosting, as: NSTextField.self).contains {
+                $0.placeholderString == "标题" && $0.stringValue.isEmpty
             }
         })
     }
@@ -225,6 +327,55 @@ struct NotesLifecycleWiringTests {
             return window.firstResponder is ContinuousBlockEditorTextView
         })
         window.orderOut(nil)
+    }
+
+    @Test func activeNoteDeepLinkReturnsTheBrowserFromArchiveToRecent() async throws {
+        let calendar = makeEmptyState()
+        var archived = Note.empty(categoryID: calendar.uncategorizedID, now: .distantPast)
+        archived.title = "归档笔记"
+        archived.archivedAt = .distantPast
+        var converted = Note.empty(categoryID: calendar.uncategorizedID, now: .distantPast)
+        converted.title = "灵感转成的笔记"
+        let repository = InMemoryWorkspaceRepository(initialState: calendar)
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
+        _ = try await store.sendWorkspace(.createNote(.init(note: archived)))
+        _ = try await store.sendWorkspace(.createNote(.init(note: converted)))
+        let router = WorkspaceDeepLinkRouter()
+        let root = NotesSplitView(
+            store: store,
+            focusRegistry: EditorFocusRegistry(),
+            deepLinkRouter: router,
+            newItemRouter: WorkspaceNewItemRouter(),
+            searchIndex: WorkspaceSearchIndex()
+        )
+        let hosting = NSHostingView(rootView: root)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        hosting.layoutSubtreeIfNeeded()
+        let scope = try #require(notesDescendants(of: hosting, as: NSSegmentedControl.self).first {
+            $0.segmentCount == NotesBrowserPartition.allCases.count
+        })
+        scope.selectedSegment = 2
+        scope.sendAction(scope.action, to: scope.target)
+        #expect(await waitUntil { scope.selectedSegment == 2 })
+
+        _ = router.request(.note(converted.id))
+
+        #expect(await waitUntil {
+            hosting.layoutSubtreeIfNeeded()
+            return scope.selectedSegment == 0
+        })
+        #expect(notesDescendants(of: hosting, as: NSTextField.self).contains {
+            $0.stringValue == "灵感转成的笔记"
+        })
     }
 
     @Test func creatingANoteRebuildsTheTitleFieldForTheNewEditorIdentity() async throws {

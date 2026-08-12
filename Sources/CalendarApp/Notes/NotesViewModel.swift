@@ -125,6 +125,11 @@ enum NotesBrowserPartition: String, CaseIterable, Identifiable, Equatable, Senda
 
     @discardableResult
     func create(_ note: Note) async throws -> Bool {
+        // Leaving the current editor must be proved safe before the new note
+        // is committed. Doing this after `.createNote` can leave a real but
+        // unselected blank note when the second lifecycle flush cannot reuse
+        // the proof from the first one.
+        guard await flushSelectionPrecondition() else { return false }
         let outcome = try await store.sendWorkspace(.createNote(.init(note: note)), undoLabel: "新建笔记")
         if capturePending(outcome, effect: .create(note.id)) { return false }
         guard didCommit(outcome) else { return false }
@@ -203,7 +208,15 @@ enum NotesBrowserPartition: String, CaseIterable, Identifiable, Equatable, Senda
         switch effect {
         case let .create(noteID):
             guard selectedNoteID != noteID else { return true }
-            return try await select(noteID)
+            guard let note = store.state.notes[noteID] else { return false }
+            try autosave.beginSession(
+                note,
+                linkedTaskBlockLinks: Set(store.state.taskBlockLinks.filter { $0.noteID == note.id }),
+                editSessionID: UUID(),
+                activeHostToken: UUID()
+            )
+            selectedNoteID = noteID
+            return true
         case let .archive(noteID, previousIndex):
             try selectFallback(afterRemoving: noteID, previousIndex: previousIndex, partition: .all)
             return true

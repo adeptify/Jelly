@@ -69,6 +69,91 @@ struct NotesWorkspaceViewModelTests {
         #expect(viewModel.recentNotes.first?.title == "新标题")
     }
 
+    @Test func createSelectsTheNewNoteAfterTheCurrentDraftWasAlreadyFlushed() async throws {
+        let calendar = makeEmptyState()
+        let existing = makeNotesTestNote(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000001008")!,
+            title: "当前笔记",
+            body: "正文",
+            categoryID: calendar.uncategorizedID,
+            updatedAt: .distantPast
+        )
+        let created = Note.empty(
+            id: NoteID(UUID(uuidString: "00000000-0000-0000-0000-000000001009")!),
+            categoryID: calendar.uncategorizedID,
+            now: .distantPast
+        )
+        let repository = InMemoryWorkspaceRepository(initialState: calendar)
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
+        _ = try await store.sendWorkspace(.createNote(.init(note: existing)))
+        let autosave = NoteAutosaveCoordinator(store: store, scheduler: NotesImmediateAutosaveScheduler())
+        let viewModel = NotesWorkspaceViewModel(store: store, autosave: autosave)
+        #expect(try await viewModel.select(existing.id))
+        _ = try viewModel.updateTitle("已安全保存的当前笔记")
+        #expect(await autosave.flushLatest() == .persisted(try #require(autosave.currentTriple)))
+
+        #expect(try await viewModel.create(created))
+
+        #expect(viewModel.selectedNoteID == created.id)
+        #expect(store.state.notes[created.id] != nil)
+    }
+
+    @Test func createSelectsTheNewNoteAfterReopeningALinkedTask() async throws {
+        let calendar = makeEmptyState()
+        let noteID = NoteID(UUID(uuidString: "00000000-0000-0000-0000-00000000100A")!)
+        let blockID = BlockID(UUID(uuidString: "00000000-0000-0000-0000-00000000100B")!)
+        var existing = Note.empty(id: noteID, categoryID: calendar.uncategorizedID, now: .distantPast)
+        existing.title = "关联任务笔记"
+        existing.document = .init(blocks: [try .task(id: blockID, text: "任务")])
+        let repository = InMemoryWorkspaceRepository(initialState: calendar)
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
+        _ = try await store.sendWorkspace(.createNote(.init(note: existing)))
+        let item = try CalendarItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-00000000100C")!,
+            kind: .task,
+            title: "任务",
+            categoryID: calendar.uncategorizedID,
+            schedule: try .init(
+                startDate: CalendarDate(year: 2026, month: 8, day: 13)!,
+                endDate: CalendarDate(year: 2026, month: 8, day: 13)!,
+                startTime: nil,
+                endTime: nil
+            ),
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        _ = try await store.sendWorkspace(.scheduleTaskBlock(.init(
+            noteID: noteID,
+            blockID: blockID,
+            item: item
+        )))
+        _ = try await TaskBlockCalendarIntegration.completeFromCalendar(
+            store: store,
+            itemID: item.id,
+            at: Date(timeIntervalSince1970: 1_786_551_000)
+        )
+        let autosave = NoteAutosaveCoordinator(store: store, scheduler: NotesImmediateAutosaveScheduler())
+        let viewModel = NotesWorkspaceViewModel(store: store, autosave: autosave)
+        #expect(try await viewModel.select(noteID))
+        var reopened = try #require(store.state.notes[noteID]).document
+        reopened.blocks[0].taskState?.completedAt = nil
+        _ = try autosave.update(document: reopened)
+        #expect(await autosave.flushLatest() == .persisted(try #require(autosave.currentTriple)))
+        let created = Note.empty(
+            id: NoteID(UUID(uuidString: "00000000-0000-0000-0000-00000000100D")!),
+            categoryID: calendar.uncategorizedID,
+            now: .distantPast
+        )
+
+        #expect(try await viewModel.create(created))
+
+        #expect(viewModel.selectedNoteID == created.id)
+        #expect(store.state.notes[created.id] != nil)
+    }
+
     @Test func browserObservesDirectStoreArchiveUndoAndExternalPublicationWithoutAutosaveCallback() async throws {
         let calendar = makeEmptyState()
         let first = makeNotesTestNote(

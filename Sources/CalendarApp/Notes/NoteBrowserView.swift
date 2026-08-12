@@ -27,6 +27,12 @@ struct NoteBrowserView: View {
         }
         .background(theme.elevatedSurface)
         .foregroundStyle(theme.primaryText)
+        .onChange(of: viewModel.selectedNoteID) { _, _ in
+            alignPartitionWithSelectedNote()
+        }
+        .onChange(of: viewModel.selectedNote?.archivedAt) { _, _ in
+            alignPartitionWithSelectedNote()
+        }
     }
 
     private var browserHeader: some View {
@@ -136,6 +142,11 @@ struct NoteBrowserView: View {
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(theme.elevatedSurface)
+    }
+
+    private func alignPartitionWithSelectedNote() {
+        guard let note = viewModel.selectedNote else { return }
+        partition = note.archivedAt == nil ? .recent : .archived
     }
 
     private var createButton: some View {
