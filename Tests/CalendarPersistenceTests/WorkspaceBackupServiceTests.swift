@@ -354,7 +354,7 @@ struct WorkspaceBackupServiceTests {
         }
     }
 
-    @Test func repairableV3PeerRemainsValidAcrossRollbackAndDefiniteCASFailures() async throws {
+    @Test func repairableCurrentPeerRemainsValidAcrossRollbackAndDefiniteCASFailures() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }
         let current = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
@@ -365,7 +365,7 @@ struct WorkspaceBackupServiceTests {
             referenceNoteIDs: []
         )
         let peerData = try JSONEncoder.workspaceDeterministic.encode(
-            WorkspaceDocument(schemaVersion: 3, state: repairable)
+            WorkspaceDocument(schemaVersion: WorkspaceDocument.currentSchemaVersion, state: repairable)
         )
         let peerLoad = try WorkspaceDocumentCodec.decode(peerData)
         #expect(peerLoad.consistencyIssues.count == 1)

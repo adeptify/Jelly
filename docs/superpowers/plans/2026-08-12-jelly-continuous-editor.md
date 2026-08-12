@@ -27,9 +27,14 @@
 - Modify: `Sources/WorkspaceDomain/WorkspaceCommand.swift`
 - Modify: `Sources/WorkspaceDomain/WorkspaceReducer.swift`
 - Modify: `Sources/WorkspaceDomain/WorkspaceReducer+Notes.swift`
+- Modify: `Sources/WorkspaceDomain/WorkspaceReducer+Relations.swift`
 - Modify: `Sources/WorkspaceDomain/WorkspaceValidator.swift`
+- Modify: `Sources/WorkspaceDomain/WorkspaceConsistencyIssue.swift`
 - Modify: `Sources/CalendarApp/Notes/TaskBlockScheduleSheet.swift`
+- Modify: `Sources/CalendarApp/Notes/TaskBlockCalendarBadge.swift`
 - Modify: `Sources/CalendarApp/Notes/TaskBlockCalendarIntegration.swift`
+- Modify: `Sources/CalendarPersistence/WorkspaceDocument.swift`
+- Modify: `Sources/CalendarPersistence/WorkspaceDocumentCodec.swift`
 - Test: `Tests/WorkspaceDomainTests/TaskBlockCalendarLinkTests.swift`
 - Test: `Tests/WorkspaceDomainTests/WorkspaceReducerTests.swift`
 - Test: `Tests/CalendarAppTests/TaskBlockCalendarIntegrationTests.swift`
@@ -55,16 +60,17 @@ Edits may start from either surface. The reducer must update both sides within o
 
 ### Steps
 
-- [ ] Add failing tests proving that scheduling a completed Task Block succeeds only when the new item receives the exact existing `completedAt` and exact block text.
-- [ ] Add failing validator tests for linked title mismatch and linked completion mismatch.
-- [ ] Add failing draft tests proving that editing a linked Task Block title or completion through `updateNote` atomically updates the linked Calendar Item, while changing ordinary text does not touch Calendar.
-- [ ] Add failing calendar-command tests proving that `.updateItem` title changes and `.setTaskCompleted` changes atomically update the linked Task Block; schedule and priority changes do not rewrite block content.
-- [ ] Replace `linkedTaskCompletionRequiresTaskCommand` rejection in `updateNote` with explicit linked-field propagation. Use Calendar reducers for the calendar mutation so timestamps, revision allocation and validation remain centralized.
-- [ ] After applying a calendar command, propagate linked title/completion into the exact source block before final workspace validation. A calendar-side title edit replaces the Task Block inline content with one plain span; this loss of inline title styling is explicit and covered by a test.
-- [ ] Enforce title equality in `WorkspaceValidator`; add a typed `taskTitleMismatch` validation error beside the existing completion mismatch.
-- [ ] Change `TaskBlockScheduleSheet` so the title is not an independently editable duplicate. Show the Task Block title as the source, construct the item with that exact title, and pass `block.taskState?.completedAt` instead of hard-coded `nil`.
-- [ ] Keep unlink behavior unchanged at the data level: remove only `TaskBlockCalendarLink`; retain both objects, their current title/completion values, and the Calendar Item's primary Note relation.
-- [ ] Rename the integration undo label and UI-facing wording to “解除任务联动”.
+- [x] Add failing tests proving that scheduling a completed Task Block succeeds only when the new item receives the exact existing `completedAt` and exact block text.
+- [x] Add failing validator tests for linked title mismatch and linked completion mismatch.
+- [x] Add failing draft tests proving that editing a linked Task Block title or completion through `updateNote` atomically updates the linked Calendar Item, while changing ordinary text does not touch Calendar.
+- [x] Add failing calendar-command tests proving that `.updateItem` title changes and `.setTaskCompleted` changes atomically update the linked Task Block; schedule and priority changes do not rewrite block content.
+- [x] Replace `linkedTaskCompletionRequiresTaskCommand` rejection in `updateNote` with explicit linked-field propagation. Use Calendar reducers for the calendar mutation so timestamps, revision allocation and validation remain centralized.
+- [x] After applying a calendar command, propagate linked title/completion into the exact source block before final workspace validation. A calendar-side title edit replaces the Task Block inline content with one plain span; this loss of inline title styling is explicit and covered by a test.
+- [x] Enforce title equality in `WorkspaceValidator`; add a typed `taskTitleMismatch` validation error beside the existing completion mismatch.
+- [x] Bump workspace persistence to Schema 4. Migrate linked V3 titles deterministically from the Task Block while preserving repairable relationship issues for the existing repair flow.
+- [x] Change `TaskBlockScheduleSheet` so the title is not an independently editable duplicate. Show the Task Block title as the source, construct the item with that exact title, and pass `block.taskState?.completedAt` instead of hard-coded `nil`.
+- [x] Keep unlink behavior unchanged at the data level: remove only `TaskBlockCalendarLink`; retain both objects, their current title/completion values, and the Calendar Item's primary Note relation.
+- [x] Rename the integration undo label and UI-facing wording to “解除任务联动”.
 
 ### Focused verification
 

@@ -74,9 +74,12 @@ struct NotesVerticalIntegrationTests {
         let evidence = await autosave.flushLatest()
         #expect(evidence == .persisted(try #require(autosave.currentTriple)))
 
-        // Main file must now be V3 and recovery snapshot of original V2 exists.
+        // Main file must now be current schema and recovery snapshot of original V2 exists.
         let mainBytes = try Data(contentsOf: main)
-        #expect(try WorkspaceDocumentCodec.decode(mainBytes).provenance.sourceSchema == 3)
+        #expect(
+            try WorkspaceDocumentCodec.decode(mainBytes).provenance.sourceSchema
+                == WorkspaceDocument.currentSchemaVersion
+        )
         let recovery = try RecoveryManifestStore(manifestURL: manifest, snapshotDirectoryURL: snapshots).load()
         #expect(recovery.entries.isEmpty == false)
 

@@ -61,7 +61,7 @@ enum TaskBlockCalendarIntegration {
     ) async throws -> WorkspaceTransactionOutcome {
         try await store.sendWorkspace(
             .unlinkTaskBlock(noteID: noteID, blockID: blockID),
-            undoLabel: "取消待办日历关联"
+            undoLabel: "解除任务联动"
         )
     }
 

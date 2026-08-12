@@ -24,6 +24,7 @@ public enum WorkspaceValidationError: Error, Equatable, Sendable {
     case taskBlockMissingPrimaryNote(NoteID, UUID)
     case duplicateTaskBlock(BlockID)
     case duplicateTaskCalendarItem(UUID)
+    case taskTitleMismatch(NoteID, BlockID, UUID)
     case taskCompletionMismatch(NoteID, BlockID, UUID)
     case danglingLiveInspiration(InspirationID)
 }
@@ -149,6 +150,14 @@ public enum WorkspaceValidator {
             let owner = CalendarNoteOwnerID.item(link.calendarItemID)
             guard state.calendarNoteRelations.baselines[owner]?.primaryNoteID == link.noteID else {
                 throw WorkspaceValidationError.taskBlockMissingPrimaryNote(link.noteID, link.calendarItemID)
+            }
+            guard state.calendar.items[link.calendarItemID]?.title
+                == block.inlineContent.spans.map(\.text).joined() else {
+                throw WorkspaceValidationError.taskTitleMismatch(
+                    link.noteID,
+                    link.blockID,
+                    link.calendarItemID
+                )
             }
             guard state.calendar.items[link.calendarItemID]?.completedAt == block.taskState?.completedAt else {
                 throw WorkspaceValidationError.taskCompletionMismatch(

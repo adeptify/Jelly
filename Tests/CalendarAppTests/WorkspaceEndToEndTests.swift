@@ -89,7 +89,10 @@ struct WorkspaceEndToEndTests {
         #expect(store2.state.calendarNoteRelations.baselines[.item(item.id)]?.primaryNoteID == authored.id)
         #expect(store2.state.inspirations[inspirationID] != nil)
         #expect(convertedNoteID.map { store2.state.notes[$0] != nil } == true)
-        #expect(try WorkspaceDocumentCodec.decode(Data(contentsOf: main)).provenance.sourceSchema == 3)
+        #expect(
+            try WorkspaceDocumentCodec.decode(Data(contentsOf: main)).provenance.sourceSchema
+                == WorkspaceDocument.currentSchemaVersion
+        )
         let recovery = try RecoveryManifestStore(manifestURL: manifest, snapshotDirectoryURL: snapshots).load()
         #expect(!recovery.entries.isEmpty)
     }

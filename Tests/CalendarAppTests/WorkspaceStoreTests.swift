@@ -2189,8 +2189,8 @@ struct WorkspaceStoreTests {
         #expect(store.phase == .externalSourceChanged(.externalBytesChanged))
     }
 
-    @Test func queuedDraftAfterV1V2OrV3RestoreIsConflictedAndItsJournalEntrySurvives() async throws {
-        for schema in [1, 2, 3] {
+    @Test func queuedDraftAfterEverySupportedRestoreSchemaIsConflictedAndItsJournalEntrySurvives() async throws {
+        for schema in [1, 2, 3, WorkspaceDocument.currentSchemaVersion] {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
                 "jelly-6b-restore-draft-\(schema)-\(UUID().uuidString)", isDirectory: true
             )
@@ -2354,13 +2354,17 @@ struct WorkspaceStoreTests {
         #expect(store.state.revision == 1)
     }
 
-    @Test func exactCurrentV3ExternalSourceUsesTheDirectAdoptionPredicateWithoutSaving() async throws {
+    @Test func exactCurrentExternalSourceUsesTheDirectAdoptionPredicateWithoutSaving() async throws {
         let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
         let initial = WorkspaceState.empty(calendar: calendar)
         let repository = WorkspaceStoreTestRepository(initial: initial)
         await repository.setReloaded(.valid(.init(
             state: initial,
-            provenance: .init(sourceSchema: 3, sourceBytesSHA256: "exact-current", sourceByteCount: 1),
+            provenance: .init(
+                sourceSchema: WorkspaceDocument.currentSchemaVersion,
+                sourceBytesSHA256: "exact-current",
+                sourceByteCount: 1
+            ),
             consistencyIssues: []
         )))
         let store = WorkspaceStore(initialState: initial, repository: repository)
@@ -2842,6 +2846,10 @@ struct WorkspaceStoreTests {
             encoder.dateEncodingStrategy = .millisecondsSince1970
             data = try encoder.encode(CalendarDocument(state: calendar))
         case 3:
+            data = try JSONEncoder.workspaceDeterministic.encode(
+                WorkspaceDocument(schemaVersion: 3, state: .empty(calendar: calendar))
+            )
+        case WorkspaceDocument.currentSchemaVersion:
             data = try WorkspaceDocumentCodec.encode(.empty(calendar: calendar))
         default:
             fatalError("Unexpected test schema")

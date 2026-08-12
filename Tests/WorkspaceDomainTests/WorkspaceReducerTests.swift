@@ -237,7 +237,7 @@ struct WorkspaceReducerTests {
         )]
         reboundWorkspace.calendar.items[Task4Fixture.otherItemID] = try Task4Fixture.item(
             id: Task4Fixture.otherItemID,
-            title: "并发改绑"
+            title: "任务"
         )
         reboundWorkspace.calendarNoteRelations.baselines[.item(Task4Fixture.otherItemID)] = .init(
             primaryNoteID: base.id,
@@ -265,7 +265,7 @@ struct WorkspaceReducerTests {
         unaffected.notes[extraNote.id] = extraNote
         unaffected.calendar.items[Task4Fixture.otherItemID] = try Task4Fixture.item(
             id: Task4Fixture.otherItemID,
-            title: "无关事项"
+            title: "任务"
         )
         unaffected.calendarNoteRelations.baselines[.item(Task4Fixture.otherItemID)] = .init(
             primaryNoteID: extraNote.id,
@@ -340,7 +340,7 @@ struct WorkspaceReducerTests {
         #expect(splitChange.state.revision == 6)
     }
 
-    @Test func rawCalendarBusinessNoOpAndLinkedCompletionMismatchAreAtomic() throws {
+    @Test func rawCalendarBusinessNoOpAndLinkedCompletionSynchronizesAtomically() throws {
         let workspace = try Task4Fixture.workspace()
         let noOp = try WorkspaceReducer.reduce(
             workspace,
@@ -350,15 +350,16 @@ struct WorkspaceReducerTests {
         #expect(noOp == .noChange(.identical))
 
         let linked = try Task4Fixture.workspaceWithLinkedTask()
-        #expect(throws: WorkspaceReducerError.finalValidationFailed) {
-            try WorkspaceReducer.reduce(
-                linked,
-                command: .calendar(.setTaskCompleted(Task4Fixture.itemID, Task4Fixture.completedAt)),
-                now: Task4Fixture.later
-            )
-        }
-        #expect(linked.calendar.items[Task4Fixture.itemID]?.completedAt == nil)
-        #expect(linked.revision == 5)
+        let result = try WorkspaceReducer.reduce(
+            linked,
+            command: .calendar(.setTaskCompleted(Task4Fixture.itemID, Task4Fixture.completedAt)),
+            now: Task4Fixture.later
+        )
+        let state = try #require(result.change).state
+        #expect(state.calendar.items[Task4Fixture.itemID]?.completedAt == Task4Fixture.completedAt)
+        #expect(state.notes[Task4Fixture.noteID]?.document.blocks[0].taskState?.completedAt == Task4Fixture.completedAt)
+        #expect(state.notes[Task4Fixture.noteID]?.revision == 4)
+        #expect(state.revision == 6)
     }
 
     @Test func splitFailureIsTypedAndDoesNotLeakRelationMigration() throws {
@@ -1257,7 +1258,7 @@ enum Task4Fixture {
     static func workspaceWithLinkedTask(completedAt: Date? = nil) throws -> WorkspaceState {
         var result = try workspace()
         result.notes[noteID] = note(id: noteID, title: "任务笔记", revision: 3, task: true, completedAt: completedAt)
-        result.calendar.items[itemID] = try item(id: itemID, title: "事项", completedAt: completedAt)
+        result.calendar.items[itemID] = try item(id: itemID, title: "任务", completedAt: completedAt)
         result.calendarNoteRelations.baselines[.item(itemID)] = .init(primaryNoteID: noteID, referenceNoteIDs: [])
         result.taskBlockLinks = [.init(noteID: noteID, blockID: taskBlockID, calendarItemID: itemID)]
         return result

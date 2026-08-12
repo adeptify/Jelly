@@ -45,6 +45,17 @@ public enum WorkspaceDocumentCodec {
             } catch {
                 throw WorkspacePersistenceError.invalidDocument
             }
+        case 3:
+            let document: WorkspaceDocument
+            do {
+                document = try JSONDecoder.workspaceDeterministic.decode(WorkspaceDocument.self, from: data)
+            } catch {
+                throw WorkspacePersistenceError.invalidDocument
+            }
+            let migrated = migrateV3TaskTitles(document.state)
+            let report = WorkspaceConsistencyInspector.inspect(migrated)
+            guard !report.hasFatalIssues else { throw WorkspacePersistenceError.invalidDocument }
+            return .init(state: migrated, provenance: provenance, consistencyIssues: report.issues)
         case WorkspaceDocument.currentSchemaVersion:
             let document: WorkspaceDocument
             do {
@@ -58,6 +69,18 @@ public enum WorkspaceDocumentCodec {
         default:
             throw WorkspacePersistenceError.unsupportedSchema(schema)
         }
+    }
+
+    private static func migrateV3TaskTitles(_ source: WorkspaceState) -> WorkspaceState {
+        var migrated = source
+        for link in source.taskBlockLinks {
+            guard let block = source.notes[link.noteID]?.document.blocks.first(where: {
+                $0.id == link.blockID && $0.kind == .task
+            }), migrated.calendar.items[link.calendarItemID] != nil else { continue }
+            migrated.calendar.items[link.calendarItemID]?.title =
+                block.inlineContent.spans.map(\.text).joined()
+        }
+        return migrated
     }
 
     private struct SchemaEnvelope: Decodable {

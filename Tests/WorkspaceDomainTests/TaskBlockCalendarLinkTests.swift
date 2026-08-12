@@ -13,7 +13,7 @@ struct TaskBlockCalendarLinkTests {
             revision: 3,
             task: true
         )
-        let item = try Task4Fixture.item(id: Task4Fixture.itemID, title: "安排任务")
+        let item = try Task4Fixture.item(id: Task4Fixture.itemID, title: "任务")
 
         let result = try WorkspaceReducer.reduce(
             workspace,
@@ -105,6 +105,8 @@ struct TaskBlockCalendarLinkTests {
         #expect(change.state.taskBlockLinks.isEmpty)
         #expect(change.state.calendar.items[Task4Fixture.itemID]?.completedAt == Task4Fixture.completedAt)
         #expect(change.state.notes[Task4Fixture.noteID]?.document.blocks.first?.taskState?.completedAt == Task4Fixture.completedAt)
+        #expect(change.state.calendar.items[Task4Fixture.itemID]?.title == "任务")
+        #expect(change.state.notes[Task4Fixture.noteID]?.document.blocks.first?.inlineContent == .plain("任务"))
         #expect(change.state.calendarNoteRelations.baselines[.item(Task4Fixture.itemID)]?.primaryNoteID == Task4Fixture.noteID)
         #expect(change.state.revision == workspace.revision + 1)
         #expect(change.changedNoteIDs.isEmpty)
@@ -200,6 +202,33 @@ struct TaskBlockCalendarLinkTests {
         #expect(mismatched.calendar.items.isEmpty)
     }
 
+    @Test func scheduleTaskBlockRejectsTitleMismatchBeforeCreatingAnything() throws {
+        var workspace = try Task4Fixture.workspaceWithoutItem()
+        workspace.notes[Task4Fixture.noteID] = Task4Fixture.note(
+            id: Task4Fixture.noteID,
+            title: "任务笔记",
+            revision: 3,
+            task: true
+        )
+
+        #expect(throws: WorkspaceReducerError.taskTitleMismatch) {
+            try WorkspaceReducer.reduce(
+                workspace,
+                command: .scheduleTaskBlock(.init(
+                    noteID: Task4Fixture.noteID,
+                    blockID: Task4Fixture.taskBlockID,
+                    item: try Task4Fixture.item(
+                        id: Task4Fixture.itemID,
+                        title: "另一条标题"
+                    )
+                )),
+                now: Task4Fixture.later
+            )
+        }
+        #expect(workspace.calendar.items.isEmpty)
+        #expect(workspace.taskBlockLinks.isEmpty)
+    }
+
     @Test func completionFromEitherEndpointSynchronizesAndRepeatedCompletePreservesFirstTimestamp() throws {
         var workspace = try Task4Fixture.workspaceWithLinkedTask()
         let first = try WorkspaceReducer.reduce(
@@ -241,22 +270,130 @@ struct TaskBlockCalendarLinkTests {
         #expect(incompleteState.revision == 7)
     }
 
-    @Test func genericDraftCannotChangeRetainedLinkedTaskCompletion() throws {
+    @Test func genericDraftSynchronizesRetainedLinkedTaskCompletion() throws {
         let workspace = try Task4Fixture.workspaceWithLinkedTask()
         let base = try #require(workspace.notes[Task4Fixture.noteID])
         let link = try #require(workspace.taskBlockLinks.first)
         var submitted = base
         submitted.document.blocks[0].taskState?.completedAt = Task4Fixture.completedAt
-        #expect(throws: WorkspaceReducerError.linkedTaskCompletionRequiresTaskCommand) {
-            try WorkspaceReducer.reduce(
-                workspace,
-                command: .updateNote(try Task4Fixture.submission(
-                    base: base, submitted: submitted, baseLinks: [link]
-                )),
-                now: Task4Fixture.later
-            )
-        }
-        #expect(workspace.calendar.items[Task4Fixture.itemID]?.completedAt == nil)
+        let result = try WorkspaceReducer.reduce(
+            workspace,
+            command: .updateNote(try Task4Fixture.submission(
+                base: base, submitted: submitted, baseLinks: [link]
+            )),
+            now: Task4Fixture.later
+        )
+        let state = try #require(result.change).state
+        #expect(state.notes[Task4Fixture.noteID]?.document.blocks[0].taskState?.completedAt == Task4Fixture.completedAt)
+        #expect(state.calendar.items[Task4Fixture.itemID]?.completedAt == Task4Fixture.completedAt)
+        #expect(state.notes[Task4Fixture.noteID]?.revision == 4)
+        #expect(state.revision == 6)
+    }
+
+    @Test func genericDraftSynchronizesRetainedLinkedTaskTitle() throws {
+        let workspace = try Task4Fixture.workspaceWithLinkedTask()
+        let base = try #require(workspace.notes[Task4Fixture.noteID])
+        let link = try #require(workspace.taskBlockLinks.first)
+        var submitted = base
+        submitted.document.blocks[0].inlineContent = .plain("从笔记改名")
+
+        let result = try WorkspaceReducer.reduce(
+            workspace,
+            command: .updateNote(try Task4Fixture.submission(
+                base: base,
+                submitted: submitted,
+                baseLinks: [link]
+            )),
+            now: Task4Fixture.later
+        )
+
+        let state = try #require(result.change).state
+        #expect(state.notes[Task4Fixture.noteID]?.document.blocks[0].inlineContent == .plain("从笔记改名"))
+        #expect(state.calendar.items[Task4Fixture.itemID]?.title == "从笔记改名")
+        #expect(state.notes[Task4Fixture.noteID]?.revision == 4)
+        #expect(state.revision == 6)
+    }
+
+    @Test func genericDraftEditingOrdinaryTextLeavesLinkedCalendarItemUntouched() throws {
+        var workspace = try Task4Fixture.workspaceWithLinkedTask()
+        let paragraph = DocumentBlock(
+            id: Task4Fixture.paragraphBlockID,
+            kind: .paragraph,
+            inlineContent: .plain("普通正文"),
+            taskState: nil,
+            indentLevel: 0
+        )
+        workspace.notes[Task4Fixture.noteID]?.document.blocks.append(paragraph)
+        let base = try #require(workspace.notes[Task4Fixture.noteID])
+        let link = try #require(workspace.taskBlockLinks.first)
+        let calendarBefore = try #require(workspace.calendar.items[Task4Fixture.itemID])
+        var submitted = base
+        submitted.document.blocks[1].inlineContent = .plain("只修改普通正文")
+
+        let result = try WorkspaceReducer.reduce(
+            workspace,
+            command: .updateNote(try Task4Fixture.submission(
+                base: base,
+                submitted: submitted,
+                baseLinks: [link]
+            )),
+            now: Task4Fixture.later
+        )
+
+        let state = try #require(result.change).state
+        #expect(state.calendar.items[Task4Fixture.itemID] == calendarBefore)
+        #expect(state.notes[Task4Fixture.noteID]?.document.blocks[0] == base.document.blocks[0])
+        #expect(state.notes[Task4Fixture.noteID]?.document.blocks[1].inlineContent == .plain("只修改普通正文"))
+    }
+
+    @Test func calendarItemEditSynchronizesLinkedTaskTitleAsPlainText() throws {
+        var workspace = try Task4Fixture.workspaceWithLinkedTask()
+        workspace.notes[Task4Fixture.noteID]?.document.blocks[0].inlineContent = .init(
+            spans: [.init(text: "任务", marks: [.bold])]
+        )
+        var item = try #require(workspace.calendar.items[Task4Fixture.itemID])
+        item.title = "从日历改名"
+
+        let result = try WorkspaceReducer.reduce(
+            workspace,
+            command: .calendar(.updateItem(item)),
+            now: Task4Fixture.later
+        )
+
+        let state = try #require(result.change).state
+        #expect(state.calendar.items[Task4Fixture.itemID]?.title == "从日历改名")
+        #expect(state.notes[Task4Fixture.noteID]?.document.blocks[0].inlineContent == .plain("从日历改名"))
+        #expect(state.notes[Task4Fixture.noteID]?.revision == 4)
+        #expect(state.revision == 6)
+    }
+
+    @Test func calendarScheduleAndPriorityEditsDoNotRewriteLinkedTaskBlock() throws {
+        var workspace = try Task4Fixture.workspaceWithLinkedTask()
+        workspace.notes[Task4Fixture.noteID]?.document.blocks[0].inlineContent = .init(
+            spans: [.init(text: "任务", marks: [.italic])]
+        )
+        let blockBefore = try #require(workspace.notes[Task4Fixture.noteID]?.document.blocks[0])
+        let noteRevisionBefore = try #require(workspace.notes[Task4Fixture.noteID]?.revision)
+        var item = try #require(workspace.calendar.items[Task4Fixture.itemID])
+        item.schedule = try CalendarSchedule(
+            startDate: Task4Fixture.day.addingDays(2),
+            endDate: Task4Fixture.day.addingDays(2),
+            startTime: nil,
+            endTime: nil
+        )
+        item.priority = .p1
+
+        let result = try WorkspaceReducer.reduce(
+            workspace,
+            command: .calendar(.updateItem(item)),
+            now: Task4Fixture.later
+        )
+
+        let state = try #require(result.change).state
+        #expect(state.calendar.items[Task4Fixture.itemID]?.schedule == item.schedule)
+        #expect(state.calendar.items[Task4Fixture.itemID]?.priority == .p1)
+        #expect(state.notes[Task4Fixture.noteID]?.document.blocks[0] == blockBefore)
+        #expect(state.notes[Task4Fixture.noteID]?.revision == noteRevisionBefore)
     }
 
     @Test func removingOrChangingLinkedTaskRequiresExactDispositionKeys() throws {
@@ -389,6 +526,7 @@ struct TaskBlockCalendarLinkTests {
             blockID: Task4Fixture.taskBlockID,
             calendarItemID: Task4Fixture.itemID
         )]
+        current.calendar.items[Task4Fixture.itemID]?.title = "任务"
         current.revision += 1
         var submitted = base
         submitted.document.blocks[0].inlineContent = .plain("被修改")

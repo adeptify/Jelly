@@ -129,7 +129,7 @@ public enum WorkspacePersistenceError: Error, Equatable, Sendable {
 }
 
 public struct WorkspaceDocument: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 3
+    public static let currentSchemaVersion = 4
 
     public var schemaVersion: Int
     public var state: WorkspaceState

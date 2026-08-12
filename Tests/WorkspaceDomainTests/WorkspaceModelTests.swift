@@ -188,7 +188,7 @@ struct WorkspaceModelTests {
         calendar.items[itemID] = try CalendarItem(
             id: itemID,
             kind: .task,
-            title: "关联事项",
+            title: "待办",
             categoryID: uncategorizedID,
             schedule: try CalendarSchedule(startDate: date, endDate: date, startTime: nil, endTime: nil),
             completedAt: nil,
@@ -446,6 +446,27 @@ struct WorkspaceModelTests {
         }
     }
 
+    @Test func validatorRejectsLinkedTaskAndItemWithDifferentTitles() throws {
+        var workspace = try validWorkspace()
+        let noteID = try #require(workspace.notes.keys.first)
+        let blockID = try #require(workspace.notes[noteID]?.document.blocks.first?.id)
+        let itemID = try #require(workspace.calendar.items.keys.first)
+        workspace.calendarNoteRelations.baselines[.item(itemID)] = .init(
+            primaryNoteID: noteID,
+            referenceNoteIDs: []
+        )
+        workspace.taskBlockLinks = [.init(
+            noteID: noteID,
+            blockID: blockID,
+            calendarItemID: itemID
+        )]
+        workspace.calendar.items[itemID]?.title = "另一条行动"
+
+        #expect(throws: (any Error).self) {
+            try WorkspaceValidator.validate(workspace)
+        }
+    }
+
     private func validWorkspace() throws -> WorkspaceState {
         let now = Date(timeIntervalSince1970: 1_786_220_000)
         let uncategorizedID = UUID(uuidString: "00000000-0000-0000-0000-000000000113")!
@@ -456,7 +477,7 @@ struct WorkspaceModelTests {
         calendar.items[itemID] = try CalendarItem(
             id: itemID,
             kind: .task,
-            title: "有关系的事项",
+            title: "关联待办",
             categoryID: uncategorizedID,
             schedule: try CalendarSchedule(
                 startDate: .init(year: 2026, month: 8, day: 9)!,

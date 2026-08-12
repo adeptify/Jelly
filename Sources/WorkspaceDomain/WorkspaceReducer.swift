@@ -180,6 +180,28 @@ public enum WorkspaceReducer {
             }
             metadata.seriesOutcome = outcome
         }
+        if case let .setTaskCompleted(itemID, completedAt) = command,
+           let link = candidate.taskBlockLinks.first(where: { $0.calendarItemID == itemID }),
+           var note = candidate.notes[link.noteID],
+           let blockIndex = note.document.blocks.firstIndex(where: {
+               $0.id == link.blockID && $0.kind == .task
+           }) {
+            note.document.blocks[blockIndex].taskState?.completedAt = completedAt
+            note.updatedAt = now
+            candidate.notes[note.id] = note
+        }
+        if case let .updateItem(item) = command,
+           let link = candidate.taskBlockLinks.first(where: { $0.calendarItemID == item.id }),
+           let updatedTitle = candidate.calendar.items[item.id]?.title,
+           var note = candidate.notes[link.noteID],
+           let blockIndex = note.document.blocks.firstIndex(where: {
+               $0.id == link.blockID && $0.kind == .task
+           }),
+           note.document.blocks[blockIndex].inlineContent.spans.map(\.text).joined() != updatedTitle {
+            note.document.blocks[blockIndex].inlineContent = .plain(updatedTitle)
+            note.updatedAt = now
+            candidate.notes[note.id] = note
+        }
         if case let .deleteItem(id) = command {
             candidate.calendarNoteRelations.baselines.removeValue(forKey: .item(id))
             candidate.taskBlockLinks = Set(candidate.taskBlockLinks.filter { $0.calendarItemID != id })

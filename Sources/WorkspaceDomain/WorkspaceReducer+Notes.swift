@@ -112,7 +112,24 @@ extension WorkspaceReducer {
                   let newBlock = document.blocks.first(where: { $0.id == link.blockID && $0.kind == .task })
             else { continue }
             if oldBlock.taskState?.completedAt != newBlock.taskState?.completedAt {
-                throw WorkspaceReducerError.linkedTaskCompletionRequiresTaskCommand
+                try applyCalendar(
+                    .setTaskCompleted(link.calendarItemID, newBlock.taskState?.completedAt),
+                    to: &candidate,
+                    now: now,
+                    metadata: &metadata
+                )
+            }
+            let oldTitle = oldBlock.inlineContent.spans.map(\.text).joined()
+            let newTitle = newBlock.inlineContent.spans.map(\.text).joined()
+            if oldTitle != newTitle,
+               var item = candidate.calendar.items[link.calendarItemID] {
+                item.title = newTitle
+                try applyCalendar(
+                    .updateItem(item),
+                    to: &candidate,
+                    now: now,
+                    metadata: &metadata
+                )
             }
         }
 
@@ -166,9 +183,6 @@ extension WorkspaceReducer {
         else {
             throw WorkspaceReducerError.taskBlockMissingOrNotTask
         }
-        guard block.taskState?.completedAt == payload.item.completedAt else {
-            throw WorkspaceReducerError.taskCompletionMismatch
-        }
         let expectedLink = TaskBlockCalendarLink(
             noteID: payload.noteID,
             blockID: payload.blockID,
@@ -186,6 +200,15 @@ extension WorkspaceReducer {
             existingItem.schedule = payload.item.schedule
             try applyCalendar(.updateItem(existingItem), to: &candidate, now: now, metadata: &metadata)
             return
+        }
+        if candidate.calendar.items[payload.item.id] != nil {
+            throw WorkspaceReducerError.calendarFailure(.invalidState)
+        }
+        guard block.taskState?.completedAt == payload.item.completedAt else {
+            throw WorkspaceReducerError.taskCompletionMismatch
+        }
+        guard block.inlineContent.spans.map(\.text).joined() == payload.item.title else {
+            throw WorkspaceReducerError.taskTitleMismatch
         }
         try applyCalendar(.createItem(payload.item), to: &candidate, now: now, metadata: &metadata)
         let owner = CalendarNoteOwnerID.item(payload.item.id)

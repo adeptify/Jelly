@@ -30,7 +30,7 @@ struct WorkspaceDocumentCodecTests {
         #expect(result.state.calendar == WorkspacePersistenceFixtures.calendarState)
     }
 
-    @Test func v3RoundTripUsesDeterministicEncodingAndPreservesAllWorkspaceContent() throws {
+    @Test func currentRoundTripUsesDeterministicEncodingAndPreservesAllWorkspaceContent() throws {
         let expected = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 3)
 
         let first = try WorkspaceDocumentCodec.encode(expected)
@@ -38,7 +38,7 @@ struct WorkspaceDocumentCodecTests {
         let result = try WorkspaceDocumentCodec.decode(first)
 
         #expect(first == second)
-        #expect(result.provenance.sourceSchema == 3)
+        #expect(result.provenance.sourceSchema == WorkspaceDocument.currentSchemaVersion)
         #expect(result.state == expected)
         #expect(result.consistencyIssues.isEmpty)
     }
@@ -77,6 +77,35 @@ struct WorkspaceDocumentCodecTests {
         #expect(result.state == workspace)
         #expect(result.consistencyIssues.count == 1)
         #expect(result.consistencyIssues.first?.defect == .missingCalendarOwner)
+    }
+
+    @Test func v3LinkedTaskTitleIsMigratedFromTheTaskBlock() throws {
+        let (legacy, itemID) = try WorkspacePersistenceFixtures.linkedTaskWorkspace(
+            calendarTitle: "旧日历标题"
+        )
+        let raw = try JSONEncoder.workspaceDeterministic.encode(
+            WorkspaceDocument(schemaVersion: 3, state: legacy)
+        )
+
+        let result = try WorkspaceDocumentCodec.decode(raw)
+
+        #expect(result.provenance.sourceSchema == 3)
+        #expect(result.state.calendar.items[itemID]?.title == "正文里的行动")
+        #expect(result.consistencyIssues.isEmpty)
+        try WorkspaceValidator.validate(result.state)
+    }
+
+    @Test func currentLinkedTaskTitleMismatchIsRejectedAsFatal() throws {
+        let (workspace, _) = try WorkspacePersistenceFixtures.linkedTaskWorkspace(
+            calendarTitle: "冲突的日历标题"
+        )
+        let raw = try JSONEncoder.workspaceDeterministic.encode(
+            WorkspaceDocument(schemaVersion: WorkspaceDocument.currentSchemaVersion, state: workspace)
+        )
+
+        #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try WorkspaceDocumentCodec.decode(raw)
+        }
     }
 
     @Test func multiMarkV3AndJournalEncodingIsByteStableAcrossARealSubprocess() async throws {
@@ -183,6 +212,54 @@ enum WorkspacePersistenceFixtures {
             calendarNoteRelations: .empty,
             taskBlockLinks: [],
             inspirationNoteLinks: []
+        )
+    }
+
+    static func linkedTaskWorkspace(calendarTitle: String) throws -> (WorkspaceState, UUID) {
+        let now = Date(timeIntervalSince1970: 100)
+        let noteID = NoteID(UUID(uuidString: "00000000-0000-0000-0000-000000000511")!)
+        let blockID = BlockID(UUID(uuidString: "00000000-0000-0000-0000-000000000512")!)
+        let itemID = UUID(uuidString: "00000000-0000-0000-0000-000000000513")!
+        var calendar = calendarState
+        calendar.items[itemID] = try CalendarItem(
+            id: itemID,
+            kind: .task,
+            title: calendarTitle,
+            categoryID: categoryID,
+            schedule: try CalendarSchedule(
+                startDate: CalendarDate(year: 2026, month: 8, day: 12)!,
+                endDate: CalendarDate(year: 2026, month: 8, day: 12)!,
+                startTime: nil,
+                endTime: nil
+            ),
+            completedAt: nil,
+            createdAt: now,
+            updatedAt: now
+        )
+        let note = Note(
+            id: noteID,
+            title: "迁移待办",
+            document: .init(blocks: [try .task(id: blockID, text: "正文里的行动")]),
+            categoryID: categoryID,
+            archivedAt: nil,
+            revision: 1,
+            createdAt: now,
+            updatedAt: now
+        )
+        return (
+            WorkspaceState(
+                revision: 1,
+                calendar: calendar,
+                notes: [noteID: note],
+                inspirations: [:],
+                calendarNoteRelations: .init(
+                    baselines: [.item(itemID): .init(primaryNoteID: noteID, referenceNoteIDs: [])],
+                    occurrenceOverrides: [:]
+                ),
+                taskBlockLinks: [.init(noteID: noteID, blockID: blockID, calendarItemID: itemID)],
+                inspirationNoteLinks: []
+            ),
+            itemID
         )
     }
 

@@ -6,6 +6,40 @@ enum TaskBlockScheduleDefaults {
     static func day(now: Date, timeZone: TimeZone) -> CalendarDate {
         CalendarDate.localDay(containing: now, in: timeZone)
     }
+
+    static func makeItem(
+        id: UUID,
+        note: Note,
+        blockID: BlockID,
+        selectedDate: Date,
+        timeZone: TimeZone,
+        createdAt: Date
+    ) throws -> CalendarItem {
+        guard let block = note.document.blocks.first(where: {
+            $0.id == blockID && $0.kind == .task
+        }) else {
+            throw TaskBlockScheduleError.missingTaskBlock
+        }
+        return try CalendarItem(
+            id: id,
+            kind: .task,
+            title: block.inlineContent.spans.map(\.text).joined(),
+            categoryID: note.categoryID,
+            schedule: try CalendarSchedule(
+                startDate: day(now: selectedDate, timeZone: timeZone),
+                endDate: day(now: selectedDate, timeZone: timeZone),
+                startTime: nil,
+                endTime: nil
+            ),
+            completedAt: block.taskState?.completedAt,
+            createdAt: createdAt,
+            updatedAt: createdAt
+        )
+    }
+}
+
+enum TaskBlockScheduleError: Error, Equatable {
+    case missingTaskBlock
 }
 
 struct TaskBlockScheduleSheet: View {
@@ -16,7 +50,6 @@ struct TaskBlockScheduleSheet: View {
     let onScheduled: () -> Void
     private let timeZone: TimeZone
 
-    @State private var title = ""
     @State private var selectedDate: Date
     @State private var error: String?
 
@@ -42,8 +75,11 @@ struct TaskBlockScheduleSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("安排待办到日历")
                 .font(.headline)
-            TextField("事项标题", text: $title)
-                .textFieldStyle(.roundedBorder)
+            if let title = taskTitle {
+                Text(title.isEmpty ? "无标题待办" : title)
+                    .font(.body)
+                    .accessibilityLabel("待办标题，\(title.isEmpty ? "无标题" : title)")
+            }
             EditorDateChip(date: $selectedDate)
             if let error {
                 Text(error).font(.caption).foregroundStyle(.red)
@@ -58,12 +94,12 @@ struct TaskBlockScheduleSheet: View {
         }
         .padding(16)
         .frame(minWidth: 320)
-        .onAppear {
-            if let note = store.state.notes[noteID],
-               let block = note.document.blocks.first(where: { $0.id == blockID }) {
-                title = block.inlineContent.spans.map(\.text).joined()
-            }
-        }
+    }
+
+    private var taskTitle: String? {
+        store.state.notes[noteID]?.document.blocks.first(where: {
+            $0.id == blockID && $0.kind == .task
+        })?.inlineContent.spans.map(\.text).joined()
     }
 
     private func schedule() async {
@@ -72,20 +108,14 @@ struct TaskBlockScheduleSheet: View {
                 error = "笔记不存在。"
                 return
             }
-            let item = try CalendarItem(
+            let createdAt = Date.now
+            let item = try TaskBlockScheduleDefaults.makeItem(
                 id: UUID(),
-                kind: .task,
-                title: title.isEmpty ? "待办" : title,
-                categoryID: note.categoryID,
-                schedule: try CalendarSchedule(
-                    startDate: TaskBlockScheduleDefaults.day(now: selectedDate, timeZone: timeZone),
-                    endDate: TaskBlockScheduleDefaults.day(now: selectedDate, timeZone: timeZone),
-                    startTime: nil,
-                    endTime: nil
-                ),
-                completedAt: nil,
-                createdAt: .now,
-                updatedAt: .now
+                note: note,
+                blockID: blockID,
+                selectedDate: selectedDate,
+                timeZone: timeZone,
+                createdAt: createdAt
             )
             let outcome = try await store.sendWorkspace(
                 .scheduleTaskBlock(.init(noteID: noteID, blockID: blockID, item: item)),

@@ -85,7 +85,7 @@ struct NoteDraftRecoveryStoreTests {
         let blockID = BlockID(UUID())
         let completedAt = Date(timeIntervalSince1970: 42)
         let item = try CalendarItem(
-            id: UUID(), kind: .task, title: "current calendar task", categoryID: categoryID,
+            id: UUID(), kind: .task, title: "linked", categoryID: categoryID,
             schedule: .init(
                 startDate: .init(year: 2026, month: 8, day: 10)!,
                 endDate: .init(year: 2026, month: 8, day: 10)!,
@@ -508,7 +508,7 @@ struct NoteDraftRecoveryStoreTests {
         let linkedBlockID = BlockID(UUID())
         let newTaskID = BlockID(UUID())
         let item = try CalendarItem(
-            id: UUID(), kind: .task, title: "retained item", categoryID: categoryID,
+            id: UUID(), kind: .task, title: "linked", categoryID: categoryID,
             schedule: .init(
                 startDate: .init(year: 2026, month: 8, day: 10)!,
                 endDate: .init(year: 2026, month: 8, day: 10)!, startTime: nil, endTime: nil
@@ -579,7 +579,7 @@ struct NoteDraftRecoveryStoreTests {
         let blockID = BlockID(UUID())
         let completedAt = Date(timeIntervalSince1970: 101)
         let item = try CalendarItem(
-            id: UUID(), kind: .task, title: "current task", categoryID: categoryID,
+            id: UUID(), kind: .task, title: "linked", categoryID: categoryID,
             schedule: .init(
                 startDate: .init(year: 2026, month: 8, day: 10)!,
                 endDate: .init(year: 2026, month: 8, day: 10)!, startTime: nil, endTime: nil

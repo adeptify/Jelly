@@ -27,7 +27,10 @@ struct WorkspaceMigrationSnapshotTests {
         let record = try #require(recovery.entries.first)
         #expect(try Data(contentsOf: snapshots.appendingPathComponent(record.snapshotFileName)) == v2)
         #expect(record.sourceSHA256 == WorkspacePersistenceFixtures.sha256(v2))
-        #expect(try WorkspaceDocumentCodec.decode(Data(contentsOf: main)).provenance.sourceSchema == 3)
+        #expect(
+            try WorkspaceDocumentCodec.decode(Data(contentsOf: main)).provenance.sourceSchema
+                == WorkspaceDocument.currentSchemaVersion
+        )
     }
 
     @Test func failedSnapshotWriteLeavesV2MainByteForByteUntouched() async throws {

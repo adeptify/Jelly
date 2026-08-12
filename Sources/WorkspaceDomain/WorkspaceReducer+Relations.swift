@@ -572,6 +572,8 @@ extension WorkspaceReducer {
                       $0.blockID == replacement.blockID || $0.calendarItemID == replacement.calendarItemID
                   })
             else { throw WorkspaceReducerError.invalidConsistencyRepair }
+            candidate.calendar.items[replacement.calendarItemID]?.title =
+                block.inlineContent.spans.map(\.text).joined()
             candidate.taskBlockLinks.insert(replacement)
         case let .inspirationNote(link):
             candidate.inspirationNoteLinks.remove(link)

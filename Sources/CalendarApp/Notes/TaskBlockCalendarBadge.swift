@@ -51,8 +51,8 @@ struct TaskBlockCalendarBadge: View {
                 }
                 .controlSize(.mini)
 
-                Button("取消关联", role: .destructive, action: onUnlink)
-                    .controlSize(.mini)
+                TaskBlockUnlinkButton(action: onUnlink)
+                    .frame(minWidth: 92, minHeight: 20)
             } else {
                 TaskBlockScheduleButton(action: onSchedule)
                     .frame(minWidth: 84, minHeight: 20)
@@ -63,6 +63,44 @@ struct TaskBlockCalendarBadge: View {
     private func dateLabel(_ item: CalendarItem) -> String {
         let d = item.schedule.startDate
         return String(format: "%04d-%02d-%02d", d.year, d.month, d.day)
+    }
+}
+
+private struct TaskBlockUnlinkButton: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(
+            title: "解除任务联动",
+            target: context.coordinator,
+            action: #selector(Coordinator.performAction)
+        )
+        button.bezelStyle = .roundRect
+        button.controlSize = .mini
+        button.contentTintColor = .systemRed
+        button.setAccessibilityLabel("解除任务联动")
+        button.setAccessibilityIdentifier("task-block-unlink-calendar")
+        return button
+    }
+
+    func updateNSView(_ button: NSButton, context: Context) {
+        context.coordinator.action = action
+        button.title = "解除任务联动"
+        button.setAccessibilityLabel("解除任务联动")
+        button.setAccessibilityIdentifier("task-block-unlink-calendar")
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var action: () -> Void
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+
+        @objc func performAction() { action() }
     }
 }
 

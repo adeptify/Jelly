@@ -262,7 +262,7 @@ struct NoteAutosaveCoordinatorTests {
     @Test func onlyARestoredTaskClearsItsLinkedDeletionDispositionAndTheRealReducerReceivesTaskToParagraph() async throws {
         let calendar = makeEmptyState()
         let linkedBlockID = BlockID()
-        let item = try makeItem(categoryID: calendar.uncategorizedID)
+        let item = try makeItem(categoryID: calendar.uncategorizedID, title: "linked task")
         var note = makeAutosaveTestNote(categoryID: calendar.uncategorizedID)
         note.document = .init(blocks: [try .task(id: linkedBlockID, text: "linked task")])
         var initial = WorkspaceState.empty(calendar: calendar)

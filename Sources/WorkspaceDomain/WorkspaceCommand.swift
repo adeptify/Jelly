@@ -343,8 +343,8 @@ public enum WorkspaceReducerError: Error, Equatable, Sendable {
     case relationMigrationFailure(SeriesRelationMigrationError)
     case invalidDraftSubmission
     case invalidLinkedBlockDispositions
-    case linkedTaskCompletionRequiresTaskCommand
     case taskBlockMissingOrNotTask
+    case taskTitleMismatch
     case taskCompletionMismatch
     case duplicateTaskBlockLink
     case primaryReplacementDispositionRequired
