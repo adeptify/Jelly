@@ -86,6 +86,17 @@ struct NoteAutosaveOutcomeMapping: Equatable, Sendable {
                 )
             }
             return .init(state: .committed(triple), evidence: .persisted(triple))
+        case let .draftAlreadyPersisted(receipt, journal):
+            guard receiptMatches(receipt, triple: triple) else {
+                return .init(state: .invalidPersistedReceipt(triple), evidence: .unsafeLatestUnprotected)
+            }
+            if case let .cleanupPending(identity, step) = journal {
+                return .init(
+                    state: .cleanupPending(triple, identity: identity, step: step),
+                    evidence: .persisted(triple)
+                )
+            }
+            return .init(state: .noChange(triple), evidence: .persisted(triple))
         case .restored, .noChange:
             return .init(state: .noChange(triple), evidence: .unsafeLatestUnprotected)
         case .conflict:
@@ -157,6 +168,10 @@ struct NoteAutosaveOutcomeMapping: Equatable, Sendable {
 
     private static func receiptMatches(_ receipt: WorkspaceSaveReceipt, triple: NoteAutosaveTriple) -> Bool {
         guard let draft = receipt.persistedDraft else { return false }
+        return receiptMatches(draft, triple: triple)
+    }
+
+    private static func receiptMatches(_ draft: PersistedDraftReceipt, triple: NoteAutosaveTriple) -> Bool {
         return draft.noteID == triple.identityAndGeneration.identity.noteID
             && draft.editSessionID == triple.identityAndGeneration.identity.editSessionID
             && draft.draftGeneration == triple.identityAndGeneration.draftGeneration

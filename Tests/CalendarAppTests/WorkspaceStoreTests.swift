@@ -992,7 +992,7 @@ struct WorkspaceStoreTests {
         let store = WorkspaceStore(initialState: state, repository: repository, journal: journal, clock: { .distantPast })
         await store.load()
 
-        #expect(try await store.submitDraft(submission) == .noChange(.identical, journal: .clean))
+        #expect(try await store.submitDraft(submission) == .draftAlreadyPersisted(receipt, journal: .clean))
         #expect(await repository.saveCount == 0)
         #expect(store.state == state)
         #expect(store.canUndo == false)
@@ -1756,7 +1756,10 @@ struct WorkspaceStoreTests {
 
         let outcome = try await store.submitDraft(submission)
         let identity = DraftJournalIdentity(noteID: note.id, editSessionID: receipt.editSessionID)
-        #expect(outcome == .noChange(.identical, journal: .cleanupPending(identity: identity, step: .acknowledge)))
+        #expect(outcome == .draftAlreadyPersisted(
+            receipt,
+            journal: .cleanupPending(identity: identity, step: .acknowledge)
+        ))
         #expect(store.phase == .parkedJournalCleanup(identity, .acknowledge))
         writer.failOnWriteNumber = nil
 
@@ -1855,7 +1858,10 @@ struct WorkspaceStoreTests {
 
         let outcome = try await store.submitDraft(submission)
         let identity = DraftJournalIdentity(noteID: note.id, editSessionID: receipt.editSessionID)
-        #expect(outcome == .noChange(.identical, journal: .cleanupPending(identity: identity, step: .clear)))
+        #expect(outcome == .draftAlreadyPersisted(
+            receipt,
+            journal: .cleanupPending(identity: identity, step: .clear)
+        ))
         writer.failOnWriteNumber = nil
 
         #expect(await store.retryJournalCleanup(identity) == .clean)

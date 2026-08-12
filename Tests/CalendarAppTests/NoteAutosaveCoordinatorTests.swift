@@ -727,6 +727,10 @@ struct NoteAutosaveCoordinatorTests {
             triple: triple, hasDurableProtection: true
         ) == .init(state: .committed(triple), evidence: .persisted(triple)))
         #expect(NoteAutosaveOutcomeMapping.workspace(
+            .draftAlreadyPersisted(validReceipt, journal: .clean),
+            triple: triple, hasDurableProtection: true
+        ) == .init(state: .noChange(triple), evidence: .persisted(triple)))
+        #expect(NoteAutosaveOutcomeMapping.workspace(
             .noChange(.identical, journal: .clean), triple: triple, hasDurableProtection: true
         ) == .init(state: .noChange(triple), evidence: .unsafeLatestUnprotected))
         #expect(NoteAutosaveOutcomeMapping.workspace(
@@ -758,6 +762,10 @@ struct NoteAutosaveCoordinatorTests {
         ) == .init(state: .persistenceBlocked(triple), evidence: .unsafeLatestUnprotected))
         #expect(NoteAutosaveOutcomeMapping.workspace(
             .committed(.init(workspaceRevision: 1, persistedDraft: validReceipt), journal: cleanup),
+            triple: triple, hasDurableProtection: true
+        ) == .init(state: .cleanupPending(triple, identity: cleanupIdentity, step: .record), evidence: .persisted(triple)))
+        #expect(NoteAutosaveOutcomeMapping.workspace(
+            .draftAlreadyPersisted(validReceipt, journal: cleanup),
             triple: triple, hasDurableProtection: true
         ) == .init(state: .cleanupPending(triple, identity: cleanupIdentity, step: .record), evidence: .persisted(triple)))
 
@@ -801,6 +809,16 @@ struct NoteAutosaveCoordinatorTests {
             #expect(retryMapping.state == .invalidPersistedReceipt(triple))
             #expect(retryMapping.evidence == .unsafeLatestUnprotected)
             #expect(retryMapping.state.statusMessage == "保存回执异常，当前草稿未保存。")
+
+            if let persistedDraft = receipt.persistedDraft {
+                let identicalMapping = NoteAutosaveOutcomeMapping.workspace(
+                    .draftAlreadyPersisted(persistedDraft, journal: .clean),
+                    triple: triple,
+                    hasDurableProtection: true
+                )
+                #expect(identicalMapping.state == .invalidPersistedReceipt(triple))
+                #expect(identicalMapping.evidence == .unsafeLatestUnprotected)
+            }
         }
 
         let restored = WorkspaceRestoreOutcome(

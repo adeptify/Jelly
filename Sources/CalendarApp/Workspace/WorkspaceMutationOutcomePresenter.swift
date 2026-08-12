@@ -67,6 +67,8 @@ enum WorkspaceMutationOutcomePresenter {
                 )
             }
             return presentation(for: journal, after: .mayDismiss)
+        case let .draftAlreadyPersisted(_, journal):
+            return presentation(for: journal, after: .mayDismiss)
         case let .noChange(_, journal):
             if isRecoveryCleanupPending(journal) {
                 return recoveryCleanupPresentation(
@@ -156,7 +158,7 @@ enum WorkspaceMutationOutcomePresenter {
             return .retain("恢复与当前工作空间状态冲突，当前数据没有被替换。")
         case .draftSuperseded:
             return .retain("已有更新的编辑版本，恢复没有覆盖它。")
-        case .committed, .noChange:
+        case .committed, .draftAlreadyPersisted, .noChange:
             return .retain("恢复内容与当前工作空间相同，当前数据没有被替换。")
         }
     }

@@ -28,6 +28,7 @@ enum WorkspaceExternalSourceChangeReason: Equatable, Sendable {
 
 enum WorkspaceTransactionOutcome: Equatable, Sendable {
     case committed(WorkspaceSaveReceipt, journal: JournalResolutionStatus)
+    case draftAlreadyPersisted(PersistedDraftReceipt, journal: JournalResolutionStatus)
     case restored(WorkspaceRestoreOutcome)
     case noChange(WorkspaceNoChangeReason, journal: JournalResolutionStatus)
     case conflict(WorkspaceConflict)
@@ -783,7 +784,7 @@ enum DraftRecoveryAction: Equatable, Sendable {
             draftGeneration: receipt.draftGeneration, noteSnapshotChecksum: receipt.noteSnapshotChecksum,
             persistedNoteRevision: receipt.persistedNoteRevision
         )) {
-        case .verified:
+        case let .verified(verifiedReceipt):
             let resolution = await DraftJournalCoordinator.acknowledgeAndClear(receipt, journal: journal)
             let status = resolution.journalStatus
             if case .cleanupPending = resolution {
@@ -791,7 +792,7 @@ enum DraftRecoveryAction: Equatable, Sendable {
             } else if case .staleOrMissing = resolution {
                 await recoverJournalAtStartup()
             }
-            return .noChange(reason, journal: status)
+            return .draftAlreadyPersisted(verifiedReceipt, journal: status)
         case .sourceChanged:
             phase = .externalSourceChanged(.externalBytesChanged)
             terminateQueuedForExternal(reason: .externalBytesChanged, artifacts: .init())

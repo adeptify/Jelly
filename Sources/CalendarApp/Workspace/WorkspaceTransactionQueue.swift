@@ -66,7 +66,9 @@ final class WorkspaceTransactionQueue {
 private extension WorkspaceTransactionOutcome {
     var parksFIFO: Bool {
         switch self {
-        case .commitPending, .committed(_, journal: .cleanupPending), .noChange(_, journal: .cleanupPending), .notCommitted(_, journal: .cleanupPending, _):
+        case .commitPending, .committed(_, journal: .cleanupPending),
+             .draftAlreadyPersisted(_, journal: .cleanupPending),
+             .noChange(_, journal: .cleanupPending), .notCommitted(_, journal: .cleanupPending, _):
             true
         default:
             false

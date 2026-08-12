@@ -288,7 +288,7 @@ enum NotesBrowserPartition: String, CaseIterable, Identifiable, Equatable, Senda
 
     private func didCommit(_ outcome: WorkspaceTransactionOutcome) -> Bool {
         switch outcome {
-        case .committed:
+        case .committed, .draftAlreadyPersisted:
             true
         case .restored, .noChange, .conflict, .draftSuperseded, .commitPending,
              .notCommitted, .externalSourceChanged, .persistenceBlocked:
