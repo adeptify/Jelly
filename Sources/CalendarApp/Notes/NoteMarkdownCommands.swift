@@ -21,6 +21,29 @@ enum NoteMarkdownCommandError: Error, Equatable, Sendable {
     case invalidDocument
 }
 
+struct NoteMarkdownLiveSnapshot: Equatable, Sendable {
+    let noteID: NoteID
+    let editSessionID: UUID
+    let document: BlockDocument
+}
+
+enum NoteMarkdownExportSource {
+    static func document(
+        persistedNoteID: NoteID,
+        persistedDocument: BlockDocument,
+        editorIdentity: NoteEditorIdentity?,
+        liveSnapshot: NoteMarkdownLiveSnapshot?
+    ) -> BlockDocument {
+        guard let editorIdentity,
+              editorIdentity.noteID == persistedNoteID,
+              let liveSnapshot,
+              liveSnapshot.noteID == persistedNoteID,
+              liveSnapshot.editSessionID == editorIdentity.editSessionID
+        else { return persistedDocument }
+        return liveSnapshot.document
+    }
+}
+
 /// Pure helpers for Note Markdown import/export. Presentation owns panels;
 /// this type never mutates the editor session itself.
 enum NoteMarkdownCommands {

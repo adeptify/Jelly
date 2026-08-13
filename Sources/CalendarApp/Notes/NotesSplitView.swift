@@ -517,6 +517,40 @@ struct NotesSplitView: View {
 
     private func exportMarkdown() {
         guard let note = viewModel.selectedNote else { return }
+        let matchingSession: BlockEditorSession?
+        if let editorIdentity,
+           editorIdentity.noteID == note.id,
+           let activeEditorSession,
+           activeEditorSession.noteID == note.id,
+           activeEditorSession.editSessionID == editorIdentity.editSessionID {
+            matchingSession = activeEditorSession
+        } else {
+            matchingSession = nil
+        }
+        guard matchingSession?.terminallyFinalizeNativeComposition() != false else {
+            statusBanner = "请先完成当前输入，再导出 Markdown。"
+            return
+        }
+        let liveSnapshot = matchingSession.map {
+            NoteMarkdownLiveSnapshot(
+                noteID: $0.noteID,
+                editSessionID: $0.editSessionID,
+                document: $0.document
+            )
+        }
+        let document = NoteMarkdownExportSource.document(
+            persistedNoteID: note.id,
+            persistedDocument: note.document,
+            editorIdentity: editorIdentity,
+            liveSnapshot: liveSnapshot
+        )
+        let markdown: String
+        do {
+            markdown = try NoteMarkdownCommands.exportMarkdown(from: document)
+        } catch {
+            statusBanner = "导出失败。"
+            return
+        }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.plainText]
         panel.nameFieldStringValue = (note.title.isEmpty ? "note" : note.title) + ".md"
@@ -524,7 +558,6 @@ struct NotesSplitView: View {
             guard response == .OK, let url = panel.url else { return }
             Task { @MainActor in
                 do {
-                    let markdown = try NoteMarkdownCommands.exportMarkdown(from: note.document)
                     try NoteMarkdownCommands.writeExport(markdown: markdown, to: url)
                     statusBanner = "Markdown 已导出。"
                 } catch {

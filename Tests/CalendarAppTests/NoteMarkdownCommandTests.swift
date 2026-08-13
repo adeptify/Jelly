@@ -5,6 +5,78 @@ import WorkspaceDomain
 
 @Suite("NoteMarkdownCommandTests")
 struct NoteMarkdownCommandTests {
+    @Test func exportSourcePrefersTheMatchingLiveEditorSnapshot() throws {
+        let noteID = NoteID()
+        let editSessionID = UUID()
+        let persisted = BlockDocument(blocks: [
+            .init(
+                id: BlockID(),
+                kind: .paragraph,
+                inlineContent: .plain("旧正文"),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let live = BlockDocument(blocks: [
+            .init(
+                id: BlockID(),
+                kind: .bullet,
+                inlineContent: .plain("实时正文"),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+
+        let selected = NoteMarkdownExportSource.document(
+            persistedNoteID: noteID,
+            persistedDocument: persisted,
+            editorIdentity: .init(noteID: noteID, editSessionID: editSessionID),
+            liveSnapshot: .init(
+                noteID: noteID,
+                editSessionID: editSessionID,
+                document: live
+            )
+        )
+
+        #expect(selected == live)
+        #expect(try NoteMarkdownCommands.exportMarkdown(from: selected).contains("- 实时正文"))
+    }
+
+    @Test func exportSourceRejectsAStaleEditorSession() {
+        let noteID = NoteID()
+        let persisted = BlockDocument(blocks: [
+            .init(
+                id: BlockID(),
+                kind: .paragraph,
+                inlineContent: .plain("已保存正文"),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let stale = BlockDocument(blocks: [
+            .init(
+                id: BlockID(),
+                kind: .paragraph,
+                inlineContent: .plain("过期会话正文"),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+
+        let selected = NoteMarkdownExportSource.document(
+            persistedNoteID: noteID,
+            persistedDocument: persisted,
+            editorIdentity: .init(noteID: noteID, editSessionID: UUID()),
+            liveSnapshot: .init(
+                noteID: noteID,
+                editSessionID: UUID(),
+                document: stale
+            )
+        )
+
+        #expect(selected == persisted)
+    }
+
     @Test func importPlanRejectsEmptyMarkdownDocument() throws {
         #expect(throws: NoteMarkdownCommandError.emptyImport) {
             _ = try NoteMarkdownCommands.planImport(
