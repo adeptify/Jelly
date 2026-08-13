@@ -5,6 +5,24 @@ import WorkspaceDomain
 
 @Suite("BlockEditorInputTests")
 struct BlockEditorInputTests {
+    @Test func ordinaryTypingCoalescesAdjacentEqualStylesIntoOneSpan() throws {
+        let id = blockID(4999)
+        var document = doc([block(id, .paragraph, "")])
+        var selection = caret(id, 0)
+
+        for character in "first" {
+            let result = try reduce(
+                document,
+                selection,
+                .insertTextApplyingMarkdownShortcut(String(character))
+            )
+            document = result.document
+            selection = result.selection
+        }
+
+        #expect(document.blocks[0].inlineContent.spans == [.init(text: "first")])
+    }
+
     @Test func taskCompletionTargetsOnlyATaskAndPreservesItsIdentityContentAndIndent() throws {
         let taskID = blockID(5000)
         let paragraphID = blockID(5001)
@@ -2745,7 +2763,7 @@ struct ReductionOutcomeExactFixture: Sendable, CustomTestStringConvertible {
         let inserted = doc([DocumentBlock(
             id: id,
             kind: .paragraph,
-            inlineContent: .init(spans: [.init(text: "甲"), .init(text: "乙")]),
+            inlineContent: .init(spans: [.init(text: "甲乙")]),
             taskState: nil,
             indentLevel: 0
         )])

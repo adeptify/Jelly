@@ -353,11 +353,11 @@ private extension ReductionContext {
         var attributes = typingAttributes().validated
         if candidate.blocks[index].kind == .code { attributes = .init(marks: [], linkURL: nil) }
         let (prefix, suffix) = candidate.blocks[index].inlineContent.split(at: caret.graphemeOffset)
-        candidate.blocks[index].inlineContent = .concatenating([
-            prefix,
-            .init(spans: [.init(text: value, marks: attributes.marks, linkURL: attributes.linkURL)]),
-            suffix
-        ])
+        candidate.blocks[index].inlineContent = .mergingInsertion(
+            .init(text: value, marks: attributes.marks, linkURL: attributes.linkURL),
+            between: prefix,
+            and: suffix
+        )
         if candidate.blocks[index].kind == .code {
             candidate.blocks[index] = Self.makeBlock(
                 id: candidate.blocks[index].id,
@@ -1591,6 +1591,29 @@ private extension InlineContent {
 
     static func concatenating(_ values: [InlineContent]) -> InlineContent {
         .init(spans: values.flatMap(\.spans))
+    }
+
+    static func mergingInsertion(
+        _ insertion: InlineSpan,
+        between prefix: InlineContent,
+        and suffix: InlineContent
+    ) -> InlineContent {
+        var leading = prefix.spans
+        var merged = insertion
+        if let previous = leading.last,
+           previous.marks == merged.marks,
+           previous.linkURL == merged.linkURL {
+            leading.removeLast()
+            merged.text = previous.text + merged.text
+        }
+        var trailing = suffix.spans
+        if let next = trailing.first,
+           next.marks == merged.marks,
+           next.linkURL == merged.linkURL {
+            trailing.removeFirst()
+            merged.text += next.text
+        }
+        return .init(spans: leading + [merged] + trailing)
     }
 
     func coalescingAdjacentStyles() -> InlineContent {
