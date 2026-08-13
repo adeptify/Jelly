@@ -31,6 +31,7 @@ struct NotesSplitView: View {
     @State private var statusBanner: String?
     @State private var activeEditorSession: BlockEditorSession?
     @State private var pendingPermanentDelete: PendingNotePermanentDelete?
+    @State private var pendingNewNoteInputRequestID: UUID?
     @State private var availableWidth: CGFloat = .infinity
 
     enum NotesAdaptiveLayoutMode: Equatable {
@@ -239,7 +240,14 @@ struct NotesSplitView: View {
                         activeEditorSession = nil
                     }
                 },
-                nativeFinalizerHook: $nativeFinalizer
+                nativeFinalizerHook: $nativeFinalizer,
+                onInitialFocusApplied: {
+                    guard initialFocusIsTitle,
+                          let requestID = pendingNewNoteInputRequestID
+                    else { return }
+                    pendingNewNoteInputRequestID = nil
+                    newItemRouter.deliverCapturedTyping(for: requestID)
+                }
             )
             .id(identity)
         } else {
@@ -272,6 +280,10 @@ struct NotesSplitView: View {
         Array(store.calendarState.categories.values).sorted {
             $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
+    }
+
+    private var initialFocusIsTitle: Bool {
+        editorInitialFocus == .title
     }
 
     private func registerRouteBridge() {
@@ -318,18 +330,23 @@ struct NotesSplitView: View {
         guard let request,
               request.route == .notes,
               newItemRouter.consume(request.id, route: .notes) != nil else { return }
-        Task { await createNote() }
+        Task { await createNote(inputRequestID: request.id) }
     }
 
-    private func createNote() async {
+    private func createNote(inputRequestID: UUID? = nil) async {
         let decision = await closeBridge.decision(for: .selection, finalizer: nativeFinalizer)
         guard decision == .allow else {
+            if let inputRequestID { newItemRouter.cancelCapturedTyping(for: inputRequestID) }
             statusBanner = "请先完成当前笔记的保存。"
             return
         }
         let note = Note.empty(id: NoteID(), categoryID: store.calendarState.uncategorizedID, now: clock())
-        guard (try? await viewModel.create(note)) == true else { return }
+        guard (try? await viewModel.create(note)) == true else {
+            if let inputRequestID { newItemRouter.cancelCapturedTyping(for: inputRequestID) }
+            return
+        }
         if let selected = viewModel.selectedNoteID {
+            pendingNewNoteInputRequestID = inputRequestID
             editorInitialFocus = .title
             editorIdentity = .init(noteID: selected, editSessionID: UUID())
             if NotesAdaptiveLayout.isCompact(width: availableWidth) { browserCollapsed = true }

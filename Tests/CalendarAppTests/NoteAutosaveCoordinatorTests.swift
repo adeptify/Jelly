@@ -7,6 +7,41 @@ import WorkspaceDomain
 @Suite("NoteAutosaveCoordinatorTests")
 @MainActor
 struct NoteAutosaveCoordinatorTests {
+    @Test func undoingAfterThePreviousGenerationPersistedStillAllowsTermination() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-autosave-undo-after-save-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let calendar = makeEmptyState()
+        let note = makeAutosaveTestNote(categoryID: calendar.uncategorizedID)
+        let journal = DraftJournalRepository(fileURL: directory.appendingPathComponent("draft.json"))
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar),
+            journal: journal
+        )
+        await store.load()
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let coordinator = NoteAutosaveCoordinator(store: store, scheduler: AutosaveImmediateScheduler())
+        try coordinator.beginSession(
+            note,
+            linkedTaskBlockLinks: [],
+            editSessionID: UUID(),
+            activeHostToken: UUID()
+        )
+
+        let edited = try coordinator.update(title: "临时输入")
+        #expect(await coordinator.flushLatest() == .persisted(NoteAutosaveTriple(submission: edited)))
+        _ = try coordinator.update(title: note.title)
+
+        let decision = await NoteCloseProtectionBridge(coordinator: coordinator)
+            .decision(for: .termination)
+
+        #expect(decision == .allow)
+        #expect(store.state.notes[note.id]?.title == note.title)
+        #expect(try await journal.current()?.records.isEmpty == true)
+    }
+
     @Test func titleEditBuildsACompleteNextGenerationFromTheImmutableSessionBase() async throws {
         let state = makeEmptyState()
         let note = makeAutosaveTestNote(categoryID: state.uncategorizedID)

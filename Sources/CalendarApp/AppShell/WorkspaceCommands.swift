@@ -40,7 +40,8 @@ struct WorkspaceCommands: Commands {
             Button(newItemTitle) {
                 _ = newItemRouter.requestNewItem(
                     route: routeState.route,
-                    features: features
+                    features: features,
+                    capturesTypingUntilReady: true
                 )
             }
             .keyboardShortcut("n", modifiers: .command)

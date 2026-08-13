@@ -58,6 +58,11 @@ struct BlockEditorVisualContractTests {
         #expect(CalendarTheme.dark.secondaryTextContrast >= 4.5)
     }
 
+    @Test func shortDocumentSurfaceFillsTheVisibleEditorViewport() {
+        #expect(NoteEditorLayout.blockEditorMinimumHeight(for: 600) == 560)
+        #expect(NoteEditorLayout.blockEditorMinimumHeight(for: 80) == 80)
+    }
+
     private func fixture(
         blocks: [DocumentBlock]
     ) -> (session: BlockEditorSession, host: ContinuousBlockEditorHostView) {

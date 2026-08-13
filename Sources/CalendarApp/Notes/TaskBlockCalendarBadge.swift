@@ -7,15 +7,21 @@ import WorkspaceDomain
 struct TaskBlockCalendarContext {
     let store: WorkspaceStore
     let now: @Sendable () -> Date
+    let prepareForMutation: () async -> Bool
+    let didCommitMutation: () -> Void
     let onOpenItem: (UUID) -> Void
 
     init(
         store: WorkspaceStore,
         now: @escaping @Sendable () -> Date = Date.init,
+        prepareForMutation: @escaping () async -> Bool = { true },
+        didCommitMutation: @escaping () -> Void = {},
         onOpenItem: @escaping (UUID) -> Void
     ) {
         self.store = store
         self.now = now
+        self.prepareForMutation = prepareForMutation
+        self.didCommitMutation = didCommitMutation
         self.onOpenItem = onOpenItem
     }
 }

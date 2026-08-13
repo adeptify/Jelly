@@ -238,9 +238,9 @@ final class NoteAutosaveCoordinator {
     }
 
     private struct Session {
-        let baseSnapshot: Note
-        let baseChecksum: String
-        let baseLinkedTaskBlockLinks: Set<TaskBlockCalendarLink>
+        var baseSnapshot: Note
+        var baseChecksum: String
+        var baseLinkedTaskBlockLinks: Set<TaskBlockCalendarLink>
         let editSessionID: UUID
         var activeHostToken: UUID
         var draft: Note
@@ -400,7 +400,10 @@ final class NoteAutosaveCoordinator {
     /// making the route transition wait on disk I/O.
     func finalizeNativeInputForRoute(_ finalizer: NoteNativeInputFinalizer?) async -> Bool {
         guard await finalizeNativeInputIfNeeded(finalizer) else { return false }
-        guard let submission = latestSubmission else { return true }
+        guard let submission = latestSubmission else {
+            latestEvidence = .clean
+            return true
+        }
         let triple = NoteAutosaveTriple(submission: submission)
         let operation = operation(for: submission)
         _ = startProtection(for: triple, operation: operation)
@@ -725,8 +728,27 @@ final class NoteAutosaveCoordinator {
                 || state.blocksSuccessorSubmission
                 || autosaveState.blocksSuccessorSubmission
         else { return }
+        if case .persisted = evidence {
+            rebaseCurrentSessionAfterPersistence(for: triple)
+        }
         autosaveState = state
         latestEvidence = evidence
+    }
+
+    private func rebaseCurrentSessionAfterPersistence(for triple: NoteAutosaveTriple) {
+        guard latestSubmission.map(NoteAutosaveTriple.init(submission:)) == triple,
+              var session,
+              let persisted = store.state.notes[triple.identityAndGeneration.identity.noteID],
+              let checksum = try? WorkspaceChecksum.noteSnapshotChecksum(persisted)
+        else { return }
+        session.baseSnapshot = persisted
+        session.baseChecksum = checksum
+        session.baseLinkedTaskBlockLinks = Set(store.state.taskBlockLinks.filter {
+            $0.noteID == persisted.id
+        })
+        session.draft = persisted
+        session.linkedBlockDeletionDispositions = [:]
+        self.session = session
     }
 
     /// This record is per exact Store operation, not presentation state.

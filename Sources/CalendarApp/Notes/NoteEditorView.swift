@@ -17,6 +17,11 @@ enum NoteEditorLayout {
     static let maximumContentWidth: CGFloat = 720
     static let horizontalSafetyMargin: CGFloat = 28
     static let bodyPointSize: CGFloat = 16
+    static let verticalContentPadding: CGFloat = 40
+
+    static func blockEditorMinimumHeight(for viewportHeight: CGFloat) -> CGFloat {
+        max(80, viewportHeight - verticalContentPadding)
+    }
 }
 
 /// Right-hand Notes editor surface. Ordinary Store publications keep the same
@@ -42,6 +47,7 @@ struct NoteEditorView: View {
     var onToggleBrowser: () -> Void
     var sessionSink: (BlockEditorSession?) -> Void
     var nativeFinalizerHook: Binding<NoteNativeInputFinalizer?>
+    var onInitialFocusApplied: () -> Void
 
     @State private var title: String
     @State private var titleOwnerID = UUID()
@@ -78,7 +84,8 @@ struct NoteEditorView: View {
         showsBrowserButton: Bool = false,
         onToggleBrowser: @escaping () -> Void = {},
         sessionSink: @escaping (BlockEditorSession?) -> Void,
-        nativeFinalizerHook: Binding<NoteNativeInputFinalizer?>
+        nativeFinalizerHook: Binding<NoteNativeInputFinalizer?>,
+        onInitialFocusApplied: @escaping () -> Void = {}
     ) {
         self.identity = identity
         self.initialFocus = initialFocus
@@ -100,6 +107,7 @@ struct NoteEditorView: View {
         self.onToggleBrowser = onToggleBrowser
         self.sessionSink = sessionSink
         self.nativeFinalizerHook = nativeFinalizerHook
+        self.onInitialFocusApplied = onInitialFocusApplied
         _title = State(initialValue: note.title)
         _lastAcceptedDocument = State(initialValue: note.document)
     }
@@ -200,28 +208,36 @@ struct NoteEditorView: View {
                     .accessibilityLabel(status)
             }
 
-            ScrollView {
-                BlockEditorView(
-                    noteID: identity.noteID,
-                    editSessionID: identity.editSessionID,
-                    initialDocument: note.document,
-                    initialSelection: defaultSelection(in: note.document),
-                    focusRegistry: focusRegistry,
-                    onDocumentChange: handleDocumentChange,
-                    sessionSink: { session in
-                        editorSession = session
-                        sessionSink(session)
-                        applyInitialFocusIfReady()
-                    },
-                    taskCalendarContext: .init(
-                        store: store,
-                        onOpenItem: onOpenCalendarItem
+            GeometryReader { viewport in
+                ScrollView {
+                    BlockEditorView(
+                        noteID: identity.noteID,
+                        editSessionID: identity.editSessionID,
+                        initialDocument: note.document,
+                        initialSelection: defaultSelection(in: note.document),
+                        focusRegistry: focusRegistry,
+                        onDocumentChange: handleDocumentChange,
+                        sessionSink: { session in
+                            editorSession = session
+                            sessionSink(session)
+                            applyInitialFocusIfReady()
+                        },
+                        taskCalendarContext: .init(
+                            store: store,
+                            prepareForMutation: prepareForTaskCalendarMutation,
+                            didCommitMutation: rebaseAutosaveAfterTaskCalendarMutation,
+                            onOpenItem: onOpenCalendarItem
+                        )
                     )
-                )
-                .frame(maxWidth: NoteEditorLayout.maximumContentWidth, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.horizontal, NoteEditorLayout.horizontalSafetyMargin)
-                .padding(.vertical, 20)
+                    .frame(
+                        maxWidth: NoteEditorLayout.maximumContentWidth,
+                        minHeight: NoteEditorLayout.blockEditorMinimumHeight(for: viewport.size.height),
+                        alignment: .topLeading
+                    )
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.horizontal, NoteEditorLayout.horizontalSafetyMargin)
+                    .padding(.vertical, 20)
+                }
             }
 
             BlockFormattingBar(session: editorSession)
@@ -290,6 +306,7 @@ struct NoteEditorView: View {
             guard editorSession.focusDocumentStart() else { return }
         }
         didApplyInitialFocus = true
+        onInitialFocusApplied()
     }
 
     private func installNativeFinalizer() {
@@ -310,6 +327,31 @@ struct NoteEditorView: View {
                 return true
             }
             return accept(permit, edit)
+        }
+    }
+
+    private func prepareForTaskCalendarMutation() async -> Bool {
+        switch await autosave.flushLatest(finalizer: nativeFinalizerHook.wrappedValue) {
+        case .clean, .persisted:
+            true
+        case .protectedOnly, .unsafeLatestUnprotected:
+            false
+        }
+    }
+
+    private func rebaseAutosaveAfterTaskCalendarMutation() {
+        guard let persisted = store.state.notes[identity.noteID] else { return }
+        do {
+            try autosave.beginSession(
+                persisted,
+                linkedTaskBlockLinks: Set(store.state.taskBlockLinks.filter {
+                    $0.noteID == identity.noteID
+                }),
+                editSessionID: identity.editSessionID,
+                activeHostToken: UUID()
+            )
+        } catch {
+            editorSession?.autosaveDidResolve(.failed("无法刷新待办联动后的保存基线。"))
         }
     }
 

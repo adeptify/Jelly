@@ -444,6 +444,58 @@ struct NotesLifecycleWiringTests {
         window.orderOut(nil)
     }
 
+    @Test func creatingANotePreservesTypingThatArrivesBeforeTheTitleFieldMounts() async throws {
+        _ = NSApplication.shared
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let newItemRouter = WorkspaceNewItemRouter()
+        let root = NotesSplitView(
+            store: store,
+            focusRegistry: EditorFocusRegistry(),
+            newItemRouter: newItemRouter,
+            searchIndex: WorkspaceSearchIndex()
+        )
+        let hosting = NSHostingView(rootView: root)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        hosting.layoutSubtreeIfNeeded()
+
+        _ = newItemRouter.requestNewItem(
+            route: .notes,
+            features: .production,
+            capturesTypingUntilReady: true,
+            sourceWindowNumber: window.windowNumber
+        )
+        let event = try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "Instant title",
+            charactersIgnoringModifiers: "Instant title",
+            isARepeat: false,
+            keyCode: 0
+        ))
+        NSApplication.shared.sendEvent(event)
+
+        #expect(await waitUntil {
+            store.state.notes.values.contains { $0.title == "Instant title" }
+        })
+    }
+
     @Test func mountedNotesHostCompletesAsyncStartupLoadForAnAlreadyPersistedDraft() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("jelly-notes-startup-recovery-\(UUID().uuidString)", isDirectory: true)

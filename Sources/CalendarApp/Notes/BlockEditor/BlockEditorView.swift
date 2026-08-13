@@ -99,11 +99,15 @@ private struct BlockEditorSessionHost: View {
                     },
                     onUnlink: {
                         Task {
-                            _ = try? await TaskBlockCalendarIntegration.unlinkFromBlock(
+                            guard await taskCalendarContext.prepareForMutation() else { return }
+                            let outcome = try? await TaskBlockCalendarIntegration.unlinkFromBlock(
                                 store: taskCalendarContext.store,
                                 noteID: session.noteID,
                                 blockID: blockID
                             )
+                            if outcome?.didCommitWorkspaceMutation == true {
+                                taskCalendarContext.didCommitMutation()
+                            }
                         }
                     },
                     onOpenItem: taskCalendarContext.onOpenItem
@@ -118,7 +122,7 @@ private struct BlockEditorSessionHost: View {
                 )
             }
             Color.clear
-                .frame(height: 20)
+                .frame(minHeight: 20, maxHeight: .infinity)
                 .contentShape(Rectangle())
                 .accessibilityLabel("定位到文档末尾")
                 .onTapGesture { session.focusDocumentEnd() }
@@ -134,13 +138,24 @@ private struct BlockEditorSessionHost: View {
                     noteID: session.noteID,
                     blockID: request.blockID,
                     now: taskCalendarContext.now(),
+                    prepareForMutation: taskCalendarContext.prepareForMutation,
                     onCancel: { scheduleRequest = nil },
-                    onScheduled: { scheduleRequest = nil }
+                    onScheduled: {
+                        taskCalendarContext.didCommitMutation()
+                        scheduleRequest = nil
+                    }
                 )
             }
         }
     }
 
+}
+
+private extension WorkspaceTransactionOutcome {
+    var didCommitWorkspaceMutation: Bool {
+        if case .committed = self { return true }
+        return false
+    }
 }
 
 private struct TaskBlockScheduleRequest: Identifiable {

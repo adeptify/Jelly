@@ -99,6 +99,87 @@ struct TaskBlockCalendarIntegrationTests {
         window.orderOut(nil)
     }
 
+    @Test func schedulingImmediatelyAfterConvertingToTaskFlushesTheLiveDraftFirst() async throws {
+        _ = NSApplication.shared
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let blockID = BlockID()
+        var note = Note.empty(id: NoteID(), categoryID: calendar.uncategorizedID, now: .distantPast)
+        note.document = .init(blocks: [.init(
+            id: blockID,
+            kind: .paragraph,
+            inlineContent: .plain("马上安排"),
+            taskState: nil,
+            indentLevel: 0
+        )])
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let persisted = try #require(store.state.notes[note.id])
+        let autosave = NoteAutosaveCoordinator(
+            store: store,
+            scheduler: SuspendedTaskBlockScheduler()
+        )
+        let editSessionID = UUID()
+        try autosave.beginSession(
+            persisted,
+            linkedTaskBlockLinks: [],
+            editSessionID: editSessionID,
+            activeHostToken: UUID()
+        )
+        let liveDocument = BlockDocument(blocks: [try .task(id: blockID, text: "马上安排")])
+        _ = try autosave.update(document: liveDocument)
+        var didSchedule = false
+        let host = NSHostingView(rootView: TaskBlockScheduleSheet(
+            store: store,
+            noteID: note.id,
+            blockID: blockID,
+            now: .distantPast,
+            prepareForMutation: {
+                switch await autosave.flushLatest() {
+                case .clean, .persisted: true
+                case .protectedOnly, .unsafeLatestUnprotected: false
+                }
+            },
+            onCancel: {},
+            onScheduled: { didSchedule = true }
+        ))
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 420, height: 260),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer {
+            window.orderOut(nil)
+        }
+        host.layoutSubtreeIfNeeded()
+        #expect(store.state.notes[note.id]?.document.blocks.first?.kind == .paragraph)
+        let returnKey = try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "\r",
+            charactersIgnoringModifiers: "\r",
+            isARepeat: false,
+            keyCode: 36
+        ))
+        #expect(window.performKeyEquivalent(with: returnKey))
+
+        #expect(await waitForTaskBlock {
+            store.state.taskBlockLinks.contains { $0.noteID == note.id && $0.blockID == blockID }
+        })
+        #expect(await waitForTaskBlock { didSchedule })
+        #expect(autosave.statusMessage == nil)
+    }
+
     @Test func scheduleTaskBlockCreatesNonRecurringItemAndSharedCompletion() async throws {
         let calendar = makeEmptyState()
         let store = WorkspaceStore(
@@ -300,6 +381,13 @@ struct TaskBlockCalendarIntegrationTests {
 @MainActor
 private final class ImmediateTaskBlockScheduler: NoteAutosaveScheduling {
     func sleep(milliseconds: UInt64) async throws {}
+}
+
+@MainActor
+private final class SuspendedTaskBlockScheduler: NoteAutosaveScheduling {
+    func sleep(milliseconds: UInt64) async throws {
+        try await Task.sleep(for: .seconds(30))
+    }
 }
 
 @MainActor

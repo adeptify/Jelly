@@ -46,6 +46,7 @@ struct TaskBlockScheduleSheet: View {
     let store: WorkspaceStore
     let noteID: NoteID
     let blockID: BlockID
+    let prepareForMutation: () async -> Bool
     let onCancel: () -> Void
     let onScheduled: () -> Void
     private let timeZone: TimeZone
@@ -59,6 +60,7 @@ struct TaskBlockScheduleSheet: View {
         blockID: BlockID,
         now: Date = Date(),
         timeZone: TimeZone = .autoupdatingCurrent,
+        prepareForMutation: @escaping () async -> Bool = { true },
         onCancel: @escaping () -> Void,
         onScheduled: @escaping () -> Void
     ) {
@@ -66,6 +68,7 @@ struct TaskBlockScheduleSheet: View {
         self.noteID = noteID
         self.blockID = blockID
         self.timeZone = timeZone
+        self.prepareForMutation = prepareForMutation
         self.onCancel = onCancel
         self.onScheduled = onScheduled
         _selectedDate = State(initialValue: now)
@@ -104,6 +107,10 @@ struct TaskBlockScheduleSheet: View {
 
     private func schedule() async {
         do {
+            guard await prepareForMutation() else {
+                error = "请先完成当前笔记的保存。"
+                return
+            }
             guard let note = store.state.notes[noteID] else {
                 error = "笔记不存在。"
                 return
