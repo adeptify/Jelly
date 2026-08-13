@@ -553,6 +553,7 @@ struct MonthView: View {
                     onCancel: { editorSession = nil },
                     onSaved: { editorSession = nil }
                 )
+                .id(session.id)
                 .background(theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
