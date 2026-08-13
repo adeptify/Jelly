@@ -101,7 +101,14 @@ enum BlockTextStyle {
     static func paragraphStyle(for kind: BlockKind, indentLevel: Int = 0) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.lineHeightMultiple = 1.45
-        style.paragraphSpacing = kind == .divider ? 8 : 5
+        switch kind {
+        case .bullet, .ordered, .task:
+            style.paragraphSpacing = 0
+        case .divider:
+            style.paragraphSpacing = 8
+        case .paragraph, .heading1, .heading2, .heading3, .quote, .code, .link:
+            style.paragraphSpacing = 5
+        }
         if [.bullet, .ordered, .task, .quote].contains(kind) {
             let structuralIndent = CGFloat(max(0, indentLevel) * 20)
             style.firstLineHeadIndent = 22 + structuralIndent

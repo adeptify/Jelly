@@ -122,6 +122,61 @@ struct ContinuousBlockEditorHostTests {
         #expect(fixture.session.undoManager.canUndo)
     }
 
+    @Test @MainActor func consecutiveBulletRowsKeepACompactContinuousWritingRhythm() throws {
+        let blocks = [
+            continuousBlock(id: 42, text: "三年级啊", kind: .bullet),
+            continuousBlock(id: 43, text: "是大数据大", kind: .bullet),
+            continuousBlock(id: 44, text: "三菱电机按时", kind: .bullet)
+        ]
+        let fixture = continuousFixture(
+            blocks: blocks,
+            selection: continuousCaret(blocks[0].id, 0)
+        )
+        fixture.host.frame = .init(x: 0, y: 0, width: 480, height: 240)
+        fixture.host.layoutSubtreeIfNeeded()
+        let layoutManager = try #require(fixture.view.layoutManager)
+        let textContainer = try #require(fixture.view.textContainer)
+        layoutManager.ensureLayout(for: textContainer)
+        let offsets = [
+            0,
+            "三年级啊\n".utf16.count,
+            "三年级啊\n是大数据大\n".utf16.count
+        ]
+        let rows = offsets.map { offset in
+            layoutManager.lineFragmentUsedRect(
+                forGlyphAt: layoutManager.glyphIndexForCharacter(at: offset),
+                effectiveRange: nil
+            )
+        }
+        let gaps = zip(rows, rows.dropFirst()).map { $1.minY - $0.minY }
+
+        #expect(
+            gaps.allSatisfy { $0 >= 24 && $0 <= 29 },
+            "连续列表的行距应在 24...29pt，实际为 \(gaps)"
+        )
+    }
+
+    @Test @MainActor func trailingEmptyTaskUsesTheExtraLineForItsCheckbox() throws {
+        let first = continuousBlock(id: 45, text: "完成一项", kind: .task)
+        let last = continuousBlock(id: 46, text: "", kind: .task)
+        let fixture = continuousFixture(
+            blocks: [first, last],
+            selection: continuousCaret(last.id, 0)
+        )
+        fixture.host.frame = .init(x: 0, y: 0, width: 480, height: 160)
+        fixture.host.layoutSubtreeIfNeeded()
+        let layoutManager = try #require(fixture.view.layoutManager)
+        let textContainer = try #require(fixture.view.textContainer)
+        layoutManager.ensureLayout(for: textContainer)
+        let checkbox = try #require(fixture.view.taskCheckboxFrame(for: last.id))
+        let extraLine = layoutManager.extraLineFragmentUsedRect
+        let expectedMinY = fixture.view.textContainerOrigin.y
+            + extraLine.minY
+            + max(0, (extraLine.height - 18) / 2)
+
+        #expect(abs(checkbox.minY - expectedMinY) < 0.5)
+    }
+
     @Test @MainActor func horizontalMovementCrossesStructuralNewlineAndLastCharacterDeletionKeepsOneBlock() throws {
         let first = continuousBlock(id: 45, text: "甲")
         let second = continuousBlock(id: 46, text: "乙")

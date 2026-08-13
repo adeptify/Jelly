@@ -180,10 +180,15 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
             return .init(x: 0, y: 0, width: bounds.width, height: 24)
         }
         let location = projection.segments[index].displayRange.location
-        guard ownedLayoutManager.numberOfGlyphs > 0, (textStorage?.length ?? 0) > 0 else {
+        let textLength = textStorage?.length ?? 0
+        if location == textLength,
+           !ownedLayoutManager.extraLineFragmentUsedRect.isEmpty {
+            return ownedLayoutManager.extraLineFragmentUsedRect
+        }
+        guard ownedLayoutManager.numberOfGlyphs > 0, textLength > 0 else {
             return .init(x: 0, y: 0, width: bounds.width, height: 24)
         }
-        let characterIndex = min(location, max(0, (textStorage?.length ?? 1) - 1))
+        let characterIndex = min(location, max(0, textLength - 1))
         let glyphIndex = ownedLayoutManager.glyphIndexForCharacter(at: characterIndex)
         return ownedLayoutManager.lineFragmentUsedRect(
             forGlyphAt: min(glyphIndex, max(0, ownedLayoutManager.numberOfGlyphs - 1)),
