@@ -134,6 +134,23 @@ struct CalendarUndoCommandRoutingTests {
         await Task.yield()
         #expect(CalendarUndoCommandRouter.isDisabled(for: store, focusRegistry: commands.focusRegistry) == false)
     }
+
+    @Test func unchangedCheckpointDoesNotRepublishUndoAvailability() async {
+        let registry = EditorFocusRegistry()
+        let manager = UndoManager()
+        registry.register(manager, ownerID: UUID())
+
+        var updates: [(Bool, Bool)] = []
+        let token = registry.availabilityPublisher
+            .dropFirst()
+            .sink { updates.append($0) }
+        defer { token.cancel() }
+
+        NotificationCenter.default.post(name: .NSUndoManagerCheckpoint, object: manager)
+        await Task.yield()
+
+        #expect(updates.isEmpty)
+    }
 }
 
 @MainActor

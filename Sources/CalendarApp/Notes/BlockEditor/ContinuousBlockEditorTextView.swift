@@ -19,6 +19,7 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
     private let ownedTextStorage: NSTextStorage
     private let ownedLayoutManager: NSLayoutManager
     private let ownedTextContainer: NSTextContainer
+    private(set) var immediateInsertionIndicator = NSTextInsertionIndicator(frame: .zero)
     private(set) var fullProjectionApplyCount = 0
     private(set) var diffProjectionApplyCount = 0
     private(set) var selectionRevealRequestCount = 0
@@ -109,6 +110,7 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
                 selectedRange: selectedRange
             )
         }
+        updateImmediateInsertionIndicator()
         needsDisplay = true
         requestSelectionRevealIfFocused()
     }
@@ -125,6 +127,28 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
             )
         }
         drawStructuralDecorations()
+    }
+
+    override func layout() {
+        super.layout()
+        updateImmediateInsertionIndicator()
+    }
+
+    override func drawInsertionPoint(
+        in rect: NSRect,
+        color: NSColor,
+        turnedOn flag: Bool
+    ) {
+        let font = insertionPointFont(at: selectedRange.location)
+        let glyphHeight = ceil(font.ascender - font.descender + font.leading)
+        let height = min(rect.height, glyphHeight)
+        let alignedRect = NSRect(
+            x: rect.minX,
+            y: rect.midY - height / 2,
+            width: rect.width,
+            height: height
+        )
+        super.drawInsertionPoint(in: alignedRect, color: color, turnedOn: flag)
     }
 
     private func drawStructuralDecorations() {
@@ -347,13 +371,19 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
 
     override func becomeFirstResponder() -> Bool {
         let result = super.becomeFirstResponder()
-        if result, let hostToken { editorSession?.focus(hostToken: hostToken) }
+        if result {
+            updateImmediateInsertionIndicator()
+            if let hostToken { editorSession?.focus(hostToken: hostToken) }
+        }
         return result
     }
 
     override func resignFirstResponder() -> Bool {
         let result = super.resignFirstResponder()
-        if result, let hostToken { editorSession?.blur(hostToken: hostToken) }
+        if result {
+            immediateInsertionIndicator.displayMode = .hidden
+            if let hostToken { editorSession?.blur(hostToken: hostToken) }
+        }
         return result
     }
 
@@ -378,6 +408,7 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
             selectedRange,
             typingAttributes: editorSession?.currentTypingAttributes ?? .init(marks: [], linkURL: nil)
         )
+        updateImmediateInsertionIndicator()
     }
 
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
@@ -394,6 +425,7 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
         }
         markedCandidate = Self.string(from: string)
         super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        updateImmediateInsertionIndicator()
     }
 
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
@@ -456,6 +488,10 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
         }
         if let command = Self.command(for: selector), let editorSession {
             if let outcome = editorSession.dispatchTextCommandOutcome(command) {
+                if case .none = outcome.result.mutation,
+                   Self.moveFocusForUnhandledIndentation(selector, from: self) {
+                    return
+                }
                 if outcome.commandHandled { return }
                 super.doCommand(by: selector)
                 return
@@ -527,10 +563,94 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
         isVerticallyResizable = true
         textContainer?.widthTracksTextView = true
         textContainerInset = .init(width: 0, height: 8)
+        insertionPointColor = .clear
+        immediateInsertionIndicator.displayMode = .hidden
+        immediateInsertionIndicator.color = .textInsertionPointColor
+        addSubview(immediateInsertionIndicator)
         setAccessibilityRole(.textArea)
         setAccessibilityLabel("笔记正文")
         setAccessibilityPlaceholderValue("开始写点什么…")
         delegate = self
+    }
+
+    private func updateImmediateInsertionIndicator() {
+        guard window?.firstResponder === self,
+              selectedRange.length == 0,
+              let caretRect = immediateInsertionPointRect(at: selectedRange.location) else {
+            immediateInsertionIndicator.displayMode = .hidden
+            return
+        }
+        let font = insertionPointFont(at: selectedRange.location)
+        let glyphHeight = ceil(font.ascender - font.descender + font.leading)
+        let height = min(caretRect.height, glyphHeight)
+        immediateInsertionIndicator.frame = NSRect(
+            x: caretRect.minX,
+            y: caretRect.midY - height / 2,
+            width: 2,
+            height: height
+        )
+        immediateInsertionIndicator.displayMode = .visible
+    }
+
+    private func immediateInsertionPointRect(at utf16Offset: Int) -> NSRect? {
+        guard utf16Offset >= 0, utf16Offset <= ownedTextStorage.length else { return nil }
+        ownedLayoutManager.ensureLayout(for: ownedTextContainer)
+        let origin = textContainerOrigin
+        let line: NSRect
+        let x: CGFloat
+
+        if utf16Offset == ownedTextStorage.length,
+           !ownedLayoutManager.extraLineFragmentUsedRect.isEmpty {
+            line = ownedLayoutManager.extraLineFragmentUsedRect
+            x = line.minX
+        } else if ownedLayoutManager.numberOfGlyphs > 0,
+                  ownedTextStorage.length > 0 {
+            let characterIndex = min(utf16Offset, ownedTextStorage.length - 1)
+            let glyphIndex = ownedLayoutManager.glyphIndexForCharacter(at: characterIndex)
+            line = ownedLayoutManager.lineFragmentUsedRect(
+                forGlyphAt: glyphIndex,
+                effectiveRange: nil
+            )
+            let glyphRect = ownedLayoutManager.boundingRect(
+                forGlyphRange: .init(location: glyphIndex, length: 1),
+                in: ownedTextContainer
+            )
+            x = utf16Offset == ownedTextStorage.length ? glyphRect.maxX : glyphRect.minX
+        } else {
+            let font = insertionPointFont(at: utf16Offset)
+            let height = ceil(font.ascender - font.descender + font.leading)
+            line = .init(x: 0, y: 0, width: 0, height: height * 1.45)
+            x = 0
+        }
+        return .init(
+            x: origin.x + x,
+            y: origin.y + line.minY,
+            width: 2,
+            height: line.height
+        )
+    }
+
+    private func insertionPointFont(at utf16Offset: Int) -> NSFont {
+        let segment = currentProjection?.segments.first(where: {
+            utf16Offset >= $0.contentRange.location
+                && utf16Offset <= NSMaxRange($0.contentRange)
+        })
+        if let textStorage,
+           let segment,
+           segment.contentRange.length > 0 {
+            let attributeOffset = min(
+                max(utf16Offset - 1, segment.contentRange.location),
+                NSMaxRange(segment.contentRange) - 1
+            )
+            if let font = textStorage.attribute(
+                .font,
+                at: attributeOffset,
+                effectiveRange: nil
+            ) as? NSFont {
+                return font
+            }
+        }
+        return BlockTextStyle.baseFont(for: segment?.kind ?? .paragraph)
     }
 
     private var authoritativeSelectionIsNonEmpty: Bool {
@@ -673,6 +793,22 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
         case "insertTab:": .indent
         case "insertBacktab:": .outdent
         default: nil
+        }
+    }
+
+    private static func moveFocusForUnhandledIndentation(
+        _ selector: Selector,
+        from textView: NSTextView
+    ) -> Bool {
+        switch selector.description {
+        case "insertTab:":
+            textView.window?.selectNextKeyView(textView)
+            return true
+        case "insertBacktab:":
+            textView.window?.selectPreviousKeyView(textView)
+            return true
+        default:
+            return false
         }
     }
 

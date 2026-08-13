@@ -78,6 +78,139 @@ struct ContinuousBlockEditorHostTests {
         #expect(fixture.view.isPresentingEmptyDocumentPlaceholder)
     }
 
+    @Test @MainActor func bodyCaretDrawsNearGlyphHeightInsteadOfFillingTheLineFragment() throws {
+        let block = continuousBlock(id: 27, text: "正文")
+        let fixture = continuousFixture(blocks: [block], selection: continuousCaret(block.id, 1))
+        let proposed = NSRect(x: 10, y: 4, width: 2, height: 34)
+
+        let drawn = try drawnInsertionPointBounds(in: fixture.view, proposed: proposed)
+
+        #expect(drawn.height <= 20)
+        #expect(abs(drawn.midY - proposed.midY) <= 1)
+    }
+
+    @Test @MainActor func editorHidesTheAnimatedSystemCaret() throws {
+        let block = continuousBlock(id: 32, text: "正文")
+        let fixture = continuousFixture(blocks: [block], selection: continuousCaret(block.id, 1))
+        let systemColor = try #require(fixture.view.insertionPointColor)
+
+        #expect(systemColor.alphaComponent == 0)
+        #expect(fixture.view.immediateInsertionIndicator.hitTest(.zero) == nil)
+    }
+
+    @Test @MainActor func immediateIndicatorMovesToTheNewCaretPositionDuringTheKeystroke() throws {
+        let block = continuousBlock(id: 33, text: "原")
+        let fixture = continuousFixture(blocks: [block], selection: continuousCaret(block.id, 1))
+        fixture.host.frame = .init(x: 0, y: 0, width: 320, height: 100)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 320, height: 120),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = fixture.host
+        window.makeKeyAndOrderFront(nil)
+        #expect(window.makeFirstResponder(fixture.view))
+        fixture.host.layoutSubtreeIfNeeded()
+        let before = fixture.view.immediateInsertionIndicator.frame
+
+        fixture.view.insertText("文", replacementRange: .init(location: NSNotFound, length: 0))
+
+        let after = fixture.view.immediateInsertionIndicator.frame
+        #expect(after.minX > before.minX)
+        #expect(after.height <= 20)
+        #expect(fixture.view.immediateInsertionIndicator.displayMode == .visible)
+        window.orderOut(nil)
+    }
+
+    @Test @MainActor func immediateIndicatorFollowsTextWrappingDuringLayout() throws {
+        let block = continuousBlock(
+            id: 34,
+            text: "这是一段会在编辑器变窄时重新换行的连续正文内容"
+        )
+        let fixture = continuousFixture(
+            blocks: [block],
+            selection: continuousCaret(block.id, continuousText(block).count)
+        )
+        fixture.host.frame = .init(x: 0, y: 0, width: 420, height: 160)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 420, height: 180),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = fixture.host
+        window.makeKeyAndOrderFront(nil)
+        #expect(window.makeFirstResponder(fixture.view))
+        fixture.host.layoutSubtreeIfNeeded()
+        let before = fixture.view.immediateInsertionIndicator.frame
+
+        fixture.host.frame.size.width = 140
+        fixture.host.layoutSubtreeIfNeeded()
+
+        let after = fixture.view.immediateInsertionIndicator.frame
+        #expect(after.minY > before.minY)
+        window.orderOut(nil)
+    }
+
+    @Test @MainActor func tabLeavesAnOrdinaryParagraphForTheNextKeyboardControl() throws {
+        let block = continuousBlock(id: 35, text: "普通正文")
+        let fixture = continuousFixture(
+            blocks: [block],
+            selection: continuousCaret(block.id, 2)
+        )
+        let container = NSView(frame: .init(x: 0, y: 0, width: 420, height: 180))
+        fixture.host.frame = .init(x: 0, y: 40, width: 420, height: 140)
+        let nextControl = ContinuousKeyboardFocusProbe(
+            frame: .init(x: 0, y: 0, width: 80, height: 30)
+        )
+        container.addSubview(fixture.host)
+        container.addSubview(nextControl)
+        fixture.view.nextKeyView = nextControl
+        let window = NSWindow(
+            contentRect: container.bounds,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        #expect(window.makeFirstResponder(fixture.view))
+
+        fixture.view.doCommand(by: #selector(NSResponder.insertTab(_:)))
+
+        #expect(window.firstResponder === nextControl)
+        #expect(fixture.session.document.blocks[0].inlineContent.spans.map(\.text).joined() == "普通正文")
+    }
+
+    @Test @MainActor func emptyHeadingCaretKeepsTheHeadingGlyphHeight() throws {
+        let block = continuousBlock(id: 28, text: "", kind: .heading1)
+        let fixture = continuousFixture(blocks: [block], selection: continuousCaret(block.id, 0))
+        let proposed = NSRect(x: 10, y: 2, width: 2, height: 40)
+
+        let drawn = try drawnInsertionPointBounds(in: fixture.view, proposed: proposed)
+
+        #expect(drawn.height >= 29)
+        #expect(drawn.height <= 32)
+        #expect(abs(drawn.midY - proposed.midY) <= 1)
+    }
+
+    @Test @MainActor func headingStartCaretUsesTheHeadingRatherThanPreviousSeparatorFont() throws {
+        let paragraph = continuousBlock(id: 29, text: "上一段")
+        let heading = continuousBlock(id: 30, text: "标题", kind: .heading1)
+        let fixture = continuousFixture(
+            blocks: [paragraph, heading],
+            selection: continuousCaret(heading.id, 0)
+        )
+        let proposed = NSRect(x: 10, y: 2, width: 2, height: 40)
+
+        let drawn = try drawnInsertionPointBounds(in: fixture.view, proposed: proposed)
+
+        #expect(drawn.height >= 24)
+        #expect(drawn.height <= 32)
+    }
+
     @Test @MainActor func nativeCrossThreeBlockSelectionRoundTripsWithReverseDirection() throws {
         let blocks = [
             continuousBlock(id: 30, text: "甲乙"),
@@ -672,6 +805,11 @@ private final class CountingContinuousHost: ContinuousBlockEditorHost {
 }
 
 @MainActor
+private final class ContinuousKeyboardFocusProbe: NSView {
+    override var acceptsFirstResponder: Bool { true }
+}
+
+@MainActor
 private func continuousFixture(
     blocks: [DocumentBlock],
     selection: BlockEditorSelection,
@@ -714,6 +852,53 @@ private func continuousCaret(_ blockID: BlockID, _ offset: Int) -> BlockEditorSe
         focus: .init(blockID: blockID, graphemeOffset: offset),
         preferredColumn: nil,
         typingAttributes: .init(marks: [], linkURL: nil)
+    )
+}
+
+@MainActor
+private func drawnInsertionPointBounds(
+    in textView: ContinuousBlockEditorTextView,
+    proposed: NSRect
+) throws -> NSRect {
+    let width = 50
+    let height = 50
+    let bitmap = try #require(NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: width,
+        pixelsHigh: height,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+    ))
+    let context = try #require(NSGraphicsContext(bitmapImageRep: bitmap))
+    NSGraphicsContext.saveGraphicsState()
+    defer { NSGraphicsContext.restoreGraphicsState() }
+    NSGraphicsContext.current = context
+    textView.drawInsertionPoint(in: proposed, color: .systemBlue, turnedOn: true)
+    context.flushGraphics()
+
+    var minX = width
+    var minY = height
+    var maxX = -1
+    var maxY = -1
+    for y in 0..<height {
+        for x in 0..<width where (bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.2 {
+            minX = min(minX, x)
+            minY = min(minY, y)
+            maxX = max(maxX, x)
+            maxY = max(maxY, y)
+        }
+    }
+    _ = try #require(maxX >= minX && maxY >= minY)
+    return NSRect(
+        x: minX,
+        y: height - maxY - 1,
+        width: maxX - minX + 1,
+        height: maxY - minY + 1
     )
 }
 

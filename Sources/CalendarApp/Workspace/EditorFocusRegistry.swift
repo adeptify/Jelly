@@ -13,6 +13,8 @@ final class EditorFocusRegistry: ObservableObject {
     private weak var focusedManager: UndoManager?
     private var focusedOwnerID: UUID?
     private var notificationTokens: [NSObjectProtocol] = []
+    private var isRefreshingAvailability = false
+    private var notificationRefreshScheduled = false
     private let availabilitySubject = CurrentValueSubject<(Bool, Bool), Never>((false, false))
     private var lastAvailability: (Bool, Bool) = (false, false)
 
@@ -43,6 +45,12 @@ final class EditorFocusRegistry: ObservableObject {
     func routeRedo() -> EditorUndoRouteResult { route(undo: false) }
 
     private func refreshAvailability(forceNotification: Bool = false) {
+        // `canRedo` posts a checkpoint synchronously. Keep that notification
+        // from scheduling another refresh of the same query forever.
+        guard !isRefreshingAvailability else { return }
+        isRefreshingAvailability = true
+        defer { isRefreshingAvailability = false }
+
         guard focusedOwnerID != nil else {
             publishAvailability((false, false), forceNotification: forceNotification)
             return
@@ -77,9 +85,21 @@ final class EditorFocusRegistry: ObservableObject {
         let center = NotificationCenter.default
         let names: [Notification.Name] = [.NSUndoManagerDidUndoChange, .NSUndoManagerDidRedoChange, .NSUndoManagerCheckpoint]
         for name in names {
-            notificationTokens.append(center.addObserver(forName: name, object: manager, queue: nil) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.refreshAvailability(forceNotification: true) }
+            notificationTokens.append(center.addObserver(forName: name, object: manager, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.scheduleNotificationRefresh()
+                }
             })
+        }
+    }
+
+    private func scheduleNotificationRefresh() {
+        guard !isRefreshingAvailability, !notificationRefreshScheduled else { return }
+        notificationRefreshScheduled = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.notificationRefreshScheduled = false
+            self.refreshAvailability()
         }
     }
 
