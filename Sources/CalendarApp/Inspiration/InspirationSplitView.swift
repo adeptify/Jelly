@@ -4,21 +4,34 @@ import SwiftUI
 import WorkspaceDomain
 
 struct InspirationSplitView: View {
+    private struct ConversionNotice: Equatable {
+        let noteID: NoteID
+        let title: String
+        let stateGeneration: UInt
+    }
+    private struct LifecycleNotice: Equatable {
+        let message: String
+        let stateGeneration: UInt
+    }
     let store: WorkspaceStore
     @ObservedObject var newItemRouter: WorkspaceNewItemRouter
     let transitionCoordinator: WorkspaceRouteTransitionCoordinator?
-    let deepLinkRouter: WorkspaceDeepLinkRouter?
+    @ObservedObject var deepLinkRouter: WorkspaceDeepLinkRouter
     @State private var model: InspirationViewModel
-    @State private var showCategoryManager = false
+    @State private var categoryManagerPresentation: CategoryManagerPresentation?
+    @State private var inboxScope: InspirationInboxScope = .pending
     @FocusState private var captureFocused: Bool
     @State private var inboxCollapsed = false
     @State private var availableWidth: CGFloat = .infinity
+    @State private var conversionNotice: ConversionNotice?
+    @State private var lifecycleNotice: LifecycleNotice?
+    @Environment(\.workspaceActiveRoute) private var activeWorkspaceRoute
 
     init(
         store: WorkspaceStore,
         newItemRouter: WorkspaceNewItemRouter = WorkspaceNewItemRouter(),
         transitionCoordinator: WorkspaceRouteTransitionCoordinator? = nil,
-        deepLinkRouter: WorkspaceDeepLinkRouter? = nil,
+        deepLinkRouter: WorkspaceDeepLinkRouter = WorkspaceDeepLinkRouter(),
         searchIndex: WorkspaceSearchIndex = WorkspaceSearchIndex()
     ) {
         self.store = store
@@ -37,15 +50,60 @@ struct InspirationSplitView: View {
             .onAppear { availableWidth = proxy.size.width }
             .onChange(of: proxy.size.width) { _, width in availableWidth = width }
         }
-        .sheet(isPresented: $showCategoryManager) {
-            CategoryManagerView(store: store)
+        .sheet(item: $categoryManagerPresentation) { presentation in
+            CategoryManagerView(
+                store: store,
+                initialCategoryID: presentation.initialCategoryID
+            )
+        }
+        .overlay(alignment: .top) {
+            if let conversionNotice {
+                HStack(spacing: 10) {
+                    Label("已生成《\(conversionNotice.title)》", systemImage: "checkmark.circle.fill")
+                    Button("打开笔记") {
+                        self.conversionNotice = nil
+                        openNote(conversionNotice.noteID)
+                    }
+                    Button("撤销") {
+                        Task { await undoConversion(conversionNotice) }
+                    }
+                }
+                .font(.system(size: 12, weight: .medium))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(.regularMaterial, in: Capsule())
+                .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+                .padding(.top, 8)
+            } else if let lifecycleNotice {
+                HStack(spacing: 10) {
+                    Label(lifecycleNotice.message, systemImage: "checkmark.circle.fill")
+                    Button("撤销") {
+                        Task { await undoLifecycleChange(lifecycleNotice) }
+                    }
+                }
+                .font(.system(size: 12, weight: .medium))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(.regularMaterial, in: Capsule())
+                .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+                .padding(.top, 8)
+            }
         }
         .onChange(of: store.statePublicationGeneration) { _, _ in
             model.refresh()
         }
-        .onAppear { consumeNewItemRequest(newItemRouter.pendingRequest) }
+        .onAppear {
+            consumeNewItemRequest(newItemRouter.pendingRequest)
+            consumeDeepLink(deepLinkRouter.pendingRequest)
+        }
         .onChange(of: newItemRouter.pendingRequest) { _, request in
             consumeNewItemRequest(request)
+        }
+        .onChange(of: deepLinkRouter.pendingRequest) { _, request in
+            consumeDeepLink(request)
+        }
+        .onChange(of: activeWorkspaceRoute) { _, route in
+            if route != .inspiration { categoryManagerPresentation = nil }
         }
     }
 
@@ -75,6 +133,7 @@ struct InspirationSplitView: View {
                 $0.name.localizedStandardCompare($1.name) == .orderedAscending
             },
             captureFocused: $captureFocused,
+            scope: $inboxScope,
             onSelect: { id in
                 model.select(id)
                 if NotesAdaptiveLayout.isCompact(width: availableWidth) { inboxCollapsed = true }
@@ -83,7 +142,11 @@ struct InspirationSplitView: View {
                 if NotesAdaptiveLayout.isCompact(width: availableWidth) { inboxCollapsed = true }
             },
             onToggleInbox: { inboxCollapsed = true },
-            onShowCategoryManager: { showCategoryManager = true }
+            onShowCategoryManager: {
+                categoryManagerPresentation = CategoryManagerPresentation(
+                    initialCategoryID: model.selected?.categoryID
+                )
+            }
         )
     }
 
@@ -92,9 +155,36 @@ struct InspirationSplitView: View {
             model: model,
             store: store,
             showsInboxButton: showsInboxButton,
+            showsSelectionPrompt: InspirationDetailEmptyStatePolicy.showsSelectionPrompt(
+                visibleItemCount: visibleInspirationCount,
+                showsInboxButton: showsInboxButton
+            ),
             onToggleInbox: { inboxCollapsed = false },
-            onOpenNote: openNote
+            onOpenNote: openNote,
+            onConverted: { noteID, title in
+                lifecycleNotice = nil
+                conversionNotice = ConversionNotice(
+                    noteID: noteID,
+                    title: title,
+                    stateGeneration: store.statePublicationGeneration
+                )
+            },
+            onLifecycleChanged: { message in
+                conversionNotice = nil
+                lifecycleNotice = LifecycleNotice(
+                    message: message,
+                    stateGeneration: store.statePublicationGeneration
+                )
+            }
         )
+    }
+
+    private var visibleInspirationCount: Int {
+        switch inboxScope {
+        case .pending: model.pending.count
+        case .converted: model.converted.count
+        case .archived: model.archived.count
+        }
     }
 
     private func consumeNewItemRequest(_ request: WorkspaceNewItemRequest?) {
@@ -104,12 +194,51 @@ struct InspirationSplitView: View {
         captureFocused = true
     }
 
+    private func consumeDeepLink(_ request: WorkspaceDeepLinkRequest?) {
+        guard let request,
+              case let .inspiration(id) = request.target,
+              store.state.inspirations[id] != nil,
+              deepLinkRouter.consume(request.id, target: request.target) != nil else { return }
+        model.select(id)
+        if NotesAdaptiveLayout.isCompact(width: availableWidth) { inboxCollapsed = true }
+    }
+
     private func openNote(_ noteID: NoteID) {
-        guard let transitionCoordinator, let deepLinkRouter else { return }
+        guard let transitionCoordinator else { return }
         Task {
             guard await transitionCoordinator.requestActivation(.notes) else { return }
             deepLinkRouter.request(.note(noteID))
         }
+    }
+
+    private func undoConversion(_ notice: ConversionNotice) async {
+        guard conversionNotice == notice,
+              store.statePublicationGeneration == notice.stateGeneration else {
+            conversionNotice = nil
+            return
+        }
+        do {
+            _ = try await store.undo()
+            model.refresh()
+        } catch {
+            // The notice disappears instead of offering an unsafe second undo.
+        }
+        conversionNotice = nil
+    }
+
+    private func undoLifecycleChange(_ notice: LifecycleNotice) async {
+        guard lifecycleNotice == notice,
+              store.statePublicationGeneration == notice.stateGeneration else {
+            lifecycleNotice = nil
+            return
+        }
+        do {
+            _ = try await store.undo()
+            model.refresh()
+        } catch {
+            // Do not keep an undo affordance once its exact mutation is stale.
+        }
+        lifecycleNotice = nil
     }
 }
 
@@ -117,11 +246,11 @@ struct InspirationInboxView: View {
     @Bindable var model: InspirationViewModel
     let categories: [CalendarCategory]
     var captureFocused: FocusState<Bool>.Binding
+    @Binding var scope: InspirationInboxScope
     let onSelect: (InspirationID) -> Void
     let onCaptured: (InspirationID) -> Void
     let onToggleInbox: () -> Void
     let onShowCategoryManager: () -> Void
-    @State private var scope: InspirationInboxScope = .pending
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: CalendarSemanticAppearance {
@@ -131,7 +260,7 @@ struct InspirationInboxView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                Text("灵光")
+                Text("灵感")
                     .font(.system(size: 17, weight: .semibold))
                 Spacer(minLength: 0)
                 Button(action: onToggleInbox) {
@@ -266,6 +395,9 @@ struct InspirationInboxView: View {
                 Image(systemName: scope == .archived ? "archivebox" : "lightbulb")
                     .font(.system(size: 20))
                 Text(empty).font(.caption)
+                Text(scope.emptyDescription)
+                    .font(.caption2)
+                    .multilineTextAlignment(.center)
             }
             .foregroundStyle(theme.secondaryText)
             .frame(maxWidth: .infinity)
@@ -406,6 +538,13 @@ enum InspirationInboxScope: String, CaseIterable, Identifiable {
         case .archived: "归档为空"
         }
     }
+    var emptyDescription: String {
+        switch self {
+        case .pending: "在上方记下一闪而过的想法，保存后会立即出现在这里。"
+        case .converted: "从待处理灵感中选择“继续写成笔记”，完成后会移到这里。"
+        case .archived: "归档的灵感会保留在这里，之后仍可恢复。"
+        }
+    }
 
     static func preferred(
         lifecycle: InspirationLifecycle,
@@ -413,6 +552,15 @@ enum InspirationInboxScope: String, CaseIterable, Identifiable {
     ) -> InspirationInboxScope {
         if lifecycle == .archived { return .archived }
         return isConverted ? .converted : .pending
+    }
+}
+
+enum InspirationDetailEmptyStatePolicy {
+    static func showsSelectionPrompt(
+        visibleItemCount: Int,
+        showsInboxButton: Bool
+    ) -> Bool {
+        showsInboxButton || visibleItemCount > 0
     }
 }
 
@@ -426,10 +574,14 @@ struct InspirationDetailView: View {
     @Bindable var model: InspirationViewModel
     let store: WorkspaceStore
     var showsInboxButton = false
+    var showsSelectionPrompt = true
     var onToggleInbox: () -> Void = {}
     var onOpenNote: (NoteID) -> Void = { _ in }
+    var onConverted: (NoteID, String) -> Void = { _, _ in }
+    var onLifecycleChanged: (String) -> Void = { _ in }
     @State private var pendingPermanentDelete: InspirationPermanentDeleteRequest?
     @State private var deleteStatus: String?
+    @FocusState private var contentEditorFocused: Bool
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: CalendarSemanticAppearance {
@@ -494,6 +646,16 @@ struct InspirationDetailView: View {
                         : "删除后无法恢复，并会把 \(request.preview.effects.count) 条笔记来源关系改为“原始灵感已删除”。")
                 }
             }
+            .onChange(of: model.selectedID) { _, _ in
+                contentEditorFocused = false
+            }
+            .onChange(of: contentEditorFocused) { _, isFocused in
+                guard !isFocused else { return }
+                Task { await model.flushSelectedTextEdit() }
+            }
+            .onDisappear {
+                Task { await model.flushSelectedTextEdit() }
+            }
         } else {
             VStack(spacing: 0) {
                 if showsInboxButton {
@@ -506,8 +668,18 @@ struct InspirationDetailView: View {
                     .padding(.horizontal, 20)
                     .frame(height: CalendarTheme.toolbarHeight)
                 }
-                ContentUnavailableView("选择一条灵感", systemImage: "lightbulb", description: Text("打开灵感列表进行选择，或捕获一条新灵感。"))
+                if showsSelectionPrompt {
+                    ContentUnavailableView(
+                        "选择一条灵感",
+                        systemImage: "lightbulb",
+                        description: Text("打开灵感列表进行选择，或捕获一条新灵感。")
+                    )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    Color.clear
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityHidden(true)
+                }
             }
             .background(theme.canvas)
         }
@@ -525,7 +697,7 @@ struct InspirationDetailView: View {
                 .help("显示灵感列表")
                 .accessibilityLabel("显示灵感列表")
             }
-            Text("灵光详情")
+            Text("灵感详情")
                 .font(.system(size: 17, weight: .semibold))
             Spacer(minLength: 12)
             categoryMenu(inspiration)
@@ -561,7 +733,7 @@ struct InspirationDetailView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .help("分类会与日历和笔记共用")
-        .accessibilityLabel("灵光分类：\(categoryName(for: inspiration.categoryID))")
+        .accessibilityLabel("灵感分类：\(categoryName(for: inspiration.categoryID))")
     }
 
     private func contentSection(_ inspiration: Inspiration) -> some View {
@@ -571,16 +743,87 @@ struct InspirationDetailView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(theme.secondaryText)
                 Spacer(minLength: 12)
-                Text(inspiration.createdAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.secondaryText)
+                if model.selectedTextIsEditable {
+                    textSaveStatus
+                } else {
+                    Text(inspiration.createdAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.secondaryText)
+                }
             }
-            Text(primaryContent(inspiration))
+            if model.selectedTextIsEditable {
+                TextEditor(text: Binding(
+                    get: { model.selectedTextDraft },
+                    set: { model.selectedTextDraft = $0 }
+                ))
                 .font(.system(size: 18, weight: .regular))
                 .lineSpacing(6)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityIdentifier("inspiration-content")
+                .scrollContentBackground(.hidden)
+                .focused($contentEditorFocused)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .frame(minHeight: 150, maxHeight: 320)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(theme.elevatedSurface.opacity(contentEditorFocused ? 0.72 : 0.38))
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(
+                            contentEditorFocused
+                                ? theme.controlAccent.opacity(0.72)
+                                : theme.separator.opacity(0.38),
+                            lineWidth: contentEditorFocused ? 1.5 : 0.5
+                        )
+                }
+                .accessibilityLabel("灵感内容")
+                .accessibilityHint("可直接补写，内容会自动保存")
+                .accessibilityIdentifier("inspiration-content-editor")
+            } else {
+                Text(primaryContent(inspiration))
+                    .font(.system(size: 18, weight: .regular))
+                    .lineSpacing(6)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("inspiration-content")
+                readOnlyExplanation(for: inspiration)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var textSaveStatus: some View {
+        switch model.selectedTextSaveState {
+        case .idle:
+            Label("可直接补写 · 自动保存", systemImage: "pencil")
+                .foregroundStyle(theme.secondaryText)
+        case .waiting, .saving:
+            Label("正在保存…", systemImage: "arrow.triangle.2.circlepath")
+                .foregroundStyle(theme.secondaryText)
+        case .saved:
+            Label("已保存", systemImage: "checkmark.circle")
+                .foregroundStyle(theme.secondaryText)
+        case .invalid:
+            Label("内容不能为空，原内容仍保留", systemImage: "exclamationmark.circle")
+                .foregroundStyle(.orange)
+        case .failed:
+            Label("保存失败，原内容仍保留", systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+        }
+    }
+
+    @ViewBuilder
+    private func readOnlyExplanation(for inspiration: Inspiration) -> some View {
+        if model.selectedConvertedNoteID != nil {
+            Label("已生成笔记，后续内容请在笔记中继续。", systemImage: "note.text")
+                .font(.system(size: 12))
+                .foregroundStyle(theme.secondaryText)
+                .padding(.top, 4)
+        } else if inspiration.lifecycle == .archived, inspiration.inputKind == .text {
+            Label("这条灵感已归档，恢复后可以继续补写。", systemImage: "archivebox")
+                .font(.system(size: 12))
+                .foregroundStyle(theme.secondaryText)
+                .padding(.top, 4)
         }
     }
 
@@ -644,8 +887,14 @@ struct InspirationDetailView: View {
         HStack(spacing: 8) {
             Button {
                 Task {
+                    let existingNoteID = model.selectedConvertedNoteID
                     if let noteID = try? await model.convertSelectedToNote() {
-                        onOpenNote(noteID)
+                        if existingNoteID != nil {
+                            onOpenNote(noteID)
+                        } else {
+                            let title = store.state.notes[noteID]?.title ?? "无标题"
+                            onConverted(noteID, title)
+                        }
                     }
                 }
             } label: {
@@ -665,9 +914,13 @@ struct InspirationDetailView: View {
             Button(inspiration.lifecycle == .archived ? "恢复" : "归档") {
                 Task {
                     if inspiration.lifecycle == .archived {
-                        _ = try? await model.restoreSelected()
+                        if (try? await model.restoreSelected()) == true {
+                            onLifecycleChanged("灵感已恢复")
+                        }
                     } else {
-                        _ = try? await model.archiveSelected()
+                        if (try? await model.archiveSelected()) == true {
+                            onLifecycleChanged("灵感已归档")
+                        }
                     }
                 }
             }

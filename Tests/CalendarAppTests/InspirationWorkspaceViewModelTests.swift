@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import SwiftUI
 import Testing
 import WorkspaceDomain
 @testable import CalendarApp
@@ -6,6 +8,136 @@ import WorkspaceDomain
 @Suite("InspirationWorkspaceViewModelTests")
 @MainActor
 struct InspirationWorkspaceViewModelTests {
+    @Test func deepLinkRouterOpensTheExactInspirationInsteadOfKeepingTheFirstRow() async throws {
+        _ = NSApplication.shared
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let writer = InspirationViewModel(store: store)
+        let first = try await writer.capture("深链第一条")
+        try await Task.sleep(for: .milliseconds(20))
+        _ = try await writer.capture("深链第二条")
+        let router = WorkspaceDeepLinkRouter()
+        let host = NSHostingView(rootView: InspirationSplitView(
+            store: store,
+            newItemRouter: WorkspaceNewItemRouter(),
+            deepLinkRouter: router
+        ))
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 960, height: 680),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        host.layoutSubtreeIfNeeded()
+        #expect(await waitUntil(timeoutNanoseconds: 1_000_000_000) {
+            host.layoutSubtreeIfNeeded()
+            return inspirationDescendants(of: host, as: NSTextView.self).contains {
+                $0.string == "深链第二条"
+            }
+        })
+
+        _ = router.request(.inspiration(first))
+
+        #expect(await waitUntil(timeoutNanoseconds: 1_000_000_000) {
+            host.layoutSubtreeIfNeeded()
+            return inspirationDescendants(of: host, as: NSTextView.self).contains {
+                $0.string == "深链第一条"
+            }
+        })
+    }
+
+    @Test func splitEmptyInboxUsesOnlyTheScopeSpecificEmptyState() {
+        #expect(InspirationDetailEmptyStatePolicy.showsSelectionPrompt(
+            visibleItemCount: 0,
+            showsInboxButton: false
+        ) == false)
+        #expect(InspirationDetailEmptyStatePolicy.showsSelectionPrompt(
+            visibleItemCount: 1,
+            showsInboxButton: false
+        ))
+        #expect(InspirationDetailEmptyStatePolicy.showsSelectionPrompt(
+            visibleItemCount: 0,
+            showsInboxButton: true
+        ))
+        #expect(InspirationInboxScope.converted.emptyDescription.contains("待处理"))
+        #expect(InspirationInboxScope.archived.emptyDescription.contains("归档"))
+    }
+
+    @Test func selectedTextInspirationCanBeEditedAndFlushedToDurableState() async throws {
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let savedAt = Date(timeIntervalSince1970: 1_700_004_200)
+        let model = InspirationViewModel(store: store, clock: { savedAt })
+        let id = try await model.capture("先记一句")
+        model.select(id)
+
+        #expect(model.selectedTextIsEditable)
+        model.selectedTextDraft = "先记一句\n再补一句"
+        #expect(model.selectedTextSaveState == .waiting)
+
+        await model.flushSelectedTextEdit()
+
+        #expect(store.state.inspirations[id]?.rawText == "先记一句\n再补一句")
+        #expect(store.state.inspirations[id]?.updatedAt == savedAt)
+        #expect(model.selectedTextSaveState == .saved)
+    }
+
+    @Test func blankTextDraftDoesNotOverwriteTheLastSavedInspiration() async throws {
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let model = InspirationViewModel(store: store)
+        let id = try await model.capture("不能丢的内容")
+        model.select(id)
+
+        model.selectedTextDraft = " \n "
+        await model.flushSelectedTextEdit()
+
+        #expect(store.state.inspirations[id]?.rawText == "不能丢的内容")
+        #expect(model.selectedTextSaveState == .invalid)
+    }
+
+    @Test func typingDuringAnInFlightSaveKeepsAndPersistsTheNewestText() async throws {
+        let calendar = makeEmptyState()
+        let repository = InMemoryWorkspaceRepository(initialState: calendar)
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
+        let model = InspirationViewModel(
+            store: store,
+            textSaveDelay: .seconds(60)
+        )
+        let id = try await model.capture("初始内容")
+        model.select(id)
+
+        await repository.suspendNextSave()
+        model.selectedTextDraft = "第一次补写"
+        let firstSave = Task { @MainActor in await model.flushSelectedTextEdit() }
+        await repository.waitForSaveToStart()
+
+        model.selectedTextDraft = "第一次补写\n保存过程中继续输入"
+        await repository.resumeSave()
+        await firstSave.value
+        await model.flushSelectedTextEdit()
+
+        #expect(store.state.inspirations[id]?.rawText == "第一次补写\n保存过程中继续输入")
+        #expect(model.selectedTextDraft == "第一次补写\n保存过程中继续输入")
+        #expect(model.selectedTextSaveState == .saved)
+    }
+
     @Test func textCaptureIsDurableBeforeAnyMetadataWork() async throws {
         let calendar = makeEmptyState()
         let store = WorkspaceStore(
@@ -200,4 +332,13 @@ private func waitUntil(
         try? await Task.sleep(nanoseconds: 5_000_000)
     }
     return predicate()
+}
+
+@MainActor
+private func inspirationDescendants<T: NSView>(of view: NSView, as type: T.Type) -> [T] {
+    var result = (view as? T).map { [$0] } ?? []
+    for child in view.subviews {
+        result.append(contentsOf: inspirationDescendants(of: child, as: type))
+    }
+    return result
 }

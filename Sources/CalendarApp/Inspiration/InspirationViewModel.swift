@@ -7,12 +7,27 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
     let preview: PermanentDeletePreview
 }
 
+enum InspirationTextSaveState: Equatable {
+    case idle
+    case waiting
+    case saving
+    case saved
+    case invalid
+    case failed
+}
+
 @MainActor
 @Observable final class InspirationViewModel {
     private let store: WorkspaceStore
     private let clock: @Sendable () -> Date
     private let metadataResolver: any URLMetadataResolving
     private let searchIndex: WorkspaceSearchIndex
+    private let textSaveDelay: Duration
+    private var textDrafts: [InspirationID: String] = [:]
+    private var textSaveStates: [InspirationID: InspirationTextSaveState] = [:]
+    private var pendingTextSaveTasks: [InspirationID: Task<Void, Never>] = [:]
+    private var dirtyTextDraftIDs: Set<InspirationID> = []
+    private var textDraftGenerations: [InspirationID: UInt64] = [:]
 
     var captureText = ""
     var searchText = "" { didSet { refresh() } }
@@ -27,11 +42,13 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
         store: WorkspaceStore,
         metadataResolver: any URLMetadataResolving = URLMetadataResolver(),
         searchIndex: WorkspaceSearchIndex = WorkspaceSearchIndex(),
+        textSaveDelay: Duration = .milliseconds(450),
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.store = store
         self.metadataResolver = metadataResolver
         self.searchIndex = searchIndex
+        self.textSaveDelay = textSaveDelay
         self.clock = clock
         refresh()
     }
@@ -49,7 +66,34 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
     }
 
     var selectedPrimaryActionTitle: String {
-        selectedConvertedNoteID == nil ? "转成笔记" : "打开笔记"
+        selectedConvertedNoteID == nil ? "继续写成笔记" : "打开笔记"
+    }
+
+    var selectedTextIsEditable: Bool {
+        guard let selected else { return false }
+        return selected.inputKind == .text
+            && selected.lifecycle == .active
+            && selectedConvertedNoteID == nil
+    }
+
+    var selectedTextDraft: String {
+        get {
+            guard let selected else { return "" }
+            return textDrafts[selected.id] ?? selected.rawText ?? ""
+        }
+        set {
+            guard let id = selectedID, selectedTextIsEditable else { return }
+            textDrafts[id] = newValue
+            dirtyTextDraftIDs.insert(id)
+            textDraftGenerations[id, default: 0] &+= 1
+            textSaveStates[id] = .waiting
+            scheduleTextSave(for: id, generation: textDraftGenerations[id, default: 0])
+        }
+    }
+
+    var selectedTextSaveState: InspirationTextSaveState {
+        guard let selectedID else { return .idle }
+        return textSaveStates[selectedID] ?? .idle
     }
 
     var pendingCount: Int { pending.count }
@@ -95,6 +139,9 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
 
     func select(_ id: InspirationID?) {
         selectedID = id
+        if let id, textDrafts[id] == nil {
+            textDrafts[id] = store.state.inspirations[id]?.rawText ?? ""
+        }
     }
 
     func alignSelection(with visibleIDs: [InspirationID]) {
@@ -146,13 +193,17 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
                 now: now
             )
         }
+        let categoryName = store.calendarState.categories[inspiration.categoryID]?.name ?? "未分类"
         let outcome = try await store.sendWorkspace(
             .createInspiration(.init(inspiration: inspiration)),
-            undoLabel: "捕获灵感"
+            undoLabel: WorkspaceCreationFeedback.inspiration(
+                text: trimmed,
+                categoryName: categoryName
+            )
         )
         guard case .committed = outcome else { throw InspirationCaptureError.notCommitted }
         captureText = ""
-        selectedID = id
+        select(id)
         refresh()
         if inspiration.inputKind == .url, let url = inspiration.rawURL {
             Task { await enrichURL(id: id, url: url) }
@@ -162,6 +213,8 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
 
     @discardableResult
     func convertSelectedToNote() async throws -> NoteID? {
+        await flushSelectedTextEdit()
+        guard selectedTextSaveState != .invalid, selectedTextSaveState != .failed else { return nil }
         guard let inspiration = selected else { return nil }
         if let existing = store.state.inspirationNoteLinks.first(where: {
             if case let .live(id) = $0.source { return id == inspiration.id }
@@ -191,6 +244,8 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
 
     @discardableResult
     func archiveSelected() async throws -> Bool {
+        await flushSelectedTextEdit()
+        guard selectedTextSaveState != .invalid, selectedTextSaveState != .failed else { return false }
         guard let id = selectedID else { return false }
         let outcome = try await store.sendWorkspace(.archiveInspiration(id, at: clock()), undoLabel: "归档灵感")
         refresh()
@@ -205,6 +260,76 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
         refresh()
         if case .committed = outcome { return true }
         return false
+    }
+
+    func flushSelectedTextEdit() async {
+        guard let selectedID, dirtyTextDraftIDs.contains(selectedID) else { return }
+        pendingTextSaveTasks[selectedID]?.cancel()
+        pendingTextSaveTasks[selectedID] = nil
+        await saveTextDraft(
+            for: selectedID,
+            generation: textDraftGenerations[selectedID, default: 0]
+        )
+    }
+
+    private func scheduleTextSave(for id: InspirationID, generation: UInt64) {
+        pendingTextSaveTasks[id]?.cancel()
+        let delay = textSaveDelay
+        pendingTextSaveTasks[id] = Task { [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await self?.saveTextDraft(for: id, generation: generation)
+        }
+    }
+
+    private func saveTextDraft(for id: InspirationID, generation: UInt64) async {
+        guard textDraftGenerations[id, default: 0] == generation else { return }
+        guard let draft = textDrafts[id] else { return }
+        guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            textSaveStates[id] = .invalid
+            return
+        }
+        guard let inspiration = store.state.inspirations[id],
+              inspiration.inputKind == .text,
+              inspiration.lifecycle == .active,
+              !store.state.inspirationNoteLinks.contains(where: { link in
+                  if case let .live(sourceID) = link.source { return sourceID == id }
+                  return false
+              }) else {
+            textSaveStates[id] = .failed
+            return
+        }
+        guard inspiration.rawText != draft else {
+            dirtyTextDraftIDs.remove(id)
+            textSaveStates[id] = .saved
+            return
+        }
+        textSaveStates[id] = .saving
+        do {
+            let outcome = try await store.sendWorkspace(
+                .updateInspirationText(id, rawText: draft, at: clock()),
+                undoLabel: "编辑灵感"
+            )
+            refresh()
+            guard textDraftGenerations[id, default: 0] == generation else { return }
+            switch outcome {
+            case .committed, .noChange:
+                dirtyTextDraftIDs.remove(id)
+                textSaveStates[id] = .saved
+            default:
+                textSaveStates[id] = .failed
+            }
+        } catch {
+            guard textDraftGenerations[id, default: 0] == generation else { return }
+            textSaveStates[id] = .failed
+        }
+        if textDraftGenerations[id, default: 0] == generation {
+            pendingTextSaveTasks[id] = nil
+        }
     }
 
     func permanentDeleteRequest(
