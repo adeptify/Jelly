@@ -38,12 +38,20 @@ struct WorkspaceNavigationRail: View {
     private func routeButton(_ route: WorkspaceRoute) -> some View {
         let metadata = route.railMetadata
         let isSelected = routeState.route == route
+        let isPending = transitionCoordinator.pendingRoute == route && !isSelected
         let pendingCount = route == .inspiration ? inspirationPendingCount : 0
         return Button {
             Task { _ = await transitionCoordinator.requestActivation(route) }
         } label: {
-            Image(systemName: metadata.symbolName)
-                .font(.system(size: 17, weight: isSelected ? .semibold : .medium))
+            ZStack {
+                Image(systemName: metadata.symbolName)
+                    .font(.system(size: 17, weight: isSelected ? .semibold : .medium))
+                    .opacity(isPending ? 0 : 1)
+                if isPending {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
                 .foregroundStyle(isSelected ? theme.primaryText : theme.secondaryText)
                 .frame(width: 40, height: 40)
                 .background {
@@ -69,6 +77,7 @@ struct WorkspaceNavigationRail: View {
         .help(metadata.help)
         .accessibilityLabel(metadata.accessibilityLabel)
         .accessibilityValue(accessibilityValue(isSelected: isSelected, pendingCount: pendingCount))
+        .accessibilityHint(isPending ? "正在切换" : "切换到\(metadata.name)")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityIdentifier("workspace-route-\(route.rawValue)")
     }

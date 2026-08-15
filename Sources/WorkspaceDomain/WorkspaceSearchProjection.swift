@@ -1,11 +1,13 @@
 import Foundation
 
 public enum WorkspaceObjectKind: String, Codable, Equatable, Sendable {
+    case calendarItem
     case note
     case inspiration
 }
 
 public enum WorkspaceObjectID: Hashable, Codable, Sendable {
+    case calendarItem(UUID)
     case note(NoteID)
     case inspiration(InspirationID)
 }
@@ -46,6 +48,15 @@ public struct WorkspaceSearchProjection: Codable, Equatable, Sendable {
 
     public static func build(from state: WorkspaceState) -> WorkspaceSearchProjection {
         var records: [WorkspaceSearchRecord] = []
+        for item in state.calendar.items.values {
+            records.append(.init(
+                objectID: .calendarItem(item.id),
+                kind: .calendarItem,
+                normalizedText: "\(item.title)\n\(item.notes)".lowercased(),
+                categoryID: item.categoryID,
+                isArchived: false
+            ))
+        }
         for note in state.notes.values {
             let body = note.document.blocks
                 .flatMap(\.inlineContent.spans)
@@ -77,6 +88,12 @@ public struct WorkspaceSearchProjection: Codable, Equatable, Sendable {
         }
         records.sort {
             switch ($0.objectID, $1.objectID) {
+            case let (.calendarItem(a), .calendarItem(b)):
+                return a.uuidString < b.uuidString
+            case (.calendarItem, _):
+                return true
+            case (_, .calendarItem):
+                return false
             case let (.note(a), .note(b)):
                 return a.rawValue.uuidString < b.rawValue.uuidString
             case let (.inspiration(a), .inspiration(b)):

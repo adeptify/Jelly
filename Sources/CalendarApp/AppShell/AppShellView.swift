@@ -1,5 +1,6 @@
 import Combine
 import SwiftUI
+import WorkspaceDomain
 
 @MainActor
 final class WorkspaceModuleHost: @MainActor Identifiable {
@@ -59,6 +60,19 @@ final class WorkspaceModuleHostStore: ObservableObject {
 
 private final class WorkspaceModuleLifetimeToken {}
 
+struct WorkspaceCreationNotice: Identifiable, Equatable {
+    let id = UUID()
+    let stateGeneration: UInt
+    let undoLabel: String
+
+    static func resolve(stateGeneration: UInt, undoLabel: String?) -> Self? {
+        guard WorkspaceCreationFeedback.isCreationUndoLabel(undoLabel), let undoLabel else {
+            return nil
+        }
+        return Self(stateGeneration: stateGeneration, undoLabel: undoLabel)
+    }
+}
+
 struct AppShellView: View {
     let store: WorkspaceStore
     let features: WorkspaceFeatures
@@ -68,8 +82,10 @@ struct AppShellView: View {
     @ObservedObject var routeState: WorkspaceRouteState
     @ObservedObject var newItemRouter: WorkspaceNewItemRouter
     @ObservedObject var deepLinkRouter: WorkspaceDeepLinkRouter
+    @ObservedObject var searchRouter: WorkspaceSearchRouter
     @ObservedObject var transitionCoordinator: WorkspaceRouteTransitionCoordinator
     @StateObject private var moduleHosts: WorkspaceModuleHostStore
+    @State private var creationNotice: WorkspaceCreationNotice?
 
     init(
         store: WorkspaceStore,
@@ -77,6 +93,7 @@ struct AppShellView: View {
         routeState: WorkspaceRouteState,
         newItemRouter: WorkspaceNewItemRouter,
         deepLinkRouter: WorkspaceDeepLinkRouter = WorkspaceDeepLinkRouter(),
+        searchRouter: WorkspaceSearchRouter = WorkspaceSearchRouter(),
         searchIndex: WorkspaceSearchIndex = WorkspaceSearchIndex(),
         focusRegistry: EditorFocusRegistry = EditorFocusRegistry(),
         transitionCoordinator: WorkspaceRouteTransitionCoordinator? = nil,
@@ -91,6 +108,7 @@ struct AppShellView: View {
         self.routeState = routeState
         self.newItemRouter = newItemRouter
         self.deepLinkRouter = deepLinkRouter
+        self.searchRouter = searchRouter
         let coordinator = transitionCoordinator
             ?? WorkspaceRouteTransitionCoordinator(routeState: routeState, features: features)
         self.transitionCoordinator = coordinator
@@ -103,7 +121,8 @@ struct AppShellView: View {
                     content: AnyView(CalendarModuleView(
                         store: store,
                         newItemRouter: newItemRouter,
-                        deepLinkRouter: deepLinkRouter
+                        deepLinkRouter: deepLinkRouter,
+                        transitionCoordinator: coordinator
                     )),
                     lifetimeToken: WorkspaceModuleLifetimeToken()
                 )
@@ -142,6 +161,7 @@ struct AppShellView: View {
     }
 
     var body: some View {
+        let stateGeneration = store.statePublicationGeneration
         HStack(spacing: 0) {
             WorkspaceNavigationRail(
                 store: store,
@@ -156,6 +176,7 @@ struct AppShellView: View {
                         activeRoute: routeState.route
                     )
                     host.content
+                        .environment(\.workspaceActiveRoute, routeState.route)
                         .opacity(presentation == .active ? 1 : 0)
                         .allowsHitTesting(presentation.allowsHitTesting)
                         .accessibilityHidden(presentation.accessibilityHidden)
@@ -174,5 +195,67 @@ struct AppShellView: View {
             minHeight: WorkspaceWindowLayout.minimumHeight,
             alignment: .topLeading
         )
+        .sheet(isPresented: $searchRouter.isPresented) {
+            WorkspaceGlobalSearchView(
+                store: store,
+                searchIndex: searchIndex,
+                onOpen: openSearchResult,
+                router: searchRouter
+            )
+        }
+        .overlay(alignment: .bottom) {
+            if let creationNotice {
+                WorkspaceCreationToast(
+                    message: creationNotice.undoLabel,
+                    onUndo: { undoCreation(creationNotice) }
+                )
+                .padding(.bottom, 16)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+        }
+        .onChange(of: stateGeneration, initial: true) { _, newGeneration in
+            withAnimation(.easeOut(duration: 0.16)) {
+                creationNotice = WorkspaceCreationNotice.resolve(
+                    stateGeneration: newGeneration,
+                    undoLabel: store.latestUndoLabel
+                )
+            }
+        }
+        .task(id: creationNotice?.id) {
+            guard let notice = creationNotice else { return }
+            try? await Task.sleep(for: .seconds(8))
+            guard !Task.isCancelled, creationNotice == notice else { return }
+            withAnimation(.easeOut(duration: 0.16)) {
+                creationNotice = nil
+            }
+        }
+    }
+
+    private func undoCreation(_ notice: WorkspaceCreationNotice) {
+        guard creationNotice == notice,
+              store.statePublicationGeneration == notice.stateGeneration,
+              store.latestUndoLabel == notice.undoLabel,
+              store.canUndo
+        else {
+            creationNotice = nil
+            return
+        }
+        Task { @MainActor in
+            _ = try? await store.undo()
+            if creationNotice == notice { creationNotice = nil }
+        }
+    }
+
+    private func openSearchResult(_ objectID: WorkspaceObjectID) {
+        let target: WorkspaceDeepLinkTarget
+        switch objectID {
+        case let .calendarItem(id): target = .calendarItem(id)
+        case let .note(id): target = .note(id)
+        case let .inspiration(id): target = .inspiration(id)
+        }
+        Task {
+            guard await transitionCoordinator.requestActivation(target.route) else { return }
+            deepLinkRouter.request(target)
+        }
     }
 }

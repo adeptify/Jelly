@@ -26,6 +26,7 @@ struct WorkspaceCommands: Commands {
     @ObservedObject var routeState: WorkspaceRouteState
     @ObservedObject var newItemRouter: WorkspaceNewItemRouter
     @ObservedObject var transitionCoordinator: WorkspaceRouteTransitionCoordinator
+    @ObservedObject var searchRouter: WorkspaceSearchRouter
     let features: WorkspaceFeatures
 
     var body: some Commands {
@@ -46,6 +47,13 @@ struct WorkspaceCommands: Commands {
             }
             .keyboardShortcut("n", modifiers: .command)
             .disabled(routeState.commandNAction(features: features) == nil)
+        }
+
+        CommandMenu("查找") {
+            Button("全局查找…") {
+                searchRouter.present()
+            }
+            .keyboardShortcut("k", modifiers: .command)
         }
     }
 

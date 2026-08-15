@@ -10,6 +10,8 @@ final class WorkspaceRouteTransitionCoordinator: ObservableObject {
     private var notesCloseBridge: NoteCloseProtectionBridge?
     private var notesFinalizer: NoteNativeInputFinalizer?
     private var inFlight: Task<Bool, Never>?
+    private var queuedRoute: WorkspaceRoute?
+    @Published private(set) var pendingRoute: WorkspaceRoute?
 
     init(routeState: WorkspaceRouteState, features: WorkspaceFeatures) {
         self.routeState = routeState
@@ -28,16 +30,31 @@ final class WorkspaceRouteTransitionCoordinator: ObservableObject {
 
     @discardableResult
     func requestActivation(_ requestedRoute: WorkspaceRoute) async -> Bool {
+        guard features.isEnabled(requestedRoute) else { return false }
+        queuedRoute = requestedRoute
         if let inFlight {
-            return await inFlight.value
+            _ = await inFlight.value
+            return routeState.route == requestedRoute
         }
         let task = Task { @MainActor [weak self] in
             guard let self else { return false }
-            defer { self.inFlight = nil }
-            return await self.performActivation(requestedRoute)
+            defer {
+                self.inFlight = nil
+                self.pendingRoute = nil
+            }
+            while let nextRoute = self.queuedRoute {
+                self.queuedRoute = nil
+                self.pendingRoute = nextRoute
+                guard await self.performActivation(nextRoute) else {
+                    self.queuedRoute = nil
+                    return false
+                }
+            }
+            return true
         }
         inFlight = task
-        return await task.value
+        _ = await task.value
+        return routeState.route == requestedRoute
     }
 
     private func performActivation(_ requestedRoute: WorkspaceRoute) async -> Bool {

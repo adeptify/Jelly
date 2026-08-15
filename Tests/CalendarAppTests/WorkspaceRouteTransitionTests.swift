@@ -123,9 +123,77 @@ struct WorkspaceRouteTransitionTests {
         await repository.resumeSave()
         #expect(await activation.value)
     }
+
+    @Test func latestClickWinsWhileANotesTransitionIsSettling() async throws {
+        let calendar = makeEmptyState()
+        let note = Note.empty(
+            id: NoteID(),
+            categoryID: calendar.uncategorizedID,
+            now: Date(timeIntervalSince1970: 1)
+        )
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let autosave = NoteAutosaveCoordinator(store: store, scheduler: RouteTestImmediateScheduler())
+        try autosave.beginSession(
+            note,
+            linkedTaskBlockLinks: [],
+            editSessionID: UUID(),
+            activeHostToken: UUID()
+        )
+        let bridge = NoteCloseProtectionBridge(coordinator: autosave)
+        let features = WorkspaceFeatures.production
+        let routeState = WorkspaceRouteState(
+            features: features,
+            preferences: SpyWorkspaceRoutePreferenceStore(initial: "notes")
+        )
+        let coordinator = WorkspaceRouteTransitionCoordinator(routeState: routeState, features: features)
+        let gate = RouteFinalizerGate()
+        coordinator.attachNotesCloseBridge(bridge, finalizer: gate.finalize)
+
+        let first = Task { await coordinator.requestActivation(.calendar) }
+        await gate.waitUntilStarted()
+        #expect(coordinator.pendingRoute == .calendar)
+
+        let second = Task { await coordinator.requestActivation(.inspiration) }
+        await Task.yield()
+        gate.resume()
+
+        #expect(await first.value == false)
+        #expect(await second.value == true)
+        #expect(routeState.route == .inspiration)
+        #expect(coordinator.pendingRoute == nil)
+    }
 }
 
 @MainActor
 private final class RouteTestImmediateScheduler: NoteAutosaveScheduling {
     func sleep(milliseconds: UInt64) async throws {}
+}
+
+@MainActor
+private final class RouteFinalizerGate {
+    private var started = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    lazy var finalize: NoteNativeInputFinalizer = { [weak self] _, _ in
+        guard let self else { return false }
+        self.started = true
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+        return true
+    }
+
+    func waitUntilStarted() async {
+        while !started { await Task.yield() }
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
+    }
 }

@@ -73,4 +73,68 @@ struct WorkspaceSearchIndexTests {
         let afterDelete = try index.search(query: "可搜索", kind: .note, includeArchived: false, in: state)
         #expect(afterDelete.isEmpty)
     }
+
+    @Test func globalSearchIncludesCalendarTitlesAndNotes() throws {
+        var calendar = makeEmptyState()
+        var item = try makeItem(categoryID: calendar.uncategorizedID, title: "提交季度复盘")
+        item.notes = "带上销售数据"
+        calendar.items[item.id] = item
+        var state = WorkspaceState.empty(calendar: calendar)
+        state.revision = 1
+        let index = WorkspaceSearchIndex()
+
+        #expect(try index.search(
+            query: "季度复盘",
+            kind: nil,
+            includeArchived: false,
+            in: state
+        ).map(\.objectID) == [.calendarItem(item.id)])
+        #expect(try index.search(
+            query: "销售数据",
+            kind: .calendarItem,
+            includeArchived: false,
+            in: state
+        ).map(\.objectID) == [.calendarItem(item.id)])
+    }
+
+    @Test func oneThousandRecordsProduceFirstSearchResultsWithinOneHundredMilliseconds() throws {
+        let calendar = makeEmptyState()
+        var state = WorkspaceState.empty(calendar: calendar)
+        for index in 0..<1_000 {
+            let note = Note(
+                id: NoteID(),
+                title: index == 999 ? "唯一命中的验收笔记" : "普通笔记 \(index)",
+                document: .init(blocks: [
+                    .init(
+                        id: BlockID(),
+                        kind: .paragraph,
+                        inlineContent: .plain("用于全局搜索性能门禁的正文 \(index)"),
+                        taskState: nil,
+                        indentLevel: 0
+                    )
+                ]),
+                categoryID: calendar.uncategorizedID,
+                archivedAt: nil,
+                revision: 1,
+                createdAt: .distantPast,
+                updatedAt: .distantPast
+            )
+            state.notes[note.id] = note
+        }
+        state.revision = 1
+        let index = WorkspaceSearchIndex()
+        let clock = ContinuousClock()
+        let start = clock.now
+
+        let results = try index.search(
+            query: "唯一命中",
+            kind: nil,
+            includeArchived: false,
+            in: state
+        )
+        let elapsed = start.duration(to: clock.now)
+
+        #expect(results.count == 1)
+        #expect(elapsed < .milliseconds(100))
+    }
 }

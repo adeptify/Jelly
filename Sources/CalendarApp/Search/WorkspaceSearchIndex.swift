@@ -51,6 +51,8 @@ final class WorkspaceSearchIndex {
         try ensureCurrent(with: state)
         return projection.search(query: query, kind: kind, includeArchived: includeArchived).filter { record in
             switch record.objectID {
+            case let .calendarItem(id):
+                return state.calendar.items[id] != nil
             case let .note(id):
                 return state.notes[id] != nil
             case let .inspiration(id):

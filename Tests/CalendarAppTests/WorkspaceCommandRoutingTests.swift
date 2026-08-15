@@ -1,3 +1,4 @@
+import AppKit
 import CalendarDomain
 import Testing
 @testable import CalendarApp
@@ -65,6 +66,47 @@ struct WorkspaceCommandRoutingTests {
         #expect(router.pendingRequest == nil)
     }
 
+    @Test func blockedNewNoteCanDiscardCapturedTypingWithoutReplayingIntoTheOldEditor() async throws {
+        _ = NSApplication.shared
+        let router = WorkspaceNewItemRouter()
+        let receiver = NewItemKeyEventProbe(frame: .init(x: 0, y: 0, width: 100, height: 40))
+        let window = NSWindow(
+            contentRect: receiver.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = receiver
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        #expect(window.makeFirstResponder(receiver))
+        let request = try #require(router.requestNewItem(
+            route: .notes,
+            features: .production,
+            capturesTypingUntilReady: true,
+            sourceWindowNumber: window.windowNumber
+        ))
+        let event = try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "不应回放",
+            charactersIgnoringModifiers: "不应回放",
+            isARepeat: false,
+            keyCode: 0
+        ))
+        NSApplication.shared.sendEvent(event)
+        #expect(receiver.values.isEmpty)
+
+        router.discardCapturedTyping(for: request.id)
+        await Task.yield()
+
+        #expect(receiver.values.isEmpty)
+    }
+
     @Test func calendarNewItemDateUsesDrawerThenSelectionThenToday() {
         #expect(CalendarNewItemRequestPolicy.resolve(
             dayDrawerDate: drawerDate,
@@ -104,5 +146,16 @@ struct WorkspaceCommandRoutingTests {
             isQuickCreatePresented: false,
             isItemEditorPresented: true
         ) == nil)
+    }
+}
+
+@MainActor
+private final class NewItemKeyEventProbe: NSView {
+    private(set) var values: [String] = []
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        values.append(event.characters ?? "")
     }
 }

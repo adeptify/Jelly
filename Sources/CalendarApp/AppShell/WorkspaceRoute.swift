@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 struct WorkspaceFeatures: Equatable, Sendable {
     var notes: Bool
@@ -74,6 +75,17 @@ enum WorkspaceNewItemAction: Equatable, Sendable {
         case .notes: self = .createNote
         case .inspiration: self = .createInspiration
         }
+    }
+}
+
+private struct WorkspaceActiveRouteKey: EnvironmentKey {
+    static let defaultValue: WorkspaceRoute = .calendar
+}
+
+extension EnvironmentValues {
+    var workspaceActiveRoute: WorkspaceRoute {
+        get { self[WorkspaceActiveRouteKey.self] }
+        set { self[WorkspaceActiveRouteKey.self] = newValue }
     }
 }
 

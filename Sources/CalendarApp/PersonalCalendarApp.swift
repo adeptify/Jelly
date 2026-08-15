@@ -28,6 +28,7 @@ struct PersonalCalendarApp: App {
     @StateObject private var deepLinkRouter: WorkspaceDeepLinkRouter
     @StateObject private var editorFocusRegistry: EditorFocusRegistry
     @StateObject private var transitionCoordinator: WorkspaceRouteTransitionCoordinator
+    @StateObject private var searchRouter: WorkspaceSearchRouter
     @AppStorage(CalendarAppearancePreference.storageKey)
     private var appearancePreferenceRaw = CalendarAppearancePreference.light.rawValue
 
@@ -46,6 +47,7 @@ struct PersonalCalendarApp: App {
             routeState: routeState,
             features: features
         ))
+        _searchRouter = StateObject(wrappedValue: WorkspaceSearchRouter())
     }
 
     private var appearancePreference: CalendarAppearancePreference {
@@ -62,6 +64,7 @@ struct PersonalCalendarApp: App {
                         routeState: routeState,
                         newItemRouter: newItemRouter,
                         deepLinkRouter: deepLinkRouter,
+                        searchRouter: searchRouter,
                         searchIndex: environment.searchIndex,
                         focusRegistry: editorFocusRegistry,
                         transitionCoordinator: transitionCoordinator,
@@ -90,6 +93,7 @@ struct PersonalCalendarApp: App {
                     routeState: routeState,
                     newItemRouter: newItemRouter,
                     transitionCoordinator: transitionCoordinator,
+                    searchRouter: searchRouter,
                     features: environment.features
                 )
                 CalendarUndoCommands(store: environment.store, focusRegistry: editorFocusRegistry)
@@ -99,7 +103,7 @@ struct PersonalCalendarApp: App {
             }
         }
 
-        Window("恢复中心", id: CalendarAppWindowID.recoveryCenter) {
+        Window("恢复与备份", id: CalendarAppWindowID.recoveryCenter) {
             Group {
                 if let environment {
                     RecoveryCenterView(store: environment.store)

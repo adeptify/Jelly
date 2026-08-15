@@ -68,6 +68,11 @@ final class WorkspaceNewItemRouter: ObservableObject {
         }
     }
 
+    func discardCapturedTyping(for requestID: UUID) {
+        guard capturedRequestID == requestID else { return }
+        _ = endCapturingTyping()
+    }
+
     private func beginCapturingTyping(
         for requestID: UUID,
         sourceWindowNumber: Int?
