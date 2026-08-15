@@ -5,6 +5,45 @@ import WorkspaceDomain
 
 @Suite("NoteMarkdownCommandTests")
 struct NoteMarkdownCommandTests {
+    @Test func supportedFileFormatsAreOnlyMarkdownAndHTMLForNow() {
+        #expect(NoteFileFormat.allCases == [.markdown, .html])
+        #expect(NoteFileFormat.detect(from: URL(fileURLWithPath: "/tmp/NOTE.MD")) == .markdown)
+        #expect(NoteFileFormat.detect(from: URL(fileURLWithPath: "/tmp/note.html")) == .html)
+        #expect(NoteFileFormat.detect(from: URL(fileURLWithPath: "/tmp/note.txt")) == nil)
+    }
+
+    @Test func htmlImportAndExportPreserveRichStructure() throws {
+        let completedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let plan = try NoteFileCommands.planImport(
+            contents: "<h1>标题</h1><ul><li><input type=\"checkbox\" checked>完成</li></ul>",
+            format: .html,
+            fileName: "验收.html",
+            mode: .append,
+            checkedTaskCompletedAt: completedAt
+        )
+        #expect(plan.format == .html)
+        #expect(plan.fileName == "验收.html")
+        #expect(plan.result.document.blocks.map(\.kind) == [.heading1, .task])
+        #expect(plan.result.document.blocks.last?.taskState?.completedAt == completedAt)
+
+        let exported = try NoteFileCommands.export(
+            plan.result.document,
+            format: .html,
+            title: "验收"
+        )
+        #expect(exported.contains("<h1>标题</h1>"))
+        #expect(exported.contains("type=\"checkbox\""))
+    }
+
+    @Test func genericExportWriteReadbackIsExact() throws {
+        let value = "<!doctype html><p>正文</p>"
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("note-export-\(UUID().uuidString).html")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try NoteFileCommands.writeExport(contents: value, to: url)
+        #expect(try String(contentsOf: url, encoding: .utf8) == value)
+    }
+
     @Test func exportSourcePrefersTheMatchingLiveEditorSnapshot() throws {
         let noteID = NoteID()
         let editSessionID = UUID()

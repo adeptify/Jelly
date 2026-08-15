@@ -90,8 +90,8 @@ struct NotesSplitView: View {
     @State private var categoryManagerPresentation: CategoryManagerPresentation?
     @State private var browserCollapsed = false
     @State private var recoveryCandidate: DraftRecoveryCandidate?
-    @State private var importDiagnostics: [BlockMarkdownDiagnostic] = []
-    @State private var pendingImportPlan: NoteMarkdownImportPlan?
+    @State private var pendingImportPlan: NoteFileImportPlan?
+    @State private var showsExportSheet = false
     @State private var statusBanner: String?
     @State private var activeEditorSession: BlockEditorSession?
     @State private var pendingPermanentDelete: PendingNotePermanentDelete?
@@ -223,23 +223,21 @@ struct NotesSplitView: View {
                 initialCategoryID: presentation.initialCategoryID
             )
         }
-        .confirmationDialog(
-            "导入 Markdown",
-            isPresented: Binding(
-                get: { pendingImportPlan != nil },
-                set: { if !$0 { pendingImportPlan = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("替换当前正文") { applyPendingImport(.replace) }
-            Button("追加到末尾") { applyPendingImport(.append) }
-            Button("取消", role: .cancel) { pendingImportPlan = nil }
-        } message: {
-            if let plan = pendingImportPlan, !plan.result.diagnostics.isEmpty {
-                Text(plan.result.diagnostics.map(\.message).joined(separator: "\n"))
-            } else {
-                Text("选择如何应用导入的 Markdown。")
-            }
+        .sheet(item: $pendingImportPlan) { plan in
+            NoteFileImportSheet(
+                plan: plan,
+                onCancel: { pendingImportPlan = nil },
+                onImport: applyPendingImport
+            )
+        }
+        .sheet(isPresented: $showsExportSheet) {
+            NoteFileExportSheet(
+                onCancel: { showsExportSheet = false },
+                onExport: { format in
+                    showsExportSheet = false
+                    exportFile(format)
+                }
+            )
         }
         .confirmationDialog(
             "永久删除这篇笔记？",
@@ -292,6 +290,7 @@ struct NotesSplitView: View {
             guard route != .notes else { return }
             categoryManagerPresentation = nil
             pendingImportPlan = nil
+            showsExportSheet = false
             pendingPermanentDelete = nil
         }
         .background(NotesWindowCloseMonitor(bridge: closeBridge, finalizer: nativeFinalizer))
@@ -399,8 +398,8 @@ struct NotesSplitView: View {
                     recoveryUndoNotice = nil
                     _ = try? autosave.update(categoryID: categoryID)
                 },
-                onRequestMarkdownImport: importMarkdown,
-                onRequestMarkdownExport: exportMarkdown,
+                onRequestMarkdownImport: importFile,
+                onRequestMarkdownExport: presentExportOptions,
                 onArchive: { Task { await archiveSelected() } },
                 onRestore: { Task { await restoreSelected() } },
                 onPermanentDelete: requestPermanentDeleteSelected,
@@ -744,9 +743,13 @@ struct NotesSplitView: View {
         }
     }
 
-    private func importMarkdown() {
+    private func importFile() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.text, .plainText]
+        panel.title = "导入笔记内容"
+        panel.message = "选择 Markdown 或 HTML 文件。"
+        panel.allowedContentTypes = ["md", "markdown", "html", "htm"].compactMap {
+            UTType(filenameExtension: $0)
+        }
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
@@ -754,16 +757,21 @@ struct NotesSplitView: View {
             guard response == .OK, let url = panel.url else { return }
             Task { @MainActor in
                 do {
-                    let markdown = try String(contentsOf: url, encoding: .utf8)
-                    let plan = try NoteMarkdownCommands.planImport(
-                        markdown: markdown,
+                    guard let format = NoteFileFormat.detect(from: url) else {
+                        statusBanner = "请选择 Markdown 或 HTML 文件。"
+                        return
+                    }
+                    let contents = try String(contentsOf: url, encoding: .utf8)
+                    let plan = try NoteFileCommands.planImport(
+                        contents: contents,
+                        format: format,
+                        fileName: url.lastPathComponent,
                         mode: .replace,
                         checkedTaskCompletedAt: clock()
                     )
-                    importDiagnostics = plan.result.diagnostics
                     pendingImportPlan = plan
                 } catch {
-                    statusBanner = "无法读取 Markdown 文件。"
+                    statusBanner = "无法读取这个文件，请确认它是 UTF-8 编码的 Markdown 或 HTML。"
                 }
             }
         }
@@ -789,18 +797,27 @@ struct NotesSplitView: View {
                     _ = try? autosave.update(document: document)
                 }
             }
-            statusBanner = importDiagnostics.isEmpty ? nil : "已导入（含诊断）。"
+            statusBanner = plan.result.diagnostics.isEmpty
+                ? "已导入 \(plan.format.displayName) 内容。"
+                : "已导入；部分内容已转换为正文。"
             return
         }
         do {
             _ = try session.dispatch(.applyDocumentBlocks(blocks: plan.result.document.blocks, mode: mode))
-            statusBanner = importDiagnostics.isEmpty ? nil : "已导入（含诊断）。"
+            statusBanner = plan.result.diagnostics.isEmpty
+                ? "已导入 \(plan.format.displayName) 内容。"
+                : "已导入；部分内容已转换为正文。"
         } catch {
             statusBanner = "导入被拒绝：文档或 ID 无效。"
         }
     }
 
-    private func exportMarkdown() {
+    private func presentExportOptions() {
+        guard viewModel.selectedNote != nil else { return }
+        showsExportSheet = true
+    }
+
+    private func exportFile(_ format: NoteFileFormat) {
         guard let note = viewModel.selectedNote else { return }
         let matchingSession: BlockEditorSession?
         if let editorIdentity,
@@ -813,7 +830,7 @@ struct NotesSplitView: View {
             matchingSession = nil
         }
         guard matchingSession?.terminallyFinalizeNativeComposition() != false else {
-            statusBanner = "请先完成当前输入，再导出 Markdown。"
+            statusBanner = "请先完成当前输入，再导出笔记。"
             return
         }
         let liveSnapshot = matchingSession.map {
@@ -829,22 +846,29 @@ struct NotesSplitView: View {
             editorIdentity: editorIdentity,
             liveSnapshot: liveSnapshot
         )
-        let markdown: String
+        let contents: String
         do {
-            markdown = try NoteMarkdownCommands.exportMarkdown(from: document)
+            contents = try NoteFileCommands.export(
+                document,
+                format: format,
+                title: note.title.isEmpty ? "未命名笔记" : note.title
+            )
         } catch {
             statusBanner = "导出失败。"
             return
         }
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.plainText]
-        panel.nameFieldStringValue = (note.title.isEmpty ? "note" : note.title) + ".md"
+        panel.title = "导出为 \(format.displayName)"
+        panel.message = format.exportDescription
+        panel.allowedContentTypes = [UTType(filenameExtension: format.fileExtension)].compactMap { $0 }
+        panel.nameFieldStringValue = (note.title.isEmpty ? "未命名笔记" : note.title) + ".\(format.fileExtension)"
+        panel.canCreateDirectories = true
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
             Task { @MainActor in
                 do {
-                    try NoteMarkdownCommands.writeExport(markdown: markdown, to: url)
-                    statusBanner = "Markdown 已导出。"
+                    try NoteFileCommands.writeExport(contents: contents, to: url)
+                    statusBanner = "已导出为 \(format.displayName)。"
                 } catch {
                     statusBanner = "导出失败。"
                 }

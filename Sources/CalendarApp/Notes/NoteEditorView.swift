@@ -163,8 +163,8 @@ struct NoteEditorView: View {
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
                 Menu {
-                    Button("从 Markdown 文件导入正文…", action: onRequestMarkdownImport)
-                    Button("将当前笔记导出为 Markdown…", action: onRequestMarkdownExport)
+                    Button("导入文件…", action: onRequestMarkdownImport)
+                    Button("导出笔记…", action: onRequestMarkdownExport)
                     Divider()
                     if note.archivedAt == nil {
                         Button("归档", action: onArchive)
