@@ -1,5 +1,6 @@
 import CalendarDomain
 import SwiftUI
+import WorkspaceDomain
 
 enum MonthEmptyStateHintPolicy {
     static func shouldShow(phase: WorkspaceStorePhase, state: CalendarState) -> Bool {
@@ -225,11 +226,13 @@ struct MonthView: View {
     private let consumeNewItemRequest: ((UUID, WorkspaceRoute) -> WorkspaceNewItemRequest?)?
     private let deepLinkRequest: WorkspaceDeepLinkRequest?
     private let consumeDeepLinkRequest: ((UUID, WorkspaceDeepLinkTarget) -> WorkspaceDeepLinkRequest?)?
+    private let onOpenNote: (NoteID) -> Void
     private let todayRefreshPolicy: MonthViewTodayRefreshPolicy
     private let todayRefreshController: MonthViewTodayRefreshController
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    @Environment(\.workspaceActiveRoute) private var activeWorkspaceRoute
     @StateObject private var model: MonthViewModel
     @StateObject private var dropCoordinator: CalendarDropCoordinator
     @StateObject private var interactionCoordinator: CalendarInteractionCoordinator
@@ -252,8 +255,9 @@ struct MonthView: View {
     @State private var quickCreateMeasuredContentSize = CGSize.zero
     @State private var selectedDayDrawerDate: CalendarDate?
     @State private var editorSession: ItemEditorConfiguration?
-    @State private var showCategoryManager = false
+    @State private var categoryManagerPresentation: CategoryManagerPresentation?
     @State private var showProgressSummary = false
+    @State private var pendingProgressSummaryItemID: String?
     @State private var recurringEditItem: ProjectedItem?
     @State private var deleteConfirmItem: ProjectedItem?
     @State private var actionError: String?
@@ -276,13 +280,15 @@ struct MonthView: View {
         newItemRequest: WorkspaceNewItemRequest? = nil,
         consumeNewItemRequest: ((UUID, WorkspaceRoute) -> WorkspaceNewItemRequest?)? = nil,
         deepLinkRequest: WorkspaceDeepLinkRequest? = nil,
-        consumeDeepLinkRequest: ((UUID, WorkspaceDeepLinkTarget) -> WorkspaceDeepLinkRequest?)? = nil
+        consumeDeepLinkRequest: ((UUID, WorkspaceDeepLinkTarget) -> WorkspaceDeepLinkRequest?)? = nil,
+        onOpenNote: @escaping (NoteID) -> Void = { _ in }
     ) {
         self.store = store
         self.newItemRequest = newItemRequest
         self.consumeNewItemRequest = consumeNewItemRequest
         self.deepLinkRequest = deepLinkRequest
         self.consumeDeepLinkRequest = consumeDeepLinkRequest
+        self.onOpenNote = onOpenNote
         self.todayRefreshPolicy = todayRefreshPolicy
         todayRefreshController = MonthViewTodayRefreshController(policy: todayRefreshPolicy)
         let initialWeekStream = MonthViewInitialWeekStream(today: todayRefreshPolicy.today)
@@ -371,7 +377,6 @@ struct MonthView: View {
             .overlay { editorOverlay }
             .overlay { quickCreateOverlay }
             .overlay { itemDragPreviewOverlay }
-            .overlay(alignment: .bottom) { undoBannerOverlay }
     }
 
     /// Floating item chip under the pointer while month-row move/resize is active.
@@ -424,6 +429,21 @@ struct MonthView: View {
             .onChange(of: scenePhase) { _, newPhase in
                 refreshToday(for: .scenePhaseChanged(newPhase))
             }
+            .onChange(of: activeWorkspaceRoute) { _, route in
+                guard route != .calendar else { return }
+                selectedDayDrawerDate = nil
+                quickCreatePresentation = nil
+                editorSession = nil
+                showProgressSummary = false
+                categoryManagerPresentation = nil
+            }
+            .onChange(of: showProgressSummary) { _, isPresented in
+                guard !isPresented,
+                      let itemID = pendingProgressSummaryItemID else { return }
+                pendingProgressSummaryItemID = nil
+                guard let item = model.projectedItem(withID: itemID) else { return }
+                openEditor(for: item)
+            }
             .onChange(of: store.calendarState) { _, _ in
                 refreshProjection()
                 weekModel.update(
@@ -441,6 +461,12 @@ struct MonthView: View {
                 )
             }
             .onChange(of: primaryViewModeRaw) { _, raw in
+                // A date drawer is a temporary inspection layer. Carrying it
+                // into another calendar mode squeezes the new primary view and
+                // leaves two competing contexts on screen.
+                selectedDayDrawerDate = nil
+                quickCreatePresentation = nil
+                editorSession = nil
                 if raw == CalendarPrimaryViewMode.week.rawValue {
                     weekModel.update(
                         state: store.calendarState,
@@ -459,11 +485,16 @@ struct MonthView: View {
                 guard size.width > 0, size.height > 0 else { return }
                 quickCreateMeasuredContentSize = size
             }
-            .environment(\.openCategoryManager, OpenCategoryManagerAction {
-                showCategoryManager = true
+            .environment(\.openCategoryManager, OpenCategoryManagerAction { categoryID in
+                categoryManagerPresentation = CategoryManagerPresentation(
+                    initialCategoryID: categoryID
+                )
             })
-            .sheet(isPresented: $showCategoryManager) {
-                CategoryManagerView(store: store)
+            .sheet(item: $categoryManagerPresentation) { presentation in
+                CategoryManagerView(
+                    store: store,
+                    initialCategoryID: presentation.initialCategoryID
+                )
                     .frame(width: 680)
                     .fixedSize(horizontal: false, vertical: true)
                     .preferredColorScheme(colorScheme)
@@ -550,6 +581,10 @@ struct MonthView: View {
                     configuration: session,
                     store: store,
                     categories: orderedCategories,
+                    onOpenNote: { noteID in
+                        editorSession = nil
+                        onOpenNote(noteID)
+                    },
                     onCancel: { editorSession = nil },
                     onSaved: { editorSession = nil }
                 )
@@ -611,25 +646,6 @@ struct MonthView: View {
         }
     }
 
-    @ViewBuilder
-    private var undoBannerOverlay: some View {
-        if store.canUndo {
-            HStack(spacing: 10) {
-                Text("上一步操作可撤销")
-                Button("撤销") { undo() }
-                    .disabled(!store.canUndo || store.phase != .ready)
-            }
-            .font(.system(size: 12, weight: .medium))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .foregroundStyle(theme.primaryText)
-            .background(theme.elevatedSurface, in: Capsule())
-            .overlay(Capsule().stroke(theme.subtleBorder, lineWidth: 0.5))
-            .padding(.bottom, 16)
-            .transition(.opacity)
-        }
-    }
-
     private var toolbar: some View {
         HStack(spacing: 12) {
             // Title — left, calm
@@ -665,6 +681,10 @@ struct MonthView: View {
                 period: primaryViewMode == .week ? .week : .month,
                 today: model.today,
                 hiddenCategoryIDs: hiddenCategoryIDs,
+                onOpenItem: { itemID in
+                    pendingProgressSummaryItemID = itemID
+                    showProgressSummary = false
+                },
                 onClose: { showProgressSummary = false }
             )
             .padding(20)
@@ -672,14 +692,14 @@ struct MonthView: View {
         }
     }
 
-    /// 本月进展 / 本周进展 — mock AI summary (prologue later).
+    /// Deterministic local review for the visible period.
     private var progressSummaryButton: some View {
-        let label = primaryViewMode == .week ? "本周进展" : "本月进展"
+        let label = primaryViewMode == .week ? "本周回顾" : "本月回顾"
         return Button {
             showProgressSummary = true
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: "sparkles")
+                Image(systemName: "chart.bar.xaxis")
                     .font(.system(size: 11, weight: .semibold))
                 Text(label)
                     .font(.system(size: 12, weight: .medium))
@@ -694,7 +714,7 @@ struct MonthView: View {
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
-        .help("总结从\(primaryViewMode == .week ? "本周" : "本月")第一天到今天的进展（当前为模拟 AI）")
+        .help("查看从\(primaryViewMode == .week ? "本周" : "本月")第一天到今天的完成情况")
         .accessibilityLabel(label)
     }
 
@@ -790,7 +810,7 @@ struct MonthView: View {
             )
             Divider()
             Button("管理分类…") {
-                showCategoryManager = true
+                categoryManagerPresentation = CategoryManagerPresentation(initialCategoryID: nil)
             }
         } label: {
             HStack(spacing: 5) {
@@ -1016,14 +1036,41 @@ struct MonthView: View {
     }
 
     private func consumeCalendarDeepLinkRequest(_ request: WorkspaceDeepLinkRequest?) {
-        guard let request,
-              case let .calendarItem(itemID) = request.target,
-              let item = store.calendarState.items[itemID],
-              consumeDeepLinkRequest?(request.id, request.target) != nil else { return }
-        openEditor(for: .item(item))
+        guard let request else { return }
+        let configuration: ItemEditorConfiguration
+        switch request.target {
+        case let .calendarItem(itemID):
+            guard let item = store.calendarState.items[itemID] else { return }
+            configuration = .oneOff(item: item)
+        case let .calendarOccurrence(key):
+            guard let series = store.calendarState.recurrence.series[key.seriesID],
+                  let occurrence = CalendarDeepLinkTargetResolver.occurrence(
+                    for: key,
+                    calendar: store.calendarState
+                  ) else { return }
+            configuration = .occurrence(series: series, occurrence: occurrence, scope: .onlyThis)
+        case let .calendarSeries(seriesID):
+            guard let series = store.calendarState.recurrence.series[seriesID],
+                  let occurrence = CalendarDeepLinkTargetResolver.representativeOccurrence(
+                    for: seriesID,
+                    calendar: store.calendarState,
+                    today: model.today
+                  ) else { return }
+            configuration = .occurrence(series: series, occurrence: occurrence, scope: .thisAndFuture)
+        case .note, .inspiration:
+            return
+        }
+        guard consumeDeepLinkRequest?(request.id, request.target) != nil else { return }
+        selectedDayDrawerDate = nil
+        quickCreatePresentation = nil
+        withAnimation(motionPolicy.overlayAnimation) {
+            editorSession = configuration
+        }
     }
 
     private func openEditor(for item: ProjectedItem) {
+        selectedDayDrawerDate = nil
+        quickCreatePresentation = nil
         switch item {
         case .item:
             if let config = ItemActions.editorConfiguration(
@@ -1048,6 +1095,8 @@ struct MonthView: View {
             seriesLookup: { store.calendarState.recurrence.series[$0] },
             scope: scope
         ) {
+            selectedDayDrawerDate = nil
+            quickCreatePresentation = nil
             withAnimation(motionPolicy.overlayAnimation) {
                 editorSession = config
             }
@@ -1148,12 +1197,6 @@ struct MonthView: View {
         guard recurringDropPresentation.cancelConfirmation() else { return }
         dropCoordinator.cancel()
         interactionCoordinator.completePendingMutation()
-    }
-
-    private func undo() {
-        Task {
-            try? await store.undo()
-        }
     }
 
     private func refreshProjection() {
@@ -1466,6 +1509,8 @@ struct MonthView: View {
         anchorFrame: CGRect? = nil
     ) {
         cancelRangeAutoScroll()
+        selectedDayDrawerDate = nil
+        editorSession = nil
         quickCreateSessionID = UUID()
         lastEditorAnchorFrame = resolvedCreateAnchorFrame(
             preferred: anchorFrame,

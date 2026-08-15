@@ -90,11 +90,13 @@ enum CalendarNotePresentedSheet: Equatable, Sendable {
     @discardableResult
     func createPrimaryNote() async throws -> Bool {
         let now = clock()
-        let note = Note.empty(
+        let metadata = suggestedPrimaryNoteMetadata
+        var note = Note.empty(
             id: NoteID(),
-            categoryID: store.calendarState.uncategorizedID,
+            categoryID: metadata?.categoryID ?? store.calendarState.uncategorizedID,
             now: now
         )
+        note.title = metadata?.title ?? ""
         if hasLegacyMarkdown {
             // Domain requires explicit legacy authorization for nonempty legacy
             // notes; without a preview authorization we refuse rather than drop text.
@@ -113,6 +115,23 @@ enum CalendarNotePresentedSheet: Equatable, Sendable {
         )
         refresh()
         return isCommitted(outcome)
+    }
+
+    private var suggestedPrimaryNoteMetadata: (title: String, categoryID: UUID)? {
+        switch target {
+        case let .item(id):
+            guard let item = store.calendarState.items[id] else { return nil }
+            return (item.title, item.categoryID)
+        case let .series(id):
+            guard let series = store.calendarState.recurrence.series[id] else { return nil }
+            return (series.title, series.categoryID)
+        case let .occurrence(key):
+            guard let series = store.calendarState.recurrence.series[key.seriesID] else { return nil }
+            if case let .modified(override)? = store.calendarState.recurrence.exceptions[key] {
+                return (override.title, override.categoryID)
+            }
+            return (series.title, series.categoryID)
+        }
     }
 
     @discardableResult

@@ -6,6 +6,25 @@ import Testing
 @Suite("CategoryManagerViewModelTests")
 @MainActor
 struct CategoryManagerViewModelTests {
+    @Test func managerPrefersTheCallingContextAndFallsBackOnlyWhenItIsMissing() {
+        let work = makeCategory(name: "工作")
+        let health = makeCategory(name: "健康")
+        let categories = [work, health]
+
+        #expect(CategoryManagerInitialSelection.resolve(
+            preferredCategoryID: health.id,
+            orderedCategories: categories
+        ) == health.id)
+        #expect(CategoryManagerInitialSelection.resolve(
+            preferredCategoryID: UUID(),
+            orderedCategories: categories
+        ) == work.id)
+        #expect(CategoryManagerInitialSelection.resolve(
+            preferredCategoryID: nil,
+            orderedCategories: categories
+        ) == work.id)
+    }
+
     @Test func emptyAndDuplicateNamesAreRejectedCaseInsensitively() async throws {
         var state = makeEmptyState()
         let work = makeCategory(name: "工作")

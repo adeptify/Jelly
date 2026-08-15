@@ -6,6 +6,8 @@ public enum CalendarCommand: Sendable {
     case deleteItem(UUID)
     /// Shifts an item's entire schedule so that it starts on the destination day.
     case moveItem(UUID, to: CalendarDate)
+    /// Atomically moves several one-off items to the same destination day.
+    case moveItems([UUID], to: CalendarDate)
     case setTaskCompleted(UUID, Date?)
     case setOccurrenceCompleted(OccurrenceKey, Date?)
     case setItemPriority(UUID, ItemPriority)

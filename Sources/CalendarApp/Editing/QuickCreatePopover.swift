@@ -164,6 +164,7 @@ struct QuickCreatePopover: View {
     @State private var categoryOption: String
     @State private var localError: String?
     @State private var recoveryAction: WorkspaceRecoveryAction?
+    @State private var showMoreDetails = false
 
     private var theme: CalendarSemanticAppearance {
         CalendarTheme.appearance(for: colorScheme)
@@ -251,42 +252,48 @@ struct QuickCreatePopover: View {
                 Spacer(minLength: 0)
             }
 
-            HStack(spacing: 8) {
-                Text("优先级")
-                    .font(EditorFormStyle.label)
-                    .foregroundStyle(theme.secondaryText)
-                    .frame(width: EditorFormStyle.labelWidth, alignment: .leading)
-                EditorPriorityPicker(priority: $model.draft.priority)
-                Spacer(minLength: 0)
-            }
-            .frame(minHeight: EditorFormStyle.fieldMinHeight)
-
             scheduleBlock
 
-            Toggle(isOn: $model.draft.repeatsWeekly) {
-                Text("每周重复")
-                    .font(EditorFormStyle.control)
-            }
-            .toggleStyle(.checkbox)
-            .controlSize(.small)
-
-            if model.draft.repeatsWeekly {
-                weekdayPicker
-                Toggle(isOn: recurrenceEndEnabledBinding) {
-                    Text("设置结束日期")
-                        .font(EditorFormStyle.control)
-                }
-                .toggleStyle(.checkbox)
-                .controlSize(.small)
-                if model.draft.recurrenceEndDate != nil {
-                    scheduleFieldRow("直到") {
-                        EditorDateChip(date: recurrenceEndBinding)
+            DisclosureGroup("更多详情", isExpanded: $showMoreDetails) {
+                VStack(alignment: .leading, spacing: EditorFormStyle.contentSpacing) {
+                    HStack(spacing: 8) {
+                        Text("优先级")
+                            .font(EditorFormStyle.label)
+                            .foregroundStyle(theme.secondaryText)
+                            .frame(width: EditorFormStyle.labelWidth, alignment: .leading)
+                        EditorPriorityPicker(priority: $model.draft.priority)
                         Spacer(minLength: 0)
                     }
-                }
-            }
+                    .frame(minHeight: EditorFormStyle.fieldMinHeight)
 
-            MarkdownNotesEditor(text: $model.draft.notes, minHeight: 96, maxHeight: 150)
+                    Toggle(isOn: $model.draft.repeatsWeekly) {
+                        Text("每周重复")
+                            .font(EditorFormStyle.control)
+                    }
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+
+                    if model.draft.repeatsWeekly {
+                        weekdayPicker
+                        Toggle(isOn: recurrenceEndEnabledBinding) {
+                            Text("设置结束日期")
+                                .font(EditorFormStyle.control)
+                        }
+                        .toggleStyle(.checkbox)
+                        .controlSize(.small)
+                        if model.draft.recurrenceEndDate != nil {
+                            scheduleFieldRow("直到") {
+                                EditorDateChip(date: recurrenceEndBinding)
+                                Spacer(minLength: 0)
+                            }
+                        }
+                    }
+
+                    MarkdownNotesEditor(text: $model.draft.notes, minHeight: 80, maxHeight: 130)
+                }
+                .padding(.top, 8)
+            }
+            .font(EditorFormStyle.control)
 
             if let message = localError ?? model.validationMessage {
                 VStack(alignment: .leading, spacing: 6) {
@@ -421,7 +428,7 @@ struct QuickCreatePopover: View {
             }
             Divider()
             Button("管理分类…") {
-                openCategoryManager.callAsFunction()
+                openCategoryManager.callAsFunction(categoryID: model.draft.categoryID)
             }
         } label: {
             HStack(spacing: 5) {
@@ -531,10 +538,17 @@ struct QuickCreatePopover: View {
             localError = model.validationMessage ?? "无法保存事项"
             return
         }
+        let categoryName = categories.first(where: { $0.id == model.draft.categoryID })?.name
+            ?? "未分类"
+        let undoLabel = WorkspaceCreationFeedback.calendar(
+            title: model.draft.title,
+            date: model.draft.startDate,
+            categoryName: categoryName
+        )
         Task { @MainActor in
             do {
                 apply(WorkspaceMutationOutcomePresenter.presentation(
-                    for: try await store.sendCalendar(command, undoLabel: "已创建事项")
+                    for: try await store.sendCalendar(command, undoLabel: undoLabel)
                 ))
             } catch {
                 localError = WorkspaceMutationOutcomePresenter.message(for: error)

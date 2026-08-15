@@ -256,6 +256,51 @@ struct CalendarReducerTests {
         #expect(result.items[itemID]?.schedule.endTime == range.end)
     }
 
+    @Test func movingSeveralItemsIsAtomicAndPreservesEachDuration() throws {
+        let categoryID = UUID(uuidString: "00000000-0000-0000-0000-000000000390")!
+        let first = try makeItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000391")!,
+            categoryID: categoryID,
+            schedule: try CalendarSchedule(
+                startDate: CalendarDate(year: 2026, month: 8, day: 10)!,
+                endDate: CalendarDate(year: 2026, month: 8, day: 10)!,
+                startTime: nil,
+                endTime: nil
+            )
+        )
+        let second = try makeItem(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000392")!,
+            categoryID: categoryID,
+            schedule: try CalendarSchedule(
+                startDate: CalendarDate(year: 2026, month: 8, day: 11)!,
+                endDate: CalendarDate(year: 2026, month: 8, day: 12)!,
+                startTime: nil,
+                endTime: nil
+            )
+        )
+        var source = state(containing: first)
+        source.items[second.id] = second
+        let destination = CalendarDate(year: 2026, month: 8, day: 17)!
+
+        let result = try CalendarReducer.reduce(
+            source,
+            command: .moveItems([first.id, second.id], to: destination),
+            now: .now
+        )
+
+        #expect(result.items[first.id]?.schedule.startDate == destination)
+        #expect(result.items[first.id]?.schedule.durationDays == 1)
+        #expect(result.items[second.id]?.schedule.startDate == destination)
+        #expect(result.items[second.id]?.schedule.durationDays == 2)
+        #expect(throws: ReducerError.invalidState) {
+            try CalendarReducer.reduce(
+                source,
+                command: .moveItems([first.id, first.id], to: destination),
+                now: .now
+            )
+        }
+    }
+
     @Test func completingOneRecurringTaskDoesNotCompleteNext() throws {
         let state = try makeRecurringTaskState()
         let series = try #require(state.recurrence.series.values.first)

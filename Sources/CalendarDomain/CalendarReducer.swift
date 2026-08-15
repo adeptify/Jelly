@@ -61,6 +61,20 @@ public enum CalendarReducer {
             item.updatedAt = now
             result.items[id] = item
 
+        case let .moveItems(ids, destination):
+            guard !ids.isEmpty, Set(ids).count == ids.count else {
+                throw ReducerError.invalidState
+            }
+            for id in ids {
+                guard var item = result.items[id] else {
+                    throw ReducerError.missingItem
+                }
+                let delta = item.schedule.startDate.days(until: destination)
+                item.schedule = try item.schedule.shifted(byDays: delta)
+                item.updatedAt = now
+                result.items[id] = item
+            }
+
         case let .setTaskCompleted(id, completedAt):
             guard var item = result.items[id] else {
                 throw ReducerError.missingItem

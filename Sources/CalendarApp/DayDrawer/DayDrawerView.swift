@@ -42,8 +42,13 @@ struct DayDrawerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("\(model.date.month)月\(model.date.day)日")
-                    .font(.headline)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(model.date.month)月\(model.date.day)日")
+                        .font(.headline)
+                    Text("\(model.items.count) 件 · 已完成 \(completedCount) 件")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button(action: onClose) {
                     Image(systemName: "xmark")
@@ -103,6 +108,18 @@ struct DayDrawerView: View {
         .onChange(of: hiddenCategoryIDs) { _, hidden in
             model.refresh(state: store.calendarState, hiddenCategoryIDs: hidden)
         }
+        .onKeyPress(.escape) {
+            onClose()
+            return .handled
+        }
+        .onKeyPress("n") {
+            onQuickCreate(model.quickCreateDate)
+            return .handled
+        }
+    }
+
+    private var completedCount: Int {
+        model.items.filter { $0.completedAt != nil }.count
     }
 
     private func sendCompletion(_ command: CalendarCommand) {

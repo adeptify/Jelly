@@ -2,11 +2,28 @@ import AppKit
 import CalendarDomain
 import SwiftUI
 
+enum CategoryManagerInitialSelection {
+    static func resolve(
+        preferredCategoryID: UUID?,
+        orderedCategories: [CalendarCategory]
+    ) -> UUID? {
+        if let preferredCategoryID,
+           orderedCategories.contains(where: { $0.id == preferredCategoryID }) {
+            return preferredCategoryID
+        }
+        return orderedCategories.first?.id
+    }
+}
+
 /// Category manager — same visual language as the item editor (compact, warm, non-system).
 struct CategoryManagerView: View {
     let store: WorkspaceStore
+    let initialCategoryID: UUID?
     @StateObject private var model: CategoryManagerViewModel
     @State private var editingCategoryID: UUID?
+    @State private var categoryBeforeCreatingID: UUID?
+    @State private var isCreating = false
+    @State private var showAdvancedColors = false
     @State private var localError: String?
     @State private var attemptedSave = false
     @FocusState private var nameFocused: Bool
@@ -21,8 +38,9 @@ struct CategoryManagerView: View {
         colorScheme == .dark ? .dark : .light
     }
 
-    init(store: WorkspaceStore) {
+    init(store: WorkspaceStore, initialCategoryID: UUID? = nil) {
         self.store = store
+        self.initialCategoryID = initialCategoryID
         _model = StateObject(wrappedValue: CategoryManagerViewModel(store: store))
     }
 
@@ -65,10 +83,14 @@ struct CategoryManagerView: View {
             }
         }
         .onAppear {
-            if editingCategoryID == nil, model.draftName.isEmpty {
-                startCreating()
-            }
-            DispatchQueue.main.async { nameFocused = true }
+            guard editingCategoryID == nil, !isCreating,
+                  let categoryID = CategoryManagerInitialSelection.resolve(
+                    preferredCategoryID: initialCategoryID,
+                    orderedCategories: orderedCategories
+                  ),
+                  let category = store.calendarState.categories[categoryID]
+            else { return }
+                select(category)
         }
     }
 
@@ -83,7 +105,7 @@ struct CategoryManagerView: View {
                 toolbarIconButton(
                     systemName: "plus",
                     help: "新建分类",
-                    emphasized: editingCategoryID == nil
+                    emphasized: isCreating
                 ) {
                     startCreating()
                 }
@@ -95,7 +117,7 @@ struct CategoryManagerView: View {
 
             ScrollView {
                 LazyVStack(spacing: 6) {
-                    if editingCategoryID == nil {
+                    if isCreating {
                         creatingRow
                     }
                     ForEach(orderedCategories) { category in
@@ -156,6 +178,9 @@ struct CategoryManagerView: View {
                     .lineLimit(1)
                     .foregroundStyle(theme.primaryText)
                 Spacer(minLength: 0)
+                Text("\(usageCount(for: category))")
+                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                    .foregroundStyle(theme.secondaryText)
                 if category.id == store.calendarState.uncategorizedID {
                     Image(systemName: "lock.fill")
                         .font(.system(size: 9))
@@ -172,6 +197,16 @@ struct CategoryManagerView: View {
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
+        .draggable(category.id.uuidString)
+        .dropDestination(for: String.self) { payloads, _ in
+            guard let rawID = payloads.first,
+                  let draggedID = UUID(uuidString: rawID),
+                  draggedID != category.id
+            else { return false }
+            moveCategory(draggedID, before: category.id)
+            return true
+        }
+        .help("拖动可调整分类顺序")
     }
 
     private func toolbarIconButton(
@@ -211,7 +246,7 @@ struct CategoryManagerView: View {
                     protectedBanner
                 }
 
-                livePreviewHero
+                usageOverview
                 nameBlock
                 colorBlock
 
@@ -233,8 +268,15 @@ struct CategoryManagerView: View {
 
     private var editorHeader: some View {
         HStack(spacing: 8) {
-            Text(editingCategory == nil ? "新建分类" : "编辑分类")
-                .font(.system(size: 13, weight: .semibold))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(isCreating ? "新建分类" : "管理分类")
+                    .font(.system(size: 13, weight: .semibold))
+                if let editingCategory {
+                    Text("正在管理“\(editingCategory.name)”")
+                        .font(.system(size: 10))
+                        .foregroundStyle(theme.secondaryText)
+                }
+            }
             Spacer(minLength: 0)
             Button {
                 dismiss()
@@ -262,10 +304,16 @@ struct CategoryManagerView: View {
                     .disabled(isProtectedCategory || store.phase != .ready)
             }
             Spacer(minLength: 0)
-            Button("取消") { dismiss() }
+            Button("取消") {
+                if isCreating {
+                    cancelCreating()
+                } else {
+                    dismiss()
+                }
+            }
                 .controlSize(.small)
                 .keyboardShortcut(.escape, modifiers: [])
-            Button(editingCategory == nil ? "创建" : "保存", action: save)
+            Button(isCreating ? "创建" : "保存", action: save)
                 .controlSize(.small)
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return, modifiers: [])
@@ -302,6 +350,38 @@ struct CategoryManagerView: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(fieldBlockBackground)
+    }
+
+    private var usageOverview: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionLabel("使用情况")
+            HStack(spacing: 10) {
+                usagePill("日历", value: editingCategory.map { calendarUsageCount(for: $0) } ?? 0)
+                usagePill("笔记", value: editingCategory.map { noteUsageCount(for: $0) } ?? 0)
+                usagePill("灵感", value: editingCategory.map { inspirationUsageCount(for: $0) } ?? 0)
+            }
+            if isCreating {
+                Text("创建后，日历事项、笔记和灵感都可以使用这个分类。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.secondaryText)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(fieldBlockBackground)
+    }
+
+    private func usagePill(_ title: String, value: Int) -> some View {
+        VStack(spacing: 3) {
+            Text("\(value)")
+                .font(.system(size: 15, weight: .semibold).monospacedDigit())
+            Text(title)
+                .font(.system(size: 10))
+                .foregroundStyle(theme.secondaryText)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 9)
+        .background(theme.subtleBorder.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func previewChip(appearance: CalendarAppearance, caption: String) -> some View {
@@ -373,43 +453,11 @@ struct CategoryManagerView: View {
         VStack(alignment: .leading, spacing: 14) {
             sectionLabel("颜色")
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(CategoryPalette.families) { family in
-                        let selected = model.selectedFamilyID == family.id
-                        Button {
-                            model.selectFamily(family.id)
-                        } label: {
-                            Text(family.name)
-                                .font(.system(size: 12, weight: selected ? .semibold : .medium))
-                                .foregroundStyle(selected ? theme.primaryText : theme.secondaryText)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 7)
-                                .background(
-                                    selected
-                                        ? theme.controlAccent.opacity(0.24)
-                                        : theme.subtleBorder.opacity(0.14),
-                                    in: Capsule()
-                                )
-                                .overlay {
-                                    Capsule()
-                                        .stroke(
-                                            selected ? theme.controlAccent.opacity(0.45) : Color.clear,
-                                            lineWidth: 1
-                                        )
-                                }
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(isProtectedCategory)
-                    }
-                }
-            }
-
             LazyVGrid(
                 columns: Array(repeating: GridItem(.flexible(minimum: 30), spacing: 10), count: 8),
                 spacing: 10
             ) {
-                ForEach(selectedFamily.presets) { preset in
+                ForEach(CategoryPalette.family(id: .basic).presets) { preset in
                     let selected = model.draftColorHex.uppercased() == preset.hex
                     Button {
                         model.selectPreset(preset.hex)
@@ -438,26 +486,56 @@ struct CategoryManagerView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(isProtectedCategory)
-                    .accessibilityLabel("选择\(selectedFamily.name)色系的\(preset.accessibilityName)")
+                    .accessibilityLabel("选择\(preset.accessibilityName)")
                     .accessibilityValue(selected ? "已选中" : "未选中")
                 }
             }
 
-            HStack(spacing: 10) {
-                Text("色值")
-                    .font(.system(size: 12))
-                    .foregroundStyle(theme.secondaryText)
-                    .frame(width: 32, alignment: .leading)
-                TextField("#RRGGBB", text: $model.draftColorHex)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-                    .disabled(isProtectedCategory)
-                ColorPicker("", selection: colorBinding, supportsOpacity: false)
-                    .labelsHidden()
-                    .disabled(isProtectedCategory)
-                    .frame(width: 28, height: 22)
-                    .help("打开取色器")
+            DisclosureGroup("自定义颜色", isExpanded: $showAdvancedColors) {
+                VStack(alignment: .leading, spacing: 12) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(CategoryPalette.families.dropFirst()) { family in
+                                Button(family.name) { model.selectFamily(family.id) }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                            }
+                        }
+                    }
+                    LazyVGrid(
+                        columns: Array(repeating: GridItem(.flexible(minimum: 30), spacing: 10), count: 8),
+                        spacing: 10
+                    ) {
+                        ForEach(selectedFamily.presets) { preset in
+                            Button { model.selectPreset(preset.hex) } label: {
+                                Circle()
+                                    .fill(CalendarTheme.categoryColor(preset.hex))
+                                    .frame(width: 28, height: 28)
+                                    .overlay {
+                                        if model.draftColorHex.uppercased() == preset.hex {
+                                            Image(systemName: "checkmark")
+                                                .font(.system(size: 10, weight: .bold))
+                                                .foregroundStyle(swatchCheckColor(for: preset.hex))
+                                        }
+                                    }
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isProtectedCategory)
+                            .accessibilityLabel("选择\(familyName(for: preset.hex))的\(preset.accessibilityName)")
+                        }
+                    }
+                    HStack(spacing: 10) {
+                        TextField("#RRGGBB", text: $model.draftColorHex)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .monospaced))
+                            .disabled(isProtectedCategory)
+                        ColorPicker("取色", selection: colorBinding, supportsOpacity: false)
+                            .disabled(isProtectedCategory)
+                    }
+                }
+                .padding(.top, 10)
             }
+            .font(.system(size: 12, weight: .medium))
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -589,6 +667,8 @@ struct CategoryManagerView: View {
     }
 
     private func select(_ category: CalendarCategory) {
+        isCreating = false
+        categoryBeforeCreatingID = nil
         editingCategoryID = category.id
         model.beginEditing(category)
         localError = nil
@@ -597,6 +677,10 @@ struct CategoryManagerView: View {
     }
 
     private func startCreating() {
+        if !isCreating {
+            categoryBeforeCreatingID = editingCategoryID
+        }
+        isCreating = true
         editingCategoryID = nil
         model.beginCreating()
         localError = nil
@@ -611,7 +695,8 @@ struct CategoryManagerView: View {
         Task {
             do {
                 let presentation: WorkspaceMutationPresentation
-                if let category = editingCategory {
+                let intendedName = model.draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let category = editingCategory, !isCreating {
                     presentation = try await model.update(category)
                 } else {
                     presentation = try await model.create()
@@ -621,6 +706,10 @@ struct CategoryManagerView: View {
                     return
                 }
                 attemptedSave = false
+                if isCreating,
+                   let created = orderedCategories.first(where: { $0.name == intendedName }) {
+                    select(created)
+                }
             } catch {
                 localError = message(for: error)
             }
@@ -641,11 +730,73 @@ struct CategoryManagerView: View {
                     localError = presentation.message
                     return
                 }
-                startCreating()
+                selectFallbackCategory()
             } catch {
                 localError = message(for: error)
             }
         }
+    }
+
+    private func cancelCreating() {
+        let categoryToRestoreID = CategoryManagerInitialSelection.resolve(
+            preferredCategoryID: categoryBeforeCreatingID,
+            orderedCategories: orderedCategories
+        )
+        categoryBeforeCreatingID = nil
+        isCreating = false
+        if let categoryToRestoreID,
+           let categoryToRestore = store.calendarState.categories[categoryToRestoreID] {
+            select(categoryToRestore)
+        } else {
+            selectFallbackCategory()
+        }
+    }
+
+    private func selectFallbackCategory() {
+        if let category = orderedCategories.first {
+            select(category)
+        } else {
+            editingCategoryID = nil
+        }
+    }
+
+    private func calendarUsageCount(for category: CalendarCategory) -> Int {
+        store.calendarState.items.values.filter { $0.categoryID == category.id }.count
+            + store.calendarState.recurrence.series.values.filter { $0.categoryID == category.id }.count
+    }
+
+    private func noteUsageCount(for category: CalendarCategory) -> Int {
+        store.state.notes.values.filter { $0.categoryID == category.id }.count
+    }
+
+    private func inspirationUsageCount(for category: CalendarCategory) -> Int {
+        store.state.inspirations.values.filter { $0.categoryID == category.id }.count
+    }
+
+    private func usageCount(for category: CalendarCategory) -> Int {
+        calendarUsageCount(for: category) + noteUsageCount(for: category) + inspirationUsageCount(for: category)
+    }
+
+    private func moveCategory(_ draggedID: UUID, before targetID: UUID) {
+        var ids = orderedCategories.map(\.id)
+        guard let sourceIndex = ids.firstIndex(of: draggedID),
+              let targetIndex = ids.firstIndex(of: targetID)
+        else { return }
+        ids.remove(at: sourceIndex)
+        let insertionIndex = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex
+        ids.insert(draggedID, at: insertionIndex)
+        Task {
+            do {
+                let presentation = try await model.reorder(ids)
+                if !presentation.allowsDismissal { localError = presentation.message }
+            } catch {
+                localError = message(for: error)
+            }
+        }
+    }
+
+    private func familyName(for hex: String) -> String {
+        CategoryPalette.families.first(where: { $0.colors.contains(hex) })?.name ?? "自定义"
     }
 
     private func message(for error: Error) -> String {

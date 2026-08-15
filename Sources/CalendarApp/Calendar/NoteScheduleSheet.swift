@@ -39,8 +39,11 @@ struct NoteScheduleSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("从笔记安排到日历")
+            Text("安排这篇笔记")
                 .font(.headline)
+            Text("将创建一个全天事项，并把这篇笔记作为事项详情。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             TextField("事项标题", text: $title)
                 .textFieldStyle(.roundedBorder)
             EditorDateChip(date: $selectedDate)
@@ -88,7 +91,7 @@ struct NoteScheduleSheet: View {
             )
             let outcome = try await store.sendWorkspace(
                 .scheduleNoteOnCalendar(.init(noteID: noteID, item: item)),
-                undoLabel: "从笔记安排到日历"
+                undoLabel: "安排这篇笔记"
             )
             if case .committed = outcome {
                 onScheduled(item.id)

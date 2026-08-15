@@ -1,11 +1,80 @@
 import CalendarDomain
 import Foundation
 import Testing
+import WorkspaceDomain
 @testable import CalendarApp
 
 @Suite("ItemEditorViewModelTests")
 @MainActor
 struct ItemEditorViewModelTests {
+    @Test func editorConfigurationTargetsTheExactCalendarObjectForNoteRelations() throws {
+        let calendar = makeEmptyState()
+        let day = CalendarDate(year: 2026, month: 8, day: 14)!
+        let item = try makeItem(
+            categoryID: calendar.uncategorizedID,
+            title: "一次事项",
+            date: day
+        )
+        #expect(ItemEditorConfiguration.oneOff(item: item).calendarTarget == .item(item.id))
+
+        let series = try WeeklySeries(
+            id: UUID(),
+            kind: .task,
+            title: "每周事项",
+            categoryID: calendar.uncategorizedID,
+            ruleStartDate: day,
+            recurrenceEndDate: nil,
+            weekdays: [day.weekday],
+            durationDays: 1,
+            startTime: nil,
+            endTime: nil,
+            creationTimeZoneIdentifier: "Asia/Shanghai",
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let occurrence = CalendarOccurrence(
+            key: .init(seriesID: series.id, originalDate: day),
+            schedule: try .init(
+                startDate: day,
+                endDate: day,
+                startTime: nil,
+                endTime: nil
+            ),
+            title: series.title,
+            kind: series.kind,
+            categoryID: series.categoryID,
+            creationTimeZoneIdentifier: series.creationTimeZoneIdentifier,
+            completedAt: nil,
+            createdAt: series.createdAt
+        )
+        #expect(ItemEditorConfiguration.occurrence(
+            series: series,
+            occurrence: occurrence,
+            scope: .onlyThis
+        ).calendarTarget == .occurrence(occurrence.key))
+        #expect(ItemEditorConfiguration.occurrence(
+            series: series,
+            occurrence: occurrence,
+            scope: .thisAndFuture
+        ).calendarTarget == .series(series.id))
+    }
+
+    @Test func existingNoteRelationsAutomaticallyRevealMoreDetails() {
+        let day = CalendarDate(year: 2026, month: 8, day: 14)!
+        let draft = ItemDraft.newItem(from: day, through: day, categoryID: UUID())
+
+        #expect(ItemEditorMoreDetailsPolicy.isInitiallyExpanded(
+            draft: draft,
+            canEditRule: false,
+            hasNoteRelations: false
+        ) == false)
+        #expect(ItemEditorMoreDetailsPolicy.isInitiallyExpanded(
+            draft: draft,
+            canEditRule: false,
+            hasNoteRelations: true
+        ))
+    }
+
     @Test func dayDrawerRetargetsDateItemsAndQuickCreateWhenExternalDateChanges() throws {
         let dateA = CalendarDate(year: 2026, month: 8, day: 3)!
         let dateB = CalendarDate(year: 2026, month: 8, day: 4)!

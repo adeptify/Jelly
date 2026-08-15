@@ -27,6 +27,7 @@ struct ItemDetailPopover: View {
                     configuration: editorConfiguration,
                     store: store,
                     categories: categories,
+                    onOpenNote: onOpenNote,
                     onCancel: { self.editorConfiguration = nil },
                     onSaved: onClose
                 )
@@ -279,6 +280,28 @@ enum ItemEditorConfiguration: Identifiable {
         }
         return false
     }
+
+    var calendarTarget: CalendarTargetID {
+        switch self {
+        case let .oneOff(item):
+            .item(item.id)
+        case let .occurrence(series, occurrence, scope):
+            scope == .thisAndFuture ? .series(series.id) : .occurrence(occurrence.key)
+        }
+    }
+}
+
+enum ItemEditorMoreDetailsPolicy {
+    static func isInitiallyExpanded(
+        draft: ItemDraft,
+        canEditRule: Bool,
+        hasNoteRelations: Bool
+    ) -> Bool {
+        draft.priority != .none
+            || !draft.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || canEditRule
+            || hasNoteRelations
+    }
 }
 
 struct ItemEditForm: View {
@@ -288,6 +311,7 @@ struct ItemEditForm: View {
     let configuration: ItemEditorConfiguration
     let store: WorkspaceStore
     let categories: [CalendarCategory]
+    let onOpenNote: (NoteID) -> Void
     let onCancel: () -> Void
     let onSaved: () -> Void
     @FocusState private var titleFocused: Bool
@@ -296,6 +320,8 @@ struct ItemEditForm: View {
     @State private var localError: String?
     @State private var recoveryAction: WorkspaceRecoveryAction?
     @State private var deleteConfirmationShown = false
+    @State private var showMoreDetails: Bool
+    @State private var noteRelationModel: CalendarNoteIntegrationModel
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.openCategoryManager) private var openCategoryManager
 
@@ -311,20 +337,33 @@ struct ItemEditForm: View {
         configuration: ItemEditorConfiguration,
         store: WorkspaceStore,
         categories: [CalendarCategory],
+        onOpenNote: @escaping (NoteID) -> Void = { _ in },
         onCancel: @escaping () -> Void,
         onSaved: @escaping () -> Void
     ) {
         self.configuration = configuration
         self.store = store
         self.categories = categories
+        self.onOpenNote = onOpenNote
         self.onCancel = onCancel
         self.onSaved = onSaved
         let draft = configuration.draft
+        let noteRelationModel = CalendarNoteIntegrationModel(
+            target: configuration.calendarTarget,
+            store: store
+        )
         _model = StateObject(wrappedValue: ItemEditorViewModel(
             mode: configuration.mode,
             draft: draft
         ))
         _categoryOption = State(initialValue: draft.categoryID.uuidString)
+        _noteRelationModel = State(initialValue: noteRelationModel)
+        _showMoreDetails = State(initialValue: ItemEditorMoreDetailsPolicy.isInitiallyExpanded(
+            draft: draft,
+            canEditRule: configuration.canEditRule,
+            hasNoteRelations: noteRelationModel.primaryNote != nil
+                || !noteRelationModel.referenceNotes.isEmpty
+        ))
     }
 
     var body: some View {
@@ -334,12 +373,24 @@ struct ItemEditForm: View {
             thinRule
             VStack(alignment: .leading, spacing: EditorFormStyle.contentSpacing) {
                 titleField
-                metaBlock
+                categoryBlock
                 scheduleBlock
-                if configuration.canEditRule {
-                    recurrenceBlock
+                DisclosureGroup("更多详情", isExpanded: $showMoreDetails) {
+                    VStack(alignment: .leading, spacing: EditorFormStyle.contentSpacing) {
+                        priorityBlock
+                        if configuration.canEditRule {
+                            recurrenceBlock
+                        }
+                        MarkdownNotesEditor(text: $model.draft.notes)
+                        CalendarNoteRelationPopover(
+                            model: noteRelationModel,
+                            store: store,
+                            onOpenNote: onOpenNote
+                        )
+                    }
+                    .padding(.top, 8)
                 }
-                MarkdownNotesEditor(text: $model.draft.notes)
+                .font(EditorFormStyle.control)
                 if let message = localError ?? model.validationMessage {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(message)
@@ -363,7 +414,10 @@ struct ItemEditForm: View {
         .background(theme.elevatedSurface)
         .foregroundStyle(theme.primaryText)
         .tint(theme.controlAccent)
-        .onAppear { titleFocused = true }
+        .onAppear {
+            noteRelationModel.refresh()
+            titleFocused = true
+        }
         .onChange(of: model.draft.categoryID) { _, id in
             categoryOption = id.uuidString
         }
@@ -391,7 +445,7 @@ struct ItemEditForm: View {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(theme.secondaryText)
-                    .frame(width: 18, height: 18)
+                    .frame(width: 28, height: 28)
                     .background(theme.subtleBorder.opacity(0.35), in: Circle())
                     .contentShape(Circle())
             }
@@ -404,10 +458,15 @@ struct ItemEditForm: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            Button("删除", role: .destructive) {
-                deleteConfirmationShown = true
+            Menu {
+                Button("删除事项", role: .destructive) {
+                    deleteConfirmationShown = true
+                }
+            } label: {
+                Label("更多", systemImage: "ellipsis")
             }
-            .controlSize(.small)
+            .menuStyle(.borderlessButton)
+            .fixedSize()
             .disabled(store.phase != .ready)
             Spacer(minLength: 0)
             Button("取消", action: onCancel)
@@ -438,13 +497,19 @@ struct ItemEditForm: View {
             .focused($titleFocused)
     }
 
-    /// Category + priority as one distinct block.
-    private var metaBlock: some View {
+    private var categoryBlock: some View {
         VStack(alignment: .leading, spacing: EditorFormStyle.blockSpacing) {
             fieldRow("分类") {
                 categoryMenu
             }
+        }
+        .padding(EditorFormStyle.blockPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(fieldBlockBackground)
+    }
 
+    private var priorityBlock: some View {
+        VStack(alignment: .leading, spacing: EditorFormStyle.blockSpacing) {
             fieldRow("优先级") {
                 EditorPriorityPicker(priority: priorityBinding)
                 Spacer(minLength: 0)
@@ -473,7 +538,7 @@ struct ItemEditForm: View {
             }
             Divider()
             Button("新建分类…") {
-                openCategoryManager.callAsFunction()
+                openCategoryManager.callAsFunction(categoryID: model.draft.categoryID)
             }
         } label: {
             HStack(spacing: 5) {

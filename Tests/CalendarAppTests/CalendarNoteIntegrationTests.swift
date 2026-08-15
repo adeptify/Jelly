@@ -8,7 +8,14 @@ import WorkspaceDomain
 @MainActor
 struct CalendarNoteIntegrationTests {
     @Test func createPrimaryNoteLinksItemAndKeepsNoteBodyIndependent() async throws {
-        let calendar = try makeStateWithOneItem()
+        var calendar = makeEmptyState()
+        let category = makeCategory(name: "采购")
+        calendar.categories[category.id] = category
+        let seededItem = try makeItem(
+            categoryID: category.id,
+            title: "采购本周食材"
+        )
+        calendar.items[seededItem.id] = seededItem
         let item = try #require(calendar.items.values.first)
         let store = WorkspaceStore(
             initialState: .empty(calendar: calendar),
@@ -19,6 +26,8 @@ struct CalendarNoteIntegrationTests {
         #expect(try await model.createPrimaryNote())
         let primary = try #require(model.primaryNote)
         #expect(store.state.notes[primary.id] != nil)
+        #expect(primary.title == item.title)
+        #expect(primary.categoryID == item.categoryID)
         #expect(store.calendarState.items[item.id]?.notes == item.notes)
     }
 
