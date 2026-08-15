@@ -61,7 +61,9 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
     var authoritativeUndoManager: UndoManager? { editorSession?.undoManager }
     var attachedSession: BlockEditorSession? { editorSession }
     var isPresentingEmptyDocumentPlaceholder: Bool {
-        projectedDocumentIsVisiblyEmpty && !hasMarkedText()
+        projectedDocumentIsVisiblyEmpty
+            && !hasMarkedText()
+            && window?.firstResponder !== self
     }
 
     func install(session: BlockEditorSession, hostToken: UUID) {
@@ -411,6 +413,7 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
     override func becomeFirstResponder() -> Bool {
         let result = super.becomeFirstResponder()
         if result {
+            needsDisplay = true
             updateImmediateInsertionIndicator()
             if let hostToken { editorSession?.focus(hostToken: hostToken) }
         }
@@ -420,6 +423,7 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
     override func resignFirstResponder() -> Bool {
         let result = super.resignFirstResponder()
         if result {
+            needsDisplay = true
             immediateInsertionIndicator.displayMode = .hidden
             if let hostToken { editorSession?.blur(hostToken: hostToken) }
         }

@@ -1225,6 +1225,89 @@ struct BlockEditorInputTests {
         ))
     }
 
+    @Test func markdownPrefixReplacesEveryCompatibleRichTextBlockKind() throws {
+        let id = blockID(476)
+        let completedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let sources: [(BlockKind, Int, Date?)] = [
+            (.paragraph, 0, nil),
+            (.heading1, 0, nil),
+            (.heading2, 0, nil),
+            (.heading3, 0, nil),
+            (.bullet, 0, nil),
+            (.ordered, 0, nil),
+            (.task, 0, completedAt),
+            (.quote, 0, nil)
+        ]
+        let conversions: [(String, BlockKind)] = [
+            ("# ", .heading1),
+            ("## ", .heading2),
+            ("### ", .heading3),
+            ("- ", .bullet),
+            ("* ", .bullet),
+            ("1. ", .ordered),
+            ("[] ", .task),
+            ("[ ] ", .task),
+            ("> ", .quote),
+            ("``` ", .code)
+        ]
+
+        for (sourceKind, sourceIndent, sourceCompletion) in sources {
+            for (prefix, targetKind) in conversions {
+                let document = doc([block(
+                    id,
+                    sourceKind,
+                    prefix + "正文",
+                    indent: sourceIndent,
+                    completed: sourceCompletion
+                )])
+                let result = try reduce(document, caret(id, prefix.count), .applyMarkdownShortcut)
+                let converted = result.document.blocks[0]
+
+                #expect(converted.kind == targetKind, Comment(rawValue: "\(sourceKind) + \(prefix.debugDescription)"))
+                #expect(text(converted) == "正文", Comment(rawValue: "\(sourceKind) + \(prefix.debugDescription)"))
+                #expect(converted.indentLevel == ([BlockKind.bullet, .ordered, .task].contains(targetKind) ? sourceIndent : 0))
+                #expect(converted.taskState?.completedAt == (sourceKind == .task && targetKind == .task ? completedAt : nil))
+                #expect(result.selection == caret(id, 0))
+                #expect(result.undo == .atomic(.conversion))
+            }
+        }
+    }
+
+    @Test func headingBulletHeadingJourneyConvertsAtTheSpaceKeystroke() throws {
+        let first = blockID(477)
+        let middle = blockID(478)
+        let last = blockID(479)
+        let document = doc([
+            block(first, .heading1, "一、背景"),
+            block(middle, .heading1, "- "),
+            block(last, .heading1, "二、结论")
+        ])
+
+        let result = try reduce(document, caret(middle, 2), .applyMarkdownShortcut)
+
+        #expect(result.document.blocks.map(\.kind) == [.heading1, .bullet, .heading1])
+        #expect(result.document.blocks.map(text) == ["一、背景", "", "二、结论"])
+        #expect(result.selection == caret(middle, 0))
+        #expect(result.undo == .atomic(.conversion))
+    }
+
+    @Test func markdownPrefixRemainsLiteralInsideCodeAndStandaloneLinkBlocks() throws {
+        let codeID = blockID(480)
+        let linkID = blockID(481)
+        let linked = InlineContent(spans: [.init(text: "- ", linkURL: exactLinkURL)])
+        let code = doc([block(codeID, .code, "- ", codeInfo: "swift")])
+        let link = doc([DocumentBlock(
+            id: linkID,
+            kind: .link,
+            inlineContent: linked,
+            taskState: nil,
+            indentLevel: 0
+        )])
+
+        #expect(try reduce(code, caret(codeID, 2), .applyMarkdownShortcut) == exactNoChange(code, caret(codeID, 2), .samePosition))
+        #expect(try reduce(link, caret(linkID, 2), .applyMarkdownShortcut) == exactNoChange(link, caret(linkID, 2), .samePosition))
+    }
+
     @Test func compositeMarkdownConversionPreservesLeadingZeroLengthSpansAndAdjacentAttributesExactly() throws {
         let id = blockID(474)
         let zeroItalic = InlineSpan(text: "", marks: [.italic])
@@ -2921,7 +3004,7 @@ struct MarkdownExactFixture: Sendable, CustomTestStringConvertible {
             ("nonleading", doc([block(id, .paragraph, "x# ")]), caret(id, 3)),
             ("caret-before-complete-prefix", doc([block(id, .paragraph, "# 正文")]), caret(id, 1)),
             ("noncollapsed", doc([block(id, .paragraph, "# 正文")]), textSelection(id, 0, id, 2)),
-            ("nonparagraph", doc([block(id, .heading1, "# ")]), caret(id, 2))
+            ("code-block", doc([block(id, .code, "# ")]), caret(id, 2))
         ]
         fixtures.append(contentsOf: rejections.map { label, document, selection in
             .init(

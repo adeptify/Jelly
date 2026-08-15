@@ -895,7 +895,9 @@ private extension ReductionContext {
         guard case let .text(anchor, focus, _, _) = selection,
               anchor == focus,
               let index = document.blocks.firstIndex(where: { $0.id == anchor.blockID }),
-              document.blocks[index].kind == .paragraph else { return noChange(.samePosition) }
+              Self.acceptsMarkdownBlockShortcut(document.blocks[index].kind) else {
+            return noChange(.samePosition)
+        }
         let block = document.blocks[index]
         let prefix = String(block.text.prefix(anchor.graphemeOffset))
         let conversion: (kind: BlockKind, recognized: String, info: String?)?
@@ -931,6 +933,15 @@ private extension ReductionContext {
         candidate.blocks[index] = converted
         let position = BlockTextPosition(blockID: block.id, graphemeOffset: 0)
         return try documentResult(candidate, selection: caretSelection(position, in: candidate), undo: .atomic(.conversion))
+    }
+
+    static func acceptsMarkdownBlockShortcut(_ kind: BlockKind) -> Bool {
+        switch kind {
+        case .paragraph, .heading1, .heading2, .heading3, .bullet, .ordered, .task, .quote:
+            true
+        case .code, .divider, .link:
+            false
+        }
     }
 
     mutating func insertDivider() throws -> BlockInputResult {

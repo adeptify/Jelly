@@ -78,6 +78,28 @@ struct ContinuousBlockEditorHostTests {
         #expect(fixture.view.isPresentingEmptyDocumentPlaceholder)
     }
 
+    @Test @MainActor func focusedEmptyDocumentHidesPlaceholderBeforeTheFirstCharacter() {
+        _ = NSApplication.shared
+        let block = continuousBlock(id: 261, text: "")
+        let fixture = continuousFixture(blocks: [block], selection: continuousCaret(block.id, 0))
+        fixture.host.frame = .init(x: 0, y: 0, width: 420, height: 140)
+        #expect(fixture.view.isPresentingEmptyDocumentPlaceholder)
+        let window = NSWindow(
+            contentRect: fixture.host.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = fixture.host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        #expect(window.makeFirstResponder(fixture.view))
+        #expect(fixture.view.isPresentingEmptyDocumentPlaceholder == false)
+        #expect(window.makeFirstResponder(nil))
+        #expect(fixture.view.isPresentingEmptyDocumentPlaceholder)
+    }
+
     @Test @MainActor func bodyCaretDrawsNearGlyphHeightInsteadOfFillingTheLineFragment() throws {
         let block = continuousBlock(id: 27, text: "正文")
         let fixture = continuousFixture(blocks: [block], selection: continuousCaret(block.id, 1))
