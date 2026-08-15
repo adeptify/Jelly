@@ -396,6 +396,65 @@ struct BlockEditorUndoTests {
         #expect(workspaceUndoCalls == 0)
     }
 
+    @Test func hostedLinkButtonRemovesTheLinkAtItsCollapsedCaretWithoutPromptingAgain() throws {
+        _ = NSApplication.shared
+        let blockID = BlockID()
+        let document = BlockDocument(blocks: [reviewBlock(blockID, "link target")])
+        let selection = BlockEditorSelection.text(
+            anchor: .init(blockID: blockID, graphemeOffset: 0),
+            focus: .init(blockID: blockID, graphemeOffset: 11),
+            preferredColumn: nil,
+            typingAttributes: .init(marks: [], linkURL: nil)
+        )
+        let url = try #require(URL(string: "https://example.com/collapsed-removal"))
+        var promptCount = 0
+        let harness = try HostedBlockEditorHarness(
+            document: document,
+            selection: selection,
+            requestLinkURL: {
+                promptCount += 1
+                return url
+            }
+        )
+        defer { harness.close() }
+
+        var linkButton = try harness.formattingButton(identifier: "block-format-link")
+        #expect(linkButton.sendAction(linkButton.action, to: linkButton.target))
+        #expect(promptCount == 1)
+        #expect(harness.document.blocks[0].inlineContent.spans.contains { $0.linkURL == url })
+
+        harness.redraw()
+        linkButton = try harness.formattingButton(identifier: "block-format-link")
+        #expect(linkButton.sendAction(linkButton.action, to: linkButton.target))
+        #expect(promptCount == 1)
+        #expect(harness.document == document)
+    }
+
+    @Test func hostedInlineStyleButtonsReallyRemoveTheStyleOnTheSecondClick() throws {
+        _ = NSApplication.shared
+        for identifier in ["block-format-bold", "block-format-italic", "block-format-code"] {
+            let blockID = BlockID()
+            let document = BlockDocument(blocks: [reviewBlock(blockID, "styled text")])
+            let selection = BlockEditorSelection.text(
+                anchor: .init(blockID: blockID, graphemeOffset: 0),
+                focus: .init(blockID: blockID, graphemeOffset: 11),
+                preferredColumn: nil,
+                typingAttributes: .init(marks: [], linkURL: nil)
+            )
+            let harness = try HostedBlockEditorHarness(document: document, selection: selection)
+            defer { harness.close() }
+
+            var button = try harness.formattingButton(identifier: identifier)
+            #expect(button.sendAction(button.action, to: button.target))
+            #expect(harness.document != document, Comment(rawValue: identifier))
+
+            harness.redraw()
+            button = try harness.formattingButton(identifier: identifier)
+            #expect(button.sendAction(button.action, to: button.target))
+            #expect(harness.document == document, Comment(rawValue: identifier))
+        }
+    }
+
     @Test func imeMultiUpdateInsertAndUnmarkCommitExactlyOnceWithChineseAndEmoji() {
         let fixture = undoFixture()
         var callbacks = 0

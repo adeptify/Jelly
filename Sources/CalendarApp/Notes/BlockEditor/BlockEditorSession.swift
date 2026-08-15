@@ -258,6 +258,15 @@ final class BlockEditorSession: ObservableObject, BlockEditorSessionContract {
         return attributes
     }
 
+    var focusedBlockKind: BlockKind? {
+        let blockID: BlockID
+        switch selection {
+        case let .text(_, focus, _, _): blockID = focus.blockID
+        case let .blocks(_, focus): blockID = focus
+        }
+        return document.blocks.first(where: { $0.id == blockID })?.kind
+    }
+
     /// Force the live IME candidate into the authoritative document through the
     /// same commit path as `unmarkText`. Returns false only when a live host
     /// still reports a composition that could not be committed.

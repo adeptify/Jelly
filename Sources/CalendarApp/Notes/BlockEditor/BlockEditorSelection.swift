@@ -57,6 +57,7 @@ enum BlockInputCommand: Equatable, Sendable {
     case moveHorizontal(BlockHorizontalDirection, extending: Bool)
     case moveVertical(BlockVerticalDirection, extending: Bool)
     case convert(BlockKind)
+    case insertDivider
     case applyMarkdownShortcut
     case applySlashConversion(BlockKind)
     case toggleInlineMark(InlineMark)

@@ -112,6 +112,15 @@ private struct BlockEditorSessionHost: View {
                     },
                     onOpenItem: taskCalendarContext.onOpenItem
                 )
+                .padding(
+                    .leading,
+                    BlockTextStyle.textColumnOffset(
+                        for: .task,
+                        indentLevel: session.document.blocks.first {
+                            $0.id == blockID
+                        }?.indentLevel ?? 0
+                    )
+                )
             }
             if let state = session.slashMenuState {
                 BlockSlashMenu(

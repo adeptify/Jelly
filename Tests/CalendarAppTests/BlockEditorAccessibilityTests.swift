@@ -898,6 +898,120 @@ struct BlockEditorAccessibilityTests {
         })
     }
 
+    @Test func taskCalendarEntryStaysCompactInsteadOfStretchingAcrossTheEditor() async throws {
+        _ = NSApplication.shared
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let noteID = NoteID()
+        let blockID = BlockID()
+        let document = BlockDocument(blocks: [try .task(id: blockID, text: "安排复盘")])
+        let hosting = NSHostingView(rootView: BlockEditorView(
+            noteID: noteID,
+            editSessionID: UUID(),
+            initialDocument: document,
+            initialSelection: projectionCaret(blockID, 0),
+            focusRegistry: EditorFocusRegistry(),
+            onDocumentChange: { _ in },
+            taskCalendarContext: .init(store: store, now: { .distantPast }, onOpenItem: { _ in })
+        ))
+        hosting.frame = .init(x: 0, y: 0, width: 640, height: 240)
+        hosting.layoutSubtreeIfNeeded()
+
+        let button = try #require(accessibilityDescendants(of: hosting, as: NSButton.self).first {
+            $0.accessibilityLabel() == "安排待办到日历"
+        })
+        #expect(
+            button.frame.width <= button.intrinsicContentSize.width + 12,
+            "日历入口应是紧凑次级操作，实际宽度 \(button.frame.width)，自然宽度 \(button.intrinsicContentSize.width)"
+        )
+        #expect(button.frame.width < hosting.bounds.width / 2)
+    }
+
+    @Test func dynamicallyRevealedTaskCalendarEntryStaysCompactAfterEditorLayoutSettles() async throws {
+        _ = NSApplication.shared
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let noteID = NoteID()
+        let blockID = BlockID()
+        var capturedSession: BlockEditorSession?
+        let hosting = NSHostingView(rootView:
+            ScrollView {
+                BlockEditorView(
+                    noteID: noteID,
+                    editSessionID: UUID(),
+                    initialDocument: BlockDocument(blocks: [projectionBlock(blockID, .paragraph, "待转换")]),
+                    initialSelection: projectionCaret(blockID, 0),
+                    focusRegistry: EditorFocusRegistry(),
+                    onDocumentChange: { _ in },
+                    sessionSink: { capturedSession = $0 },
+                    taskCalendarContext: .init(
+                        store: store,
+                        now: { .distantPast },
+                        onOpenItem: { _ in }
+                    )
+                )
+                .frame(maxWidth: NoteEditorLayout.maximumContentWidth, minHeight: 200, alignment: .topLeading)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.horizontal, NoteEditorLayout.horizontalSafetyMargin)
+                .padding(.vertical, 20)
+            }
+        )
+        hosting.frame = .init(x: 0, y: 0, width: 640, height: 240)
+        let window = NSWindow(
+            contentRect: hosting.bounds,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        hosting.layoutSubtreeIfNeeded()
+
+        let session = try #require(capturedSession)
+        #expect(session.dispatchTextCommand(.convert(.task)))
+        try await Task.sleep(for: .milliseconds(120))
+        hosting.layoutSubtreeIfNeeded()
+
+        let button = try #require(accessibilityDescendants(of: hosting, as: NSButton.self).first {
+            $0.accessibilityLabel() == "安排待办到日历"
+        })
+        #expect(
+            button.frame.width <= button.intrinsicContentSize.width + 12,
+            "动态出现的入口也必须保持紧凑，实际宽度 \(button.frame.width)"
+        )
+        #expect(button.frame.width < hosting.bounds.width / 2)
+
+        let textView = try #require(accessibilityDescendants(
+            of: hosting,
+            as: ContinuousBlockEditorTextView.self
+        ).first)
+        let layoutManager = try #require(textView.layoutManager)
+        let textContainer = try #require(textView.textContainer)
+        let firstGlyph = layoutManager.glyphIndexForCharacter(at: 0)
+        let glyphRect = layoutManager.boundingRect(
+            forGlyphRange: .init(location: firstGlyph, length: 1),
+            in: textContainer
+        )
+        let textStartInHost = textView.convert(
+            .init(x: textView.textContainerOrigin.x + glyphRect.minX, y: 0),
+            to: hosting
+        ).x
+        let buttonStartInHost = button.convert(.zero, to: hosting).x
+        #expect(
+            abs(buttonStartInHost - textStartInHost) < 1,
+            "日历入口应与待办正文起笔线对齐，正文 x=\(textStartInHost)，入口 x=\(buttonStartInHost)"
+        )
+    }
+
     @Test func darkAppearanceProjectsAConcreteReadableForegroundColor() throws {
         let blockID = BlockID()
         let view = BlockEditorTextView()

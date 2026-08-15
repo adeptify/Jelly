@@ -66,7 +66,7 @@ enum BlockFormattingAction: CaseIterable, Equatable {
         case .ordered: "设为有序列表"
         case .task: "设为待办"
         case .quote: "设为引用"
-        case .divider: "设为分隔线"
+        case .divider: "插入分隔线"
         case .link: "添加或移除链接"
         }
     }
@@ -84,7 +84,7 @@ enum BlockFormattingAction: CaseIterable, Equatable {
         case .ordered: .convert(.ordered)
         case .task: .convert(.task)
         case .quote: .convert(.quote)
-        case .divider: .convert(.divider)
+        case .divider: .insertDivider
         case .link: nil
         }
     }
@@ -118,18 +118,13 @@ struct BlockFormattingBar: View {
 
             if isExpanded {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 4) {
-                        ForEach(BlockFormattingAction.allCases, id: \.accessibilityIdentifier) { action in
-                            BlockFormattingButtonRepresentable(
-                                title: action.title,
-                                identifier: action.accessibilityIdentifier,
-                                accessibilityLabel: action.accessibilityLabel,
-                                prepareAction: { session?.prepareAuxiliaryControlAction() },
-                                action: { perform(action) }
-                            )
-                            .frame(minWidth: action == .paragraph || action == .link ? 46 : 30, minHeight: 28)
-                            .disabled(session == nil)
-                        }
+                    if let session {
+                        ObservedFormattingActions(
+                            session: session,
+                            requestLinkURL: requestLinkURL
+                        )
+                    } else {
+                        DisabledFormattingActions()
                     }
                 }
                 .accessibilityElement(children: .contain)
@@ -154,19 +149,65 @@ struct BlockFormattingBar: View {
         session.performAuxiliaryControlAction { isExpanded.toggle() }
     }
 
-    private func perform(_ action: BlockFormattingAction) {
-        guard let session else { return }
-        session.performAuxiliaryControlAction {
-            if let command = action.command {
-                _ = session.dispatchTextCommand(command)
-            } else {
-                toggleLink(in: session)
+}
+
+private struct ObservedFormattingActions: View {
+    @ObservedObject var session: BlockEditorSession
+    let requestLinkURL: () -> URL?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(Array(BlockFormattingAction.allCases.enumerated()), id: \.element.accessibilityIdentifier) { index, action in
+                if [4, 7, 12].contains(index) {
+                    Rectangle()
+                        .fill(Color.secondary.opacity(0.22))
+                        .frame(width: 1, height: 18)
+                        .padding(.horizontal, 2)
+                        .accessibilityHidden(true)
+                }
+                BlockFormattingButtonRepresentable(
+                    title: action.title,
+                    identifier: action.accessibilityIdentifier,
+                    accessibilityLabel: action.accessibilityLabel,
+                    isActive: isActive(action),
+                    prepareAction: { session.prepareAuxiliaryControlAction() },
+                    action: { perform(action) }
+                )
+                .frame(minWidth: action == .paragraph || action == .link ? 46 : 30, minHeight: 28)
             }
         }
     }
 
-    private func toggleLink(in session: BlockEditorSession) {
-        if session.selectionContainsLink {
+    private func isActive(_ action: BlockFormattingAction) -> Bool {
+        switch action {
+        case .paragraph: session.focusedBlockKind == .paragraph
+        case .heading1: session.focusedBlockKind == .heading1
+        case .heading2: session.focusedBlockKind == .heading2
+        case .heading3: session.focusedBlockKind == .heading3
+        case .bold: session.currentTypingAttributes.marks.contains(.bold)
+        case .italic: session.currentTypingAttributes.marks.contains(.italic)
+        case .inlineCode: session.currentTypingAttributes.marks.contains(.code)
+        case .bullet: session.focusedBlockKind == .bullet
+        case .ordered: session.focusedBlockKind == .ordered
+        case .task: session.focusedBlockKind == .task
+        case .quote: session.focusedBlockKind == .quote
+        case .divider: session.focusedBlockKind == .divider
+        case .link: session.selectionContainsLink || session.currentTypingAttributes.linkURL != nil
+        }
+    }
+
+    private func perform(_ action: BlockFormattingAction) {
+        session.performAuxiliaryControlAction {
+            if let command = action.command {
+                _ = session.dispatchTextCommand(command)
+            } else {
+                toggleLink()
+            }
+        }
+    }
+
+    private func toggleLink() {
+        if session.selectionContainsLink || session.currentTypingAttributes.linkURL != nil {
             _ = session.dispatchTextCommand(.setLink(nil))
             return
         }
@@ -181,10 +222,30 @@ struct BlockFormattingBar: View {
     }
 }
 
+private struct DisabledFormattingActions: View {
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(BlockFormattingAction.allCases, id: \.accessibilityIdentifier) { action in
+                BlockFormattingButtonRepresentable(
+                    title: action.title,
+                    identifier: action.accessibilityIdentifier,
+                    accessibilityLabel: action.accessibilityLabel,
+                    isActive: false,
+                    prepareAction: {},
+                    action: {}
+                )
+                .frame(minWidth: action == .paragraph || action == .link ? 46 : 30, minHeight: 28)
+                .disabled(true)
+            }
+        }
+    }
+}
+
 struct BlockFormattingButtonRepresentable: NSViewRepresentable {
     let title: String
     let identifier: String
     let accessibilityLabel: String
+    var isActive = false
     let prepareAction: () -> Void
     let action: () -> Void
 
@@ -214,6 +275,8 @@ struct BlockFormattingButtonRepresentable: NSViewRepresentable {
         button.toolTip = accessibilityLabel
         button.setAccessibilityIdentifier(identifier)
         button.setAccessibilityLabel(accessibilityLabel)
+        button.state = isActive ? .on : .off
+        button.setAccessibilityValue(isActive ? "已开启" : "未开启")
     }
 
     @MainActor

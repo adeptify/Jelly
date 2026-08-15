@@ -5,6 +5,63 @@ import WorkspaceDomain
 
 @Suite("BlockEditorInputTests")
 struct BlockEditorInputTests {
+    @Test func insertDividerLeavesOneEditableParagraphAfterTheRuleInOneUndoStep() throws {
+        let emptyID = blockID(4994)
+        let paragraphID = blockID(4995)
+        let dividerID = blockID(4996)
+
+        let replacingEmpty = try reduce(
+            doc([block(emptyID, .paragraph, "")]),
+            caret(emptyID, 0),
+            .insertDivider,
+            ids: [paragraphID]
+        )
+        #expect(replacingEmpty.document.blocks.map(\.kind) == [.divider, .paragraph])
+        #expect(replacingEmpty.document.blocks.map(text) == ["", ""])
+        #expect(replacingEmpty.selection == caret(paragraphID, 0))
+        #expect(replacingEmpty.undo == .atomic(.conversion))
+
+        let insertingAfterContent = try reduce(
+            doc([block(emptyID, .paragraph, "正文")]),
+            caret(emptyID, 2),
+            .insertDivider,
+            ids: [dividerID, paragraphID]
+        )
+        #expect(insertingAfterContent.document.blocks.map(\.kind) == [.paragraph, .divider, .paragraph])
+        #expect(insertingAfterContent.document.blocks.map(text) == ["正文", "", ""])
+        #expect(insertingAfterContent.selection == caret(paragraphID, 0))
+        #expect(insertingAfterContent.undo == .atomic(.conversion))
+    }
+
+    @Test func completeEmptyListExitAndBackspaceSequenceLeavesNoStrayListRow() throws {
+        let contentID = blockID(4997)
+        let emptyID = blockID(4998)
+        var result = try reduce(
+            doc([block(contentID, .bullet, "gamma")]),
+            caret(contentID, 5),
+            .enter,
+            ids: [emptyID]
+        )
+        #expect(result.document.blocks.map(\.kind) == [.bullet, .bullet])
+        #expect(result.selection == caret(emptyID, 0))
+
+        result = try reduce(result.document, result.selection, .enter)
+        #expect(result.document.blocks.map(\.kind) == [.bullet, .paragraph])
+        #expect(result.selection == caret(emptyID, 0))
+
+        result = try reduce(result.document, result.selection, .convert(.bullet))
+        #expect(result.document.blocks.map(\.kind) == [.bullet, .bullet])
+
+        result = try reduce(result.document, result.selection, .backspace)
+        #expect(result.document.blocks.map(\.kind) == [.bullet, .paragraph])
+        #expect(text(result.document.blocks[1]).isEmpty)
+
+        result = try reduce(result.document, result.selection, .backspace)
+        #expect(result.document.blocks.map(\.kind) == [.bullet])
+        #expect(result.document.blocks.map(text) == ["gamma"])
+        #expect(result.selection == caret(contentID, 5))
+    }
+
     @Test func ordinaryTypingCoalescesAdjacentEqualStylesIntoOneSpan() throws {
         let id = blockID(4999)
         var document = doc([block(id, .paragraph, "")])
@@ -138,7 +195,10 @@ struct BlockEditorInputTests {
         )
         let result = try reduce(document, reverse, .toggleInlineMark(.italic))
         #expect(result.mutation == .document)
-        #expect(result.selection == caret(id, 1, attributes: attributesAt(result.document, id, 1)))
+        #expect(result.selection == textSelection(
+            id, 1, id, 3,
+            attributes: .init(marks: [.italic], linkURL: nil)
+        ))
         #expect(result.document.blocks[0].inlineContent == .init(spans: [
             .init(text: "甲", marks: [.bold]),
             zero,
@@ -1974,7 +2034,10 @@ struct SpanBoundaryExactFixture: Sendable, CustomTestStringConvertible {
                 command: .setLink(exactLinkURL),
                 expected: .init(
                     document: linkedDocument,
-                    selection: caret(id, 1, attributes: .init(marks: [.bold], linkURL: nil)),
+                    selection: textSelection(
+                        id, 1, id, 2,
+                        attributes: .init(marks: [], linkURL: exactLinkURL)
+                    ),
                     mutation: .document,
                     effect: .handled,
                     undo: .atomic(.link)
@@ -2235,7 +2298,10 @@ struct FormattingExactFixture: Sendable, CustomTestStringConvertible {
                 selection: addSelection,
                 command: .toggleInlineMark(.bold),
                 expectedDocument: addedDocument,
-                expectedSelection: caret(a, 0, attributes: .init(marks: [.bold], linkURL: nil)),
+                expectedSelection: textSelection(
+                    a, 0, a, 2,
+                    attributes: .init(marks: [.bold], linkURL: nil)
+                ),
                 undo: .atomic(.formatting)
             ),
             documentResult(
@@ -2244,7 +2310,7 @@ struct FormattingExactFixture: Sendable, CustomTestStringConvertible {
                 selection: addSelection,
                 command: .toggleInlineMark(.bold),
                 expectedDocument: removedDocument,
-                expectedSelection: caret(a, 0),
+                expectedSelection: textSelection(a, 0, a, 2),
                 undo: .atomic(.formatting)
             ),
             documentResult(
@@ -2253,7 +2319,10 @@ struct FormattingExactFixture: Sendable, CustomTestStringConvertible {
                 selection: textSelection(a, 0, b, 1),
                 command: .toggleInlineMark(.bold),
                 expectedDocument: crossExpected,
-                expectedSelection: caret(a, 0, attributes: .init(marks: [.bold, .italic], linkURL: nil)),
+                expectedSelection: textSelection(
+                    a, 0, b, 1,
+                    attributes: .init(marks: [.bold], linkURL: nil)
+                ),
                 undo: .atomic(.formatting)
             ),
             documentResult(
@@ -2262,7 +2331,10 @@ struct FormattingExactFixture: Sendable, CustomTestStringConvertible {
                 selection: textSelection(b, 1, a, 0),
                 command: .toggleInlineMark(.bold),
                 expectedDocument: crossExpected,
-                expectedSelection: caret(a, 0, attributes: .init(marks: [.bold, .italic], linkURL: nil)),
+                expectedSelection: textSelection(
+                    a, 0, b, 1,
+                    attributes: .init(marks: [.bold], linkURL: nil)
+                ),
                 undo: .atomic(.formatting)
             ),
             .init(
@@ -2294,7 +2366,10 @@ struct FormattingExactFixture: Sendable, CustomTestStringConvertible {
                 selection: textSelection(a, 0, a, 1),
                 command: .setLink(exactLinkURL),
                 expectedDocument: linkedDocument,
-                expectedSelection: caret(a, 0, attributes: .init(marks: [], linkURL: exactLinkURL)),
+                expectedSelection: textSelection(
+                    a, 0, a, 1,
+                    attributes: .init(marks: [], linkURL: exactLinkURL)
+                ),
                 undo: .atomic(.link)
             )
         ]
@@ -3120,12 +3195,18 @@ private func caret(
     )
 }
 
-private func textSelection(_ a: BlockID, _ ao: Int, _ f: BlockID, _ fo: Int) -> BlockEditorSelection {
+private func textSelection(
+    _ a: BlockID,
+    _ ao: Int,
+    _ f: BlockID,
+    _ fo: Int,
+    attributes: BlockTypingAttributes = .init(marks: [], linkURL: nil)
+) -> BlockEditorSelection {
     .text(
         anchor: .init(blockID: a, graphemeOffset: ao),
         focus: .init(blockID: f, graphemeOffset: fo),
         preferredColumn: nil,
-        typingAttributes: .init(marks: [], linkURL: nil)
+        typingAttributes: attributes
     )
 }
 

@@ -47,6 +47,8 @@ enum BlockInputReducer {
             return context.moveVertical(direction, extending: extending)
         case let .convert(kind):
             return try context.convert(to: kind, slash: false)
+        case .insertDivider:
+            return try context.insertDivider()
         case .applyMarkdownShortcut:
             return try context.applyMarkdownShortcut()
         case let .applySlashConversion(kind):
@@ -102,7 +104,7 @@ private extension BlockInputCommand {
         case .insertText, .insertTextApplyingMarkdownShortcut, .enter, .softBreak, .backspace,
              .moveHorizontal, .moveVertical, .applyMarkdownShortcut, .applySlashConversion:
             true
-        case .indent, .outdent, .convert, .toggleInlineMark, .setLink, .setTaskCompletion,
+        case .indent, .outdent, .convert, .insertDivider, .toggleInlineMark, .setLink, .setTaskCompletion,
              .copySelection, .cutSelection, .replaceSelection, .deleteSelection, .moveBlockRoots,
              .applyDocumentBlocks:
             false
@@ -714,8 +716,15 @@ private extension ReductionContext {
                 return span
             }
         }
-        let position = range.start
-        return try documentResult(candidate, selection: caretSelection(position, in: candidate), undo: .atomic(.formatting))
+        var updatedAttributes = attributes
+        if remove { updatedAttributes.marks.remove(mark) } else { updatedAttributes.marks.insert(mark) }
+        let preservedSelection = BlockEditorSelection.text(
+            anchor: range.start,
+            focus: range.end,
+            preferredColumn: nil,
+            typingAttributes: updatedAttributes.validated
+        )
+        return try documentResult(candidate, selection: preservedSelection, undo: .atomic(.formatting))
     }
 
     mutating func setLink(_ url: URL?) throws -> BlockInputResult {
@@ -726,6 +735,37 @@ private extension ReductionContext {
             return noChange(.unsupportedBlockKind)
         }
         if range.isCollapsed {
+            if url == nil,
+               let activeURL = attributes.linkURL,
+               let linkedRange = contiguousLinkRange(
+                   in: document.blocks[range.startIndex],
+                   at: range.start.graphemeOffset,
+                   matching: activeURL
+               ) {
+                var candidate = document
+                candidate.blocks[range.startIndex].inlineContent = candidate.blocks[range.startIndex].inlineContent.transforming(
+                    linkedRange.lowerBound,
+                    linkedRange.upperBound
+                ) { span in
+                    var span = span
+                    if !span.text.isEmpty { span.linkURL = nil }
+                    return span
+                }
+                if candidate.blocks[range.startIndex].kind == .link,
+                   !candidate.blocks[range.startIndex].inlineContent.containsValidLink {
+                    let block = candidate.blocks[range.startIndex]
+                    candidate.blocks[range.startIndex] = Self.makeBlock(
+                        id: block.id,
+                        kind: .paragraph,
+                        content: block.inlineContent
+                    )
+                }
+                return try documentResult(
+                    candidate,
+                    selection: caretSelection(range.start, in: candidate),
+                    undo: .atomic(.link)
+                )
+            }
             var updated = attributes
             updated.linkURL = url
             return selectionResult(.text(anchor: anchor, focus: focus, preferredColumn: nil, typingAttributes: updated.validated))
@@ -750,7 +790,48 @@ private extension ReductionContext {
                 )
             }
         }
-        return try documentResult(candidate, selection: caretSelection(range.start, in: candidate), undo: .atomic(.link))
+        var updatedAttributes = attributes
+        updatedAttributes.linkURL = url
+        let preservedSelection = BlockEditorSelection.text(
+            anchor: range.start,
+            focus: range.end,
+            preferredColumn: nil,
+            typingAttributes: updatedAttributes.validated
+        )
+        return try documentResult(candidate, selection: preservedSelection, undo: .atomic(.link))
+    }
+
+    func contiguousLinkRange(
+        in block: DocumentBlock,
+        at offset: Int,
+        matching url: URL
+    ) -> Range<Int>? {
+        let spans = block.inlineContent.spans
+        var cursor = 0
+        var matchingIndex: Int?
+        var trailingIndex: Int?
+        for (index, span) in spans.enumerated() {
+            let end = cursor + span.text.count
+            if span.linkURL == url {
+                if cursor <= offset, offset < end {
+                    matchingIndex = index
+                    break
+                }
+                if end == offset { trailingIndex = index }
+            }
+            cursor = end
+        }
+        guard var lowerIndex = matchingIndex ?? trailingIndex else { return nil }
+        var upperIndex = lowerIndex
+        while lowerIndex > spans.startIndex, spans[lowerIndex - 1].linkURL == url {
+            lowerIndex -= 1
+        }
+        while upperIndex + 1 < spans.endIndex, spans[upperIndex + 1].linkURL == url {
+            upperIndex += 1
+        }
+        let lower = spans[..<lowerIndex].reduce(0) { $0 + $1.text.count }
+        let upper = lower + spans[lowerIndex...upperIndex].reduce(0) { $0 + $1.text.count }
+        return lower..<upper
     }
 
     mutating func convert(to kind: BlockKind, slash: Bool) throws -> BlockInputResult {
@@ -850,6 +931,41 @@ private extension ReductionContext {
         candidate.blocks[index] = converted
         let position = BlockTextPosition(blockID: block.id, graphemeOffset: 0)
         return try documentResult(candidate, selection: caretSelection(position, in: candidate), undo: .atomic(.conversion))
+    }
+
+    mutating func insertDivider() throws -> BlockInputResult {
+        guard case let .text(anchor, focus, _, _) = selection,
+              anchor == focus,
+              let index = document.blocks.firstIndex(where: { $0.id == focus.blockID }) else {
+            return noChange(.unsupportedBlockKind)
+        }
+
+        var candidate = document
+        let current = candidate.blocks[index]
+
+        if current.kind == .divider {
+            if candidate.blocks.indices.contains(index + 1),
+               candidate.blocks[index + 1].kind == .paragraph {
+                let following = candidate.blocks[index + 1]
+                return selectionResult(plainCaret(following.id, 0))
+            }
+            let paragraphID = try identifiers.next()
+            candidate.blocks.insert(Self.makeBlock(id: paragraphID, kind: .paragraph, content: .plain("")), at: index + 1)
+            return try documentResult(candidate, selection: plainCaret(paragraphID, 0), undo: .atomic(.conversion))
+        }
+
+        if current.text.isEmpty {
+            candidate.blocks[index] = Self.makeBlock(id: current.id, kind: .divider, content: .plain(""))
+            let paragraphID = try identifiers.next()
+            candidate.blocks.insert(Self.makeBlock(id: paragraphID, kind: .paragraph, content: .plain("")), at: index + 1)
+            return try documentResult(candidate, selection: plainCaret(paragraphID, 0), undo: .atomic(.conversion))
+        }
+
+        let dividerID = try identifiers.next()
+        let paragraphID = try identifiers.next()
+        candidate.blocks.insert(Self.makeBlock(id: dividerID, kind: .divider, content: .plain("")), at: index + 1)
+        candidate.blocks.insert(Self.makeBlock(id: paragraphID, kind: .paragraph, content: .plain("")), at: index + 2)
+        return try documentResult(candidate, selection: plainCaret(paragraphID, 0), undo: .atomic(.conversion))
     }
 
     func convertedBlock(_ block: DocumentBlock, kind: BlockKind, content: InlineContent) -> DocumentBlock? {

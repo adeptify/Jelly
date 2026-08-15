@@ -163,20 +163,25 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
             } else {
                 orderedIndex = 0
             }
-            let line = lineFragmentRect(forBlockAt: index)
             let structuralIndent = CGFloat(block.indentLevel * 20)
-            let baseline = NSPoint(
+            guard let markerBaseline = structuralMarkerBaselineY(forBlockAt: index) else { continue }
+            let markerFont = markerFont(for: block.kind)
+            let drawOrigin = NSPoint(
                 x: textContainerOrigin.x + structuralIndent + 1,
-                y: line.minY + textContainerOrigin.y
+                y: markerBaseline - markerFont.ascender
             )
             switch block.kind {
             case .bullet:
-                ("•" as NSString).draw(at: baseline, withAttributes: markerAttributes(color: color))
+                ("•" as NSString).draw(at: drawOrigin, withAttributes: markerAttributes(font: markerFont, color: color))
             case .ordered:
-                ("\(orderedIndex)." as NSString).draw(at: baseline, withAttributes: markerAttributes(color: color))
+                ("\(orderedIndex)." as NSString).draw(
+                    at: drawOrigin,
+                    withAttributes: markerAttributes(font: markerFont, color: color)
+                )
             case .task:
                 break
             case .quote:
+                let line = lineFragmentRect(forBlockAt: index)
                 color.setFill()
                 NSBezierPath(rect: .init(
                     x: textContainerOrigin.x + structuralIndent + 4,
@@ -185,6 +190,7 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
                     height: max(18, line.height)
                 )).fill()
             case .divider:
+                let line = lineFragmentRect(forBlockAt: index)
                 color.withAlphaComponent(0.48).setStroke()
                 let path = NSBezierPath()
                 let y = line.midY + textContainerOrigin.y
@@ -196,6 +202,34 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
                 break
             }
         }
+    }
+
+    func structuralMarkerBaselineY(for blockID: BlockID) -> CGFloat? {
+        guard let projection = currentProjection,
+              let index = projection.document.blocks.firstIndex(where: { $0.id == blockID }) else {
+            return nil
+        }
+        return structuralMarkerBaselineY(forBlockAt: index)
+    }
+
+    private func structuralMarkerBaselineY(forBlockAt index: Int) -> CGFloat? {
+        guard let projection = currentProjection,
+              projection.document.blocks.indices.contains(index) else { return nil }
+        ownedLayoutManager.ensureLayout(for: ownedTextContainer)
+        let segment = projection.segments[index]
+        let origin = textContainerOrigin
+
+        if segment.contentRange.length > 0, ownedLayoutManager.numberOfGlyphs > 0 {
+            let glyphIndex = ownedLayoutManager.glyphIndexForCharacter(at: segment.contentRange.location)
+            let line = ownedLayoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
+            let glyphLocation = ownedLayoutManager.location(forGlyphAt: glyphIndex)
+            return origin.y + line.minY + glyphLocation.y
+        }
+
+        let line = lineFragmentRect(forBlockAt: index)
+        let font = BlockTextStyle.baseFont(for: projection.document.blocks[index].kind)
+        let glyphHeight = font.ascender - font.descender
+        return origin.y + line.minY + max(0, (line.height - glyphHeight) / 2) + font.ascender
     }
 
     private func lineFragmentRect(forBlockAt index: Int) -> NSRect {
@@ -220,9 +254,14 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
         )
     }
 
-    private func markerAttributes(color: NSColor) -> [NSAttributedString.Key: Any] {
+    private func markerFont(for kind: BlockKind) -> NSFont {
+        let bodyFont = BlockTextStyle.baseFont(for: kind)
+        return NSFont.systemFont(ofSize: bodyFont.pointSize, weight: .regular)
+    }
+
+    private func markerAttributes(font: NSFont, color: NSColor) -> [NSAttributedString.Key: Any] {
         [
-            .font: NSFont.systemFont(ofSize: 15, weight: .medium),
+            .font: font,
             .foregroundColor: color
         ]
     }
@@ -423,6 +462,7 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
             editorSession.projectAuthoritativeState()
             return
         }
+        prepareTypingAttributesForEmptyBlockComposition(at: self.selectedRange.location)
         markedCandidate = Self.string(from: string)
         super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
         updateImmediateInsertionIndicator()
@@ -562,6 +602,7 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
         isHorizontallyResizable = false
         isVerticallyResizable = true
         textContainer?.widthTracksTextView = true
+        textContainer?.lineFragmentPadding = BlockTextStyle.lineFragmentPadding
         textContainerInset = .init(width: 0, height: 8)
         insertionPointColor = .clear
         immediateInsertionIndicator.displayMode = .hidden
@@ -576,57 +617,91 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
     private func updateImmediateInsertionIndicator() {
         guard window?.firstResponder === self,
               selectedRange.length == 0,
-              let caretRect = immediateInsertionPointRect(at: selectedRange.location) else {
+              let geometry = immediateInsertionPointGeometry(at: selectedRange.location) else {
             immediateInsertionIndicator.displayMode = .hidden
             return
         }
-        let font = insertionPointFont(at: selectedRange.location)
-        let glyphHeight = ceil(font.ascender - font.descender + font.leading)
-        let height = min(caretRect.height, glyphHeight)
         immediateInsertionIndicator.frame = NSRect(
-            x: caretRect.minX,
-            y: caretRect.midY - height / 2,
-            width: 2,
-            height: height
+            x: geometry.x,
+            y: geometry.baseline - geometry.font.ascender,
+            width: 1,
+            height: ceil(geometry.font.ascender - geometry.font.descender)
         )
-        immediateInsertionIndicator.displayMode = .visible
+        immediateInsertionIndicator.displayMode = .automatic
     }
 
-    private func immediateInsertionPointRect(at utf16Offset: Int) -> NSRect? {
+    private func immediateInsertionPointGeometry(
+        at utf16Offset: Int
+    ) -> (x: CGFloat, baseline: CGFloat, font: NSFont)? {
         guard utf16Offset >= 0, utf16Offset <= ownedTextStorage.length else { return nil }
         ownedLayoutManager.ensureLayout(for: ownedTextContainer)
         let origin = textContainerOrigin
-        let line: NSRect
-        let x: CGFloat
+        let font = insertionPointFont(at: utf16Offset)
+
+        if !hasMarkedText(),
+           let projection = currentProjection,
+           let emptyBlockIndex = projection.segments.firstIndex(where: {
+               $0.contentRange.length == 0 && $0.contentRange.location == utf16Offset
+           }) {
+            let block = projection.document.blocks[emptyBlockIndex]
+            let line = utf16Offset == ownedTextStorage.length
+                && !ownedLayoutManager.extraLineFragmentUsedRect.isEmpty
+                ? ownedLayoutManager.extraLineFragmentUsedRect
+                : lineFragmentRect(forBlockAt: emptyBlockIndex)
+            let glyphHeight = font.ascender - font.descender
+            let textStart = BlockTextStyle.textColumnOffset(
+                for: block.kind,
+                indentLevel: block.indentLevel
+            )
+            return (
+                x: origin.x + textStart,
+                baseline: origin.y + line.minY
+                    + max(0, (line.height - glyphHeight) / 2)
+                    + font.ascender,
+                font: font
+            )
+        }
 
         if utf16Offset == ownedTextStorage.length,
+           !hasMarkedText(),
            !ownedLayoutManager.extraLineFragmentUsedRect.isEmpty {
-            line = ownedLayoutManager.extraLineFragmentUsedRect
-            x = line.minX
-        } else if ownedLayoutManager.numberOfGlyphs > 0,
-                  ownedTextStorage.length > 0 {
-            let characterIndex = min(utf16Offset, ownedTextStorage.length - 1)
-            let glyphIndex = ownedLayoutManager.glyphIndexForCharacter(at: characterIndex)
-            line = ownedLayoutManager.lineFragmentUsedRect(
-                forGlyphAt: glyphIndex,
-                effectiveRange: nil
+            let line = ownedLayoutManager.extraLineFragmentUsedRect
+            let glyphHeight = font.ascender - font.descender
+            return (
+                x: origin.x + line.minX,
+                baseline: origin.y + line.minY
+                    + max(0, (line.height - glyphHeight) / 2)
+                    + font.ascender,
+                font: font
             )
+        }
+
+        if ownedLayoutManager.numberOfGlyphs > 0, ownedTextStorage.length > 0 {
+            let characterIndex = utf16Offset == ownedTextStorage.length
+                ? max(0, utf16Offset - 1)
+                : utf16Offset
+            let glyphIndex = ownedLayoutManager.glyphIndexForCharacter(at: characterIndex)
+            let line = ownedLayoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
+            let glyphLocation = ownedLayoutManager.location(forGlyphAt: glyphIndex)
             let glyphRect = ownedLayoutManager.boundingRect(
                 forGlyphRange: .init(location: glyphIndex, length: 1),
                 in: ownedTextContainer
             )
-            x = utf16Offset == ownedTextStorage.length ? glyphRect.maxX : glyphRect.minX
-        } else {
-            let font = insertionPointFont(at: utf16Offset)
-            let height = ceil(font.ascender - font.descender + font.leading)
-            line = .init(x: 0, y: 0, width: 0, height: height * 1.45)
-            x = 0
+            return (
+                x: origin.x + (utf16Offset == ownedTextStorage.length ? glyphRect.maxX : glyphRect.minX),
+                baseline: origin.y + line.minY + glyphLocation.y,
+                font: font
+            )
         }
-        return .init(
-            x: origin.x + x,
-            y: origin.y + line.minY,
-            width: 2,
-            height: line.height
+
+        let line = ownedLayoutManager.extraLineFragmentUsedRect.isEmpty
+            ? NSRect(x: 0, y: 0, width: 0, height: ceil((font.ascender - font.descender) * 1.45))
+            : ownedLayoutManager.extraLineFragmentUsedRect
+        let glyphHeight = font.ascender - font.descender
+        return (
+            x: origin.x + line.minX,
+            baseline: origin.y + line.minY + max(0, (line.height - glyphHeight) / 2) + font.ascender,
+            font: font
         )
     }
 
@@ -643,6 +718,16 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
                 NSMaxRange(segment.contentRange) - 1
             )
             if let font = textStorage.attribute(
+                .font,
+                at: attributeOffset,
+                effectiveRange: nil
+            ) as? NSFont {
+                return font
+            }
+        }
+        if ownedTextStorage.length > 0 {
+            let attributeOffset = min(max(utf16Offset - 1, 0), ownedTextStorage.length - 1)
+            if let font = ownedTextStorage.attribute(
                 .font,
                 at: attributeOffset,
                 effectiveRange: nil
@@ -783,6 +868,26 @@ final class ContinuousBlockEditorTextView: NSTextView, NSTextViewDelegate {
             }
         }
         textStorage.endEditing()
+    }
+
+    private func prepareTypingAttributesForEmptyBlockComposition(at utf16Offset: Int) {
+        guard let projection = currentProjection,
+              let index = projection.segments.firstIndex(where: {
+                  $0.contentRange.length == 0 && $0.contentRange.location == utf16Offset
+              }) else { return }
+        let block = projection.document.blocks[index]
+        var attributes = typingAttributes
+        attributes[.font] = BlockTextStyle.styledFont(
+            base: BlockTextStyle.baseFont(for: block.kind),
+            marks: editorSession?.currentTypingAttributes.marks ?? []
+        )
+        attributes[.paragraphStyle] = BlockTextStyle.paragraphStyle(
+            for: block.kind,
+            indentLevel: block.indentLevel
+        )
+        attributes[.jellyBlockID] = block.id.rawValue.uuidString
+        attributes[.jellyBlockKind] = block.kind.rawValue
+        typingAttributes = attributes
     }
 
     private static func command(for selector: Selector) -> BlockInputCommand? {

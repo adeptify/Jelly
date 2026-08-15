@@ -89,13 +89,43 @@ struct ContinuousBlockEditorHostTests {
         #expect(abs(drawn.midY - proposed.midY) <= 1)
     }
 
-    @Test @MainActor func editorHidesTheAnimatedSystemCaret() throws {
+    @Test @MainActor func editorUsesOneSystemInsertionIndicatorInsteadOfTheTextViewCaret() throws {
         let block = continuousBlock(id: 32, text: "正文")
         let fixture = continuousFixture(blocks: [block], selection: continuousCaret(block.id, 1))
         let systemColor = try #require(fixture.view.insertionPointColor)
 
         #expect(systemColor.alphaComponent == 0)
         #expect(fixture.view.immediateInsertionIndicator.hitTest(.zero) == nil)
+    }
+
+    @Test @MainActor func insertionIndicatorIsImmediateThenSystemAnimatedAndHidesWithoutACaret() throws {
+        let block = continuousBlock(id: 72, text: "正文")
+        let fixture = continuousFixture(blocks: [block], selection: continuousCaret(block.id, 1))
+        fixture.host.frame = .init(x: 0, y: 0, width: 320, height: 100)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 320, height: 120),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = fixture.host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        #expect(window.makeFirstResponder(fixture.view))
+        fixture.host.layoutSubtreeIfNeeded()
+
+        #expect(fixture.view.immediateInsertionIndicator.displayMode == .automatic)
+        #expect(fixture.view.immediateInsertionIndicator.frame.width == 1)
+        #expect(fixture.view.immediateInsertionIndicator.frame.height <= 20)
+
+        fixture.view.setAccessibilitySelectedTextRange(.init(location: 0, length: 2))
+        #expect(fixture.view.immediateInsertionIndicator.displayMode == .hidden)
+
+        fixture.view.setAccessibilitySelectedTextRange(.init(location: 1, length: 0))
+        #expect(fixture.view.immediateInsertionIndicator.displayMode == .automatic)
+
+        #expect(window.makeFirstResponder(nil))
+        #expect(fixture.view.immediateInsertionIndicator.displayMode == .hidden)
     }
 
     @Test @MainActor func immediateIndicatorMovesToTheNewCaretPositionDuringTheKeystroke() throws {
@@ -119,7 +149,7 @@ struct ContinuousBlockEditorHostTests {
         let after = fixture.view.immediateInsertionIndicator.frame
         #expect(after.minX > before.minX)
         #expect(after.height <= 20)
-        #expect(fixture.view.immediateInsertionIndicator.displayMode == .visible)
+        #expect(fixture.view.immediateInsertionIndicator.displayMode == .automatic)
         window.orderOut(nil)
     }
 
@@ -289,6 +319,214 @@ struct ContinuousBlockEditorHostTests {
         )
     }
 
+    @Test @MainActor func bulletMarkerUsesTheSameBaselineAsItsFirstTextGlyph() throws {
+        let block = continuousBlock(id: 142, text: "但是哦哦啊啊", kind: .bullet)
+        let fixture = continuousFixture(
+            blocks: [block],
+            selection: continuousCaret(block.id, 0)
+        )
+        fixture.host.frame = .init(x: 0, y: 0, width: 480, height: 120)
+        fixture.host.layoutSubtreeIfNeeded()
+
+        let markerBaseline = try #require(fixture.view.structuralMarkerBaselineY(for: block.id))
+        let layoutManager = try #require(fixture.view.layoutManager)
+        let glyphIndex = layoutManager.glyphIndexForCharacter(at: 0)
+        let line = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
+        let glyphLocation = layoutManager.location(forGlyphAt: glyphIndex)
+        let textBaseline = fixture.view.textContainerOrigin.y + line.minY + glyphLocation.y
+
+        #expect(abs(markerBaseline - textBaseline) < 0.5)
+    }
+
+    @Test @MainActor func markedTextCaretUsesTheComposingGlyphBaselineInsteadOfTheLineBox() throws {
+        let block = continuousBlock(id: 143, text: "")
+        let fixture = continuousFixture(
+            blocks: [block],
+            selection: continuousCaret(block.id, 0)
+        )
+        fixture.host.frame = .init(x: 0, y: 0, width: 320, height: 100)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 320, height: 120),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = fixture.host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        #expect(window.makeFirstResponder(fixture.view))
+
+        fixture.view.setMarkedText(
+            "d",
+            selectedRange: .init(location: 1, length: 0),
+            replacementRange: .init(location: NSNotFound, length: 0)
+        )
+        fixture.host.layoutSubtreeIfNeeded()
+
+        let layoutManager = try #require(fixture.view.layoutManager)
+        let textStorage = try #require(fixture.view.textStorage)
+        let font = try #require(textStorage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+        let glyphIndex = layoutManager.glyphIndexForCharacter(at: 0)
+        let line = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
+        let glyphLocation = layoutManager.location(forGlyphAt: glyphIndex)
+        let baseline = fixture.view.textContainerOrigin.y + line.minY + glyphLocation.y
+        let expectedTop = baseline - font.ascender
+        let expectedBottom = baseline - font.descender
+        let caret = fixture.view.immediateInsertionIndicator.frame
+
+        #expect(abs(caret.minY - expectedTop) < 1)
+        #expect(abs(caret.maxY - expectedBottom) < 1)
+    }
+
+    @Test @MainActor func trailingEmptyListCaretUsesTheExtraLineTextStartInsteadOfTheRightEdge() throws {
+        let first = continuousBlock(id: 144, text: "已有内容", kind: .bullet)
+        let empty = continuousBlock(id: 145, text: "", kind: .bullet)
+        let fixture = continuousFixture(
+            blocks: [first, empty],
+            selection: continuousCaret(empty.id, 0)
+        )
+        fixture.host.frame = .init(x: 0, y: 0, width: 480, height: 140)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 480, height: 160),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = fixture.host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        #expect(window.makeFirstResponder(fixture.view))
+        fixture.host.layoutSubtreeIfNeeded()
+
+        let layoutManager = try #require(fixture.view.layoutManager)
+        let textContainer = try #require(fixture.view.textContainer)
+        let extraLine = layoutManager.extraLineFragmentUsedRect
+        let caret = fixture.view.immediateInsertionIndicator.frame
+        let expectedX = fixture.view.textContainerOrigin.x
+            + extraLine.minX
+            + textContainer.lineFragmentPadding
+
+        #expect(extraLine.isEmpty == false)
+        #expect(abs(caret.minX - expectedX) < 0.5)
+        #expect(caret.minX < fixture.view.bounds.midX)
+    }
+
+    @Test @MainActor func trailingEmptyListCaretAlignsWithThePreviousListTextColumn() throws {
+        let first = continuousBlock(id: 244, text: "列表正文", kind: .bullet)
+        let empty = continuousBlock(id: 245, text: "", kind: .bullet)
+        let fixture = continuousFixture(
+            blocks: [first, empty],
+            selection: continuousCaret(empty.id, 0)
+        )
+        fixture.host.frame = .init(x: 0, y: 0, width: 480, height: 140)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 480, height: 160),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = fixture.host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        #expect(window.makeFirstResponder(fixture.view))
+        fixture.host.layoutSubtreeIfNeeded()
+
+        let layoutManager = try #require(fixture.view.layoutManager)
+        let firstGlyph = layoutManager.glyphIndexForCharacter(at: 0)
+        let firstTextRect = layoutManager.boundingRect(
+            forGlyphRange: .init(location: firstGlyph, length: 1),
+            in: try #require(fixture.view.textContainer)
+        )
+        let firstTextX = fixture.view.textContainerOrigin.x + firstTextRect.minX
+        let emptyCaretX = fixture.view.immediateInsertionIndicator.frame.minX
+
+        #expect(
+            abs(emptyCaretX - firstTextX) < 0.5,
+            "空列表光标应与列表正文起笔位置对齐，正文 x=\(firstTextX)，光标 x=\(emptyCaretX)"
+        )
+    }
+
+    @Test @MainActor func emptyListAfterParagraphUsesItsOwnIndentInsteadOfThePreviousParagraphIndent() throws {
+        let paragraph = continuousBlock(id: 146, text: "dsk", kind: .paragraph)
+        let empty = continuousBlock(id: 147, text: "", kind: .bullet)
+        let fixture = continuousFixture(
+            blocks: [paragraph, empty],
+            selection: continuousCaret(empty.id, 0)
+        )
+        fixture.host.frame = .init(x: 0, y: 0, width: 480, height: 140)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 480, height: 160),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = fixture.host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        #expect(window.makeFirstResponder(fixture.view))
+        fixture.host.layoutSubtreeIfNeeded()
+
+        let textContainer = try #require(fixture.view.textContainer)
+        let expectedX = fixture.view.textContainerOrigin.x
+            + BlockTextStyle.paragraphStyle(for: .bullet).firstLineHeadIndent
+            + textContainer.lineFragmentPadding
+        let caret = fixture.view.immediateInsertionIndicator.frame
+
+        #expect(abs(caret.minX - expectedX) < 0.5)
+    }
+
+    @Test @MainActor func markedTextInEmptyListAfterParagraphKeepsTheListTextIndent() throws {
+        let paragraph = continuousBlock(id: 148, text: "dsk", kind: .paragraph)
+        let empty = continuousBlock(id: 149, text: "", kind: .bullet)
+        let fixture = continuousFixture(
+            blocks: [paragraph, empty],
+            selection: continuousCaret(empty.id, 0)
+        )
+        fixture.host.frame = .init(x: 0, y: 0, width: 480, height: 140)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 480, height: 160),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = fixture.host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        #expect(window.makeFirstResponder(fixture.view))
+
+        for candidate in ["s", "s'", "s'd"] {
+            fixture.view.setMarkedText(
+                candidate,
+                selectedRange: .init(location: (candidate as NSString).length, length: 0),
+                replacementRange: .init(location: NSNotFound, length: 0)
+            )
+        }
+        fixture.host.layoutSubtreeIfNeeded()
+
+        let markedRange = fixture.view.markedRange()
+        let textStorage = try #require(fixture.view.textStorage)
+        let style = try #require(textStorage.attribute(
+            .paragraphStyle,
+            at: markedRange.location,
+            effectiveRange: nil
+        ) as? NSParagraphStyle)
+        let expectedIndent = BlockTextStyle.paragraphStyle(for: .bullet).firstLineHeadIndent
+        let layoutManager = try #require(fixture.view.layoutManager)
+        let textContainer = try #require(fixture.view.textContainer)
+        layoutManager.ensureLayout(for: textContainer)
+        let firstMarkedGlyph = layoutManager.glyphIndexForCharacter(at: markedRange.location)
+        let firstMarkedGlyphRect = layoutManager.boundingRect(
+            forGlyphRange: .init(location: firstMarkedGlyph, length: 1),
+            in: textContainer
+        )
+        let expectedGlyphX = expectedIndent + textContainer.lineFragmentPadding
+
+        #expect(markedRange.length == 3)
+        #expect(style.firstLineHeadIndent == expectedIndent)
+        #expect(style.headIndent == expectedIndent)
+        #expect(abs(firstMarkedGlyphRect.minX - expectedGlyphX) < 0.5)
+    }
+
     @Test @MainActor func trailingEmptyTaskUsesTheExtraLineForItsCheckbox() throws {
         let first = continuousBlock(id: 45, text: "完成一项", kind: .task)
         let last = continuousBlock(id: 46, text: "", kind: .task)
@@ -452,6 +690,152 @@ struct ContinuousBlockEditorHostTests {
             #expect(actualFont == expectedFont)
         }
         window.orderOut(nil)
+    }
+
+    @Test @MainActor func realMouseClickOnFormattingBarRunsTheCommandAndRestoresEditorFocus() throws {
+        _ = NSApplication.shared
+        let block = continuousBlock(id: 59, text: "alpha beta")
+        let session = BlockEditorSession(
+            noteID: NoteID(),
+            editSessionID: UUID(),
+            initialDocument: .init(blocks: [block]),
+            initialSelection: continuousCaret(block.id, 0),
+            focusRegistry: EditorFocusRegistry(),
+            onDocumentChange: { _ in }
+        )
+        let root = VStack {
+            ContinuousBlockEditorRepresentable(session: session, appearance: CalendarTheme.light)
+            BlockFormattingBar(session: session)
+        }
+        let hosting = NSHostingView(rootView: root)
+        hosting.frame = .init(x: 0, y: 0, width: 640, height: 240)
+        let window = NSWindow(
+            contentRect: hosting.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        hosting.layoutSubtreeIfNeeded()
+        let textView = try #require(continuousDescendants(
+            of: hosting,
+            as: ContinuousBlockEditorTextView.self
+        ).first)
+        #expect(window.makeFirstResponder(textView))
+        textView.setAccessibilitySelectedTextRange(.init(location: 6, length: 4))
+        let bold = try #require(continuousDescendants(of: hosting, as: NSButton.self).first {
+            $0.accessibilityIdentifier() == BlockFormattingAction.bold.accessibilityIdentifier
+        })
+        let location = bold.convert(
+            .init(x: bold.bounds.midX, y: bold.bounds.midY),
+            to: nil
+        )
+        let down = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: location,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        ))
+        let up = try #require(NSEvent.mouseEvent(
+            with: .leftMouseUp,
+            location: location,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime + 0.01,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 2,
+            clickCount: 1,
+            pressure: 0
+        ))
+        NSApplication.shared.postEvent(up, atStart: false)
+
+        bold.mouseDown(with: down)
+
+        #expect(window.firstResponder === textView)
+        #expect(session.document.blocks[0].inlineContent.spans.filter {
+            $0.marks.contains(.bold)
+        }.map(\.text) == ["beta"])
+    }
+
+    @Test @MainActor func firstKeystrokeImmediatelyAfterARealFormattingClickIsNotDropped() throws {
+        _ = NSApplication.shared
+        let block = continuousBlock(id: 60, text: "abc")
+        let session = BlockEditorSession(
+            noteID: NoteID(),
+            editSessionID: UUID(),
+            initialDocument: .init(blocks: [block]),
+            initialSelection: continuousCaret(block.id, 3),
+            focusRegistry: EditorFocusRegistry(),
+            onDocumentChange: { _ in }
+        )
+        let root = VStack {
+            ContinuousBlockEditorRepresentable(session: session, appearance: CalendarTheme.light)
+            BlockFormattingBar(session: session)
+        }
+        let hosting = NSHostingView(rootView: root)
+        hosting.frame = .init(x: 0, y: 0, width: 640, height: 240)
+        let window = NSWindow(
+            contentRect: hosting.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        hosting.layoutSubtreeIfNeeded()
+        let textView = try #require(continuousDescendants(
+            of: hosting,
+            as: ContinuousBlockEditorTextView.self
+        ).first)
+        #expect(window.makeFirstResponder(textView))
+        let bold = try #require(continuousDescendants(of: hosting, as: NSButton.self).first {
+            $0.accessibilityIdentifier() == BlockFormattingAction.bold.accessibilityIdentifier
+        })
+        let location = bold.convert(
+            .init(x: bold.bounds.midX, y: bold.bounds.midY),
+            to: nil
+        )
+        let down = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: location,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        ))
+        let up = try #require(NSEvent.mouseEvent(
+            with: .leftMouseUp,
+            location: location,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime + 0.01,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 2,
+            clickCount: 1,
+            pressure: 0
+        ))
+        NSApplication.shared.postEvent(up, atStart: false)
+
+        bold.mouseDown(with: down)
+        textView.insertText("X", replacementRange: .init(location: NSNotFound, length: 0))
+
+        #expect(window.firstResponder === textView)
+        #expect(session.document.blocks[0].inlineContent.spans.map(\.text).joined() == "abcX")
+        #expect(session.document.blocks[0].inlineContent.spans.filter {
+            $0.marks.contains(.bold)
+        }.map(\.text) == ["X"])
+        #expect(textView.selectedRange == .init(location: 4, length: 0))
     }
 
     @Test @MainActor func structuralFormattingBarConvertsASelectedLineAndKeepsItSelected() throws {
@@ -683,6 +1067,22 @@ struct ContinuousBlockEditorHostTests {
         fixture.host.layoutSubtreeIfNeeded()
 
         #expect(fixture.view.utf16Offset(at: .init(x: 300, y: 18)) == 3)
+    }
+
+    @Test @MainActor func clickingBelowDocumentContentPlacesTheCaretAtTheDocumentEnd() {
+        let first = continuousBlock(id: 151, text: "第一行")
+        let last = continuousBlock(id: 152, text: "最后一行")
+        let fixture = continuousFixture(
+            blocks: [first, last],
+            selection: continuousCaret(first.id, 0)
+        )
+        fixture.host.frame = .init(x: 0, y: 0, width: 320, height: 280)
+        fixture.host.layoutSubtreeIfNeeded()
+
+        #expect(
+            fixture.view.utf16Offset(at: .init(x: 40, y: 250))
+                == fixture.view.string.utf16.count
+        )
     }
 
     @Test @MainActor func markedCandidatesPublishOnlyOnceAtTerminalCommitAndUndoOnce() throws {

@@ -26,7 +26,7 @@ struct MarkdownNotesEditor: View {
                 Text("随记")
                     .font(EditorFormStyle.label)
                     .foregroundStyle(theme.secondaryText)
-                Text("点 H/B/列表直接变格式 · 列表显示为 • 与 1.")
+                Text("补充说明、清单或链接")
                     .font(EditorFormStyle.caption)
                     .foregroundStyle(theme.secondaryText.opacity(0.85))
                 Spacer(minLength: 0)

@@ -11,6 +11,13 @@ extension NSAttributedString.Key {
 }
 
 enum BlockTextStyle {
+    static let lineFragmentPadding: CGFloat = 5
+
+    static func textColumnOffset(for kind: BlockKind, indentLevel: Int = 0) -> CGFloat {
+        paragraphStyle(for: kind, indentLevel: indentLevel).firstLineHeadIndent
+            + lineFragmentPadding
+    }
+
     static func attributedString(
         for block: DocumentBlock,
         appearance: CalendarSemanticAppearance?
