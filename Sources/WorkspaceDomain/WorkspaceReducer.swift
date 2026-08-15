@@ -81,6 +81,8 @@ public enum WorkspaceReducer {
             try setNoteArchive(noteID, archivedAt: at, in: &candidate, now: at)
         case let .restoreNote(noteID, at):
             try setNoteArchive(noteID, archivedAt: nil, in: &candidate, now: at)
+        case let .setNotePinned(noteID, isPinned, at):
+            try setNotePinned(noteID, isPinned: isPinned, in: &candidate, now: at)
         case let .permanentlyDeleteNote(noteID, authorization):
             return try permanentlyDeleteNote(noteID, authorization: authorization, in: &candidate)
         case let .createPrimaryNoteForCalendar(payload):
@@ -108,6 +110,8 @@ public enum WorkspaceReducer {
             return try setTaskCompletion(target, value: value, in: &candidate, now: now)
         case let .createInspiration(payload):
             try createInspiration(payload.inspiration, in: &candidate)
+        case let .updateInspirationText(id, rawText, at):
+            return try updateInspirationText(id, rawText: rawText, in: &candidate, now: at)
         case let .updateInspirationMetadata(id, expectation, metadataValue, kind):
             return try updateInspirationMetadata(
                 id,

@@ -23,6 +23,19 @@ extension WorkspaceReducer {
         candidate.notes[id] = note
     }
 
+    static func setNotePinned(
+        _ id: NoteID,
+        isPinned: Bool,
+        in candidate: inout WorkspaceState,
+        now: Date
+    ) throws {
+        guard var note = candidate.notes[id] else { throw WorkspaceReducerError.missingNote(id) }
+        guard note.archivedAt == nil, note.isPinned != isPinned else { return }
+        note.isPinned = isPinned
+        note.updatedAt = now
+        candidate.notes[id] = note
+    }
+
     static func updateNote(
         _ submission: NoteDraftSubmission,
         in candidate: inout WorkspaceState,

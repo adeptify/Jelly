@@ -18,6 +18,33 @@ extension WorkspaceReducer {
         candidate.inspirations[inspiration.id] = inspiration
     }
 
+    static func updateInspirationText(
+        _ id: InspirationID,
+        rawText: String,
+        in candidate: inout WorkspaceState,
+        now: Date
+    ) throws -> WorkspaceCommandControl {
+        guard var inspiration = candidate.inspirations[id] else {
+            throw WorkspaceReducerError.missingInspiration(id)
+        }
+        guard inspiration.inputKind == .text,
+              inspiration.lifecycle == .active,
+              !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !candidate.inspirationNoteLinks.contains(where: { link in
+                  if case let .live(sourceID) = link.source { return sourceID == id }
+                  return false
+              }) else {
+            throw WorkspaceReducerError.invalidInspiration
+        }
+        guard inspiration.rawText != rawText else {
+            return .result(.noChange(.identical))
+        }
+        inspiration.rawText = rawText
+        inspiration.updatedAt = now
+        candidate.inspirations[id] = inspiration
+        return .proceed
+    }
+
     static func updateInspirationMetadata(
         _ id: InspirationID,
         expectation: InspirationMetadataExpectation,

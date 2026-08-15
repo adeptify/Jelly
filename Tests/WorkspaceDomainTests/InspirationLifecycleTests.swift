@@ -5,6 +5,104 @@ import WorkspaceDomain
 
 @Suite("InspirationLifecycleTests")
 struct InspirationLifecycleTests {
+    @Test func activeTextInspirationCanBeUpdatedWithoutChangingItsIdentity() throws {
+        let workspace = try Task4Fixture.workspace()
+        let updatedAt = Date(timeIntervalSince1970: 1_700_003_600)
+
+        let result = try WorkspaceReducer.reduce(
+            workspace,
+            command: .updateInspirationText(
+                Task4Fixture.inspirationID,
+                rawText: "原来的想法\n后来补充的一句",
+                at: updatedAt
+            ),
+            now: updatedAt
+        )
+
+        let state = try #require(result.change).state
+        let updated = try #require(state.inspirations[Task4Fixture.inspirationID])
+        #expect(updated.id == Task4Fixture.inspirationID)
+        #expect(updated.rawText == "原来的想法\n后来补充的一句")
+        #expect(updated.updatedAt == updatedAt)
+        #expect(updated.createdAt == workspace.inspirations[Task4Fixture.inspirationID]?.createdAt)
+    }
+
+    @Test func textUpdateRejectsBlankArchivedAndNonTextInspirations() throws {
+        let workspace = try Task4Fixture.workspace()
+        #expect(throws: WorkspaceReducerError.invalidInspiration) {
+            try WorkspaceReducer.reduce(
+                workspace,
+                command: .updateInspirationText(
+                    Task4Fixture.inspirationID,
+                    rawText: "  \n ",
+                    at: Task4Fixture.later
+                ),
+                now: Task4Fixture.later
+            )
+        }
+
+        var archivedWorkspace = workspace
+        archivedWorkspace.inspirations[Task4Fixture.inspirationID]?.lifecycle = .archived
+        #expect(throws: WorkspaceReducerError.invalidInspiration) {
+            try WorkspaceReducer.reduce(
+                archivedWorkspace,
+                command: .updateInspirationText(
+                    Task4Fixture.inspirationID,
+                    rawText: "不能修改归档内容",
+                    at: Task4Fixture.later
+                ),
+                now: Task4Fixture.later
+            )
+        }
+
+        var urlWorkspace = workspace
+        urlWorkspace.inspirations[Task4Fixture.inspirationID] = Inspiration(
+            id: Task4Fixture.inspirationID,
+            inputKind: .url,
+            rawText: nil,
+            rawURL: URL(string: "https://example.com")!,
+            rawFile: nil,
+            resolvedSourceKind: .article,
+            resolvedMetadata: nil,
+            categoryID: Task4Fixture.uncategorizedID,
+            lifecycle: .active,
+            createdAt: Task4Fixture.now,
+            updatedAt: Task4Fixture.now
+        )
+        #expect(throws: WorkspaceReducerError.invalidInspiration) {
+            try WorkspaceReducer.reduce(
+                urlWorkspace,
+                command: .updateInspirationText(
+                    Task4Fixture.inspirationID,
+                    rawText: "不能把链接改成文字",
+                    at: Task4Fixture.later
+                ),
+                now: Task4Fixture.later
+            )
+        }
+    }
+
+    @Test func convertedTextInspirationCannotDivergeFromItsLinkedNote() throws {
+        var workspace = try Task4Fixture.workspace()
+        workspace.inspirationNoteLinks.insert(.init(
+            source: .live(Task4Fixture.inspirationID),
+            noteID: Task4Fixture.noteID,
+            createdAt: Task4Fixture.now
+        ))
+
+        #expect(throws: WorkspaceReducerError.invalidInspiration) {
+            try WorkspaceReducer.reduce(
+                workspace,
+                command: .updateInspirationText(
+                    Task4Fixture.inspirationID,
+                    rawText: "不应与已生成笔记分叉",
+                    at: Task4Fixture.later
+                ),
+                now: Task4Fixture.later
+            )
+        }
+    }
+
     @Test func createArchiveAndRestoreInspirationIncrementExactlyOnceEach() throws {
         var workspace = try Task4Fixture.workspace()
         let created = Task4Fixture.inspiration(

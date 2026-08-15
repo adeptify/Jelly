@@ -226,6 +226,7 @@ public enum WorkspaceCommand: Sendable {
     case updateNote(NoteDraftSubmission)
     case archiveNote(NoteID, at: Date)
     case restoreNote(NoteID, at: Date)
+    case setNotePinned(NoteID, Bool, at: Date)
     case permanentlyDeleteNote(NoteID, authorization: PermanentDeleteAuthorization)
     case createPrimaryNoteForCalendar(CreatePrimaryNoteForCalendarPayload)
     case attachPrimaryNote(AttachPrimaryNotePayload)
@@ -236,6 +237,7 @@ public enum WorkspaceCommand: Sendable {
     case unlinkTaskBlock(noteID: NoteID, blockID: BlockID)
     case setTaskCompletion(TaskCompletionTarget, value: TaskCompletionValue)
     case createInspiration(CreateInspirationPayload)
+    case updateInspirationText(InspirationID, rawText: String, at: Date)
     case updateInspirationMetadata(
         InspirationID,
         expectedSource: InspirationMetadataExpectation,
