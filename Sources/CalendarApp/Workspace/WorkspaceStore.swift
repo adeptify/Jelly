@@ -95,6 +95,7 @@ enum DraftRecoveryAction: Equatable, Sendable {
 
 @MainActor
 @Observable final class WorkspaceStore {
+    private static let recoveryUndoLabel = "恢复笔记版本"
     private(set) var state: WorkspaceState { didSet { statePublicationGeneration &+= 1 } }
     var calendarState: CalendarState { state.calendar }
     private(set) var statePublicationGeneration: UInt = 0
@@ -102,6 +103,10 @@ enum DraftRecoveryAction: Equatable, Sendable {
     private(set) var hasRawRecoverySource = false
     private(set) var canUndo = false
     private(set) var canRedo = false
+    var latestUndoLabel: String? { undoStack.last?.label }
+    var canUndoRecoverySelection: Bool {
+        undoStack.last?.label == Self.recoveryUndoLabel
+    }
 
     private let repository: any WorkspaceRepository
     private let journal: DraftJournalRepository?
@@ -152,7 +157,8 @@ enum DraftRecoveryAction: Equatable, Sendable {
         case draftRecovery(
             completion: DraftRecoveryCompletion,
             terminalPhase: WorkspaceStorePhase,
-            failurePhase: WorkspaceStorePhase
+            failurePhase: WorkspaceStorePhase,
+            undoRecord: WorkspaceStoreUndoRecord?
         )
 
         var notCommittedTerminalPhase: WorkspaceStorePhase {
@@ -161,7 +167,7 @@ enum DraftRecoveryAction: Equatable, Sendable {
                 .needsRelationshipRepair
             case .externalAdoption:
                 .externalSourceChanged(.externalBytesChanged)
-            case let .draftRecovery(_, _, failurePhase):
+            case let .draftRecovery(_, _, failurePhase, _):
                 failurePhase
             case .forward, .undo:
                 .ready
@@ -963,6 +969,29 @@ enum DraftRecoveryAction: Equatable, Sendable {
                 }
                 let persisted = state.notes[record.entry.noteID]
                 if let persisted,
+                   Self.hasSameRecoverableContent(record.entry.noteSnapshot, persisted) {
+                    let token = DraftRecoveryToken(
+                        identityAndGeneration: .init(
+                            identity: record.identity,
+                            draftGeneration: record.entry.draftGeneration
+                        ),
+                        noteSnapshotChecksum: record.entry.noteSnapshotChecksum,
+                        journalChecksum: record.entry.journalChecksum
+                    )
+                    let resolution = await DraftJournalCoordinator.discardRecovery(token, journal: journal)
+                    if case .cleanupPending = resolution {
+                        parkJournalCleanup(
+                            resolution.journalStatus,
+                            receipt: nil,
+                            terminalPhase: terminalPhaseWhenClean,
+                            requiresStartupRescan: true
+                        )
+                        return
+                    }
+                    await recoverJournalAtStartup(terminalPhaseWhenClean: terminalPhaseWhenClean)
+                    return
+                }
+                if let persisted,
                    (try WorkspaceChecksum.noteSnapshotChecksum(persisted)) == record.entry.noteSnapshotChecksum {
                     let context = PersistableDraftContext(
                         noteID: persisted.id, editSessionID: record.entry.editSessionID,
@@ -1035,6 +1064,15 @@ enum DraftRecoveryAction: Equatable, Sendable {
         } catch {
             phase = .unreadablePrimaryLoadFailed
         }
+    }
+
+    private static func hasSameRecoverableContent(_ draft: Note, _ persisted: Note) -> Bool {
+        draft.id == persisted.id
+            && draft.title == persisted.title
+            && draft.document == persisted.document
+            && draft.categoryID == persisted.categoryID
+            && draft.archivedAt == persisted.archivedAt
+            && draft.createdAt == persisted.createdAt
     }
 
     private func verifyRecoveryCompletion(
@@ -1150,8 +1188,8 @@ enum DraftRecoveryAction: Equatable, Sendable {
             await recoverJournalAtStartup(
                 terminalPhaseWhenClean: draftRecoveryTerminalPhaseWhenClean
             )
-        case let .draftRecovery(recoveryCompletion, terminalPhase, _):
-            publish(candidate, undoRecord: nil)
+        case let .draftRecovery(recoveryCompletion, terminalPhase, _, undoRecord):
+            publish(candidate, undoRecord: undoRecord)
             draftRecoveryTerminalPhaseWhenClean = .ready
             let committedTerminalPhase: WorkspaceStorePhase = terminalPhase.isDraftRecovery
                 ? terminalPhase
@@ -1202,7 +1240,7 @@ enum DraftRecoveryAction: Equatable, Sendable {
         draftReceipt: PersistedDraftReceipt?,
         artifacts: WorkspacePendingCommitArtifacts
     ) async -> JournalResolutionStatus {
-        if case let .draftRecovery(recoveryCompletion, _, failurePhase) = completion,
+        if case let .draftRecovery(recoveryCompletion, _, failurePhase, _) = completion,
            let journal {
             let resolution = await DraftJournalCoordinator.abandonRecovery(recoveryCompletion, journal: journal)
             let journalStatus = resolution.journalStatus
@@ -1257,7 +1295,7 @@ enum DraftRecoveryAction: Equatable, Sendable {
         case .externalAdoption:
             phase = .externalSourceChanged(.externalBytesChanged)
             terminateQueuedForExternal(reason: .externalBytesChanged, artifacts: artifacts)
-        case let .draftRecovery(_, _, failurePhase):
+        case let .draftRecovery(_, _, failurePhase, _):
             phase = failurePhase
         case .forward, .undo:
             phase = .ready
@@ -1300,7 +1338,7 @@ enum DraftRecoveryAction: Equatable, Sendable {
     private func finishRejectedRecoverySave(
         completion: SaveCompletion
     ) async -> JournalResolutionStatus {
-        guard case let .draftRecovery(recoveryCompletion, _, failurePhase) = completion,
+        guard case let .draftRecovery(recoveryCompletion, _, failurePhase, _) = completion,
               let journal
         else { return .clean }
         let resolution = await DraftJournalCoordinator.abandonRecovery(
@@ -1337,7 +1375,7 @@ enum DraftRecoveryAction: Equatable, Sendable {
         draftReceipt: PersistedDraftReceipt?,
         artifacts: WorkspacePendingCommitArtifacts
     ) async -> JournalResolutionStatus {
-        if case let .draftRecovery(recoveryCompletion, _, _) = completion,
+        if case let .draftRecovery(recoveryCompletion, _, _, _) = completion,
            let journal {
             let resolution = await DraftJournalCoordinator.abandonRecovery(recoveryCompletion, journal: journal)
             let journalStatus = resolution.journalStatus
@@ -1781,6 +1819,16 @@ enum DraftRecoveryAction: Equatable, Sendable {
         let terminalPhase = draftRecoveryTerminalPhase(afterResolving: recovery.token, from: candidates)
         switch action {
         case .keepPersisted:
+            let undoRecord = (try? recoveredCurrentState(
+                from: recovery,
+                entersRelationshipRepairOnFailure: false
+            )).flatMap {
+                WorkspaceUndoReducer.record(
+                    before: $0,
+                    after: state,
+                    label: Self.recoveryUndoLabel
+                )
+            }
             let resolution = await DraftJournalCoordinator.discardRecovery(recovery.token, journal: journal)
             if case .staleOrMissing = resolution {
                 claimedDraftRecoveryTokens.remove(recovery.token)
@@ -1802,6 +1850,7 @@ enum DraftRecoveryAction: Equatable, Sendable {
                 finalizeDraftRecoveryCandidate(recovery.token)
                 phase = terminalPhase
             }
+            publish(state, undoRecord: undoRecord)
             recoveryResolutionQueueOpen = false
             return .noChange(.identical, journal: status)
 
@@ -1810,6 +1859,7 @@ enum DraftRecoveryAction: Equatable, Sendable {
             let completionAction: DraftRecoveryCompletionAction
             let resultNoteID: NoteID
             let completion: DraftRecoveryCompletion
+            let undoRecord: WorkspaceStoreUndoRecord?
             do {
                 switch action {
                 case .restoreAsCurrent:
@@ -1823,6 +1873,11 @@ enum DraftRecoveryAction: Equatable, Sendable {
                 case .keepPersisted:
                     fatalError("covered above")
                 }
+                undoRecord = WorkspaceUndoReducer.record(
+                    before: state,
+                    after: candidate,
+                    label: Self.recoveryUndoLabel
+                )
                 completion = try recoveryCompletion(
                     token: recovery.token,
                     action: completionAction,
@@ -1855,7 +1910,8 @@ enum DraftRecoveryAction: Equatable, Sendable {
                 completion: .draftRecovery(
                     completion: completion,
                     terminalPhase: terminalPhase,
-                    failurePhase: .needsDraftRecovery(candidates)
+                    failurePhase: .needsDraftRecovery(candidates),
+                    undoRecord: undoRecord
                 ),
                 transactionID: transactionID
             )
@@ -1886,19 +1942,20 @@ enum DraftRecoveryAction: Equatable, Sendable {
     }
 
     private func recoveredCurrentState(
-        from recovery: DraftRecoveryCandidate
+        from recovery: DraftRecoveryCandidate,
+        entersRelationshipRepairOnFailure: Bool = true
     ) throws -> WorkspaceState {
         // Relationship repair always begins from the current persisted graph.
         // Do not place any reviewed draft bytes into that repair candidate:
         // the user must separately and explicitly choose a later restore.
         guard state.calendar.categories[recovery.draft.categoryID] != nil else {
-            enterDraftRecoveryRelationshipRepair()
+            if entersRelationshipRepairOnFailure { enterDraftRecoveryRelationshipRepair() }
             throw WorkspaceStoreError.frozen
         }
         let sourceLinks = state.taskBlockLinks.filter { $0.noteID == recovery.draft.id }
         for link in sourceLinks {
             guard state.calendar.items[link.calendarItemID] != nil else {
-                enterDraftRecoveryRelationshipRepair()
+                if entersRelationshipRepairOnFailure { enterDraftRecoveryRelationshipRepair() }
                 throw WorkspaceStoreError.frozen
             }
         }
@@ -1917,7 +1974,7 @@ enum DraftRecoveryAction: Equatable, Sendable {
         let links = candidate.taskBlockLinks.filter { $0.noteID == restored.id }
         for link in links {
             guard let item = candidate.calendar.items[link.calendarItemID] else {
-                enterDraftRecoveryRelationshipRepair()
+                if entersRelationshipRepairOnFailure { enterDraftRecoveryRelationshipRepair() }
                 throw WorkspaceStoreError.frozen
             }
             guard let index = restored.document.blocks.firstIndex(where: {
@@ -1932,7 +1989,7 @@ enum DraftRecoveryAction: Equatable, Sendable {
         do {
             try WorkspaceValidator.validate(candidate)
         } catch {
-            enterDraftRecoveryRelationshipRepair()
+            if entersRelationshipRepairOnFailure { enterDraftRecoveryRelationshipRepair() }
             throw WorkspaceStoreError.frozen
         }
         return candidate

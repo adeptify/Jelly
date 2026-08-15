@@ -8,6 +8,24 @@ import WorkspaceDomain
 @Suite("WorkspaceStoreTests")
 @MainActor
 struct WorkspaceStoreTests {
+    @Test func latestUndoLabelExplainsTheActualReversibleAction() async throws {
+        let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
+        let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
+        let item = try makeItem(
+            id: UUID(),
+            categoryID: calendar.uncategorizedID,
+            title: "可解释的撤销"
+        )
+
+        #expect(store.latestUndoLabel == nil)
+        _ = try await store.sendCalendar(.createItem(item), undoLabel: "已创建事项")
+        #expect(store.latestUndoLabel == "已创建事项")
+        _ = try await store.undo()
+        #expect(store.latestUndoLabel == nil)
+    }
+
     @Test func ordinaryMutationsAreRejectedUntilTheInitialLoadCompletes() async throws {
         let calendar = CalendarState.empty(uncategorizedID: UUID(), now: .distantPast)
         let item = try makeItem(id: UUID(), categoryID: calendar.uncategorizedID, title: "too early")

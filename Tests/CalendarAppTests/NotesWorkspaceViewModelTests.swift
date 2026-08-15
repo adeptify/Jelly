@@ -7,6 +7,131 @@ import WorkspaceDomain
 @Suite("NotesWorkspaceViewModelTests")
 @MainActor
 struct NotesWorkspaceViewModelTests {
+    @Test func undoingANewNoteClearsTheNowMissingEditorSelection() async throws {
+        let calendar = makeEmptyState()
+        let repository = InMemoryWorkspaceRepository(initialState: calendar)
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
+        let viewModel = NotesWorkspaceViewModel(
+            store: store,
+            autosave: NoteAutosaveCoordinator(store: store, scheduler: NotesImmediateAutosaveScheduler())
+        )
+        let note = Note.empty(categoryID: calendar.uncategorizedID, now: .distantPast)
+        #expect(try await viewModel.create(note))
+        #expect(viewModel.selectedNoteID == note.id)
+
+        _ = try await store.undo()
+        viewModel.refreshBrowser()
+
+        #expect(viewModel.selectedNoteID == nil)
+    }
+
+    @Test func collapsedInactiveFolderDoesNotActivateDuringSwiftUISynchronization() {
+        #expect(
+            NotesFolderExpansionPolicy.action(
+                requestedExpansion: false,
+                isActive: false
+            ) == .none
+        )
+        #expect(
+            NotesFolderExpansionPolicy.action(
+                requestedExpansion: true,
+                isActive: false
+            ) == .activate
+        )
+        #expect(
+            NotesFolderExpansionPolicy.action(
+                requestedExpansion: false,
+                isActive: true
+            ) == .collapse
+        )
+    }
+
+    @Test func clickingAnywhereOnAFolderRowOpensItAndAnActiveOpenRowCanCollapse() {
+        #expect(
+            NotesFolderExpansionPolicy.rowClickAction(
+                isExpanded: false,
+                isActive: false
+            ) == .activate
+        )
+        #expect(
+            NotesFolderExpansionPolicy.rowClickAction(
+                isExpanded: false,
+                isActive: true
+            ) == .activate
+        )
+        #expect(
+            NotesFolderExpansionPolicy.rowClickAction(
+                isExpanded: true,
+                isActive: false
+            ) == .activate
+        )
+        #expect(
+            NotesFolderExpansionPolicy.rowClickAction(
+                isExpanded: true,
+                isActive: true
+            ) == .collapse
+        )
+    }
+
+    @Test func categoryFilterCannotKeepASelectionFromAnotherFolder() async throws {
+        var calendar = makeEmptyState()
+        let life = makeCategory(name: "生活")
+        var health = makeCategory(name: "健康")
+        health.sortIndex = 2
+        calendar.categories[life.id] = life
+        calendar.categories[health.id] = health
+        let note = makeNotesTestNote(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000001211")!,
+            title: "只属于生活的笔记",
+            body: "正文",
+            categoryID: life.id,
+            updatedAt: .distantPast
+        )
+        let repository = InMemoryWorkspaceRepository(initialState: calendar)
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let autosave = NoteAutosaveCoordinator(store: store, scheduler: NotesImmediateAutosaveScheduler())
+        let viewModel = NotesWorkspaceViewModel(store: store, autosave: autosave)
+        #expect(try await viewModel.select(note.id))
+
+        viewModel.categoryFilterID = health.id
+        viewModel.refreshBrowser()
+
+        #expect(viewModel.allNotes.isEmpty)
+        #expect(viewModel.selectedNoteID == nil)
+    }
+
+    @Test func sidebarCreatesIntoTheSelectedCategoryAndFallsBackFromSmartFolders() {
+        let fallback = UUID()
+        let selected = UUID()
+
+        #expect(NotesBrowserLocation.category(selected).newNoteCategoryID(fallback: fallback) == selected)
+        #expect(NotesBrowserLocation.all.newNoteCategoryID(fallback: fallback) == fallback)
+        #expect(NotesBrowserLocation.archived.newNoteCategoryID(fallback: fallback) == fallback)
+    }
+
+    @Test func searchResultReturnsToItsRealFolderInsteadOfTheAllNotesBucket() {
+        let categoryID = UUID()
+        let active = Note.empty(categoryID: categoryID, now: .distantPast)
+        var archived = active
+        archived.archivedAt = .distantFuture
+
+        #expect(
+            NotesBrowserSelectionPolicy.target(for: active, sourceLocation: nil)
+                == .category(categoryID)
+        )
+        #expect(
+            NotesBrowserSelectionPolicy.target(for: archived, sourceLocation: nil)
+                == .archived
+        )
+        #expect(
+            NotesBrowserSelectionPolicy.target(for: active, sourceLocation: .all)
+                == .all
+        )
+    }
+
     @Test func browserSearchesChineseTitleAndBlockTextWithinSharedCategory() async throws {
         let now = Date(timeIntervalSince1970: 1_754_000_000)
         var calendar = makeEmptyState()
@@ -69,6 +194,37 @@ struct NotesWorkspaceViewModelTests {
         #expect(viewModel.recentNotes.first?.title == "新标题")
     }
 
+    @Test func movingANoteToAFolderPersistsWithoutChangingAnotherActiveSelection() async throws {
+        var calendar = makeEmptyState()
+        let target = makeCategory(name: "项目")
+        calendar.categories[target.id] = target
+        let active = makeNotesTestNote(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000001105")!,
+            title: "正在编辑", body: "当前内容", categoryID: calendar.uncategorizedID, updatedAt: .distantPast
+        )
+        let moved = makeNotesTestNote(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000001106")!,
+            title: "待移动", body: "拖动内容", categoryID: calendar.uncategorizedID, updatedAt: .distantPast
+        )
+        let repository = InMemoryWorkspaceRepository(initialState: calendar)
+        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
+        await store.load()
+        _ = try await store.sendWorkspace(.createNote(.init(note: active)))
+        _ = try await store.sendWorkspace(.createNote(.init(note: moved)))
+        let autosave = NoteAutosaveCoordinator(store: store, scheduler: NotesImmediateAutosaveScheduler())
+        let viewModel = NotesWorkspaceViewModel(store: store, autosave: autosave)
+        #expect(try await viewModel.select(active.id))
+
+        #expect(try await viewModel.move(moved.id, toCategoryID: target.id))
+
+        #expect(viewModel.selectedNoteID == active.id)
+        #expect(store.state.notes[moved.id]?.categoryID == target.id)
+
+        #expect(try await viewModel.setPinned(moved.id, true))
+        #expect(store.state.notes[moved.id]?.isPinned == true)
+        #expect(viewModel.allNotes.first?.id == moved.id)
+    }
+
     @Test func createSelectsTheNewNoteAfterTheCurrentDraftWasAlreadyFlushed() async throws {
         let calendar = makeEmptyState()
         let existing = makeNotesTestNote(
@@ -97,6 +253,7 @@ struct NotesWorkspaceViewModelTests {
 
         #expect(viewModel.selectedNoteID == created.id)
         #expect(store.state.notes[created.id] != nil)
+        #expect(store.latestUndoLabel == "已新建笔记 · 未分类")
     }
 
     @Test func createSelectsTheNewNoteAfterReopeningALinkedTask() async throws {

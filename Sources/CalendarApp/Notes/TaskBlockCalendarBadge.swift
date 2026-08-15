@@ -52,12 +52,13 @@ struct TaskBlockCalendarBadge: View {
                 .accessibilityLabel("已关联日历事项")
 
                 TaskBlockUnlinkButton(action: onUnlink)
-                    .frame(minWidth: 92, minHeight: 20)
+                    .frame(width: 118, height: 22)
             } else {
                 TaskBlockScheduleButton(action: onSchedule)
-                    .frame(minWidth: 84, minHeight: 20)
+                    .frame(width: 112, height: 22)
             }
         }
+        .fixedSize(horizontal: true, vertical: true)
     }
 
     private func dateLabel(_ item: CalendarItem) -> String {
@@ -111,7 +112,7 @@ private struct TaskBlockScheduleButton: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSButton {
         let button = NSButton(
-            title: "安排到日历",
+            title: "安排这个待办",
             target: context.coordinator,
             action: #selector(Coordinator.performAction)
         )

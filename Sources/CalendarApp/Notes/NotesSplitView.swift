@@ -4,6 +4,70 @@ import SwiftUI
 import UniformTypeIdentifiers
 import WorkspaceDomain
 
+enum NotesNewItemCategoryPolicy {
+    static func resolve(
+        explicitCategoryID: UUID?,
+        currentCategoryFilterID: UUID?,
+        calendarState: CalendarState
+    ) -> UUID {
+        if let explicitCategoryID,
+           calendarState.categories[explicitCategoryID] != nil {
+            return explicitCategoryID
+        }
+        if let currentCategoryFilterID,
+           calendarState.categories[currentCategoryFilterID] != nil {
+            return currentCategoryFilterID
+        }
+        return calendarState.uncategorizedID
+    }
+}
+
+@MainActor
+enum NotesNewItemAdmission {
+    case proceed
+    case presentRecovery(DraftRecoveryCandidate)
+
+    static func decision(for store: WorkspaceStore) -> Self {
+        guard let candidate = DraftRecoveryPresentation.candidates(from: store).first else {
+            return .proceed
+        }
+        return .presentRecovery(candidate)
+    }
+}
+
+private struct RecoveryUndoNotice: Equatable {
+    let message: String
+    let stateGeneration: UInt
+}
+
+private struct NoteActionUndoNotice: Equatable {
+    let message: String
+    let noteID: NoteID
+    let stateGeneration: UInt
+}
+
+@MainActor
+enum NotesRecoverySelectionUndo {
+    static func perform(
+        store: WorkspaceStore,
+        autosave: NoteAutosaveCoordinator,
+        preferredNoteID: NoteID?
+    ) async throws -> NoteEditorIdentity? {
+        _ = try await store.undo()
+        let noteID = preferredNoteID.flatMap { store.state.notes[$0]?.id }
+            ?? store.state.notes.keys.first
+        guard let noteID, let note = store.state.notes[noteID] else { return nil }
+        let identity = NoteEditorIdentity(noteID: noteID, editSessionID: UUID())
+        try autosave.beginSession(
+            note,
+            linkedTaskBlockLinks: Set(store.state.taskBlockLinks.filter { $0.noteID == noteID }),
+            editSessionID: identity.editSessionID,
+            activeHostToken: UUID()
+        )
+        return identity
+    }
+}
+
 /// Production Notes module host. Keeps one autosave coordinator and one
 /// ViewModel for the module lifetime (AppShell host token).
 @MainActor
@@ -23,7 +87,7 @@ struct NotesSplitView: View {
     @State private var editorIdentity: NoteEditorIdentity?
     @State private var editorInitialFocus: NoteInitialFocus?
     @State private var nativeFinalizer: NoteNativeInputFinalizer?
-    @State private var showCategoryManager = false
+    @State private var categoryManagerPresentation: CategoryManagerPresentation?
     @State private var browserCollapsed = false
     @State private var recoveryCandidate: DraftRecoveryCandidate?
     @State private var importDiagnostics: [BlockMarkdownDiagnostic] = []
@@ -33,6 +97,11 @@ struct NotesSplitView: View {
     @State private var pendingPermanentDelete: PendingNotePermanentDelete?
     @State private var pendingNewNoteInputRequestID: UUID?
     @State private var availableWidth: CGFloat = .infinity
+    @State private var recoveryUndoNotice: RecoveryUndoNotice?
+    @State private var noteActionUndoNotice: NoteActionUndoNotice?
+    @State private var browserLocation: NotesBrowserLocation = .all
+    @State private var expandedBrowserLocations: Set<NotesBrowserLocation> = []
+    @Environment(\.workspaceActiveRoute) private var activeWorkspaceRoute
 
     enum NotesAdaptiveLayoutMode: Equatable {
         case browserOnly
@@ -80,18 +149,54 @@ struct NotesSplitView: View {
             .onChange(of: proxy.size.width) { _, width in availableWidth = width }
         }
         .overlay(alignment: .top) {
-            if let statusBanner {
-                Text(statusBanner)
-                    .padding(8)
-                    .background(.yellow.opacity(0.2))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .padding(.top, 8)
+            VStack(spacing: 8) {
+                if let recoveryUndoNotice {
+                    HStack(spacing: 12) {
+                        Label(recoveryUndoNotice.message, systemImage: "checkmark.circle.fill")
+                        Button("撤销") {
+                            Task { await undoRecoverySelection(recoveryUndoNotice) }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .font(.subheadline)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+                }
+                if let noteActionUndoNotice {
+                    HStack(spacing: 12) {
+                        Label(noteActionUndoNotice.message, systemImage: "archivebox.fill")
+                        Button("撤销") {
+                            Task { await undoNoteAction(noteActionUndoNotice) }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .font(.subheadline)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+                }
+                if let statusBanner {
+                    Text(statusBanner)
+                        .padding(8)
+                        .background(.yellow.opacity(0.2))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
             }
+            .padding(.top, 8)
         }
-        .sheet(item: $recoveryCandidate) { candidate in
+        .sheet(item: $recoveryCandidate, onDismiss: {
+            Task { @MainActor in
+                await Task.yield()
+                refreshRecoveryPresentation()
+            }
+        }) { candidate in
             DraftRecoverySheet(
                 candidate: candidate,
                 statusMessage: DraftRecoveryPresentation.statusMessage(for: store),
+                isResolving: DraftRecoveryPresentation.isResolving(store),
                 onRestoreAsCurrent: {
                     Task { await resolveRecovery(candidate, action: .restoreAsCurrent) }
                 },
@@ -101,18 +206,22 @@ struct NotesSplitView: View {
                 onSaveAsNew: {
                     Task {
                         let newID = NoteID()
-                        let blockIDs = candidate.draft.document.blocks.map(\.id)
+                        let blockIDs = DraftRecoveryPresentation.replacementBlockIDs(
+                            for: candidate.draft.document
+                        )
                         await resolveRecovery(
                             candidate,
                             action: .saveAsNew(noteID: newID, blockIDs: blockIDs)
                         )
                     }
-                },
-                onDismiss: { recoveryCandidate = nil }
+                }
             )
         }
-        .sheet(isPresented: $showCategoryManager) {
-            CategoryManagerView(store: store)
+        .sheet(item: $categoryManagerPresentation) { presentation in
+            CategoryManagerView(
+                store: store,
+                initialCategoryID: presentation.initialCategoryID
+            )
         }
         .confirmationDialog(
             "导入 Markdown",
@@ -163,6 +272,10 @@ struct NotesSplitView: View {
             registerRouteBridge()
         }
         .onChange(of: store.statePublicationGeneration) { _, _ in
+            if let notice = recoveryUndoNotice,
+               notice.stateGeneration != store.statePublicationGeneration {
+                recoveryUndoNotice = nil
+            }
             refreshRecoveryPresentation()
             syncEditorNoteIfNeeded()
         }
@@ -174,6 +287,12 @@ struct NotesSplitView: View {
         }
         .onChange(of: newItemRouter.pendingRequest) { _, request in
             consumeNoteNewItemRequest(request)
+        }
+        .onChange(of: activeWorkspaceRoute) { _, route in
+            guard route != .notes else { return }
+            categoryManagerPresentation = nil
+            pendingImportPlan = nil
+            pendingPermanentDelete = nil
         }
         .background(NotesWindowCloseMonitor(bridge: closeBridge, finalizer: nativeFinalizer))
     }
@@ -201,11 +320,66 @@ struct NotesSplitView: View {
         NoteBrowserView(
             viewModel: viewModel,
             categories: sortedCategories,
+            location: $browserLocation,
+            expandedLocations: $expandedBrowserLocations,
             onSelect: { await selectNote($0) },
-            onCreate: { await createNote() },
+            onCreate: { await createNote(categoryID: $0) },
+            onMoveToCategory: moveNote,
+            onActivateLocation: activateBrowserLocation,
             onToggleBrowser: { browserCollapsed = true },
-            onShowCategoryManager: { showCategoryManager = true }
+            onShowCategoryManager: { categoryID in
+                categoryManagerPresentation = CategoryManagerPresentation(
+                    initialCategoryID: categoryID
+                )
+            },
+            noteCount: noteCount
         )
+    }
+
+    private func activateBrowserLocation(_ location: NotesBrowserLocation) async -> Bool {
+        let selectionFallsOutsideLocation = viewModel.selectedNote.map { !location.contains($0) } ?? false
+        if selectionFallsOutsideLocation {
+            let decision = await closeBridge.decision(for: .selection, finalizer: nativeFinalizer)
+            guard decision == .allow, await viewModel.clearSelection() else {
+                statusBanner = "请先完成当前笔记的保存。"
+                return false
+            }
+            editorInitialFocus = nil
+            editorIdentity = nil
+        }
+
+        switch location {
+        case .all, .archived:
+            viewModel.categoryFilterID = nil
+        case let .category(categoryID):
+            viewModel.categoryFilterID = categoryID
+        }
+        statusBanner = nil
+        return true
+    }
+
+    private func noteCount(at location: NotesBrowserLocation) -> Int {
+        switch location {
+        case .all:
+            store.state.notes.values.filter { $0.archivedAt == nil }.count
+        case let .category(categoryID):
+            store.state.notes.values.filter { $0.archivedAt == nil && $0.categoryID == categoryID }.count
+        case .archived:
+            store.state.notes.values.filter { $0.archivedAt != nil }.count
+        }
+    }
+
+    private func moveNote(_ noteID: NoteID, toCategoryID categoryID: UUID) async -> Bool {
+        do {
+            let moved = try await viewModel.move(noteID, toCategoryID: categoryID)
+            if moved {
+                statusBanner = "笔记已移动到“\(store.calendarState.categories[categoryID]?.name ?? "分类")”。"
+            }
+            return moved
+        } catch {
+            statusBanner = "移动笔记未完成，请重试。"
+            return false
+        }
     }
 
     @ViewBuilder
@@ -219,9 +393,10 @@ struct NotesSplitView: View {
                 autosave: autosave,
                 store: store,
                 categories: sortedCategories,
-                onDocumentCommitted: { _ in },
-                onTitleCommitted: { _ in },
+                onDocumentCommitted: { _ in recoveryUndoNotice = nil },
+                onTitleCommitted: { _ in recoveryUndoNotice = nil },
                 onCategoryChanged: { categoryID in
+                    recoveryUndoNotice = nil
                     _ = try? autosave.update(categoryID: categoryID)
                 },
                 onRequestMarkdownImport: importMarkdown,
@@ -230,6 +405,7 @@ struct NotesSplitView: View {
                 onRestore: { Task { await restoreSelected() } },
                 onPermanentDelete: requestPermanentDeleteSelected,
                 onOpenCalendarItem: openCalendarItem,
+                onOpenCalendarTarget: openCalendarTarget,
                 showsBrowserButton: showsBrowserButton,
                 onToggleBrowser: { browserCollapsed = false },
                 sessionSink: { session in
@@ -311,10 +487,14 @@ struct NotesSplitView: View {
     }
 
     private func openCalendarItem(_ itemID: UUID) {
+        openCalendarTarget(.calendarItem(itemID))
+    }
+
+    private func openCalendarTarget(_ target: WorkspaceDeepLinkTarget) {
         guard let transitionCoordinator else { return }
         Task {
             guard await transitionCoordinator.requestActivation(.calendar) else { return }
-            deepLinkRouter.request(.calendarItem(itemID))
+            deepLinkRouter.request(target)
         }
     }
 
@@ -333,18 +513,37 @@ struct NotesSplitView: View {
         Task { await createNote(inputRequestID: request.id) }
     }
 
-    private func createNote(inputRequestID: UUID? = nil) async {
+    private func createNote(inputRequestID: UUID? = nil, categoryID: UUID? = nil) async {
+        if case let .presentRecovery(candidate) = NotesNewItemAdmission.decision(for: store) {
+            if let inputRequestID { newItemRouter.discardCapturedTyping(for: inputRequestID) }
+            recoveryCandidate = candidate
+            statusBanner = "请先处理待恢复草稿，再新建笔记。"
+            return
+        }
         let decision = await closeBridge.decision(for: .selection, finalizer: nativeFinalizer)
         guard decision == .allow else {
             if let inputRequestID { newItemRouter.cancelCapturedTyping(for: inputRequestID) }
             statusBanner = "请先完成当前笔记的保存。"
             return
         }
-        let note = Note.empty(id: NoteID(), categoryID: store.calendarState.uncategorizedID, now: clock())
-        guard (try? await viewModel.create(note)) == true else {
+        let resolvedCategoryID = NotesNewItemCategoryPolicy.resolve(
+            explicitCategoryID: categoryID,
+            currentCategoryFilterID: viewModel.categoryFilterID,
+            calendarState: store.calendarState
+        )
+        let note = Note.empty(id: NoteID(), categoryID: resolvedCategoryID, now: clock())
+        let created: Bool
+        do {
+            created = try await viewModel.create(note)
+        } catch {
+            created = false
+        }
+        guard created else {
             if let inputRequestID { newItemRouter.cancelCapturedTyping(for: inputRequestID) }
+            statusBanner = "新建笔记未完成，请重试。"
             return
         }
+        statusBanner = nil
         if let selected = viewModel.selectedNoteID {
             pendingNewNoteInputRequestID = inputRequestID
             editorInitialFocus = .title
@@ -368,13 +567,39 @@ struct NotesSplitView: View {
             statusBanner = "归档前需要完成主文件保存。"
             return
         }
-        _ = try? await viewModel.archive(noteID)
+        guard (try? await viewModel.archive(noteID)) == true else {
+            statusBanner = "归档笔记未完成。"
+            return
+        }
         if let selected = viewModel.selectedNoteID {
             editorInitialFocus = nil
             editorIdentity = .init(noteID: selected, editSessionID: UUID())
         } else {
             editorInitialFocus = nil
             editorIdentity = nil
+        }
+        noteActionUndoNotice = NoteActionUndoNotice(
+            message: "笔记已归档",
+            noteID: noteID,
+            stateGeneration: store.statePublicationGeneration
+        )
+    }
+
+    private func undoNoteAction(_ notice: NoteActionUndoNotice) async {
+        guard noteActionUndoNotice == notice,
+              store.statePublicationGeneration == notice.stateGeneration else {
+            noteActionUndoNotice = nil
+            statusBanner = "内容已经继续变化，无法撤销这次归档。"
+            return
+        }
+        do {
+            _ = try await store.undo()
+            viewModel.refreshBrowser()
+            noteActionUndoNotice = nil
+            await selectNote(notice.noteID)
+        } catch {
+            noteActionUndoNotice = nil
+            statusBanner = "撤销归档未完成。"
         }
     }
 
@@ -428,6 +653,17 @@ struct NotesSplitView: View {
         do {
             _ = try await store.resolveDraftRecovery(candidate.token, action: action)
             recoveryCandidate = nil
+            if store.canUndoRecoverySelection {
+                let notice = RecoveryUndoNotice(
+                    message: recoveryResolutionMessage(for: action),
+                    stateGeneration: store.statePublicationGeneration
+                )
+                recoveryUndoNotice = notice
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(12))
+                    if recoveryUndoNotice == notice { recoveryUndoNotice = nil }
+                }
+            }
             // Recovery and save-as-new always create a new editor key.
             if case let .saveAsNew(noteID, _) = action {
                 editorInitialFocus = nil
@@ -439,6 +675,38 @@ struct NotesSplitView: View {
         } catch {
             statusBanner = "草稿恢复操作已过期，请重新选择。"
             refreshRecoveryPresentation()
+        }
+    }
+
+    private func recoveryResolutionMessage(for action: DraftRecoveryAction) -> String {
+        switch action {
+        case .keepPersisted: "已保留当前笔记，可撤销改用退出前版本"
+        case .restoreAsCurrent: "已改用退出前版本，可撤销回当前笔记"
+        case .saveAsNew: "两个版本都已保留，可撤销新建副本"
+        }
+    }
+
+    private func undoRecoverySelection(_ notice: RecoveryUndoNotice) async {
+        guard recoveryUndoNotice == notice,
+              notice.stateGeneration == store.statePublicationGeneration,
+              store.canUndoRecoverySelection else {
+            recoveryUndoNotice = nil
+            statusBanner = "内容已经继续变化，无法再撤销这次恢复选择。"
+            return
+        }
+        do {
+            let replacement = try await NotesRecoverySelectionUndo.perform(
+                store: store,
+                autosave: autosave,
+                preferredNoteID: viewModel.selectedNoteID
+            )
+            editorInitialFocus = nil
+            editorIdentity = replacement
+            recoveryUndoNotice = nil
+            statusBanner = "已撤销恢复选择。"
+        } catch {
+            recoveryUndoNotice = nil
+            statusBanner = "撤销恢复选择未完成。"
         }
     }
 

@@ -76,7 +76,7 @@ struct TaskBlockScheduleSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("安排待办到日历")
+            Text("安排这个待办")
                 .font(.headline)
             if let title = taskTitle {
                 Text(title.isEmpty ? "无标题待办" : title)
@@ -126,7 +126,7 @@ struct TaskBlockScheduleSheet: View {
             )
             let outcome = try await store.sendWorkspace(
                 .scheduleTaskBlock(.init(noteID: noteID, blockID: blockID, item: item)),
-                undoLabel: "安排待办到日历"
+                undoLabel: "安排这个待办"
             )
             if case .committed = outcome {
                 onScheduled()

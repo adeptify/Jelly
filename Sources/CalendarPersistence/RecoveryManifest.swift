@@ -127,7 +127,8 @@ public final class RecoveryManifestStore: @unchecked Sendable {
     }
 
     private func isStructurallySafe(_ record: RecoverySnapshotRecord) -> Bool {
-        guard record.sourceSchema == 1 || record.sourceSchema == 2,
+        guard record.sourceSchema > 0,
+              record.sourceSchema < WorkspaceDocument.currentSchemaVersion,
               record.sourceByteCount >= 0,
               record.sourceSHA256.count == 64,
               record.sourceSHA256.allSatisfy({ $0.isHexDigit }),

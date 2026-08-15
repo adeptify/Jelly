@@ -9,6 +9,148 @@ import WorkspaceDomain
 @Suite("TaskBlockCalendarIntegrationTests")
 @MainActor
 struct TaskBlockCalendarIntegrationTests {
+    @Test func focusedTaskCalendarActionStaysVisibleInTheFixedBarForALongDocument() async throws {
+        _ = NSApplication.shared
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let taskID = BlockID()
+        var blocks: [DocumentBlock] = [try .task(id: taskID, text: "安排复盘")]
+        blocks.append(contentsOf: (0..<40).map { index in
+            .init(
+                id: BlockID(),
+                kind: .paragraph,
+                inlineContent: .plain("后续正文 \(index)"),
+                taskState: nil,
+                indentLevel: 0
+            )
+        })
+        var note = Note.empty(id: NoteID(), categoryID: calendar.uncategorizedID, now: .distantPast)
+        note.document = .init(blocks: blocks)
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let persisted = try #require(store.state.notes[note.id])
+        let editSessionID = UUID()
+        let autosave = NoteAutosaveCoordinator(store: store, scheduler: ImmediateTaskBlockScheduler())
+        try autosave.beginSession(
+            persisted,
+            linkedTaskBlockLinks: [],
+            editSessionID: editSessionID,
+            activeHostToken: UUID()
+        )
+        var finalizer: NoteNativeInputFinalizer?
+        let host = NSHostingView(rootView: NoteEditorView(
+            identity: .init(noteID: note.id, editSessionID: editSessionID),
+            note: persisted,
+            focusRegistry: EditorFocusRegistry(),
+            autosave: autosave,
+            store: store,
+            categories: Array(calendar.categories.values),
+            onDocumentCommitted: { _ in },
+            onTitleCommitted: { _ in },
+            onCategoryChanged: { _ in },
+            onRequestMarkdownImport: {},
+            onRequestMarkdownExport: {},
+            sessionSink: { _ in },
+            nativeFinalizerHook: Binding(get: { finalizer }, set: { finalizer = $0 })
+        ))
+        host.frame = .init(x: 0, y: 0, width: 900, height: 620)
+        let window = NSWindow(
+            contentRect: host.bounds,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        host.layoutSubtreeIfNeeded()
+
+        let button = try #require(taskBlockDescendants(of: host, as: NSButton.self).first {
+            $0.accessibilityIdentifier() == "task-block-schedule-calendar"
+        })
+        let visibleFrame = button.convert(button.bounds, to: host)
+        #expect(host.bounds.intersects(visibleFrame))
+        #expect(
+            host.bounds.maxY - visibleFrame.maxY < 70,
+            "待办日历动作应固定在底部格式栏，实际 frame=\(visibleFrame)"
+        )
+    }
+
+    @Test func taskCalendarActionAppearsWhenSelectionMovesFromParagraphIntoTask() async throws {
+        _ = NSApplication.shared
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let paragraphID = BlockID()
+        let taskID = BlockID()
+        var note = Note.empty(id: NoteID(), categoryID: calendar.uncategorizedID, now: .distantPast)
+        note.document = .init(blocks: [
+            .init(id: paragraphID, kind: .paragraph, inlineContent: .plain("正文"), taskState: nil, indentLevel: 0),
+            try .task(id: taskID, text: "安排复盘")
+        ])
+        _ = try await store.sendWorkspace(.createNote(.init(note: note)))
+        let persisted = try #require(store.state.notes[note.id])
+        let editSessionID = UUID()
+        let autosave = NoteAutosaveCoordinator(store: store, scheduler: ImmediateTaskBlockScheduler())
+        try autosave.beginSession(
+            persisted,
+            linkedTaskBlockLinks: [],
+            editSessionID: editSessionID,
+            activeHostToken: UUID()
+        )
+        var finalizer: NoteNativeInputFinalizer?
+        var capturedSession: BlockEditorSession?
+        let host = NSHostingView(rootView: NoteEditorView(
+            identity: .init(noteID: note.id, editSessionID: editSessionID),
+            note: persisted,
+            focusRegistry: EditorFocusRegistry(),
+            autosave: autosave,
+            store: store,
+            categories: Array(calendar.categories.values),
+            onDocumentCommitted: { _ in },
+            onTitleCommitted: { _ in },
+            onCategoryChanged: { _ in },
+            onRequestMarkdownImport: {},
+            onRequestMarkdownExport: {},
+            sessionSink: { capturedSession = $0 },
+            nativeFinalizerHook: Binding(get: { finalizer }, set: { finalizer = $0 })
+        ))
+        host.frame = .init(x: 0, y: 0, width: 900, height: 620)
+        let window = NSWindow(
+            contentRect: host.bounds,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        host.layoutSubtreeIfNeeded()
+
+        let session = try #require(capturedSession)
+        #expect(!taskBlockDescendants(of: host, as: NSButton.self).contains {
+            $0.accessibilityIdentifier() == "task-block-schedule-calendar"
+        })
+
+        try session.adoptSelectionFromNativeTextView(
+            .init(location: 3, length: 4),
+            typingAttributes: .init(marks: [], linkURL: nil)
+        )
+
+        #expect(await waitForTaskBlock {
+            host.layoutSubtreeIfNeeded()
+            return taskBlockDescendants(of: host, as: NSButton.self).contains {
+                $0.accessibilityIdentifier() == "task-block-schedule-calendar"
+            }
+        })
+    }
+
     @Test func productionEditorCheckboxPersistsOneSharedCompletionToLinkedCalendarItem() async throws {
         _ = NSApplication.shared
         let calendar = makeEmptyState()

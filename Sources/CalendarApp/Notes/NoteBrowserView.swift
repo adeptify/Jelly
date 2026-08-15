@@ -2,44 +2,161 @@ import CalendarDomain
 import SwiftUI
 import WorkspaceDomain
 
+enum NotesBrowserLocation: Hashable {
+    case all
+    case category(UUID)
+    case archived
+
+    func newNoteCategoryID(fallback: UUID) -> UUID {
+        if case let .category(categoryID) = self { return categoryID }
+        return fallback
+    }
+
+    func title(in categories: [CalendarCategory]) -> String {
+        switch self {
+        case .all: "全部笔记"
+        case let .category(categoryID):
+            categories.first(where: { $0.id == categoryID })?.name ?? "分类"
+        case .archived: "归档"
+        }
+    }
+
+    var accessibilityIdentifier: String {
+        switch self {
+        case .all: "notes-folder-all"
+        case let .category(categoryID): "notes-folder-category-\(categoryID.uuidString)"
+        case .archived: "notes-folder-archived"
+        }
+    }
+
+    func aligned(with note: Note) -> NotesBrowserLocation {
+        if note.archivedAt != nil { return .archived }
+        switch self {
+        case .all:
+            return .all
+        case let .category(categoryID) where categoryID == note.categoryID:
+            return self
+        case .category, .archived:
+            return .category(note.categoryID)
+        }
+    }
+
+    func contains(_ note: Note) -> Bool {
+        switch self {
+        case .all:
+            note.archivedAt == nil
+        case let .category(categoryID):
+            note.archivedAt == nil && note.categoryID == categoryID
+        case .archived:
+            note.archivedAt != nil
+        }
+    }
+}
+
+enum NotesFolderExpansionPolicy {
+    enum Action: Equatable {
+        case none
+        case activate
+        case collapse
+    }
+
+    static func action(requestedExpansion: Bool, isActive: Bool) -> Action {
+        if requestedExpansion { return .activate }
+        return isActive ? .collapse : .none
+    }
+
+    static func rowClickAction(isExpanded: Bool, isActive: Bool) -> Action {
+        if isExpanded, isActive { return .collapse }
+        return .activate
+    }
+}
+
+enum NotesBrowserSelectionPolicy {
+    static func target(
+        for note: Note,
+        sourceLocation: NotesBrowserLocation?
+    ) -> NotesBrowserLocation {
+        if let sourceLocation { return sourceLocation }
+        if note.archivedAt != nil { return .archived }
+        return .category(note.categoryID)
+    }
+}
+
 struct NoteBrowserView: View {
     @Bindable var viewModel: NotesWorkspaceViewModel
     let categories: [CalendarCategory]
+    @Binding var location: NotesBrowserLocation
+    @Binding var expandedLocations: Set<NotesBrowserLocation>
     let onSelect: (NoteID) async -> Void
-    let onCreate: () async -> Void
+    let onCreate: (UUID?) async -> Void
+    let onMoveToCategory: (NoteID, UUID) async -> Bool
+    let onActivateLocation: (NotesBrowserLocation) async -> Bool
     let onToggleBrowser: () -> Void
-    let onShowCategoryManager: () -> Void
+    let onShowCategoryManager: (UUID?) -> Void
+    let noteCount: (NotesBrowserLocation) -> Int
 
-    @State private var partition: NotesBrowserPartition = .recent
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: CalendarSemanticAppearance {
         CalendarTheme.appearance(for: colorScheme)
     }
 
+    private var isSearching: Bool {
+        !viewModel.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             browserHeader
-            searchAndFilter
-            partitionPicker
-            noteList
-            createButton
+            searchField
+            browserContent
         }
         .background(theme.elevatedSurface)
         .foregroundStyle(theme.primaryText)
-        .onChange(of: viewModel.selectedNoteID) { _, _ in
-            alignPartitionWithSelectedNote()
+        .onChange(of: categories.map(\.id)) { _, ids in
+            if case let .category(categoryID) = location, !ids.contains(categoryID) {
+                location = .all
+                expandedLocations = []
+            }
+            expandedLocations = expandedLocations.filter {
+                if case let .category(categoryID) = $0 { return ids.contains(categoryID) }
+                return true
+            }
         }
         .onChange(of: viewModel.selectedNote?.archivedAt) { _, _ in
-            alignPartitionWithSelectedNote()
+            alignLocationWithSelectedNote()
+        }
+        .onChange(of: viewModel.selectedNote?.categoryID) { _, categoryID in
+            guard let categoryID, case .category = location else { return }
+            location = .category(categoryID)
         }
     }
 
     private var browserHeader: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 6) {
             Text("笔记")
                 .font(.system(size: 17, weight: .semibold))
             Spacer(minLength: 0)
+            Button {
+                let categoryID: UUID?
+                if case let .category(selectedID) = location {
+                    categoryID = selectedID
+                } else {
+                    categoryID = nil
+                }
+                Task { await onCreate(categoryID) }
+            } label: {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(theme.primaryText)
+            .help("新建笔记")
+            .accessibilityLabel("新建笔记")
+            .accessibilityIdentifier("notes-new-note")
+
             Button(action: onToggleBrowser) {
                 Image(systemName: "sidebar.left")
                     .font(.system(size: 13, weight: .medium))
@@ -58,162 +175,359 @@ struct NoteBrowserView: View {
         }
     }
 
-    private var searchAndFilter: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(theme.secondaryText)
-                TextField("搜索标题和正文", text: $viewModel.searchText)
-                    .textFieldStyle(.plain)
-                    .accessibilityLabel("搜索笔记")
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 30)
-            .background(theme.canvas.opacity(0.78), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(theme.subtleBorder.opacity(0.5), lineWidth: 0.5)
-            }
-
-            categoryMenu
+    private var searchField: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(theme.secondaryText)
+            TextField("搜索标题和正文", text: $viewModel.searchText)
+                .textFieldStyle(.plain)
+                .accessibilityLabel("搜索笔记")
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+        .background(theme.canvas.opacity(0.78), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(theme.subtleBorder.opacity(0.5), lineWidth: 0.5)
         }
         .padding(.horizontal, 12)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
-    }
-
-    private var categoryMenu: some View {
-        Menu {
-            Button {
-                viewModel.categoryFilterID = nil
-            } label: {
-                categoryMenuLabel("全部分类", selected: viewModel.categoryFilterID == nil)
-            }
-            ForEach(categories) { category in
-                Button {
-                    viewModel.categoryFilterID = category.id
-                } label: {
-                    categoryMenuLabel(category.name, selected: viewModel.categoryFilterID == category.id)
-                }
-            }
-            Divider()
-            Button("管理分类…", action: onShowCategoryManager)
-        } label: {
-            Image(systemName: viewModel.categoryFilterID == nil
-                ? "line.3.horizontal.decrease.circle"
-                : "line.3.horizontal.decrease.circle.fill")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(viewModel.categoryFilterID == nil ? theme.secondaryText : theme.controlAccent)
-                .frame(width: 30, height: 30)
-                .background(theme.canvas.opacity(0.78), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .help("按分类筛选；也可管理分类")
-        .accessibilityLabel("筛选笔记分类")
-    }
-
-    private func categoryMenuLabel(_ title: String, selected: Bool) -> some View {
-        HStack {
-            Text(title)
-            if selected { Image(systemName: "checkmark") }
-        }
-    }
-
-    private var partitionPicker: some View {
-        Picker("笔记范围", selection: $partition) {
-            ForEach(NotesBrowserPartition.allCases) { scope in
-                Text(scope.title).tag(scope)
-            }
-        }
-        .pickerStyle(.segmented)
-        .tint(theme.controlAccent)
-        .labelsHidden()
-        .padding(.horizontal, 12)
-        .padding(.bottom, 8)
-        .accessibilityLabel("笔记范围")
-    }
-
-    private var noteList: some View {
-        List {
-            noteRows(viewModel.displayedNotes(in: partition), empty: partition.emptyMessage)
-        }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .background(theme.elevatedSurface)
-    }
-
-    private func alignPartitionWithSelectedNote() {
-        guard let note = viewModel.selectedNote else { return }
-        partition = note.archivedAt == nil ? .recent : .archived
-    }
-
-    private var createButton: some View {
-        Button {
-            Task { await onCreate() }
-        } label: {
-            Label("新建笔记", systemImage: "square.and.pencil")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(theme.primaryText)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .frame(height: 34)
-                .background(theme.rangePreviewFill, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .padding(12)
-        .overlay(alignment: .top) {
-            Rectangle().fill(theme.separator.opacity(0.7)).frame(height: 0.5)
-        }
-        .accessibilityLabel("新建笔记")
+        .padding(.vertical, 10)
     }
 
     @ViewBuilder
-    private func noteRows(_ notes: [Note], empty: String) -> some View {
-        if notes.isEmpty {
-            VStack(spacing: 8) {
-                Image(systemName: partition == .archived ? "archivebox" : "note.text")
-                    .font(.system(size: 20))
-                Text(empty).font(.caption)
+    private var browserContent: some View {
+        if isSearching {
+            searchResults
+        } else {
+            folderTree
+        }
+    }
+
+    private var folderTree: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("分类")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(theme.secondaryText)
+                Spacer()
+                Button {
+                    let categoryID: UUID?
+                    if case let .category(selectedID) = location {
+                        categoryID = selectedID
+                    } else {
+                        categoryID = viewModel.selectedNote?.categoryID
+                    }
+                    onShowCategoryManager(categoryID)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 24, height: 22)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(theme.secondaryText)
+                .help("管理分类")
+                .accessibilityLabel("管理分类")
             }
+            .padding(.horizontal, 14)
+
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    folderSection(title: "全部笔记", systemImage: "folder", target: .all)
+                    ForEach(categories) { category in
+                        folderSection(title: category.name, systemImage: "folder", target: .category(category.id))
+                    }
+                    folderSection(title: "归档", systemImage: "archivebox", target: .archived)
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 10)
+            }
+        }
+    }
+
+    private func folderSection(
+        title: String,
+        systemImage: String,
+        target: NotesBrowserLocation
+    ) -> some View {
+        DisclosureGroup(isExpanded: expansionBinding(for: target)) {
+            folderNotes(target)
+                .padding(.leading, 18)
+                .padding(.bottom, 4)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: expandedLocations.contains(target) ? "\(systemImage).fill" : systemImage)
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 16)
+                Text(title)
+                    .font(.system(size: 13, weight: location == target ? .semibold : .regular))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text("\(noteCount(target))")
+                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                    .foregroundStyle(theme.secondaryText.opacity(0.8))
+            }
+            .foregroundStyle(location == target ? theme.primaryText : theme.secondaryText)
+            .padding(.horizontal, 8)
+            .frame(height: 30)
+            .background {
+                if location == target {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(theme.rangePreviewFill)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .onTapGesture {
+                handleFolderRowClick(target)
+            }
+            .accessibilityLabel(title)
+            .accessibilityIdentifier(target.accessibilityIdentifier)
+            .accessibilityAddTraits(location == target ? .isSelected : [])
+        }
+        .disclosureGroupStyle(.automatic)
+        .contextMenu {
+            if target != .archived {
+                Button(target == .all ? "新建笔记" : "在此新建笔记") {
+                    let categoryID: UUID?
+                    if case let .category(id) = target { categoryID = id } else { categoryID = nil }
+                    Task { await onCreate(categoryID) }
+                }
+            }
+            if case let .category(categoryID) = target {
+                Button("管理分类…") { onShowCategoryManager(categoryID) }
+            }
+        }
+        .dropDestination(for: String.self) { payloads, _ in
+            guard case let .category(categoryID) = target,
+                  let rawID = payloads.first,
+                  let uuid = UUID(uuidString: rawID)
+            else { return false }
+            Task { _ = await onMoveToCategory(NoteID(uuid), categoryID) }
+            return true
+        }
+    }
+
+    private var searchResults: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("搜索结果")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Text("\(viewModel.searchResults.count)")
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(theme.secondaryText)
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 32)
+
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    noteRows(viewModel.searchResults, showsSearchContext: true, sourceLocation: nil)
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 10)
+            }
+        }
+    }
+
+    private func expansionBinding(for target: NotesBrowserLocation) -> Binding<Bool> {
+        Binding(
+            get: { expandedLocations.contains(target) },
+            set: { requestedExpansion in
+                switch NotesFolderExpansionPolicy.action(
+                    requestedExpansion: requestedExpansion,
+                    isActive: location == target
+                ) {
+                case .none:
+                    break
+                case .activate:
+                    Task { await activate(target) }
+                case .collapse:
+                    expandedLocations.remove(target)
+                }
+            }
+        )
+    }
+
+    private func handleFolderRowClick(_ target: NotesBrowserLocation) {
+        switch NotesFolderExpansionPolicy.rowClickAction(
+            isExpanded: expandedLocations.contains(target),
+            isActive: location == target
+        ) {
+        case .none:
+            break
+        case .activate:
+            Task { await activate(target) }
+        case .collapse:
+            expandedLocations.remove(target)
+        }
+    }
+
+    @discardableResult
+    private func activate(_ target: NotesBrowserLocation) async -> Bool {
+        guard await onActivateLocation(target) else { return false }
+        location = target
+        switch target {
+        case .all, .archived:
+            expandedLocations = [target]
+        case .category:
+            expandedLocations.remove(.all)
+            expandedLocations.remove(.archived)
+            expandedLocations.insert(target)
+        }
+        return true
+    }
+
+    private func alignLocationWithSelectedNote() {
+        guard let note = viewModel.selectedNote else { return }
+        location = location.aligned(with: note)
+        expandedLocations.insert(location)
+    }
+
+    @ViewBuilder
+    private func folderNotes(_ target: NotesBrowserLocation) -> some View {
+        let notes = viewModel.browserNotes(at: target)
+        if notes.isEmpty {
+            HStack(spacing: 8) {
+                Text(target == .archived ? "归档为空" : "还没有笔记")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.secondaryText)
+                if target != .archived {
+                    Button("新建") {
+                        Task {
+                            let categoryID: UUID?
+                            if case let .category(id) = target { categoryID = id } else { categoryID = nil }
+                            await onCreate(categoryID)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 30)
+        } else {
+            noteRows(notes, showsSearchContext: false, sourceLocation: target)
+        }
+    }
+
+    @ViewBuilder
+    private func noteRows(
+        _ notes: [Note],
+        showsSearchContext: Bool,
+        sourceLocation: NotesBrowserLocation?
+    ) -> some View {
+        if notes.isEmpty, showsSearchContext {
+            VStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                Text("没有找到匹配的笔记")
+            }
+            .font(.caption)
             .foregroundStyle(theme.secondaryText)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 28)
-            .listRowBackground(Color.clear)
-            .listRowSeparator(.hidden)
         } else {
             ForEach(notes) { note in
-                Button {
-                    Task { await onSelect(note.id) }
-                } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(note.title.isEmpty ? "无标题" : note.title)
-                            .lineLimit(1)
-                            .font(.system(size: 13, weight: viewModel.selectedNoteID == note.id ? .semibold : .regular))
-                            .foregroundStyle(theme.primaryText)
-                        Text(note.updatedAt.formatted(date: .abbreviated, time: .shortened))
-                            .font(.system(size: 11))
-                            .foregroundStyle(theme.secondaryText)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background {
-                        if viewModel.selectedNoteID == note.id {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(theme.rangePreviewFill)
-                        }
-                    }
-                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .listRowInsets(.init(top: 2, leading: 8, bottom: 2, trailing: 8))
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .accessibilityLabel(note.title.isEmpty ? "无标题笔记" : note.title)
-                .accessibilityAddTraits(viewModel.selectedNoteID == note.id ? .isSelected : [])
+                noteRow(note, showsSearchContext: showsSearchContext, sourceLocation: sourceLocation)
             }
         }
+    }
+
+    private func noteRow(
+        _ note: Note,
+        showsSearchContext: Bool,
+        sourceLocation: NotesBrowserLocation?
+    ) -> some View {
+        Button {
+            Task {
+                let target = NotesBrowserSelectionPolicy.target(
+                    for: note,
+                    sourceLocation: sourceLocation
+                )
+                guard await activate(target) else { return }
+                await onSelect(note.id)
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(note.title.isEmpty ? "无标题" : note.title)
+                    .lineLimit(1)
+                    .font(.system(size: 12, weight: viewModel.selectedNoteID == note.id ? .semibold : .regular))
+                    .foregroundStyle(theme.primaryText)
+                if showsSearchContext, let snippet = matchingSnippet(for: note) {
+                    Text(highlighted(snippet))
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.secondaryText)
+                        .lineLimit(2)
+                }
+                HStack(spacing: 5) {
+                    if note.isPinned { Image(systemName: "pin.fill") }
+                    Text(note.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                    if showsSearchContext {
+                        Text("·")
+                        Text(categoryName(for: note.categoryID)).lineLimit(1)
+                    }
+                }
+                .font(.system(size: 10))
+                .foregroundStyle(theme.secondaryText)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background {
+                if viewModel.selectedNoteID == note.id {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(theme.rangePreviewFill)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(note.title.isEmpty ? "无标题笔记" : note.title)
+        .accessibilityIdentifier("notes-note-\(note.id.rawValue.uuidString)")
+        .accessibilityAddTraits(viewModel.selectedNoteID == note.id ? .isSelected : [])
+        .draggable(note.id.rawValue.uuidString)
+        .contextMenu {
+            if note.archivedAt == nil {
+                Button(note.isPinned ? "取消固定" : "固定到顶部") {
+                    Task { _ = try? await viewModel.setPinned(note.id, !note.isPinned) }
+                }
+            }
+            Menu("移动到分类") {
+                ForEach(categories) { category in
+                    Button(category.name) {
+                        Task { _ = await onMoveToCategory(note.id, category.id) }
+                    }
+                    .disabled(category.id == note.categoryID || note.archivedAt != nil)
+                }
+            }
+        }
+    }
+
+    private func categoryName(for categoryID: UUID) -> String {
+        categories.first(where: { $0.id == categoryID })?.name ?? "未分类"
+    }
+
+    private func matchingSnippet(for note: Note) -> String? {
+        let query = viewModel.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return nil }
+        let paragraphs = note.document.blocks.map {
+            $0.inlineContent.spans.map(\.text).joined()
+        }
+        return paragraphs.first(where: {
+            $0.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        })
+    }
+
+    private func highlighted(_ source: String) -> AttributedString {
+        var result = AttributedString(source)
+        let query = viewModel.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let sourceRange = source.range(
+            of: query,
+            options: [.caseInsensitive, .diacriticInsensitive]
+        ), let range = Range(sourceRange, in: result) else { return result }
+        result[range].backgroundColor = theme.controlAccent.opacity(0.18)
+        result[range].foregroundColor = theme.primaryText
+        return result
     }
 }

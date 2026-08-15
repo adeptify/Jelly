@@ -48,6 +48,7 @@ enum NotesBrowserPartition: String, CaseIterable, Identifiable, Equatable, Senda
     private let searchIndex: WorkspaceSearchIndex
     private let clock: @Sendable () -> Date
     private var pendingSelectionMutation: PendingSelectionMutation?
+    private var isSelectionMutationInFlight = false
 
     var searchText = "" { didSet { refreshBrowser() } }
     var categoryFilterID: UUID? { didSet { refreshBrowser() } }
@@ -80,13 +81,98 @@ enum NotesBrowserPartition: String, CaseIterable, Identifiable, Equatable, Senda
         try autosave.update(title: title)
     }
 
-    func refreshBrowser() {
+    /// Moves any active note without making drag-and-drop silently change the
+    /// current editor selection. The selected note still travels through the
+    /// autosave barrier so native input and the category mutation cannot race.
+    @discardableResult
+    func move(_ noteID: NoteID, toCategoryID categoryID: UUID) async throws -> Bool {
+        guard store.calendarState.categories[categoryID] != nil,
+              let base = store.state.notes[noteID],
+              base.archivedAt == nil,
+              base.categoryID != categoryID
+        else { return false }
+
+        if selectedNoteID == noteID {
+            _ = try autosave.update(categoryID: categoryID)
+            if case .persisted = await autosave.flushLatest() { return true }
+            return false
+        }
+
+        var moved = base
+        moved.categoryID = categoryID
+        let links = Set(store.state.taskBlockLinks.filter { $0.noteID == noteID })
+        let submission = NoteDraftSubmission(
+            noteID: noteID,
+            editSessionID: UUID(),
+            baseNoteRevision: base.revision,
+            baseNoteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(base),
+            baseSnapshot: base,
+            baseLinkedTaskBlockLinks: links,
+            draftGeneration: 1,
+            snapshot: moved,
+            noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(moved),
+            modifiedFields: [.categoryID],
+            linkedBlockDeletionDispositions: [:]
+        )
+        let outcome = try await store.sendWorkspace(.updateNote(submission), undoLabel: "移动笔记")
+        return didCommit(outcome)
+    }
+
+    @discardableResult
+    func setPinned(_ noteID: NoteID, _ isPinned: Bool) async throws -> Bool {
+        guard let note = store.state.notes[noteID], note.archivedAt == nil else { return false }
+        if selectedNoteID == noteID, await flushSelectionPrecondition() == false { return false }
+        let outcome = try await store.sendWorkspace(
+            .setNotePinned(noteID, isPinned, at: clock()),
+            undoLabel: isPinned ? "固定笔记" : "取消固定"
+        )
+        return didCommit(outcome)
+    }
+
+    func refreshBrowser(preservingMissingSelection: Bool = false) {
         let matching = searchableNotes().filter(matchesCategory(_:))
         let active = matching.filter { $0.archivedAt == nil }.sorted(by: Self.browserOrder(_:_:))
         recentNotes = active
         allNotes = active
         archivedNotes = matching.filter { $0.archivedAt != nil }.sorted(by: Self.browserOrder(_:_:))
+        if let selectedNoteID,
+           store.state.notes[selectedNoteID] == nil,
+           !preservingMissingSelection,
+           !isSelectionMutationInFlight {
+            self.selectedNoteID = nil
+        } else if let categoryFilterID,
+           let selectedNote,
+           !isSelectionMutationInFlight,
+           selectedNote.archivedAt != nil || selectedNote.categoryID != categoryFilterID {
+            selectedNoteID = nil
+        }
         isShowingEmptyState = active.isEmpty && archivedNotes.isEmpty
+    }
+
+    func browserNotes(at location: NotesBrowserLocation) -> [Note] {
+        let notes = Array(store.state.notes.values)
+        return notes.filter { note in
+            switch location {
+            case .all:
+                note.archivedAt == nil
+            case let .category(categoryID):
+                note.archivedAt == nil && note.categoryID == categoryID
+            case .archived:
+                note.archivedAt != nil
+            }
+        }.sorted(by: Self.browserOrder(_:_:))
+    }
+
+    var searchResults: [Note] {
+        searchableNotes().sorted(by: Self.browserOrder(_:_:))
+    }
+
+    @discardableResult
+    func clearSelection() async -> Bool {
+        guard selectedNoteID != nil else { return true }
+        guard await flushSelectionPrecondition() else { return false }
+        selectedNoteID = nil
+        return true
     }
 
     /// The browser is derived from Store publication, rather than from one
@@ -130,7 +216,11 @@ enum NotesBrowserPartition: String, CaseIterable, Identifiable, Equatable, Senda
         // unselected blank note when the second lifecycle flush cannot reuse
         // the proof from the first one.
         guard await flushSelectionPrecondition() else { return false }
-        let outcome = try await store.sendWorkspace(.createNote(.init(note: note)), undoLabel: "新建笔记")
+        let categoryName = store.calendarState.categories[note.categoryID]?.name ?? "未分类"
+        let outcome = try await store.sendWorkspace(
+            .createNote(.init(note: note)),
+            undoLabel: WorkspaceCreationFeedback.note(categoryName: categoryName)
+        )
         if capturePending(outcome, effect: .create(note.id)) { return false }
         guard didCommit(outcome) else { return false }
         return try await applyCommittedSelectionEffect(.create(note.id))
@@ -140,6 +230,8 @@ enum NotesBrowserPartition: String, CaseIterable, Identifiable, Equatable, Senda
     func archive(_ noteID: NoteID) async throws -> Bool {
         if selectedNoteID == noteID, await flushSelectionPrecondition() == false { return false }
         let previousIndex = displayedIndex(of: noteID, in: .all)
+        isSelectionMutationInFlight = true
+        defer { isSelectionMutationInFlight = false }
         let outcome = try await store.sendWorkspace(.archiveNote(noteID, at: clock()), undoLabel: "归档笔记")
         if capturePending(outcome, effect: .archive(noteID: noteID, previousIndex: previousIndex)) { return false }
         guard didCommit(outcome) else { return false }
@@ -150,6 +242,8 @@ enum NotesBrowserPartition: String, CaseIterable, Identifiable, Equatable, Senda
     func restore(_ noteID: NoteID) async throws -> Bool {
         if selectedNoteID == noteID, await flushSelectionPrecondition() == false { return false }
         let previousIndex = displayedIndex(of: noteID, in: .archived)
+        isSelectionMutationInFlight = true
+        defer { isSelectionMutationInFlight = false }
         let outcome = try await store.sendWorkspace(.restoreNote(noteID, at: clock()), undoLabel: "恢复笔记")
         if capturePending(outcome, effect: .restore(noteID: noteID, previousIndex: previousIndex)) { return false }
         guard didCommit(outcome) else { return false }
@@ -167,6 +261,8 @@ enum NotesBrowserPartition: String, CaseIterable, Identifiable, Equatable, Senda
     ) async throws -> Bool {
         if selectedNoteID == noteID, await flushSelectionPrecondition() == false { return false }
         let previousIndex = displayedIndex(of: noteID, in: .archived)
+        isSelectionMutationInFlight = true
+        defer { isSelectionMutationInFlight = false }
         let outcome = try await store.sendWorkspace(
             .permanentlyDeleteNote(noteID, authorization: authorization),
             undoLabel: "永久删除笔记"
@@ -181,6 +277,8 @@ enum NotesBrowserPartition: String, CaseIterable, Identifiable, Equatable, Senda
     @discardableResult
     func retryPendingMutation() async throws -> Bool {
         guard let pendingSelectionMutation else { return false }
+        isSelectionMutationInFlight = true
+        defer { isSelectionMutationInFlight = false }
         let outcome = try await store.retryPendingCommit(pendingSelectionMutation.transactionID)
         switch outcome {
         case .committed:
@@ -204,7 +302,12 @@ enum NotesBrowserPartition: String, CaseIterable, Identifiable, Equatable, Senda
     }
 
     private func applyCommittedSelectionEffect(_ effect: CommittedSelectionEffect) async throws -> Bool {
-        refreshBrowser()
+        // Archive/restore/delete choose their fallback from the identity that
+        // was selected before the mutation. Keep that missing identity just
+        // long enough for the operation-owned fallback below to run. A later
+        // external mutation (for example undoing a newly created note) still
+        // uses the default refresh and clears a stale selection.
+        refreshBrowser(preservingMissingSelection: true)
         switch effect {
         case let .create(noteID):
             guard selectedNoteID != noteID else { return true }
@@ -310,6 +413,7 @@ enum NotesBrowserPartition: String, CaseIterable, Identifiable, Equatable, Senda
     }
 
     private static func browserOrder(_ lhs: Note, _ rhs: Note) -> Bool {
+        if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
         if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
         return lhs.id.rawValue.uuidString.lowercased() < rhs.id.rawValue.uuidString.lowercased()
     }

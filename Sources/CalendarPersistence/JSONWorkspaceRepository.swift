@@ -463,7 +463,9 @@ public actor JSONWorkspaceRepository: WorkspaceRepository {
         rawData: Data,
         provenance: WorkspaceLoadProvenance
     ) throws {
-        guard provenance.sourceSchema == 1 || provenance.sourceSchema == 2 else {
+        guard provenance.sourceSchema > 0,
+              provenance.sourceSchema < WorkspaceDocument.currentSchemaVersion
+        else {
             throw WorkspacePersistenceError.invalidDocument
         }
         do {

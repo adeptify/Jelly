@@ -15,7 +15,7 @@ struct BackupCommands: Commands {
     var body: some Commands {
         CommandGroup(after: .newItem) {
             Divider()
-            Button("打开恢复中心") {
+            Button("恢复与备份…") {
                 openWindow(id: CalendarAppWindowID.recoveryCenter)
             }
             Button("导出备份…", action: exportBackup)
@@ -95,7 +95,7 @@ struct BackupCommands: Commands {
         Task { @MainActor in
             do {
                 try await store.exportBackup(to: destination)
-                showInformation(title: "备份已导出", message: "已保存到：\n\(destination.path)")
+                showExportSuccess(title: "备份已导出", destination: destination)
             } catch {
                 showError(title: "无法导出备份", message: "备份没有写入。请确认目标位置可写后重试。")
             }
@@ -209,7 +209,7 @@ struct BackupCommands: Commands {
             showError(title: "备份文件无法恢复", message: "该文件不是有效的 Jelly 备份，当前数据没有被修改。")
             return
         }
-        guard confirmRestore(preview.loadResult.state.calendar) else { return }
+        guard confirmRestore(preview.loadResult.state) else { return }
         do {
             let outcome = try await store.restore(preview, rollbackDirectoryURL: rollbackDirectory)
             switch outcome {
@@ -227,16 +227,16 @@ struct BackupCommands: Commands {
         }
     }
 
-    private func confirmRestore(_ restored: CalendarState) -> Bool {
+    private func confirmRestore(_ restored: WorkspaceState) -> Bool {
         let alert = NSAlert()
         alert.messageText = "确认恢复备份？"
         let currentSummary = store.phase == .ready
-            ? BackupStateSummary(state: store.calendarState).description
+            ? BackupStateSummary(state: store.state).description
             : "当前数据需要恢复或修复"
         alert.informativeText = """
         \(currentSummary) → \(BackupStateSummary(state: restored).description)
 
-        恢复会替换完整当前工作空间，包括日历、分类、笔记、灵感及其关系。恢复前内容会由工作空间恢复流程保留为回滚证据。
+        恢复会替换完整当前工作空间，包括日历、分类、笔记、灵感及它们之间的关联。恢复前内容会自动保留为可回退副本。
         """
         alert.addButton(withTitle: "恢复")
         alert.addButton(withTitle: "取消")
@@ -280,6 +280,18 @@ struct BackupCommands: Commands {
         alert.alertStyle = .informational; alert.addButton(withTitle: "好"); alert.runModal()
     }
 
+    private func showExportSuccess(title: String, destination: URL) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = "已保存到：\n\(destination.path)"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "在 Finder 中显示")
+        alert.addButton(withTitle: "好")
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.activateFileViewerSelecting([destination])
+        }
+    }
+
     private func showError(title: String, message: String) {
         let alert = NSAlert(); alert.messageText = title; alert.informativeText = message
         alert.alertStyle = .warning; alert.addButton(withTitle: "知道了"); alert.runModal()
@@ -290,12 +302,18 @@ private struct BackupStateSummary {
     let categories: Int
     let items: Int
     let series: Int
+    let notes: Int
+    let inspirations: Int
 
-    init(state: CalendarState) {
-        categories = state.categories.count
-        items = state.items.count
-        series = state.recurrence.series.count
+    init(state: WorkspaceState) {
+        categories = state.calendar.categories.count
+        items = state.calendar.items.count
+        series = state.calendar.recurrence.series.count
+        notes = state.notes.count
+        inspirations = state.inspirations.count
     }
 
-    var description: String { "分类 \(categories) 个，事项 \(items) 项，重复系列 \(series) 个" }
+    var description: String {
+        "分类 \(categories) 个，事项 \(items + series) 项，笔记 \(notes) 篇，灵感 \(inspirations) 条"
+    }
 }

@@ -33,6 +33,41 @@ struct WorkspaceMigrationSnapshotTests {
         )
     }
 
+    @Test func firstV3SaveCreatesVerifiedRawSnapshotBeforeCurrentSchemaReplacement() async throws {
+        let directory = try WorkspacePersistenceTemporaryDirectory()
+        defer { directory.remove() }
+        let main = directory.file("calendar-v1.json")
+        let snapshots = directory.file("snapshots")
+        let manifest = directory.file("recovery-manifest.json")
+        let legacy = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 1)
+        let v3 = try JSONEncoder.workspaceDeterministic.encode(
+            WorkspaceDocument(schemaVersion: 3, state: legacy)
+        )
+        try v3.write(to: main)
+        let repository = JSONWorkspaceRepository(
+            documentURL: main,
+            seed: { .empty(calendar: WorkspacePersistenceFixtures.calendarState) },
+            snapshotDirectoryURL: snapshots,
+            recoveryManifestURL: manifest
+        )
+        _ = try await repository.load()
+        var updated = legacy
+        updated.revision = 2
+        updated.notes[updated.notes.keys.first!]!.revision = 2
+        updated.notes[updated.notes.keys.first!]!.title = "首次修改"
+
+        _ = try await repository.save(updated)
+
+        let recovery = try RecoveryManifestStore(
+            manifestURL: manifest,
+            snapshotDirectoryURL: snapshots
+        ).load()
+        let record = try #require(recovery.entries.first)
+        #expect(record.sourceSchema == 3)
+        #expect(try Data(contentsOf: snapshots.appendingPathComponent(record.snapshotFileName)) == v3)
+        #expect(try WorkspaceDocumentCodec.decode(Data(contentsOf: main)).state == updated)
+    }
+
     @Test func failedSnapshotWriteLeavesV2MainByteForByteUntouched() async throws {
         let directory = try WorkspacePersistenceTemporaryDirectory()
         defer { directory.remove() }

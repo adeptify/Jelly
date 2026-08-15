@@ -27,6 +27,16 @@ enum NoteEditorLayout {
 /// Right-hand Notes editor surface. Ordinary Store publications keep the same
 /// `EditorKey`; selection changes and recovery/save-as-new mint a new one.
 struct NoteEditorView: View {
+    private struct FocusedTaskScheduleRequest: Identifiable {
+        let id = UUID()
+        let blockID: BlockID
+    }
+
+    private struct ScheduleNotice: Equatable {
+        let itemID: UUID
+        let message: String
+        let stateGeneration: UInt
+    }
     let identity: NoteEditorIdentity
     let initialFocus: NoteInitialFocus?
     let note: Note
@@ -43,6 +53,7 @@ struct NoteEditorView: View {
     var onRestore: () -> Void
     var onPermanentDelete: () -> Void
     var onOpenCalendarItem: (UUID) -> Void
+    var onOpenCalendarTarget: (WorkspaceDeepLinkTarget) -> Void
     var showsBrowserButton: Bool
     var onToggleBrowser: () -> Void
     var sessionSink: (BlockEditorSession?) -> Void
@@ -58,7 +69,10 @@ struct NoteEditorView: View {
     @State private var lastAcceptedDocument: BlockDocument
     @State private var pendingLinkedTaskDeletion: PendingLinkedTaskDeletion?
     @State private var didApplyInitialFocus = false
+    @State private var scheduleNotice: ScheduleNotice?
+    @State private var focusedTaskScheduleRequest: FocusedTaskScheduleRequest?
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.workspaceActiveRoute) private var activeWorkspaceRoute
 
     private var theme: CalendarSemanticAppearance {
         CalendarTheme.appearance(for: colorScheme)
@@ -81,6 +95,7 @@ struct NoteEditorView: View {
         onRestore: @escaping () -> Void = {},
         onPermanentDelete: @escaping () -> Void = {},
         onOpenCalendarItem: @escaping (UUID) -> Void = { _ in },
+        onOpenCalendarTarget: @escaping (WorkspaceDeepLinkTarget) -> Void = { _ in },
         showsBrowserButton: Bool = false,
         onToggleBrowser: @escaping () -> Void = {},
         sessionSink: @escaping (BlockEditorSession?) -> Void,
@@ -103,6 +118,7 @@ struct NoteEditorView: View {
         self.onRestore = onRestore
         self.onPermanentDelete = onPermanentDelete
         self.onOpenCalendarItem = onOpenCalendarItem
+        self.onOpenCalendarTarget = onOpenCalendarTarget
         self.showsBrowserButton = showsBrowserButton
         self.onToggleBrowser = onToggleBrowser
         self.sessionSink = sessionSink
@@ -147,8 +163,8 @@ struct NoteEditorView: View {
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
                 Menu {
-                    Button("导入 Markdown…", action: onRequestMarkdownImport)
-                    Button("导出 Markdown…", action: onRequestMarkdownExport)
+                    Button("从 Markdown 文件导入正文…", action: onRequestMarkdownImport)
+                    Button("将当前笔记导出为 Markdown…", action: onRequestMarkdownExport)
                     Divider()
                     if note.archivedAt == nil {
                         Button("归档", action: onArchive)
@@ -182,17 +198,19 @@ struct NoteEditorView: View {
 
                 Spacer(minLength: 12)
 
-                Button("安排到日历…") { showScheduleSheet = true }
-                    .accessibilityLabel("从笔记安排到日历")
+                Button("安排这篇笔记…") { showScheduleSheet = true }
+                    .accessibilityLabel("安排这篇笔记到日历")
 
-                Button("日历关系") { showCalendarLinks = true }
+                if calendarArrangementCount > 0 {
+                    Button("日历安排 · \(calendarArrangementCount)") { showCalendarLinks = true }
                     .popover(isPresented: $showCalendarLinks) {
                         NoteCalendarLinksPopover(
                             store: store,
                             noteID: identity.noteID,
-                            onOpenItem: onOpenCalendarItem
+                            onOpenTarget: onOpenCalendarTarget
                         )
                     }
+                }
             }
             .font(.system(size: 12, weight: .medium))
             .padding(.horizontal, 20)
@@ -221,13 +239,7 @@ struct NoteEditorView: View {
                             editorSession = session
                             sessionSink(session)
                             applyInitialFocusIfReady()
-                        },
-                        taskCalendarContext: .init(
-                            store: store,
-                            prepareForMutation: prepareForTaskCalendarMutation,
-                            didCommitMutation: rebaseAutosaveAfterTaskCalendarMutation,
-                            onOpenItem: onOpenCalendarItem
-                        )
+                        }
                     )
                     .frame(
                         maxWidth: NoteEditorLayout.maximumContentWidth,
@@ -240,7 +252,50 @@ struct NoteEditorView: View {
                 }
             }
 
-            BlockFormattingBar(session: editorSession)
+            HStack(spacing: 8) {
+                BlockFormattingBar(session: editorSession)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if let editorSession {
+                    NoteEditorTaskCalendarAction(
+                        session: editorSession,
+                        store: store,
+                        noteID: identity.noteID,
+                        onSchedule: { blockID in
+                            focusedTaskScheduleRequest = .init(blockID: blockID)
+                        },
+                        onUnlink: { blockID in
+                            Task { await unlinkTaskBlockFromCalendar(blockID) }
+                        },
+                        onOpenItem: onOpenCalendarItem
+                    )
+                    .padding(.trailing, 12)
+                }
+            }
+            .background(theme.elevatedSurface)
+            .overlay(alignment: .top) {
+                Rectangle().fill(theme.separator.opacity(0.7)).frame(height: 0.5)
+            }
+        }
+        .overlay(alignment: .top) {
+            if let scheduleNotice {
+                HStack(spacing: 10) {
+                    Label(scheduleNotice.message, systemImage: "calendar.badge.checkmark")
+                    Button("打开日历") {
+                        self.scheduleNotice = nil
+                        onOpenCalendarItem(scheduleNotice.itemID)
+                    }
+                    Button("撤销") {
+                        Task { await undoScheduledItem(scheduleNotice) }
+                    }
+                }
+                .font(.system(size: 12, weight: .medium))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(.regularMaterial, in: Capsule())
+                .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+                .padding(.top, 8)
+            }
         }
         .background(theme.canvas)
         .foregroundStyle(theme.primaryText)
@@ -251,7 +306,26 @@ struct NoteEditorView: View {
                 onCancel: { showScheduleSheet = false },
                 onScheduled: { itemID in
                     showScheduleSheet = false
-                    onOpenCalendarItem(itemID)
+                    guard let item = store.calendarState.items[itemID] else { return }
+                    scheduleNotice = ScheduleNotice(
+                        itemID: itemID,
+                        message: "已创建 \(item.schedule.startDate.month) 月 \(item.schedule.startDate.day) 日全天事项",
+                        stateGeneration: store.statePublicationGeneration
+                    )
+                }
+            )
+        }
+        .sheet(item: $focusedTaskScheduleRequest) { request in
+            TaskBlockScheduleSheet(
+                store: store,
+                noteID: identity.noteID,
+                blockID: request.blockID,
+                now: Date(),
+                prepareForMutation: prepareForTaskCalendarMutation,
+                onCancel: { focusedTaskScheduleRequest = nil },
+                onScheduled: {
+                    rebaseAutosaveAfterTaskCalendarMutation()
+                    focusedTaskScheduleRequest = nil
                 }
             )
         }
@@ -287,12 +361,36 @@ struct NoteEditorView: View {
             }
         }
         .onChange(of: identity) { _, _ in installNativeFinalizer() }
+        .onChange(of: activeWorkspaceRoute) { _, route in
+            guard route != .notes else { return }
+            showCalendarLinks = false
+            showScheduleSheet = false
+            focusedTaskScheduleRequest = nil
+        }
         .onDisappear {
             sessionSink(nil)
             if nativeFinalizerHook.wrappedValue != nil {
                 // Only clear when this identity still owns the hook.
                 nativeFinalizerHook.wrappedValue = nil
             }
+        }
+    }
+
+    private var calendarArrangementCount: Int {
+        NoteCalendarArrangementProjection.make(noteID: identity.noteID, state: store.state).count
+    }
+
+    private func undoScheduledItem(_ notice: ScheduleNotice) async {
+        guard scheduleNotice == notice,
+              store.statePublicationGeneration == notice.stateGeneration else {
+            scheduleNotice = nil
+            return
+        }
+        do {
+            _ = try await store.undo()
+            scheduleNotice = nil
+        } catch {
+            scheduleNotice = nil
         }
     }
 
@@ -352,6 +450,18 @@ struct NoteEditorView: View {
             )
         } catch {
             editorSession?.autosaveDidResolve(.failed("无法刷新待办联动后的保存基线。"))
+        }
+    }
+
+    private func unlinkTaskBlockFromCalendar(_ blockID: BlockID) async {
+        guard await prepareForTaskCalendarMutation() else { return }
+        let outcome = try? await TaskBlockCalendarIntegration.unlinkFromBlock(
+            store: store,
+            noteID: identity.noteID,
+            blockID: blockID
+        )
+        if case .committed? = outcome {
+            rebaseAutosaveAfterTaskCalendarMutation()
         }
     }
 
@@ -415,6 +525,28 @@ struct NoteEditorView: View {
             preferredColumn: nil,
             typingAttributes: .init(marks: [], linkURL: nil)
         )
+    }
+}
+
+private struct NoteEditorTaskCalendarAction: View {
+    @ObservedObject var session: BlockEditorSession
+    let store: WorkspaceStore
+    let noteID: NoteID
+    let onSchedule: (BlockID) -> Void
+    let onUnlink: (BlockID) -> Void
+    let onOpenItem: (UUID) -> Void
+
+    var body: some View {
+        if let blockID = session.focusedTaskBlockID {
+            TaskBlockCalendarBadge(
+                store: store,
+                noteID: noteID,
+                blockID: blockID,
+                onSchedule: { onSchedule(blockID) },
+                onUnlink: { onUnlink(blockID) },
+                onOpenItem: onOpenItem
+            )
+        }
     }
 }
 

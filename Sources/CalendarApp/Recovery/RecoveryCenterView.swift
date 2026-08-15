@@ -39,7 +39,7 @@ import WorkspaceDomain
         case .parkedJournalCleanup:
             phaseDescription = "草稿清理待确认"
         case .needsRelationshipRepair:
-            phaseDescription = "需要修复关系一致性"
+            phaseDescription = "部分内容关联需要修复"
         }
     }
 
@@ -66,7 +66,7 @@ struct RecoveryCenterView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("恢复中心")
+            Text("恢复与备份")
                 .font(.title2.weight(.semibold))
             Text(model.phaseDescription)
                 .foregroundStyle(.secondary)
@@ -80,7 +80,7 @@ struct RecoveryCenterView: View {
                 ContentUnavailableView(
                     "没有待处理草稿",
                     systemImage: "checkmark.shield",
-                    description: Text("主文件与 Journal 当前没有需要人工选择的恢复候选。")
+                    description: Text("当前没有需要你确认的未保存内容。完整备份可从“文件”菜单导出或恢复。")
                 )
             } else {
                 List(model.draftCandidates) { candidate in
@@ -91,13 +91,13 @@ struct RecoveryCenterView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         HStack {
-                            Button("恢复为当前") {
+                            Button("使用退出前版本") {
                                 Task { await model.resolve(candidate, action: .restoreAsCurrent) }
                             }
-                            Button("保留磁盘") {
+                            Button("使用当前版本") {
                                 Task { await model.resolve(candidate, action: .keepPersisted) }
                             }
-                            Button("另存新笔记") {
+                            Button("两个版本都保留") {
                                 Task {
                                     await model.resolve(
                                         candidate,
@@ -123,6 +123,6 @@ struct RecoveryCenterView: View {
         .onChange(of: store.statePublicationGeneration) { _, _ in model.refresh() }
         .onChange(of: store.phase) { _, _ in model.refresh() }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("恢复中心")
+        .accessibilityLabel("恢复与备份")
     }
 }

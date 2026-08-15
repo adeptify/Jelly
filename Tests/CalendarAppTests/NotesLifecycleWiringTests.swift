@@ -329,53 +329,36 @@ struct NotesLifecycleWiringTests {
         window.orderOut(nil)
     }
 
-    @Test func activeNoteDeepLinkReturnsTheBrowserFromArchiveToRecent() async throws {
+    @Test func activeNoteMovesAnArchivedBrowserBackToItsCategory() {
         let calendar = makeEmptyState()
-        var archived = Note.empty(categoryID: calendar.uncategorizedID, now: .distantPast)
-        archived.title = "归档笔记"
-        archived.archivedAt = .distantPast
-        var converted = Note.empty(categoryID: calendar.uncategorizedID, now: .distantPast)
-        converted.title = "灵感转成的笔记"
-        let repository = InMemoryWorkspaceRepository(initialState: calendar)
-        let store = WorkspaceStore(initialState: .empty(calendar: calendar), repository: repository)
-        await store.load()
-        _ = try await store.sendWorkspace(.createNote(.init(note: archived)))
-        _ = try await store.sendWorkspace(.createNote(.init(note: converted)))
-        let router = WorkspaceDeepLinkRouter()
-        let root = NotesSplitView(
-            store: store,
-            focusRegistry: EditorFocusRegistry(),
-            deepLinkRouter: router,
-            newItemRouter: WorkspaceNewItemRouter(),
-            searchIndex: WorkspaceSearchIndex()
-        )
-        let hosting = NSHostingView(rootView: root)
-        let window = NSWindow(
-            contentRect: .init(x: 0, y: 0, width: 900, height: 600),
-            styleMask: [],
-            backing: .buffered,
-            defer: false
-        )
-        window.contentView = hosting
-        window.makeKeyAndOrderFront(nil)
-        defer { window.orderOut(nil) }
-        hosting.layoutSubtreeIfNeeded()
-        let scope = try #require(notesDescendants(of: hosting, as: NSSegmentedControl.self).first {
-            $0.segmentCount == NotesBrowserPartition.allCases.count
-        })
-        scope.selectedSegment = 2
-        scope.sendAction(scope.action, to: scope.target)
-        #expect(await waitUntil { scope.selectedSegment == 2 })
+        let active = Note.empty(categoryID: calendar.uncategorizedID, now: .distantPast)
 
-        _ = router.request(.note(converted.id))
+        #expect(
+            NotesBrowserLocation.archived.aligned(with: active)
+                == .category(calendar.uncategorizedID)
+        )
+    }
 
-        #expect(await waitUntil {
-            hosting.layoutSubtreeIfNeeded()
-            return scope.selectedSegment == 0
-        })
-        #expect(notesDescendants(of: hosting, as: NSTextField.self).contains {
-            $0.stringValue == "灵感转成的笔记"
-        })
+    @Test func commandNewNoteUsesTheCurrentFolderLikeTheMouseButton() {
+        var calendar = makeEmptyState()
+        let health = makeCategory(name: "健康")
+        calendar.categories[health.id] = health
+
+        #expect(NotesNewItemCategoryPolicy.resolve(
+            explicitCategoryID: nil,
+            currentCategoryFilterID: health.id,
+            calendarState: calendar
+        ) == health.id)
+        #expect(NotesNewItemCategoryPolicy.resolve(
+            explicitCategoryID: calendar.uncategorizedID,
+            currentCategoryFilterID: health.id,
+            calendarState: calendar
+        ) == calendar.uncategorizedID)
+        #expect(NotesNewItemCategoryPolicy.resolve(
+            explicitCategoryID: UUID(),
+            currentCategoryFilterID: UUID(),
+            calendarState: calendar
+        ) == calendar.uncategorizedID)
     }
 
     @Test func creatingANoteRebuildsTheTitleFieldForTheNewEditorIdentity() async throws {
@@ -496,6 +479,116 @@ struct NotesLifecycleWiringTests {
         })
     }
 
+    @Test func newItemAdmissionReturnsTheRecoveryCandidateWhileJournalBlocksWrites() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-notes-new-item-recovery-gate-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let documentURL = directory.appendingPathComponent("workspace.json")
+        let journalURL = directory.appendingPathComponent("workspace.draft-journal.json")
+        let initial = WorkspaceState.empty(calendar: makeEmptyState())
+        let writerRepository = JSONWorkspaceRepository(documentURL: documentURL, seed: { initial })
+        let writer = WorkspaceStore(initialState: initial, repository: writerRepository)
+        await writer.load()
+        var note = Note.empty(categoryID: initial.calendar.uncategorizedID, now: .distantPast)
+        note.title = "磁盘版本"
+        _ = try await writer.sendWorkspace(.createNote(.init(note: note)))
+        let persisted = try #require(writer.state.notes[note.id])
+        var draft = persisted
+        draft.title = "待恢复草稿"
+        draft.revision += 1
+        let journal = DraftJournalRepository(fileURL: journalURL)
+        try await journal.persist(try divergentRecoveryEntry(
+            persisted: persisted,
+            draft: draft,
+            workspaceRevision: writer.state.revision
+        ))
+
+        let readerRepository = JSONWorkspaceRepository(documentURL: documentURL, seed: { initial })
+        let reader = WorkspaceStore(initialState: initial, repository: readerRepository, journal: journal)
+        await reader.load()
+        guard case .needsDraftRecovery = reader.phase else {
+            Issue.record("fixture must begin behind the recovery gate")
+            return
+        }
+        let expected = try #require(DraftRecoveryPresentation.candidates(from: reader).first)
+
+        guard case let .presentRecovery(candidate) = NotesNewItemAdmission.decision(for: reader) else {
+            Issue.record("new item must reopen the durable recovery decision")
+            return
+        }
+
+        #expect(candidate.token == expected.token)
+        #expect(reader.state.notes.count == 1)
+    }
+
+    @Test func undoingARecoveryChoiceRebuildsTheEditorSessionFromTheRestoredNote() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-notes-recovery-undo-ui-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let documentURL = directory.appendingPathComponent("workspace.json")
+        let journalURL = directory.appendingPathComponent("workspace.draft-journal.json")
+        let initial = WorkspaceState.empty(calendar: makeEmptyState())
+        let writerRepository = JSONWorkspaceRepository(documentURL: documentURL, seed: { initial })
+        let writer = WorkspaceStore(initialState: initial, repository: writerRepository)
+        await writer.load()
+        var persisted = Note.empty(categoryID: initial.calendar.uncategorizedID, now: .distantPast)
+        persisted.title = "恢复选择可撤销"
+        persisted.document = .init(blocks: [
+            .init(
+                id: BlockID(),
+                kind: .paragraph,
+                inlineContent: .plain("当前笔记内容"),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        _ = try await writer.sendWorkspace(.createNote(.init(note: persisted)))
+        persisted = try #require(writer.state.notes[persisted.id])
+        var draft = persisted
+        draft.document = .init(blocks: [
+            .init(
+                id: persisted.document.blocks[0].id,
+                kind: .paragraph,
+                inlineContent: .plain("退出前内容"),
+                taskState: nil,
+                indentLevel: 0
+            )
+        ])
+        let journal = DraftJournalRepository(fileURL: journalURL)
+        try await journal.persist(try divergentRecoveryEntry(
+            persisted: persisted,
+            draft: draft,
+            workspaceRevision: writer.state.revision
+        ))
+
+        let readerRepository = JSONWorkspaceRepository(documentURL: documentURL, seed: { initial })
+        let reader = WorkspaceStore(initialState: initial, repository: readerRepository, journal: journal)
+        await reader.load()
+        let candidate = try #require(DraftRecoveryPresentation.candidates(from: reader).first)
+        _ = try await reader.resolveDraftRecovery(candidate.token, action: .restoreAsCurrent)
+        #expect(reader.state.notes[persisted.id]?.document == draft.document)
+        let autosave = NoteAutosaveCoordinator(store: reader)
+        try autosave.beginSession(
+            draft,
+            linkedTaskBlockLinks: [],
+            editSessionID: UUID(),
+            activeHostToken: UUID()
+        )
+
+        let identity = try await NotesRecoverySelectionUndo.perform(
+            store: reader,
+            autosave: autosave,
+            preferredNoteID: persisted.id
+        )
+
+        #expect(reader.state.notes[persisted.id]?.document == persisted.document)
+        #expect(identity?.noteID == persisted.id)
+        let nextSubmission = try autosave.update(title: "撤销后继续编辑")
+        #expect(nextSubmission.snapshot.document == persisted.document)
+    }
+
     @Test func mountedNotesHostCompletesAsyncStartupLoadForAnAlreadyPersistedDraft() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("jelly-notes-startup-recovery-\(UUID().uuidString)", isDirectory: true)
@@ -575,6 +668,36 @@ private func identicalRecoveryEntry(note: Note, workspaceRevision: Int64) throws
         baseNoteRevision: note.revision,
         draftGeneration: 1,
         noteSnapshot: note,
+        updatedAt: .distantPast,
+        noteSnapshotChecksum: snapshotChecksum,
+        journalChecksum: ""
+    )
+    return DraftJournalEntry(
+        noteID: unsigned.noteID,
+        editSessionID: unsigned.editSessionID,
+        baseWorkspaceRevision: unsigned.baseWorkspaceRevision,
+        baseNoteRevision: unsigned.baseNoteRevision,
+        draftGeneration: unsigned.draftGeneration,
+        noteSnapshot: unsigned.noteSnapshot,
+        updatedAt: unsigned.updatedAt,
+        noteSnapshotChecksum: unsigned.noteSnapshotChecksum,
+        journalChecksum: try DraftJournal.entryChecksum(for: unsigned)
+    )
+}
+
+private func divergentRecoveryEntry(
+    persisted: Note,
+    draft: Note,
+    workspaceRevision: Int64
+) throws -> DraftJournalEntry {
+    let snapshotChecksum = try WorkspaceChecksum.noteSnapshotChecksum(draft)
+    let unsigned = DraftJournalEntry(
+        noteID: draft.id,
+        editSessionID: .editor(UUID()),
+        baseWorkspaceRevision: workspaceRevision,
+        baseNoteRevision: persisted.revision,
+        draftGeneration: 1,
+        noteSnapshot: draft,
         updatedAt: .distantPast,
         noteSnapshotChecksum: snapshotChecksum,
         journalChecksum: ""

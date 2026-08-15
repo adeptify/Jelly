@@ -8,6 +8,24 @@ import WorkspaceDomain
 @Suite("NoteDraftRecoveryStoreTests")
 @MainActor
 struct NoteDraftRecoveryStoreTests {
+    @Test @MainActor func startupSilentlyClearsARecoveryRecordThatOnlyChangesRevisionAndTime() async throws {
+        let categoryID = UUID()
+        var persisted = Note.empty(id: NoteID(UUID()), categoryID: categoryID, now: .distantPast)
+        persisted.title = "内容完全相同"
+        persisted.revision = 1
+        var draft = persisted
+        draft.revision = 2
+        draft.updatedAt = Date(timeIntervalSince1970: 50)
+        let fixture = try await controlledRecoveryFixture(
+            state: recoveryState(persisted: persisted, categoryID: categoryID),
+            drafts: [draft]
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        #expect(fixture.store.phase == .ready)
+        #expect(try await fixture.journal.current()?.records.isEmpty == true)
+        #expect(fixture.store.state.notes[persisted.id] == persisted)
+    }
     @Test func continuousEditorRecoveryPreservesSoftBreaksFormattingEmptyBlocksAndLinkedTasks() async throws {
         let categoryID = UUID()
         let noteID = NoteID()
@@ -158,6 +176,72 @@ struct NoteDraftRecoveryStoreTests {
         #expect(fixture.store.phase == .ready)
         #expect(fixture.store.state.notes[persisted.id] == persisted)
         #expect(try await fixture.journal.current()?.records.isEmpty == true)
+    }
+
+    @Test func keepingTheCurrentNoteCanBeUndoneBackToTheExitVersionDuringThisSession() async throws {
+        let categoryID = UUID()
+        var persisted = Note.empty(id: NoteID(UUID()), categoryID: categoryID, now: .distantPast)
+        persisted.revision = 1
+        persisted.title = "当前笔记"
+        var draft = persisted
+        draft.title = "退出前版本"
+        let fixture = try await recoveryFixture(persisted: persisted, draft: draft, categoryID: categoryID)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let candidate = try #require(recoveryCandidate(from: fixture.store.phase))
+
+        _ = try await fixture.store.resolveDraftRecovery(candidate.token, action: .keepPersisted)
+
+        #expect(fixture.store.canUndo)
+        #expect(fixture.store.canUndoRecoverySelection)
+        guard case .committed = try await fixture.store.undo() else {
+            Issue.record("撤销恢复选择必须保存另一个版本")
+            return
+        }
+        #expect(fixture.store.state.notes[persisted.id]?.title == "退出前版本")
+    }
+
+    @Test func restoringTheExitVersionCanBeUndoneBackToTheCurrentNote() async throws {
+        let categoryID = UUID()
+        var persisted = Note.empty(id: NoteID(UUID()), categoryID: categoryID, now: .distantPast)
+        persisted.revision = 1
+        persisted.title = "当前笔记"
+        var draft = persisted
+        draft.title = "退出前版本"
+        let fixture = try await recoveryFixture(persisted: persisted, draft: draft, categoryID: categoryID)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let candidate = try #require(recoveryCandidate(from: fixture.store.phase))
+
+        _ = try await fixture.store.resolveDraftRecovery(candidate.token, action: .restoreAsCurrent)
+
+        #expect(fixture.store.canUndo)
+        #expect(fixture.store.canUndoRecoverySelection)
+        _ = try await fixture.store.undo()
+        #expect(fixture.store.state.notes[persisted.id]?.title == "当前笔记")
+    }
+
+    @Test func savingBothVersionsCanBeUndoneByRemovingOnlyTheRecoveredCopy() async throws {
+        let categoryID = UUID()
+        var persisted = Note.empty(id: NoteID(UUID()), categoryID: categoryID, now: .distantPast)
+        persisted.revision = 1
+        var draft = persisted
+        draft.title = "退出前版本"
+        let fixture = try await recoveryFixture(persisted: persisted, draft: draft, categoryID: categoryID)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let candidate = try #require(recoveryCandidate(from: fixture.store.phase))
+        let recoveredID = NoteID(UUID())
+        let blockIDs = draft.document.blocks.map { _ in BlockID(UUID()) }
+
+        _ = try await fixture.store.resolveDraftRecovery(
+            candidate.token,
+            action: .saveAsNew(noteID: recoveredID, blockIDs: blockIDs)
+        )
+
+        #expect(fixture.store.state.notes[recoveredID] != nil)
+        #expect(fixture.store.canUndo)
+        #expect(fixture.store.canUndoRecoverySelection)
+        _ = try await fixture.store.undo()
+        #expect(fixture.store.state.notes[recoveredID] == nil)
+        #expect(fixture.store.state.notes[persisted.id] != nil)
     }
 
     @Test func restoreAsCurrentNormalizesRetainedTaskCompletionToTheCurrentCalendarItem() async throws {
@@ -625,6 +709,8 @@ struct NoteDraftRecoveryStoreTests {
         let categoryID = UUID()
         var kept = Note.empty(id: NoteID(UUID()), categoryID: categoryID, now: .distantPast)
         kept.revision = 1
+        var keptDraft = kept
+        keptDraft.title = "discard after keep"
         var restored = Note.empty(id: NoteID(UUID()), categoryID: categoryID, now: .distantPast)
         restored.revision = 1
         var restoredDraft = restored
@@ -632,7 +718,7 @@ struct NoteDraftRecoveryStoreTests {
         var state = WorkspaceState.empty(calendar: .empty(uncategorizedID: categoryID, now: .distantPast))
         state.revision = 1
         state.notes = [kept.id: kept, restored.id: restored]
-        let fixture = try await controlledRecoveryFixture(state: state, drafts: [kept, restoredDraft])
+        let fixture = try await controlledRecoveryFixture(state: state, drafts: [keptDraft, restoredDraft])
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let candidates = try #require(recoveryCandidates(from: fixture.store.phase))
         let keep = try #require(candidates.first { $0.draft.id == kept.id })
