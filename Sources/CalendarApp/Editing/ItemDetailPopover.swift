@@ -297,10 +297,10 @@ enum ItemEditorMoreDetailsPolicy {
         canEditRule: Bool,
         hasNoteRelations: Bool
     ) -> Bool {
-        draft.priority != .none
-            || !draft.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !draft.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || canEditRule
             || hasNoteRelations
+            || draft.repeatsWeekly
     }
 }
 
@@ -374,9 +374,8 @@ struct ItemEditForm: View {
                 titleField
                 categoryBlock
                 scheduleBlock
-                DisclosureGroup("更多详情", isExpanded: $showMoreDetails) {
+                EditorMoreDetailsDisclosure(isExpanded: $showMoreDetails) {
                     VStack(alignment: .leading, spacing: EditorFormStyle.contentSpacing) {
-                        priorityBlock
                         if configuration.canEditRule {
                             recurrenceBlock
                         }
@@ -387,9 +386,7 @@ struct ItemEditForm: View {
                             onOpenNote: onOpenNote
                         )
                     }
-                    .padding(.top, 8)
                 }
-                .font(EditorFormStyle.control)
                 if let message = localError ?? model.validationMessage {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(message)
@@ -522,18 +519,6 @@ struct ItemEditForm: View {
         .background(fieldBlockBackground)
     }
 
-    private var priorityBlock: some View {
-        VStack(alignment: .leading, spacing: EditorFormStyle.blockSpacing) {
-            fieldRow("优先级") {
-                EditorPriorityPicker(priority: priorityBinding)
-                Spacer(minLength: 0)
-            }
-        }
-        .padding(EditorFormStyle.blockPadding)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(fieldBlockBackground)
-    }
-
     private func selectCategory(_ id: UUID) {
         categoryOption = id.uuidString
         model.draft.categoryID = id
@@ -612,7 +597,10 @@ struct ItemEditForm: View {
             Text("重复")
                 .font(EditorFormStyle.label)
                 .foregroundStyle(theme.secondaryText)
-            weekdayPicker
+            EditorRecurrenceModePicker(mode: recurrenceModeBinding, allowsClearing: false)
+            if model.draft.recurrenceMode == .weekly {
+                EditorWeekdayPicker(weekdays: $model.draft.weekdays)
+            }
             Toggle(isOn: recurrenceEndEnabledBinding) {
                 Text("设置结束日期")
                     .font(EditorFormStyle.control)
@@ -647,30 +635,12 @@ struct ItemEditForm: View {
         .frame(minHeight: EditorFormStyle.fieldMinHeight)
     }
 
-    private var weekdayPicker: some View {
-        HStack(spacing: 4) {
-            ForEach(Weekday.allCases, id: \.self) { weekday in
-                let selected = model.draft.weekdays.contains(weekday)
-                Button(["一", "二", "三", "四", "五", "六", "日"][weekday.rawValue - 1]) {
-                    if selected {
-                        model.draft.weekdays.remove(weekday)
-                    } else {
-                        model.draft.weekdays.insert(weekday)
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.mini)
-                .tint(selected ? theme.controlAccent : theme.secondaryText)
-            }
-        }
-    }
-
     // MARK: - Bindings & actions
 
-    private var priorityBinding: Binding<ItemPriority> {
+    private var recurrenceModeBinding: Binding<ItemRecurrenceMode> {
         Binding(
-            get: { model.draft.priority },
-            set: { model.draft.priority = $0 }
+            get: { model.draft.recurrenceMode },
+            set: { model.draft.recurrenceMode = $0 }
         )
     }
 

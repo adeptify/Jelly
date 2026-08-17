@@ -266,27 +266,14 @@ struct QuickCreatePopover: View {
 
             scheduleBlock
 
-            DisclosureGroup("更多详情", isExpanded: $showMoreDetails) {
+            EditorMoreDetailsDisclosure(isExpanded: $showMoreDetails) {
                 VStack(alignment: .leading, spacing: EditorFormStyle.contentSpacing) {
-                    HStack(spacing: 8) {
-                        Text("优先级")
-                            .font(EditorFormStyle.label)
-                            .foregroundStyle(theme.secondaryText)
-                            .frame(width: EditorFormStyle.labelWidth, alignment: .leading)
-                        EditorPriorityPicker(priority: $model.draft.priority)
-                        Spacer(minLength: 0)
-                    }
-                    .frame(minHeight: EditorFormStyle.fieldMinHeight)
-
-                    Toggle(isOn: $model.draft.repeatsWeekly) {
-                        Text("每周重复")
-                            .font(EditorFormStyle.control)
-                    }
-                    .toggleStyle(.checkbox)
-                    .controlSize(.small)
+                    EditorRecurrenceModePicker(mode: recurrenceModeBinding)
 
                     if model.draft.repeatsWeekly {
-                        weekdayPicker
+                        if model.draft.recurrenceMode == .weekly {
+                            EditorWeekdayPicker(weekdays: $model.draft.weekdays)
+                        }
                         Toggle(isOn: recurrenceEndEnabledBinding) {
                             Text("设置结束日期")
                                 .font(EditorFormStyle.control)
@@ -303,9 +290,7 @@ struct QuickCreatePopover: View {
 
                     MarkdownNotesEditor(text: $model.draft.notes, minHeight: 80, maxHeight: 130)
                 }
-                .padding(.top, 8)
             }
-            .font(EditorFormStyle.control)
 
             if let message = localError ?? model.validationMessage {
                 VStack(alignment: .leading, spacing: 6) {
@@ -420,22 +405,6 @@ struct QuickCreatePopover: View {
         .frame(minHeight: EditorFormStyle.fieldMinHeight)
     }
 
-    private var weekdayPicker: some View {
-        HStack(spacing: 4) {
-            ForEach(Weekday.allCases, id: \.self) { weekday in
-                Button(Self.weekdayName(weekday)) {
-                    if model.draft.weekdays.contains(weekday) {
-                        model.draft.weekdays.remove(weekday)
-                    } else {
-                        model.draft.weekdays.insert(weekday)
-                    }
-                }
-                .buttonStyle(.bordered)
-                .tint(model.draft.weekdays.contains(weekday) ? theme.controlAccent : theme.secondaryText)
-            }
-        }
-    }
-
     private var startDateBinding: Binding<Date> {
         Binding(
             get: { model.draft.startDate.editorDate },
@@ -464,6 +433,13 @@ struct QuickCreatePopover: View {
         Binding(
             get: { model.draft.endTime.editorDate },
             set: { model.draft.endTime = .editorMinute(containing: $0) }
+        )
+    }
+
+    private var recurrenceModeBinding: Binding<ItemRecurrenceMode> {
+        Binding(
+            get: { model.draft.recurrenceMode },
+            set: { model.draft.recurrenceMode = $0 }
         )
     }
 
@@ -543,7 +519,4 @@ struct QuickCreatePopover: View {
         }
     }
 
-    private static func weekdayName(_ weekday: Weekday) -> String {
-        ["一", "二", "三", "四", "五", "六", "日"][weekday.rawValue - 1]
-    }
 }

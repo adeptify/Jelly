@@ -122,7 +122,159 @@ struct EditorCategoryPicker: View {
     }
 }
 
-/// Shared 无 / P0 / P1 / P2 control for create + edit forms.
+/// Full-row disclosure. macOS `DisclosureGroup` only hits the tiny chevron;
+/// this button owns the entire label row.
+struct EditorMoreDetailsDisclosure<Content: View>: View {
+    @Binding var isExpanded: Bool
+    @ViewBuilder var content: () -> Content
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var isHovering = false
+
+    private var theme: CalendarSemanticAppearance {
+        CalendarTheme.appearance(for: colorScheme)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Text("更多详情")
+                        .font(EditorFormStyle.control)
+                        .foregroundStyle(theme.secondaryText)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(EditorFormStyle.chevron)
+                        .foregroundStyle(theme.secondaryText.opacity(0.72))
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                }
+                .padding(.horizontal, 4)
+                .frame(maxWidth: .infinity, minHeight: EditorFormStyle.fieldMinHeight, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(theme.subtleBorder.opacity(isHovering ? 0.18 : 0))
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(EditorFullRowButtonStyle())
+            .onHover { isHovering = $0 }
+            .accessibilityLabel("更多详情")
+            .accessibilityValue(isExpanded ? "已展开" : "已收起")
+
+            if isExpanded {
+                content()
+                    .padding(.top, 8)
+            }
+        }
+    }
+}
+
+/// macOS `.plain` buttons ignore empty space unless the style itself is a hit target.
+private struct EditorFullRowButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .opacity(configuration.isPressed ? 0.72 : 1)
+    }
+}
+
+/// Shared 每天 / 每周 / 一二三… track so weekday chips cannot drift larger.
+private struct EditorSegmentTrack<Item: Hashable>: View {
+    let items: [Item]
+    let isSelected: (Item) -> Bool
+    let title: (Item) -> String
+    let accessibilityLabel: (Item) -> String
+    let action: (Item) -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var theme: CalendarSemanticAppearance {
+        CalendarTheme.appearance(for: colorScheme)
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(items, id: \.self) { item in
+                let selected = isSelected(item)
+                Button {
+                    action(item)
+                } label: {
+                    Text(title(item))
+                        .font(EditorFormStyle.segment(selected: selected))
+                        .foregroundStyle(selected ? theme.primaryText : theme.secondaryText)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 5)
+                        .background {
+                            if selected {
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(theme.elevatedSurface)
+                                    .shadow(color: .black.opacity(0.12), radius: 1, y: 0.5)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(accessibilityLabel(item))
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+        .padding(2)
+        .background(
+            theme.subtleBorder.opacity(0.22),
+            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+        )
+    }
+}
+
+struct EditorRecurrenceModePicker: View {
+    @Binding var mode: ItemRecurrenceMode
+    /// Create form can tap the selected chip to go back to no repeat.
+    var allowsClearing = true
+
+    private static let options: [ItemRecurrenceMode] = [.daily, .weekly]
+
+    var body: some View {
+        EditorSegmentTrack(
+            items: Self.options,
+            isSelected: { mode == $0 },
+            title: { $0.title },
+            accessibilityLabel: { $0.title },
+            action: { value in
+                if mode == value, allowsClearing {
+                    mode = .none
+                } else {
+                    mode = value
+                }
+            }
+        )
+    }
+}
+
+struct EditorWeekdayPicker: View {
+    @Binding var weekdays: Set<Weekday>
+
+    private static let names = ["一", "二", "三", "四", "五", "六", "日"]
+
+    var body: some View {
+        EditorSegmentTrack(
+            items: Array(Weekday.allCases),
+            isSelected: { weekdays.contains($0) },
+            title: { Self.names[$0.rawValue - 1] },
+            accessibilityLabel: { "星期\(Self.names[$0.rawValue - 1])" },
+            action: { weekday in
+                if weekdays.contains(weekday) {
+                    weekdays.remove(weekday)
+                } else {
+                    weekdays.insert(weekday)
+                }
+            }
+        )
+    }
+}
+
 struct EditorPriorityPicker: View {
     @Binding var priority: ItemPriority
     @Environment(\.colorScheme) private var colorScheme
