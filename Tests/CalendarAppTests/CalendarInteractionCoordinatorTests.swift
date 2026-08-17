@@ -181,6 +181,48 @@ struct CalendarInteractionCoordinatorTests {
         let expected = try schedule(6, 6)
 
         #expect(coordinator.previewSchedule == expected)
+        #expect(coordinator.isResizingItem)
+    }
+
+    @Test func untimedSingleDayEdgeDragExtendsTheDateRange() throws {
+        let item = try makeProjectedItem(startDay: 17, endDay: 17)
+        let coordinator = CalendarInteractionCoordinator()
+        coordinator.pointerDown(
+            on: date(17),
+            target: .trailingHandle,
+            source: .item(item),
+            point: .zero
+        )
+        _ = coordinator.updatePointer(point: CGPoint(x: 80, y: 0), over: date(18))
+        let action = coordinator.pointerUp(at: CGPoint(x: 80, y: 0), over: date(18))
+
+        guard case let .submitMutation(pending) = action else {
+            Issue.record("Expected a captured pending mutation")
+            return
+        }
+        #expect(pending.operation == .resizeTrailing)
+        #expect(pending.previewSchedule == (try schedule(17, 18)))
+        #expect(coordinator.isResizingItem == false)
+    }
+
+    @Test func timedSingleDayEdgeDragStillResizes() throws {
+        let item = try timedProjectedItem(
+            startDay: 17,
+            endDay: 17,
+            startHour: 15,
+            endHour: 16
+        )
+        let coordinator = CalendarInteractionCoordinator()
+        coordinator.pointerDown(
+            on: date(17),
+            target: .trailingHandle,
+            source: .item(item),
+            point: .zero
+        )
+        _ = coordinator.updatePointer(point: CGPoint(x: 80, y: 0), over: date(18))
+
+        #expect(coordinator.previewSchedule == (try timedSchedule(17, 18, startHour: 15, endHour: 16)))
+        #expect(coordinator.isResizingItem)
     }
 
     @Test func itemInteractionDoesNotCommitBeforePointerUpAndReturnsCapturedMutation() throws {

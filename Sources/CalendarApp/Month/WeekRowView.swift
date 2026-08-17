@@ -356,7 +356,8 @@ enum WeekRowItemHitRouting {
         atX x: CGFloat,
         width: CGFloat,
         showsLeadingHandle: Bool,
-        showsTrailingHandle: Bool
+        showsTrailingHandle: Bool,
+        generousEdges: Bool = false
     ) -> CalendarInteractionHitTarget {
         let clampedX = min(max(x, 0), max(0, width))
 
@@ -366,11 +367,15 @@ enum WeekRowItemHitRouting {
             return .completionButton
         }
         if showsLeadingHandle,
-           CalendarItemRowInteractionGeometry.leadingHandleRange.contains(clampedX) {
+           CalendarItemRowInteractionGeometry.leadingHandleRange(generousEdges: generousEdges)
+            .contains(clampedX) {
             return .leadingHandle
         }
         if showsTrailingHandle,
-           clampedX >= CalendarItemRowInteractionGeometry.trailingHandleLowerBound(width: width) {
+           clampedX >= CalendarItemRowInteractionGeometry.trailingHandleLowerBound(
+            width: width,
+            generousEdges: generousEdges
+           ) {
             return .trailingHandle
         }
         return .barBody
@@ -382,15 +387,35 @@ enum WeekRowItemHitRouting {
         atX x: CGFloat,
         width: CGFloat,
         showsLeadingHandle: Bool,
-        showsTrailingHandle: Bool
+        showsTrailingHandle: Bool,
+        generousEdges: Bool = false
     ) -> CalendarInteractionHitTarget? {
         let target = target(
             atX: x,
             width: width,
             showsLeadingHandle: showsLeadingHandle,
-            showsTrailingHandle: showsTrailingHandle
+            showsTrailingHandle: showsTrailingHandle,
+            generousEdges: generousEdges
         )
-        return target == .completionButton ? nil : target
+        // A drag that starts on the checkbox still stretches the leading edge.
+        // Short clicks stay completion because the gesture has a minimum distance.
+        if target == .completionButton {
+            return showsLeadingHandle ? .leadingHandle : .barBody
+        }
+        return target
+    }
+}
+
+enum WeekRowPreviewLayout {
+    static func columns(
+        for schedule: CalendarSchedule,
+        weekStart: CalendarDate
+    ) -> (start: Int, end: Int)? {
+        let weekEnd = weekStart.addingDays(6)
+        guard schedule.startDate <= weekEnd, weekStart <= schedule.endDate else { return nil }
+        let startDate = max(schedule.startDate, weekStart)
+        let endDate = min(schedule.endDate, weekEnd)
+        return (weekStart.days(until: startDate), weekStart.days(until: endDate))
     }
 }
 
@@ -534,8 +559,12 @@ struct WeekRowView: View {
     let selectionRange: CalendarDateRange?
     /// Source currently being dragged/resized — original chip is dimmed as a ghost.
     var draggingSourceID: ProjectedEntryID? = nil
+    var draggingPreviewSchedule: CalendarSchedule? = nil
+    var isResizingItem = false
     let onRangeGesture: (WeekRowRangeGesture) -> Void
     let onItemGesture: (WeekRowItemGesture) -> Void
+    var onDeleteItem: ((ProjectedItem) -> Void)? = nil
+    var onSetPriority: ((ProjectedItem, ItemPriority) -> Void)? = nil
     var height: CGFloat = WeekRowMetrics.defaultHeight
 
     private var presentation: WeekRowPresentation {
@@ -564,27 +593,34 @@ struct WeekRowView: View {
                 }
 
                 ForEach(presentation.segments) { segment in
+                    let display = previewDisplay(
+                        for: segment,
+                        columnWidth: columnWidth
+                    )
                     WeekRowSegmentBar(
                         segment: segment,
                         category: categories[segment.entry.categoryID],
                         weekStart: layout.weekStart,
                         columnWidth: columnWidth,
+                        dropCoordinator: dropCoordinator,
                         onItemGesture: onItemGesture,
                         onCompletion: onCompletion,
                         onOpenDetail: { item in
                             onAction(.openItem(item.id))
-                        }
+                        },
+                        onDelete: onDeleteItem,
+                        onSetPriority: onSetPriority
                     )
                     // Inset chip without expanding dead zones: apply padding inside the frame
                     // so neighboring empty body stays hittable for create.
                     .padding(.horizontal, 2)
                     .frame(
-                        width: columnWidth * CGFloat(segment.endColumn - segment.startColumn + 1),
+                        width: display.width,
                         height: WeekRowMetrics.laneHeight
                     )
-                    .opacity(draggingSourceID == segment.source ? 0.32 : 1)
+                    .opacity(display.opacity)
                     .offset(
-                        x: columnWidth * CGFloat(segment.startColumn),
+                        x: display.x,
                         y: WeekRowMetrics.laneOffset(segment.lane)
                     )
                 }
@@ -607,6 +643,30 @@ struct WeekRowView: View {
         }
         .frame(height: height)
         .accessibilityElement(children: .contain)
+    }
+
+    private func previewDisplay(
+        for segment: WeekRowSegmentPresentation,
+        columnWidth: CGFloat
+    ) -> (width: CGFloat, x: CGFloat, opacity: Double) {
+        let columns: (start: Int, end: Int)
+        if draggingSourceID == segment.source,
+           isResizingItem,
+           let preview = draggingPreviewSchedule,
+           let previewColumns = WeekRowPreviewLayout.columns(
+            for: preview,
+            weekStart: layout.weekStart
+           ) {
+            columns = previewColumns
+        } else {
+            columns = (segment.startColumn, segment.endColumn)
+        }
+        let isGhostMove = draggingSourceID == segment.source && !isResizingItem
+        return (
+            columnWidth * CGFloat(columns.end - columns.start + 1),
+            columnWidth * CGFloat(columns.start),
+            isGhostMove ? 0.32 : 1
+        )
     }
 }
 
@@ -760,9 +820,12 @@ private struct WeekRowSegmentBar: View {
     let category: CalendarCategory?
     let weekStart: CalendarDate
     let columnWidth: CGFloat
+    @ObservedObject var dropCoordinator: CalendarDropCoordinator
     let onItemGesture: (WeekRowItemGesture) -> Void
     let onCompletion: (CalendarCommand) -> Void
     let onOpenDetail: (ProjectedItem) -> Void
+    var onDelete: ((ProjectedItem) -> Void)? = nil
+    var onSetPriority: ((ProjectedItem, ItemPriority) -> Void)? = nil
 
     @State private var isItemDragging = false
     @State private var barFrameInRoot: CGRect = .zero
@@ -773,6 +836,12 @@ private struct WeekRowSegmentBar: View {
             category: category,
             onCompletion: onCompletion,
             onOpenDetail: onOpenDetail,
+            onDelete: onDelete.map { action in
+                { action(projectedItem) }
+            },
+            onSetPriority: onSetPriority.map { action in
+                { action(projectedItem, $0) }
+            },
             allowsSwipeToDelete: CalendarItemRowPlacement.monthGrid.allowsSwipeToDelete,
             accessibilityLabelOverride: segment.accessibilityLabel,
             accessibilityValueOverride: segment.accessibilityValue,
@@ -781,7 +850,9 @@ private struct WeekRowSegmentBar: View {
             showsLeadingHandle: segment.showsLeadingHandle,
             showsTrailingHandle: segment.showsTrailingHandle,
             leadingHandleAccessibility: segment.leadingHandleAccessibility,
-            trailingHandleAccessibility: segment.trailingHandleAccessibility
+            trailingHandleAccessibility: segment.trailingHandleAccessibility,
+            timeTextStyle: .startOnly,
+            onDropTransfer: untimedDropHandler
         )
         .accessibilityIdentifier(stableAccessibilityIdentifier)
         .accessibilityValue(segment.accessibilityValue)
@@ -814,7 +885,8 @@ private struct WeekRowSegmentBar: View {
                     atX: localX,
                     width: max(barFrameInRoot.width, 1),
                     showsLeadingHandle: segment.showsLeadingHandle,
-                    showsTrailingHandle: segment.showsTrailingHandle
+                    showsTrailingHandle: segment.showsTrailingHandle,
+                    generousEdges: true
                 ) else {
                     isItemDragging = false
                     return
@@ -847,6 +919,27 @@ private struct WeekRowSegmentBar: View {
             segment.endColumn - segment.startColumn
         )
         return weekStart.addingDays(segment.startColumn + localColumn)
+    }
+
+    private var untimedDropHandler: ((CalendarTransferPayload) -> Bool)? {
+        guard case let .item(target) = projectedItem,
+              UntimedItemReorder.isReorderable(target)
+        else { return nil }
+        let date = target.schedule.startDate
+        let targetID = target.id
+        return { payload in
+            Task {
+                let reordered = (try? await dropCoordinator.acceptUntimedReorder(
+                    payload,
+                    onto: targetID,
+                    on: date
+                )) ?? false
+                if !reordered {
+                    try? await dropCoordinator.accept(payload, on: date)
+                }
+            }
+            return true
+        }
     }
 
     private var projectedItem: ProjectedItem {

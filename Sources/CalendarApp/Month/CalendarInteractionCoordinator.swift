@@ -303,6 +303,17 @@ final class CalendarInteractionCoordinator: ObservableObject {
         }
     }
 
+    var isMovingItem: Bool {
+        if case .movingItem = state { true } else { false }
+    }
+
+    var isResizingItem: Bool {
+        switch state {
+        case .resizingLeading, .resizingTrailing: true
+        case .idle, .selectingRange, .movingItem, .pendingRecurrenceScope, .editing: false
+        }
+    }
+
     /// True only for item move/resize — not empty-cell range select.
     var isDraggingItem: Bool {
         switch state {
@@ -323,6 +334,9 @@ final class CalendarInteractionCoordinator: ObservableObject {
     }
 
     var latestPointer: CGPoint? { latestPoint ?? dragPreviewPointer }
+
+    /// Pointer location at the start of the current press, if any.
+    var pressOrigin: CGPoint? { press?.point }
 
     var selectionCursorDate: CalendarDate? {
         switch state {

@@ -10,6 +10,7 @@ struct DayDrawerView: View {
     let onQuickCreate: (CalendarDate) -> Void
     let onOpenDetail: (ProjectedItem) -> Void
     var onDelete: ((ProjectedItem) -> Void)?
+    var dropCoordinator: CalendarDropCoordinator?
     @StateObject private var model: DayDrawerViewModel
     @State private var actionError: String?
     @State private var recoveryAction: WorkspaceRecoveryAction?
@@ -22,7 +23,8 @@ struct DayDrawerView: View {
         onClose: @escaping () -> Void,
         onQuickCreate: @escaping (CalendarDate) -> Void,
         onOpenDetail: @escaping (ProjectedItem) -> Void,
-        onDelete: ((ProjectedItem) -> Void)? = nil
+        onDelete: ((ProjectedItem) -> Void)? = nil,
+        dropCoordinator: CalendarDropCoordinator? = nil
     ) {
         self.date = date
         self.store = store
@@ -32,6 +34,7 @@ struct DayDrawerView: View {
         self.onQuickCreate = onQuickCreate
         self.onOpenDetail = onOpenDetail
         self.onDelete = onDelete
+        self.dropCoordinator = dropCoordinator
         _model = StateObject(wrappedValue: DayDrawerViewModel(
             date: date,
             state: store.calendarState,
@@ -69,7 +72,9 @@ struct DayDrawerView: View {
                                 onCompletion: sendCompletion,
                                 onOpenDetail: onOpenDetail,
                                 onDelete: { onDelete?(item) },
-                                allowsSwipeToDelete: CalendarItemRowPlacement.dayDrawer.allowsSwipeToDelete
+                                onSetPriority: { setPriority($0, on: item) },
+                                allowsSwipeToDelete: CalendarItemRowPlacement.dayDrawer.allowsSwipeToDelete,
+                                onDropTransfer: untimedDropHandler(for: item)
                             )
                         }
                     }
@@ -118,8 +123,51 @@ struct DayDrawerView: View {
         }
     }
 
+    private func untimedDropHandler(for item: ProjectedItem) -> ((CalendarTransferPayload) -> Bool)? {
+        guard case let .item(target) = item,
+              UntimedItemReorder.isReorderable(target),
+              let dropCoordinator
+        else { return nil }
+        let date = model.date
+        let targetID = target.id
+        return { payload in
+            Task {
+                let reordered = (try? await dropCoordinator.acceptUntimedReorder(
+                    payload,
+                    onto: targetID,
+                    on: date
+                )) ?? false
+                if !reordered {
+                    try? await dropCoordinator.accept(payload, on: date)
+                }
+            }
+            return true
+        }
+    }
+
     private var completedCount: Int {
         model.items.filter { $0.completedAt != nil }.count
+    }
+
+    private func setPriority(_ priority: ItemPriority, on item: ProjectedItem) {
+        actionError = nil
+        recoveryAction = nil
+        guard store.phase == .ready else {
+            actionError = "日历尚未准备好，优先级没有保存。"
+            return
+        }
+        Task {
+            do {
+                receive(WorkspaceMutationOutcomePresenter.presentation(
+                    for: try await store.sendCalendar(
+                        ItemActions.setPriority(priority, on: item),
+                        undoLabel: "已设置优先级"
+                    )
+                ))
+            } catch {
+                actionError = WorkspaceMutationOutcomePresenter.message(for: error)
+            }
+        }
     }
 
     private func sendCompletion(_ command: CalendarCommand) {

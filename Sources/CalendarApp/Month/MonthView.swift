@@ -373,16 +373,22 @@ struct MonthView: View {
                 Button("删除", role: .destructive) { confirmDeleteItem() }
                 Button("取消", role: .cancel) { deleteConfirmItem = nil }
             }
+            .environment(\.openCategoryManager, OpenCategoryManagerAction { categoryID in
+                categoryManagerPresentation = CategoryManagerPresentation(
+                    initialCategoryID: categoryID
+                )
+            })
             .overlay(alignment: .trailing) { dayDrawerOverlay }
             .overlay { editorOverlay }
             .overlay { quickCreateOverlay }
             .overlay { itemDragPreviewOverlay }
+            .overlay { categoryManagerOverlay }
     }
 
     /// Floating item chip under the pointer while month-row move/resize is active.
     @ViewBuilder
     private var itemDragPreviewOverlay: some View {
-        if interactionCoordinator.isDraggingItem,
+        if interactionCoordinator.isMovingItem,
            let entry = interactionCoordinator.dragSourceEntry,
            let pointer = interactionCoordinator.dragPreviewPointer
                 ?? interactionCoordinator.latestPointer
@@ -485,20 +491,6 @@ struct MonthView: View {
                 guard size.width > 0, size.height > 0 else { return }
                 quickCreateMeasuredContentSize = size
             }
-            .environment(\.openCategoryManager, OpenCategoryManagerAction { categoryID in
-                categoryManagerPresentation = CategoryManagerPresentation(
-                    initialCategoryID: categoryID
-                )
-            })
-            .sheet(item: $categoryManagerPresentation) { presentation in
-                CategoryManagerView(
-                    store: store,
-                    initialCategoryID: presentation.initialCategoryID
-                )
-                    .frame(width: 680)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .preferredColorScheme(colorScheme)
-            }
     }
 
     @ViewBuilder
@@ -566,7 +558,8 @@ struct MonthView: View {
                 },
                 onQuickCreate: { openQuickCreate(on: $0) },
                 onOpenDetail: { openEditor(for: $0) },
-                onDelete: { requestDelete($0) }
+                onDelete: { requestDelete($0) },
+                dropCoordinator: dropCoordinator
             )
             .transition(.move(edge: .trailing))
         }
@@ -586,7 +579,8 @@ struct MonthView: View {
                         onOpenNote(noteID)
                     },
                     onCancel: { editorSession = nil },
-                    onSaved: { editorSession = nil }
+                    onSaved: { editorSession = nil },
+                    onManageCategories: presentCategoryManager
                 )
                 .id(session.id)
                 .background(theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -597,6 +591,25 @@ struct MonthView: View {
                 .shadow(color: theme.subtleShadow.opacity(0.22), radius: 16, y: 6)
                 .fixedSize(horizontal: true, vertical: true)
                 .accessibilityIdentifier("item-edit-overlay-card")
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    @ViewBuilder
+    private var categoryManagerOverlay: some View {
+        if categoryManagerPresentation != nil {
+            ZStack {
+                dismissScrim(action: { categoryManagerPresentation = nil })
+                CategoryManagerView(
+                    store: store,
+                    initialCategoryID: categoryManagerPresentation?.initialCategoryID,
+                    onClose: { categoryManagerPresentation = nil }
+                )
+                .frame(width: 680)
+                .fixedSize(horizontal: false, vertical: true)
+                .shadow(color: theme.subtleShadow.opacity(0.22), radius: 16, y: 6)
+                .preferredColorScheme(colorScheme)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -626,7 +639,8 @@ struct MonthView: View {
                         store: store,
                         availableWidth: overlayPresentation.placement.frame.width,
                         maximumContentHeight: overlayPresentation.contentLayout.maximumHeight,
-                        onClose: dismissQuickCreate
+                        onClose: dismissQuickCreate,
+                        onManageCategories: presentCategoryManager
                     )
                     .id(quickCreateSessionID)
                     .frame(width: overlayPresentation.placement.frame.width)
@@ -1103,6 +1117,10 @@ struct MonthView: View {
         }
     }
 
+    private func presentCategoryManager(categoryID: UUID?) {
+        categoryManagerPresentation = CategoryManagerPresentation(initialCategoryID: categoryID)
+    }
+
     private func requestDelete(_ item: ProjectedItem) {
         deleteConfirmItem = item
     }
@@ -1264,6 +1282,8 @@ struct MonthView: View {
                                 onCompletion: sendCompletion,
                                 selectionRange: interactionCoordinator.previewRange,
                                 draggingSourceID: interactionCoordinator.draggingSourceID,
+                                draggingPreviewSchedule: interactionCoordinator.previewSchedule,
+                                isResizingItem: interactionCoordinator.isResizingItem,
                                 onRangeGesture: { gesture in
                                     handleRangeGesture(
                                         gesture,
@@ -1276,6 +1296,13 @@ struct MonthView: View {
                                         gesture,
                                         viewportBounds: viewportBounds,
                                         scrollProxy: scrollProxy
+                                    )
+                                },
+                                onDeleteItem: { requestDelete($0) },
+                                onSetPriority: { item, priority in
+                                    sendItemAction(
+                                        ItemActions.setPriority(priority, on: item),
+                                        undoLabel: "已设置优先级"
                                     )
                                 }
                             )
@@ -1395,6 +1422,7 @@ struct MonthView: View {
             autoScrollDriver.update(direction: interactionCoordinator.autoScrollDirection)
         case let .ended(point):
             cancelRangeAutoScroll()
+            let origin = interactionCoordinator.pressOrigin
             let releaseDate = dateFrameMap.date(at: point) ?? dateFrameMap.nearestDate(to: point)
             guard case let .submitMutation(pending) = interactionCoordinator.pointerUp(
                 at: point,
@@ -1402,7 +1430,99 @@ struct MonthView: View {
             ) else {
                 return
             }
+            if commitSameDayUntimedReorder(
+                pending,
+                from: origin,
+                to: point,
+                on: releaseDate
+            ) {
+                return
+            }
+            if commitMoveToDateUnderPointer(pending, on: releaseDate) {
+                return
+            }
             commitWeekMutation(pending)
+        }
+    }
+
+    /// Month chips use the existing item-drag gesture, not system `.draggable`.
+    /// Same-column untimed drags shift by how many lanes the pointer moved,
+    /// so we do not depend on a drop target or reconstructed cell Y.
+    /// Same-day resize is treated as a body drag: a one-day untimed chip
+    /// cannot shrink, and narrow month cells often start on a handle.
+    private func commitSameDayUntimedReorder(
+        _ pending: PendingCalendarMutation,
+        from origin: CGPoint?,
+        to point: CGPoint,
+        on releaseDate: CalendarDate?
+    ) -> Bool {
+        guard pending.operation == .move,
+              case let .item(item) = pending.source,
+              UntimedItemReorder.isReorderable(item)
+        else { return false }
+
+        let sourceDate = pending.originalSchedule.startDate
+        if let origin, let releaseDate, releaseDate != sourceDate {
+            let dx = point.x - origin.x
+            let dy = point.y - origin.y
+            if abs(dx) >= abs(dy) {
+                return false
+            }
+        }
+        let stayedInCell: Bool
+        if let cellFrame = dateFrameMap.frame(for: sourceDate) {
+            // Vertical slop only. Crossing a cell's left/right edge is a date move.
+            stayedInCell = cellFrame.insetBy(dx: 0, dy: -10).contains(point)
+        } else {
+            stayedInCell = releaseDate == sourceDate
+        }
+        guard stayedInCell else { return false }
+
+        let lanePitch = WeekRowMetrics.laneHeight + WeekRowMetrics.laneSpacing
+        guard let origin, lanePitch > 0 else { return true }
+        let shift = Int(((point.y - origin.y) / lanePitch).rounded())
+        let ids = UntimedItemReorder.reorderableIDs(
+            on: sourceDate,
+            in: store.calendarState,
+            hiddenCategoryIDs: hiddenCategoryIDs
+        )
+        guard let ordered = UntimedItemReorder.moving(item.id, byLanes: shift, in: ids) else {
+            return true
+        }
+
+        let sourceID = item.id
+        Task {
+            do {
+                _ = try await dropCoordinator.acceptUntimedReorder(
+                    .item(sourceID),
+                    orderedIDs: ordered,
+                    on: sourceDate
+                )
+            } catch {
+                // Same-day path already claimed the drop; do not date-move.
+            }
+        }
+        return true
+    }
+
+    /// Relocate by the cell under the pointer, not the live preview schedule.
+    /// Preview dates can stay stale when date frames miss a few drag samples.
+    private func commitMoveToDateUnderPointer(
+        _ pending: PendingCalendarMutation,
+        on releaseDate: CalendarDate?
+    ) -> Bool {
+        guard pending.operation == .move,
+              let releaseDate,
+              releaseDate != pending.originalSchedule.startDate
+        else { return false }
+        switch pending.source {
+        case let .item(item):
+            Task {
+                try? await dropCoordinator.accept(.item(item.id), on: releaseDate)
+            }
+            return true
+        case .occurrence:
+            return false
         }
     }
 

@@ -110,12 +110,13 @@ struct DayCellInteractionTests {
             showsTrailingHandle: true
         ) == .barBody)
 
+        // Leading checkbox is still a click; a drag that starts there resizes.
         #expect(WeekRowItemHitRouting.dragTarget(
             atX: 12,
             width: 140,
             showsLeadingHandle: true,
             showsTrailingHandle: false
-        ) == nil)
+        ) == .leadingHandle)
         #expect(WeekRowItemHitRouting.dragTarget(
             atX: 31,
             width: 140,
@@ -134,6 +135,21 @@ struct DayCellInteractionTests {
             showsLeadingHandle: false,
             showsTrailingHandle: true
         ) == .trailingHandle)
+
+        #expect(WeekRowItemHitRouting.dragTarget(
+            atX: 115,
+            width: 140,
+            showsLeadingHandle: true,
+            showsTrailingHandle: true,
+            generousEdges: true
+        ) == .trailingHandle)
+        #expect(WeekRowItemHitRouting.target(
+            atX: 50,
+            width: 140,
+            showsLeadingHandle: true,
+            showsTrailingHandle: true,
+            generousEdges: true
+        ) == .leadingHandle)
     }
 
     @Test func appKitRangeGestureSurfaceEmitsOnlyForTheDedicatedEmptySurface() throws {

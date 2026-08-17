@@ -76,6 +76,7 @@ final class MonthViewModel: ObservableObject {
         hiddenCategoryIDs: Set<UUID>,
         today: CalendarDate
     ) {
+        objectWillChange.send()
         self.state = state
         self.hiddenCategoryIDs = hiddenCategoryIDs
         self.today = today
