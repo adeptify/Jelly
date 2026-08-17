@@ -356,4 +356,29 @@ struct MonthViewModelTests {
         #expect(model.projectedItem(withID: lookupID)?.id == lookupID)
         #expect(model.projectedEntries.map(\.id) == projectedIDsBeforeFocusChange)
     }
+
+    @Test func revealingTheVisibleWeekRestoresTodayAfterFocusJumpsToTheWindowStart() {
+        let today = CalendarDate(year: 2026, month: 8, day: 18)!
+        let model = MonthViewModel(
+            centeredOn: today,
+            state: makeEmptyState(),
+            hiddenCategoryIDs: [],
+            today: today
+        )
+        let todayWeek = WeekStreamModel.weekStart(containing: today)
+        #expect(model.focusWeek == todayWeek)
+
+        // Recreating the month ScrollView lands on weekStarts[0] (~52 weeks back).
+        // A teardown viewport pass then writes that week into focus.
+        model.updateFocus(toWeekStarting: model.weekStarts[0])
+        #expect(model.focusWeek == todayWeek.addingDays(-364))
+        #expect(model.monthTitleDate.year == 2025)
+        #expect(model.monthTitleDate.month == 8)
+
+        model.reveal(weekContaining: todayWeek)
+        #expect(model.focusWeek == todayWeek)
+        #expect(model.monthTitleDate.year == 2026)
+        #expect(model.monthTitleDate.month == 8)
+        #expect(model.weekStarts.contains(todayWeek))
+    }
 }

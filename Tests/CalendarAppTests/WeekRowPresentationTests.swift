@@ -469,6 +469,9 @@ struct WeekRowPresentationTests {
         #expect(source.contains(
             "await Task.yield()\n            confirmDeferredCentering(for: request, using: proxy)"
         ))
+        #expect(source.contains("model.reveal(weekContaining: weekModel.weekStart)"))
+        #expect(source.contains("requestCentering(on: model.focusWeek, animated: false)"))
+        #expect(source.contains("guard primaryViewMode == .month else { return }"))
     }
 
     @Test func nearLeadingWindowEdgeRequestsExtensionAndPreservesTheVisibleWeekAnchor() {

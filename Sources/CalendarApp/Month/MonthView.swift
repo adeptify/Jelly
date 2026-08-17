@@ -473,12 +473,20 @@ struct MonthView: View {
                 selectedDayDrawerDate = nil
                 quickCreatePresentation = nil
                 editorSession = nil
-                if raw == CalendarPrimaryViewMode.week.rawValue {
+                switch CalendarPrimaryViewMode(rawValue: raw) ?? .month {
+                case .week:
+                    weekModel.focus(on: model.selectedDate ?? model.focusWeek)
                     weekModel.update(
                         state: store.calendarState,
                         hiddenCategoryIDs: hiddenCategoryIDs,
                         today: model.today
                     )
+                case .month:
+                    // Month's ScrollView is recreated at weekStarts[0] (~1–3 years
+                    // back). Adopt the week we just left and re-arm centering
+                    // before the first viewport frames can steal focus.
+                    model.reveal(weekContaining: weekModel.weekStart)
+                    requestCentering(on: model.focusWeek, animated: false)
                 }
             }
             .onChange(of: storedHiddenCategoryIDs) { _, encoded in
@@ -1250,13 +1258,21 @@ struct MonthView: View {
         requestCentering(on: model.focusWeek)
     }
 
-    private func requestCentering(on weekStart: CalendarDate) {
+    private func requestCentering(on weekStart: CalendarDate, animated: Bool = true) {
         weekStreamRestoration.cancel()
         weekStreamScrollCoordinator.invalidateQueuedCorrection()
+        let revision = WeekStreamWindowRevision(weekStarts: model.weekStarts)
+        // Arm the coordinator immediately. The month ScrollView is often created
+        // *after* this call, so `onChange(of: requestedCenterRequest)` may never
+        // fire; `onAppear` reads `pendingRequest` instead.
+        _ = weekStreamCentering.begin(
+            weekStart: weekStart,
+            windowRevision: revision
+        )
         requestedCenterRequest = .init(
             weekStart: weekStart,
-            windowRevision: WeekStreamWindowRevision(weekStarts: model.weekStarts),
-            animated: true
+            windowRevision: revision,
+            animated: animated
         )
     }
 
@@ -1790,6 +1806,10 @@ struct MonthView: View {
         viewportHeight: CGFloat,
         scrollProxy: ScrollViewProxy
     ) {
+        // Destroying the month ScrollView can emit a last preference pass of the
+        // leading-edge weeks. Ignore it so week mode cannot rewrite month focus.
+        guard primaryViewMode == .month else { return }
+
         switch weekStreamCentering.receiveViewport(
             frames: frames,
             viewportHeight: viewportHeight

@@ -89,6 +89,13 @@ final class MonthViewModel: ObservableObject {
         rebuildItemLookup()
     }
 
+    /// Bring a week from another calendar mode back into the month stream.
+    /// Viewport teardown can leave `focusWeek` on `weekStarts[0]` (about a year
+    /// earlier); this recenters the loaded window on the week the user still has.
+    func reveal(weekContaining date: CalendarDate) {
+        moveFocus(to: date, preservingCivilDayIntent: false)
+    }
+
     func extendEarlier(visibleWeek: CalendarDate, pixelOffset: CGFloat) -> WeekStreamAnchor {
         objectWillChange.send()
         let anchor = weekStream.extendEarlier(

@@ -84,6 +84,23 @@ struct WeekViewModelTests {
         )
         #expect(blocks.isEmpty)
     }
+
+    @Test @MainActor func focusMovesTheWeekWithoutRequiringToday() {
+        let today = CalendarDate(year: 2026, month: 8, day: 18)!
+        let model = WeekViewModel(
+            weekStart: today,
+            today: today,
+            state: CalendarState.empty(uncategorizedID: UUID(), now: .distantPast),
+            hiddenCategoryIDs: []
+        )
+        #expect(model.weekStart == WeekStreamModel.weekStart(containing: today))
+
+        model.focus(on: CalendarDate(year: 2026, month: 10, day: 5)!)
+        #expect(model.weekStart == CalendarDate(year: 2026, month: 10, day: 5)!)
+
+        model.focus(on: CalendarDate(year: 2026, month: 10, day: 7)!)
+        #expect(model.weekStart == CalendarDate(year: 2026, month: 10, day: 5)!)
+    }
 }
 
 @Suite("WeekGridCreateSelectionTests")

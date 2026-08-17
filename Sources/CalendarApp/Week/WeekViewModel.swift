@@ -92,6 +92,13 @@ final class WeekViewModel: ObservableObject {
         rebuild()
     }
 
+    func focus(on date: CalendarDate) {
+        let next = WeekStreamModel.weekStart(containing: date)
+        guard next != weekStart else { return }
+        weekStart = next
+        rebuild()
+    }
+
     func allDayItems(on dayIndex: Int) -> [WeekAllDayItem] {
         guard dayStarts.indices.contains(dayIndex) else { return [] }
         let day = dayStarts[dayIndex]
