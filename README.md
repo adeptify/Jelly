@@ -7,12 +7,17 @@ Personal productivity app for macOS.
 
 Local-first. Data stays on your Mac.
 
-## Requirements
+## Download
 
-- Apple silicon Mac (arm64)
-- macOS 14+
+Prebuilt installers are on **[GitHub Releases](https://github.com/adeptify/Jelly/releases/latest)** — not in this git tree (`dist/` is gitignored).
 
-## Build & run
+1. Open the latest release.
+2. Download `Jelly.app.zip` (or `Jelly.dmg`).
+3. Follow [docs/Jelly-安装说明.md](docs/Jelly-安装说明.md).
+
+Requirements: Apple silicon Mac, macOS 14+. First launch uses Control-click → Open (ad-hoc signed).
+
+## Build from source
 
 ```bash
 cd /path/to/Jelly
@@ -21,9 +26,7 @@ swift build -c release --product PersonalCalendar
 open dist/Jelly.app
 ```
 
-Packaged outputs (gitignored): `dist/Jelly.app`, `dist/Jelly.app.zip`, `dist/Jelly.dmg`.
-
-Install notes for sharing a build: [docs/Jelly-安装说明.md](docs/Jelly-安装说明.md).
+Local outputs: `dist/Jelly.app`, `dist/Jelly.app.zip`, `dist/Jelly.dmg`.
 
 ## Layout
 

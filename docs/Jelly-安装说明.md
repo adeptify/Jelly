@@ -2,6 +2,12 @@
 
 Jelly 是一款 macOS 个人日历应用。收到安装包后，按下面步骤安装即可。
 
+当前对外安装包在 GitHub Release，不在 git 仓库里：
+
+**https://github.com/adeptify/Jelly/releases/latest**
+
+选 `Jelly.app.zip` 或 `Jelly.dmg` 下载即可。
+
 ---
 
 ## 系统要求
