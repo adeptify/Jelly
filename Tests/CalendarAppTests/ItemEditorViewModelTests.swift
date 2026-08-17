@@ -582,6 +582,36 @@ struct ItemEditorViewModelTests {
         }
     }
 
+    @Test func dailyModeUsesEveryWeekdayAndCreatesASeries() throws {
+        let day = CalendarDate(year: 2026, month: 8, day: 18)!
+        var draft = ItemDraft.newItem(from: day, through: day, categoryID: UUID())
+        draft.title = "晨间拉伸"
+        draft.recurrenceMode = .daily
+        #expect(draft.repeatsWeekly)
+        #expect(draft.weekdays == ItemDraft.allWeekdays)
+
+        let command = try ItemEditorViewModel(mode: .create, draft: draft).makeCommand(
+            now: .distantPast,
+            newItemID: UUID(),
+            newSeriesID: UUID(),
+            timeZoneIdentifier: "Asia/Shanghai"
+        )
+        guard case let .createSeries(series) = command else {
+            Issue.record("Expected createSeries")
+            return
+        }
+        #expect(series.weekdays == ItemDraft.allWeekdays)
+    }
+
+    @Test func switchingDailyBackToWeeklyKeepsASingleWeekday() {
+        let day = CalendarDate(year: 2026, month: 8, day: 18)!
+        var draft = ItemDraft.newItem(from: day, through: day, categoryID: UUID())
+        draft.recurrenceMode = .daily
+        draft.recurrenceMode = .weekly
+        #expect(draft.recurrenceMode == .weekly)
+        #expect(draft.weekdays == [day.weekday])
+    }
+
     @Test func validWeeklyDraftCreatesSeriesNotItem() throws {
         let categoryID = UUID()
         let end = CalendarDate(year: 2026, month: 8, day: 31)!

@@ -1,6 +1,20 @@
 import CalendarDomain
 import Foundation
 
+enum ItemRecurrenceMode: Equatable, Hashable, CaseIterable, Sendable {
+    case none
+    case daily
+    case weekly
+
+    var title: String {
+        switch self {
+        case .none: "不重复"
+        case .daily: "每天"
+        case .weekly: "每周"
+        }
+    }
+}
+
 struct ItemDraft: Equatable {
     var kind: ItemKind
     var title: String
@@ -104,6 +118,28 @@ extension ItemDraft {
         )
     }
 
+    static var allWeekdays: Set<Weekday> { Set(Weekday.allCases) }
+
+    var recurrenceMode: ItemRecurrenceMode {
+        get {
+            guard repeatsWeekly else { return .none }
+            return weekdays == Self.allWeekdays ? .daily : .weekly
+        }
+        set {
+            switch newValue {
+            case .none:
+                repeatsWeekly = false
+            case .daily:
+                repeatsWeekly = true
+                weekdays = Self.allWeekdays
+            case .weekly:
+                repeatsWeekly = true
+                if weekdays == Self.allWeekdays || weekdays.isEmpty {
+                    weekdays = [startDate.weekday]
+                }
+            }
+        }
+    }
 }
 
 extension CalendarDate {
