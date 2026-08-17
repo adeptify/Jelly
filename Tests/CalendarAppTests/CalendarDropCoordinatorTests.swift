@@ -632,6 +632,207 @@ struct CalendarDropCoordinatorTests {
         #expect(store.calendarState == original)
         #expect(await repository.saveCount == 0)
     }
+
+    @Test func sameDayUntimedDropReordersWithoutMovingTheDate() async throws {
+        var original = makeEmptyState()
+        let day = date(17)
+        let first = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "先写的",
+            categoryID: original.uncategorizedID,
+            schedule: try CalendarSchedule(startDate: day, endDate: day, startTime: nil, endTime: nil),
+            completedAt: nil,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 1)
+        )
+        let second = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "后写的",
+            categoryID: original.uncategorizedID,
+            schedule: try CalendarSchedule(startDate: day, endDate: day, startTime: nil, endTime: nil),
+            completedAt: nil,
+            createdAt: Date(timeIntervalSince1970: 2),
+            updatedAt: Date(timeIntervalSince1970: 2)
+        )
+        original.items[first.id] = first
+        original.items[second.id] = second
+        let repository = InMemoryWorkspaceRepository(initialState: original)
+        let store = WorkspaceStore(initialState: original, repository: repository)
+        await store.load()
+        let coordinator = CalendarDropCoordinator(store: store)
+
+        let didReorder = try await coordinator.acceptUntimedReorder(
+            .item(second.id),
+            before: first.id,
+            on: day
+        )
+
+        #expect(didReorder)
+        #expect(store.calendarState.items[second.id]?.schedule.startDate == day)
+        #expect(store.calendarState.items[first.id]?.schedule.startDate == day)
+        #expect(
+            UntimedItemReorder.reorderableIDs(on: day, in: store.calendarState)
+                == [second.id, first.id]
+        )
+        _ = try await store.undo()
+        #expect(
+            UntimedItemReorder.reorderableIDs(on: day, in: store.calendarState)
+                == [first.id, second.id]
+        )
+    }
+
+    @Test func timedOrCrossDayDropDoesNotClaimUntimedReorder() async throws {
+        var original = makeEmptyState()
+        let day = date(17)
+        let other = date(18)
+        let untimed = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "全天",
+            categoryID: original.uncategorizedID,
+            schedule: try CalendarSchedule(startDate: day, endDate: day, startTime: nil, endTime: nil),
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let timed = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "定时",
+            categoryID: original.uncategorizedID,
+            schedule: try CalendarSchedule(
+                startDate: day,
+                endDate: day,
+                startTime: MinuteOfDay(hour: 9, minute: 0)!,
+                endTime: MinuteOfDay(hour: 10, minute: 0)!
+            ),
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let otherDay = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "另一天",
+            categoryID: original.uncategorizedID,
+            schedule: try CalendarSchedule(startDate: other, endDate: other, startTime: nil, endTime: nil),
+            completedAt: nil,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        original.items[untimed.id] = untimed
+        original.items[timed.id] = timed
+        original.items[otherDay.id] = otherDay
+        let store = WorkspaceStore(
+            initialState: original,
+            repository: InMemoryWorkspaceRepository(initialState: original)
+        )
+        await store.load()
+        let coordinator = CalendarDropCoordinator(store: store)
+
+        #expect(
+            try await coordinator.acceptUntimedReorder(.item(timed.id), before: untimed.id, on: day)
+                == false
+        )
+        #expect(
+            try await coordinator.acceptUntimedReorder(.item(otherDay.id), before: untimed.id, on: day)
+                == false
+        )
+        #expect(store.calendarState.items[timed.id]?.schedule.startDate == day)
+        #expect(store.calendarState.items[otherDay.id]?.schedule.startDate == other)
+    }
+
+    @Test func droppingAnEarlierUntimedRowOntoALaterRowMovesItAfter() async throws {
+        var original = makeEmptyState()
+        let day = date(17)
+        let first = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "先写的",
+            categoryID: original.uncategorizedID,
+            schedule: try CalendarSchedule(startDate: day, endDate: day, startTime: nil, endTime: nil),
+            completedAt: nil,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 1)
+        )
+        let second = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "后写的",
+            categoryID: original.uncategorizedID,
+            schedule: try CalendarSchedule(startDate: day, endDate: day, startTime: nil, endTime: nil),
+            completedAt: nil,
+            createdAt: Date(timeIntervalSince1970: 2),
+            updatedAt: Date(timeIntervalSince1970: 2)
+        )
+        original.items[first.id] = first
+        original.items[second.id] = second
+        let store = WorkspaceStore(
+            initialState: original,
+            repository: InMemoryWorkspaceRepository(initialState: original)
+        )
+        await store.load()
+        let coordinator = CalendarDropCoordinator(store: store)
+
+        let didReorder = try await coordinator.acceptUntimedReorder(
+            .item(first.id),
+            onto: second.id,
+            on: day
+        )
+
+        #expect(didReorder)
+        #expect(
+            UntimedItemReorder.reorderableIDs(on: day, in: store.calendarState)
+                == [second.id, first.id]
+        )
+    }
+
+    @Test func applyingAnExplicitLaneOrderPersistsRanks() async throws {
+        var original = makeEmptyState()
+        let day = date(17)
+        let first = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "先写的",
+            categoryID: original.uncategorizedID,
+            schedule: try CalendarSchedule(startDate: day, endDate: day, startTime: nil, endTime: nil),
+            completedAt: nil,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 1)
+        )
+        let second = try CalendarItem(
+            id: UUID(),
+            kind: .task,
+            title: "后写的",
+            categoryID: original.uncategorizedID,
+            schedule: try CalendarSchedule(startDate: day, endDate: day, startTime: nil, endTime: nil),
+            completedAt: nil,
+            createdAt: Date(timeIntervalSince1970: 2),
+            updatedAt: Date(timeIntervalSince1970: 2)
+        )
+        original.items[first.id] = first
+        original.items[second.id] = second
+        let store = WorkspaceStore(
+            initialState: original,
+            repository: InMemoryWorkspaceRepository(initialState: original)
+        )
+        await store.load()
+        let coordinator = CalendarDropCoordinator(store: store)
+
+        let didReorder = try await coordinator.acceptUntimedReorder(
+            .item(first.id),
+            orderedIDs: [second.id, first.id],
+            on: day
+        )
+
+        #expect(didReorder)
+        #expect(
+            UntimedItemReorder.reorderableIDs(on: day, in: store.calendarState)
+                == [second.id, first.id]
+        )
+    }
 }
 
 private struct RangeMutationHarness {

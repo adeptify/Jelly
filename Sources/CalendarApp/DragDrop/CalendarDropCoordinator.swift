@@ -75,6 +75,84 @@ final class CalendarDropCoordinator: ObservableObject {
         }
     }
 
+    /// Same-day reorder of untimed single-day items. Returns false so the
+    /// caller can keep the existing date-move path. Same-day no-ops return
+    /// true so they do not become a redundant schedule write.
+    func acceptUntimedReorder(
+        _ payload: CalendarTransferPayload,
+        before targetID: UUID,
+        on date: CalendarDate
+    ) async throws -> Bool {
+        try await acceptUntimedReorder(payload, to: .before(targetID), on: date)
+    }
+
+    func acceptUntimedReorder(
+        _ payload: CalendarTransferPayload,
+        to destination: UntimedItemReorder.Destination,
+        on date: CalendarDate
+    ) async throws -> Bool {
+        guard case let .item(sourceID) = payload else { return false }
+        guard store.phase == .ready else { throw WorkspaceStoreError.frozen }
+        guard let source = store.calendarState.items[sourceID],
+              UntimedItemReorder.isReorderable(source),
+              source.schedule.startDate == date
+        else { return false }
+        if case let .before(targetID) = destination {
+            guard let target = store.calendarState.items[targetID],
+                  UntimedItemReorder.isReorderable(target),
+                  target.schedule.startDate == date
+            else { return false }
+        }
+
+        let displayIDs = UntimedItemReorder.reorderableIDs(on: date, in: store.calendarState)
+        guard let ordered = UntimedItemReorder.moving(sourceID, to: destination, in: displayIDs) else {
+            return true
+        }
+        let outcome = try await store.sendCalendar(
+            .reorderUntimedItems(on: date, orderedIDs: ordered),
+            undoLabel: "已调整事项顺序"
+        )
+        try requirePersistedCalendarOutcome(outcome)
+        return true
+    }
+
+    func acceptUntimedReorder(
+        _ payload: CalendarTransferPayload,
+        orderedIDs: [UUID],
+        on date: CalendarDate
+    ) async throws -> Bool {
+        guard case let .item(sourceID) = payload else { return false }
+        guard store.phase == .ready else { throw WorkspaceStoreError.frozen }
+        guard orderedIDs.contains(sourceID) else { return false }
+        let current = UntimedItemReorder.reorderableIDs(on: date, in: store.calendarState)
+        guard Set(current) == Set(orderedIDs) else { return false }
+        if current == orderedIDs { return true }
+        let outcome = try await store.sendCalendar(
+            .reorderUntimedItems(on: date, orderedIDs: orderedIDs),
+            undoLabel: "已调整事项顺序"
+        )
+        try requirePersistedCalendarOutcome(outcome)
+        return true
+    }
+
+    /// Transferable drop onto another untimed row: move past the target
+    /// instead of always inserting before it (which no-ops a downward drag).
+    func acceptUntimedReorder(
+        _ payload: CalendarTransferPayload,
+        onto targetID: UUID,
+        on date: CalendarDate
+    ) async throws -> Bool {
+        guard case let .item(sourceID) = payload else { return false }
+        let displayIDs = UntimedItemReorder.reorderableIDs(on: date, in: store.calendarState)
+        guard displayIDs.contains(sourceID) else { return false }
+        guard let destination = UntimedItemReorder.destination(
+            moving: sourceID,
+            onto: targetID,
+            in: displayIDs
+        ) else { return true }
+        return try await acceptUntimedReorder(payload, to: destination, on: date)
+    }
+
     func accept(_ payload: CalendarTransferPayload, on date: CalendarDate) async throws {
         switch payload {
         case let .item(id):
