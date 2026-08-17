@@ -28,6 +28,44 @@ enum CategoryReorderMove {
         result.swapAt(currentIndex, targetIndex)
         return result
     }
+
+    /// System “未分类” is not managed in the list. Keep it in persisted order
+    /// at its current index so reorder still sends a complete ID set.
+    static func visibleCategories(
+        _ categories: [CalendarCategory],
+        uncategorizedID: UUID
+    ) -> [CalendarCategory] {
+        categories
+            .filter { $0.id != uncategorizedID }
+            .sorted {
+                $0.sortIndex == $1.sortIndex ? $0.name < $1.name : $0.sortIndex < $1.sortIndex
+            }
+    }
+
+    static func persistedOrder(
+        visibleIDs: [UUID],
+        uncategorizedID: UUID,
+        currentlyOrderedIDs: [UUID]
+    ) -> [UUID] {
+        var ids = visibleIDs.filter { $0 != uncategorizedID }
+        let insertion = currentlyOrderedIDs.firstIndex(of: uncategorizedID) ?? ids.count
+        ids.insert(uncategorizedID, at: min(insertion, ids.count))
+        return ids
+    }
+}
+
+enum CategoryRowPreview {
+    static let emptyNamePlaceholder = "未命名"
+
+    static func name(stored: String, draft: String, isLive: Bool) -> String {
+        guard isLive else { return stored }
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? emptyNamePlaceholder : trimmed
+    }
+
+    static func colorHex(stored: String, draft: String, isLive: Bool) -> String {
+        isLive ? draft : stored
+    }
 }
 
 struct CategoryPreviewPalette: Sendable {
@@ -228,7 +266,18 @@ final class CategoryManagerViewModel: ObservableObject {
 
     func selectPreset(_ colorHex: String) {
         guard let preset = CategoryPalette.preset(hex: colorHex) else { return }
-        draftColorHex = preset.hex
+        applyDraftColor(preset.hex)
+    }
+
+    func applyDraftColor(_ colorHex: String) {
+        draftColorHex = colorHex.uppercased()
+    }
+
+    func normalizeDraftColorIfComplete(_ colorHex: String) {
+        guard let normalized = try? CategoryColorValidator.normalizedHex(colorHex),
+              normalized != draftColorHex
+        else { return }
+        draftColorHex = normalized
     }
 
     func synchronizeDraftFromStore(_ category: CalendarCategory) {

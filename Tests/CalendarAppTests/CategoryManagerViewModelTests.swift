@@ -23,6 +23,10 @@ struct CategoryManagerViewModelTests {
             preferredCategoryID: nil,
             orderedCategories: categories
         ) == work.id)
+        #expect(CategoryManagerInitialSelection.resolve(
+            preferredCategoryID: UUID(),
+            orderedCategories: []
+        ) == nil)
     }
 
     @Test func emptyAndDuplicateNamesAreRejectedCaseInsensitively() async throws {

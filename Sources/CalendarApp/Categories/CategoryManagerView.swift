@@ -19,6 +19,7 @@ enum CategoryManagerInitialSelection {
 struct CategoryManagerView: View {
     let store: WorkspaceStore
     let initialCategoryID: UUID?
+    var onClose: (() -> Void)? = nil
     @StateObject private var model: CategoryManagerViewModel
     @State private var editingCategoryID: UUID?
     @State private var categoryBeforeCreatingID: UUID?
@@ -38,9 +39,14 @@ struct CategoryManagerView: View {
         colorScheme == .dark ? .dark : .light
     }
 
-    init(store: WorkspaceStore, initialCategoryID: UUID? = nil) {
+    init(
+        store: WorkspaceStore,
+        initialCategoryID: UUID? = nil,
+        onClose: (() -> Void)? = nil
+    ) {
         self.store = store
         self.initialCategoryID = initialCategoryID
+        self.onClose = onClose
         _model = StateObject(wrappedValue: CategoryManagerViewModel(store: store))
     }
 
@@ -135,7 +141,7 @@ struct CategoryManagerView: View {
     private var creatingRow: some View {
         HStack(spacing: 10) {
             Circle()
-                .fill(CalendarTheme.categoryTagColor(model.draftColorHex, appearance: appearance))
+                .fill(CalendarTheme.categoryColor(model.draftColorHex))
                 .frame(width: 10, height: 10)
             Text(model.draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "新分类…"
@@ -165,18 +171,32 @@ struct CategoryManagerView: View {
     }
 
     private func categoryRow(_ category: CalendarCategory) -> some View {
-        let selected = category.id == editingCategoryID
+        let selected = category.id == editingCategoryID && !isCreating
+        let previewName = CategoryRowPreview.name(
+            stored: category.name,
+            draft: model.draftName,
+            isLive: selected
+        )
+        let previewHex = CategoryRowPreview.colorHex(
+            stored: category.colorHex,
+            draft: model.draftColorHex,
+            isLive: selected
+        )
         return Button {
             select(category)
         } label: {
             HStack(spacing: 10) {
                 Circle()
-                    .fill(CalendarTheme.categoryTagColor(category.colorHex, appearance: appearance))
+                    .fill(CalendarTheme.categoryColor(previewHex))
                     .frame(width: 10, height: 10)
-                Text(category.name)
+                Text(previewName)
                     .font(.system(size: 13, weight: selected ? .semibold : .regular))
                     .lineLimit(1)
-                    .foregroundStyle(theme.primaryText)
+                    .foregroundStyle(
+                        selected && previewName == CategoryRowPreview.emptyNamePlaceholder
+                            ? theme.secondaryText
+                            : theme.primaryText
+                    )
                 Spacer(minLength: 0)
                 Text("\(usageCount(for: category))")
                     .font(.system(size: 10, weight: .medium).monospacedDigit())
@@ -242,13 +262,13 @@ struct CategoryManagerView: View {
             editorHeader
             thinRule
             VStack(alignment: .leading, spacing: 16) {
-                if isProtectedCategory {
-                    protectedBanner
+                if isCreating || editingCategory != nil {
+                    usageOverview
+                    nameBlock
+                    colorBlock
+                } else {
+                    emptyCategoriesHint
                 }
-
-                usageOverview
-                nameBlock
-                colorBlock
 
                 if let message = userFacingMessage {
                     Text(message.text)
@@ -279,7 +299,7 @@ struct CategoryManagerView: View {
             }
             Spacer(minLength: 0)
             Button {
-                dismiss()
+                close()
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
@@ -301,14 +321,14 @@ struct CategoryManagerView: View {
             if editingCategory != nil {
                 Button("删除", role: .destructive, action: beginDelete)
                     .controlSize(.small)
-                    .disabled(isProtectedCategory || store.phase != .ready)
+                    .disabled(store.phase != .ready)
             }
             Spacer(minLength: 0)
             Button("取消") {
                 if isCreating {
                     cancelCreating()
                 } else {
-                    dismiss()
+                    close()
                 }
             }
                 .controlSize(.small)
@@ -323,12 +343,11 @@ struct CategoryManagerView: View {
         .padding(.vertical, 12)
     }
 
-    private var protectedBanner: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "lock.fill")
-                .font(.system(size: 11))
-                .foregroundStyle(theme.secondaryText)
-            Text("「未分类」是系统分类，名称与颜色受保护。")
+    private var emptyCategoriesHint: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("还没有自定义分类")
+                .font(.system(size: 13, weight: .semibold))
+            Text("点左上角 + 新建。没有分类的事项会用系统灰色，不必单独管理。")
                 .font(.system(size: 12))
                 .foregroundStyle(theme.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -529,7 +548,11 @@ struct CategoryManagerView: View {
                             .textFieldStyle(.roundedBorder)
                             .font(.system(size: 12, design: .monospaced))
                             .disabled(isProtectedCategory)
+                            .onChange(of: model.draftColorHex) { _, hex in
+                                model.normalizeDraftColorIfComplete(hex)
+                            }
                         ColorPicker("取色", selection: colorBinding, supportsOpacity: false)
+                            .labelsHidden()
                             .disabled(isProtectedCategory)
                     }
                 }
@@ -569,9 +592,6 @@ struct CategoryManagerView: View {
         if let localError {
             return (localError, true)
         }
-        if isProtectedCategory {
-            return ("系统分类受保护，仅可调整顺序。", false)
-        }
         guard attemptedSave, let validationError else { return nil }
         switch validationError {
         case .emptyName:
@@ -594,7 +614,7 @@ struct CategoryManagerView: View {
             get: { CalendarTheme.categoryColor(model.draftColorHex) },
             set: { color in
                 if let hex = Self.hexString(from: color) {
-                    model.draftColorHex = hex
+                    model.applyDraftColor(hex)
                 }
             }
         )
@@ -625,9 +645,10 @@ struct CategoryManagerView: View {
     }
 
     private var orderedCategories: [CalendarCategory] {
-        store.calendarState.categories.values.sorted {
-            $0.sortIndex == $1.sortIndex ? $0.name < $1.name : $0.sortIndex < $1.sortIndex
-        }
+        CategoryReorderMove.visibleCategories(
+            Array(store.calendarState.categories.values),
+            uncategorizedID: store.calendarState.uncategorizedID
+        )
     }
 
     private var validationError: CategoryManagerError? {
@@ -652,7 +673,7 @@ struct CategoryManagerView: View {
     }
 
     private var isSaveDisabled: Bool {
-        isProtectedCategory || store.phase != .ready
+        (!isCreating && editingCategory == nil) || store.phase != .ready
     }
 
     private var deleteDialogPresented: Binding<Bool> {
@@ -667,6 +688,7 @@ struct CategoryManagerView: View {
     }
 
     private func select(_ category: CalendarCategory) {
+        guard category.id != store.calendarState.uncategorizedID else { return }
         isCreating = false
         categoryBeforeCreatingID = nil
         editingCategoryID = category.id
@@ -778,13 +800,25 @@ struct CategoryManagerView: View {
     }
 
     private func moveCategory(_ draggedID: UUID, before targetID: UUID) {
-        var ids = orderedCategories.map(\.id)
-        guard let sourceIndex = ids.firstIndex(of: draggedID),
-              let targetIndex = ids.firstIndex(of: targetID)
+        var visibleIDs = orderedCategories.map(\.id)
+        guard draggedID != store.calendarState.uncategorizedID,
+              targetID != store.calendarState.uncategorizedID,
+              let sourceIndex = visibleIDs.firstIndex(of: draggedID),
+              let targetIndex = visibleIDs.firstIndex(of: targetID)
         else { return }
-        ids.remove(at: sourceIndex)
+        visibleIDs.remove(at: sourceIndex)
         let insertionIndex = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex
-        ids.insert(draggedID, at: insertionIndex)
+        visibleIDs.insert(draggedID, at: insertionIndex)
+        let currentlyOrdered = store.calendarState.categories.values
+            .sorted {
+                $0.sortIndex == $1.sortIndex ? $0.name < $1.name : $0.sortIndex < $1.sortIndex
+            }
+            .map(\.id)
+        let ids = CategoryReorderMove.persistedOrder(
+            visibleIDs: visibleIDs,
+            uncategorizedID: store.calendarState.uncategorizedID,
+            currentlyOrderedIDs: currentlyOrdered
+        )
         Task {
             do {
                 let presentation = try await model.reorder(ids)
@@ -792,6 +826,14 @@ struct CategoryManagerView: View {
             } catch {
                 localError = message(for: error)
             }
+        }
+    }
+
+    private func close() {
+        if let onClose {
+            onClose()
+        } else {
+            dismiss()
         }
     }
 
@@ -817,12 +859,18 @@ struct CategoryManagerView: View {
     }
 
     private static func hexString(from color: Color) -> String? {
-        guard let srgb = NSColor(color).usingColorSpace(.sRGB) else { return nil }
+        let nsColor = NSColor(color)
+        let rgb = nsColor.usingColorSpace(.sRGB) ?? nsColor.usingColorSpace(.deviceRGB)
+        guard let rgb else { return nil }
         return String(
             format: "#%02X%02X%02X",
-            Int((srgb.redComponent * 255).rounded()),
-            Int((srgb.greenComponent * 255).rounded()),
-            Int((srgb.blueComponent * 255).rounded())
+            Self.byte(rgb.redComponent),
+            Self.byte(rgb.greenComponent),
+            Self.byte(rgb.blueComponent)
         )
+    }
+
+    private static func byte(_ component: CGFloat) -> Int {
+        min(255, max(0, Int((component * 255).rounded())))
     }
 }
