@@ -22,13 +22,104 @@ enum EditorFormStyle {
     static let caption = Font.system(size: 11)
     /// Icons inside chips
     static let chipIcon = Font.system(size: 10, weight: .semibold)
-    static let chevron = Font.system(size: 8, weight: .semibold)
+    /// Quiet disclosure caret — never the system popup “up-down” pair
+    static let chevron = Font.system(size: 7, weight: .bold)
 
     static let labelWidth: CGFloat = 36
+    /// Label-to-category-tag gap; tighter than schedule field columns
+    static let categoryLabelSpacing: CGFloat = 6
     static let fieldMinHeight: CGFloat = 28
     static let blockPadding: CGFloat = 10
     static let blockSpacing: CGFloat = 10
     static let contentSpacing: CGFloat = 12
+}
+
+/// Compact category tag used in create + edit. A chip, not a stretched popup.
+struct EditorCategoryPicker: View {
+    let categories: [CalendarCategory]
+    let selectedID: UUID
+    let footerTitle: String
+    let onSelect: (UUID) -> Void
+    let onFooter: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var isHovering = false
+
+    private var theme: CalendarSemanticAppearance {
+        CalendarTheme.appearance(for: colorScheme)
+    }
+
+    private var appearance: CalendarAppearance {
+        colorScheme == .dark ? .dark : .light
+    }
+
+    private var selected: CalendarCategory? {
+        categories.first { $0.id == selectedID }
+    }
+
+    private var selectedName: String {
+        selected?.name ?? "未分类"
+    }
+
+    private var selectedHex: String {
+        selected?.colorHex ?? "#8C8F96"
+    }
+
+    var body: some View {
+        Menu {
+            ForEach(categories) { category in
+                Button {
+                    onSelect(category.id)
+                } label: {
+                    Text(category.name)
+                    CalendarTheme.categoryTagDotImage(category.colorHex, appearance: appearance)
+                    if category.id == selectedID {
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
+            Divider()
+            Button(footerTitle) {
+                // Menu teardown cancels same-turn sheet/overlay presentation.
+                let action = onFooter
+                DispatchQueue.main.async {
+                    action()
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(CalendarTheme.categoryTagColor(selectedHex, appearance: appearance))
+                    .frame(width: 8, height: 8)
+                Text(selectedName)
+                    .font(EditorFormStyle.control)
+                    .foregroundStyle(theme.primaryText)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(EditorFormStyle.chevron)
+                    .foregroundStyle(theme.secondaryText.opacity(0.72))
+                    .padding(.leading, 1)
+            }
+            .padding(.leading, 8)
+            .padding(.trailing, 7)
+            .padding(.vertical, 4)
+            .background(
+                theme.subtleBorder.opacity(isHovering ? 0.42 : 0.26),
+                in: Capsule(style: .continuous)
+            )
+            .overlay {
+                Capsule(style: .continuous)
+                    .stroke(theme.subtleBorder.opacity(isHovering ? 0.7 : 0.48), lineWidth: 0.5)
+            }
+            .contentShape(Capsule(style: .continuous))
+        }
+        .menuIndicator(.hidden)
+        .buttonStyle(.plain)
+        .fixedSize()
+        .onHover { isHovering = $0 }
+        .accessibilityLabel("分类 \(selectedName)")
+        .help("选择分类")
+    }
 }
 
 /// Shared 无 / P0 / P1 / P2 control for create + edit forms.

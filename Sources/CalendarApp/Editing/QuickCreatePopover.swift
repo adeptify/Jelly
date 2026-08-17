@@ -155,6 +155,7 @@ struct QuickCreatePopover: View {
     let store: WorkspaceStore
     let categories: [CalendarCategory]
     let onClose: () -> Void
+    var onManageCategories: ((UUID?) -> Void)? = nil
     private let availableWidth: CGFloat
     private let maximumContentHeight: CGFloat?
     @Environment(\.openCategoryManager) private var openCategoryManager
@@ -176,11 +177,13 @@ struct QuickCreatePopover: View {
         store: WorkspaceStore,
         availableWidth: CGFloat = QuickCreatePopover.preferredWidth,
         maximumContentHeight: CGFloat? = nil,
-        onClose: @escaping () -> Void
+        onClose: @escaping () -> Void,
+        onManageCategories: ((UUID?) -> Void)? = nil
     ) {
         self.store = store
         self.categories = categories
         self.onClose = onClose
+        self.onManageCategories = onManageCategories
         self.availableWidth = availableWidth
         self.maximumContentHeight = maximumContentHeight
         let categoryID = categories.first?.id ?? store.calendarState.uncategorizedID
@@ -242,13 +245,22 @@ struct QuickCreatePopover: View {
                 .font(EditorFormStyle.body)
                 .focused($titleFocused)
 
-            // Category
-            HStack(spacing: 8) {
+            HStack(spacing: EditorFormStyle.categoryLabelSpacing) {
                 Text("分类")
                     .font(EditorFormStyle.label)
                     .foregroundStyle(theme.secondaryText)
-                    .frame(width: EditorFormStyle.labelWidth, alignment: .leading)
-                categoryMenu
+                EditorCategoryPicker(
+                    categories: categories,
+                    selectedID: model.draft.categoryID,
+                    footerTitle: "管理分类…",
+                    onSelect: { id in
+                        categoryOption = id.uuidString
+                        model.draft.categoryID = id
+                    },
+                    onFooter: {
+                        presentCategoryManager(categoryID: model.draft.categoryID)
+                    }
+                )
                 Spacer(minLength: 0)
             }
 
@@ -408,57 +420,6 @@ struct QuickCreatePopover: View {
         .frame(minHeight: EditorFormStyle.fieldMinHeight)
     }
 
-    private var categoryMenu: some View {
-        let appearance: CalendarAppearance = colorScheme == .dark ? .dark : .light
-        let selected = categories.first { $0.id.uuidString == categoryOption }
-            ?? categories.first { $0.id == model.draft.categoryID }
-        let selectedHex = selected?.colorHex ?? "#8C8F96"
-        return Menu {
-            ForEach(categories) { category in
-                Button {
-                    categoryOption = category.id.uuidString
-                    model.draft.categoryID = category.id
-                } label: {
-                    Text(category.name)
-                    CalendarTheme.categoryTagDotImage(category.colorHex, appearance: appearance)
-                    if category.id.uuidString == categoryOption {
-                        Image(systemName: "checkmark")
-                    }
-                }
-            }
-            Divider()
-            Button("管理分类…") {
-                openCategoryManager.callAsFunction(categoryID: model.draft.categoryID)
-            }
-        } label: {
-            HStack(spacing: 5) {
-                Text(selected?.name ?? "未分类")
-                    .font(EditorFormStyle.control)
-                    .foregroundStyle(theme.primaryText)
-                    .lineLimit(1)
-                Circle()
-                    .fill(CalendarTheme.categoryTagColor(selectedHex, appearance: appearance))
-                    .frame(width: 8, height: 8)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(EditorFormStyle.chevron)
-                    .foregroundStyle(theme.secondaryText)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(
-                theme.subtleBorder.opacity(0.28),
-                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(theme.subtleBorder.opacity(0.55), lineWidth: 0.5)
-            }
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize(horizontal: true, vertical: false)
-    }
-
     private var weekdayPicker: some View {
         HStack(spacing: 4) {
             ForEach(Weekday.allCases, id: \.self) { weekday in
@@ -492,7 +453,10 @@ struct QuickCreatePopover: View {
     private var startTimeBinding: Binding<Date> {
         Binding(
             get: { model.draft.startTime.editorDate },
-            set: { model.draft.startTime = .editorMinute(containing: $0) }
+            set: { newValue in
+                model.draft.startTime = .editorMinute(containing: newValue)
+                model.startTimeDidChange()
+            }
         )
     }
 
@@ -517,6 +481,14 @@ struct QuickCreatePopover: View {
             get: { (model.draft.recurrenceEndDate ?? model.draft.startDate).editorDate },
             set: { model.draft.recurrenceEndDate = CalendarDate.editorDate(containing: $0) }
         )
+    }
+
+    private func presentCategoryManager(categoryID: UUID?) {
+        if let onManageCategories {
+            onManageCategories(categoryID)
+        } else {
+            openCategoryManager.callAsFunction(categoryID: categoryID)
+        }
     }
 
     private func save() {

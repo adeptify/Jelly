@@ -314,6 +314,7 @@ struct ItemEditForm: View {
     let onOpenNote: (NoteID) -> Void
     let onCancel: () -> Void
     let onSaved: () -> Void
+    var onManageCategories: ((UUID?) -> Void)? = nil
     @FocusState private var titleFocused: Bool
     @StateObject private var model: ItemEditorViewModel
     @State private var categoryOption: String
@@ -329,17 +330,14 @@ struct ItemEditForm: View {
         CalendarTheme.appearance(for: colorScheme)
     }
 
-    private var appearance: CalendarAppearance {
-        colorScheme == .dark ? .dark : .light
-    }
-
     init(
         configuration: ItemEditorConfiguration,
         store: WorkspaceStore,
         categories: [CalendarCategory],
         onOpenNote: @escaping (NoteID) -> Void = { _ in },
         onCancel: @escaping () -> Void,
-        onSaved: @escaping () -> Void
+        onSaved: @escaping () -> Void,
+        onManageCategories: ((UUID?) -> Void)? = nil
     ) {
         self.configuration = configuration
         self.store = store
@@ -347,6 +345,7 @@ struct ItemEditForm: View {
         self.onOpenNote = onOpenNote
         self.onCancel = onCancel
         self.onSaved = onSaved
+        self.onManageCategories = onManageCategories
         let draft = configuration.draft
         let noteRelationModel = CalendarNoteIntegrationModel(
             target: configuration.calendarTarget,
@@ -498,11 +497,26 @@ struct ItemEditForm: View {
     }
 
     private var categoryBlock: some View {
-        VStack(alignment: .leading, spacing: EditorFormStyle.blockSpacing) {
-            fieldRow("分类") {
-                categoryMenu
-            }
+        HStack(spacing: EditorFormStyle.categoryLabelSpacing) {
+            Text("分类")
+                .font(EditorFormStyle.label)
+                .foregroundStyle(theme.secondaryText)
+            EditorCategoryPicker(
+                categories: categories,
+                selectedID: model.draft.categoryID,
+                footerTitle: "新建分类…",
+                onSelect: selectCategory,
+                onFooter: {
+                    if let onManageCategories {
+                        onManageCategories(model.draft.categoryID)
+                    } else {
+                        openCategoryManager.callAsFunction(categoryID: model.draft.categoryID)
+                    }
+                }
+            )
+            Spacer(minLength: 0)
         }
+        .frame(minHeight: EditorFormStyle.fieldMinHeight)
         .padding(EditorFormStyle.blockPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(fieldBlockBackground)
@@ -518,60 +532,6 @@ struct ItemEditForm: View {
         .padding(EditorFormStyle.blockPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(fieldBlockBackground)
-    }
-
-    /// macOS menus strip SwiftUI colors from SF Symbols; bake category color into NSImage.
-    private var categoryMenu: some View {
-        let selectedHex = selectedCategory?.colorHex ?? "#8C8F96"
-        return Menu {
-            ForEach(categories) { category in
-                Button {
-                    selectCategory(category.id)
-                } label: {
-                    // Name left, category-colored tag on the right.
-                    Text(category.name)
-                    CalendarTheme.categoryTagDotImage(category.colorHex, appearance: appearance)
-                    if category.id == model.draft.categoryID {
-                        Image(systemName: "checkmark")
-                    }
-                }
-            }
-            Divider()
-            Button("新建分类…") {
-                openCategoryManager.callAsFunction(categoryID: model.draft.categoryID)
-            }
-        } label: {
-            HStack(spacing: 5) {
-                Text(selectedCategory?.name ?? "未分类")
-                    .font(EditorFormStyle.control)
-                    .foregroundStyle(theme.primaryText)
-                    .lineLimit(1)
-                Circle()
-                    .fill(CalendarTheme.categoryTagColor(selectedHex, appearance: appearance))
-                    .frame(width: 8, height: 8)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(EditorFormStyle.chevron)
-                    .foregroundStyle(theme.secondaryText)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(
-                theme.subtleBorder.opacity(0.28),
-                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(theme.subtleBorder.opacity(0.55), lineWidth: 0.5)
-            }
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize(horizontal: true, vertical: false)
-    }
-
-    private var selectedCategory: CalendarCategory? {
-        categories.first { $0.id == model.draft.categoryID }
-            ?? categories.first { $0.id.uuidString == categoryOption }
     }
 
     private func selectCategory(_ id: UUID) {
@@ -731,7 +691,10 @@ struct ItemEditForm: View {
     private var startTimeBinding: Binding<Date> {
         Binding(
             get: { model.draft.startTime.editorDate },
-            set: { model.draft.startTime = .editorMinute(containing: $0) }
+            set: { newValue in
+                model.draft.startTime = .editorMinute(containing: newValue)
+                model.startTimeDidChange()
+            }
         )
     }
 
