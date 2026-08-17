@@ -46,7 +46,7 @@ struct ItemDragPreviewChip: View {
     }
 
     private var timeText: String? {
-        CalendarItemRowPresentation.displayTimeText(for: schedule)
+        CalendarItemRowPresentation.displayTimeText(for: schedule, style: .startOnly)
     }
 
     var body: some View {

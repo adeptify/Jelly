@@ -216,6 +216,35 @@ struct CalendarItemRowPresentationTests {
         #expect(presentation.accessibilityLabel == "工作, 23:00, 夜间发布")
     }
 
+    @Test func monthStyleShowsOnlyStartTimeSoTheTitleCanUseTheChip() throws {
+        let schedule = try CalendarSchedule(
+            startDate: CalendarDate(year: 2026, month: 8, day: 26)!,
+            endDate: CalendarDate(year: 2026, month: 8, day: 26)!,
+            startTime: MinuteOfDay(hour: 15, minute: 30)!,
+            endTime: MinuteOfDay(hour: 18, minute: 0)!
+        )
+
+        let month = CalendarItemRowPresentation.make(
+            availableContentWidth: 112,
+            categoryName: "Keep Fit",
+            schedule: schedule,
+            title: "超皮训练计划",
+            timeTextStyle: .startOnly
+        )
+        let drawer = CalendarItemRowPresentation.make(
+            availableContentWidth: 240,
+            categoryName: "Keep Fit",
+            schedule: schedule,
+            title: "超皮训练计划",
+            timeTextStyle: .range
+        )
+
+        #expect(month.timeText == "15:30")
+        #expect(month.title == "超皮训练计划")
+        #expect(month.accessibilityLabel == "Keep Fit, 15:30, 超皮训练计划")
+        #expect(drawer.timeText == "15:30–18:00")
+    }
+
     @Test func narrowUntimedRowKeepsTitleWithoutCategoryLabel() {
         let compact = CalendarItemRowPresentation.make(
             availableContentWidth: 112,

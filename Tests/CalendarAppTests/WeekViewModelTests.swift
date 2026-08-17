@@ -181,6 +181,9 @@ struct CalendarItemTimeDisplayTests {
             endTime: MinuteOfDay(hour: 10, minute: 15)!
         )
         #expect(CalendarItemRowPresentation.displayTimeText(for: sameDay) == "09:30–10:15")
+        #expect(
+            CalendarItemRowPresentation.displayTimeText(for: sameDay, style: .startOnly) == "09:30"
+        )
 
         let midnight = try CalendarSchedule(
             startDate: CalendarDate(year: 2026, month: 8, day: 4)!,

@@ -140,18 +140,35 @@ enum CalendarItemRowInteractionGeometry {
     static let contentSpacing: CGFloat = 4
     static let completionWidth: CGFloat = 16
     static let handleWidth: CGFloat = 10
+    /// Month chips are a cell wide; a 10pt handle is too easy to miss.
+    static let generousEdgeHandleWidth: CGFloat = 32
 
     static var completionUpperBound: CGFloat {
         horizontalPadding + completionWidth + contentSpacing
     }
 
     static var leadingHandleRange: ClosedRange<CGFloat> {
-        completionUpperBound...(completionUpperBound + handleWidth)
+        leadingHandleRange(generousEdges: false)
     }
 
-    static func trailingHandleLowerBound(width: CGFloat) -> CGFloat {
-        max(completionUpperBound, width - horizontalPadding - handleWidth)
+    static func leadingHandleRange(generousEdges: Bool) -> ClosedRange<CGFloat> {
+        let handle = generousEdges ? generousEdgeHandleWidth : handleWidth
+        return completionUpperBound...(completionUpperBound + handle)
     }
+
+    static func trailingHandleLowerBound(width: CGFloat, generousEdges: Bool = false) -> CGFloat {
+        let handle = generousEdges
+            ? generousEdgeHandleWidth
+            : horizontalPadding + handleWidth
+        return max(completionUpperBound, width - handle)
+    }
+}
+
+enum CalendarItemTimeTextStyle: Equatable, Sendable {
+    /// Month cells: start clock only, so the title can use the rest of the chip.
+    case startOnly
+    /// Week grid and day drawer: same-day `HH:mm–HH:mm` when end differs.
+    case range
 }
 
 struct CalendarItemRowPresentation: Equatable {
@@ -192,7 +209,8 @@ struct CalendarItemRowPresentation: Equatable {
         availableContentWidth: Double,
         categoryName: String,
         schedule: CalendarSchedule,
-        title: String
+        title: String,
+        timeTextStyle: CalendarItemTimeTextStyle = .range
     ) -> CalendarItemRowPresentation {
         make(
             availableContentWidth: availableContentWidth,
@@ -201,8 +219,10 @@ struct CalendarItemRowPresentation: Equatable {
             accessibilityLabel: rowBodyAccessibilityLabel(
                 categoryName: categoryName,
                 schedule: schedule,
-                title: title
-            )
+                title: title,
+                timeTextStyle: timeTextStyle
+            ),
+            timeTextStyle: timeTextStyle
         )
     }
 
@@ -210,21 +230,29 @@ struct CalendarItemRowPresentation: Equatable {
         availableContentWidth: Double,
         schedule: CalendarSchedule,
         title: String,
-        accessibilityLabel: String
+        accessibilityLabel: String,
+        timeTextStyle: CalendarItemTimeTextStyle = .range
     ) -> CalendarItemRowPresentation {
         let isCompactRow = availableContentWidth <= compactRowContentWidth
         return CalendarItemRowPresentation(
             categoryName: nil,
-            timeText: displayTimeText(for: schedule),
+            timeText: displayTimeText(for: schedule, style: timeTextStyle),
             title: title,
             accessibilityLabel: accessibilityLabel,
             layout: isCompactRow ? .compact : .standard
         )
     }
 
-    /// Visible chip time: start only, or same-day `HH:mm–HH:mm` when end differs.
-    static func displayTimeText(for schedule: CalendarSchedule) -> String? {
+    /// Visible chip time. Month cells keep start only so the title can use
+    /// the rest of the chip; week / day-drawer keep the same-day range.
+    static func displayTimeText(
+        for schedule: CalendarSchedule,
+        style: CalendarItemTimeTextStyle = .range
+    ) -> String? {
         guard let start = schedule.startTime else { return nil }
+        if style == .startOnly {
+            return timeString(start)
+        }
         guard let end = schedule.endTime else { return timeString(start) }
         if schedule.startDate == schedule.endDate, end != start {
             return "\(timeString(start))–\(timeString(end))"
@@ -248,10 +276,11 @@ struct CalendarItemRowPresentation: Equatable {
     static func rowBodyAccessibilityLabel(
         categoryName: String,
         schedule: CalendarSchedule,
-        title: String
+        title: String,
+        timeTextStyle: CalendarItemTimeTextStyle = .range
     ) -> String {
         var components = [categoryName]
-        if let time = displayTimeText(for: schedule) {
+        if let time = displayTimeText(for: schedule, style: timeTextStyle) {
             components.append(time)
         }
         components.append(title)
@@ -269,6 +298,7 @@ struct CalendarItemRow: View {
     var onCompletion: ((CalendarCommand) -> Void)?
     var onOpenDetail: ((ProjectedItem) -> Void)?
     var onDelete: (() -> Void)?
+    var onSetPriority: ((ItemPriority) -> Void)?
     var allowsSwipeToDelete = true
     var accessibilityLabelOverride: String?
     var accessibilityValueOverride: String?
@@ -278,6 +308,11 @@ struct CalendarItemRow: View {
     var showsTrailingHandle = false
     var leadingHandleAccessibility: CalendarResizeHandleAccessibility?
     var trailingHandleAccessibility: CalendarResizeHandleAccessibility?
+    /// Month cells use `.startOnly` so the title can occupy the leftover width.
+    var timeTextStyle: CalendarItemTimeTextStyle = .range
+    /// When set, this row can accept a same-day untimed reorder (or a
+    /// date-move fallback). Timed / week-resize chips leave this nil.
+    var onDropTransfer: ((CalendarTransferPayload) -> Bool)?
     @Environment(\.colorScheme) private var colorScheme
 
     private var theme: CalendarSemanticAppearance {
@@ -373,7 +408,8 @@ struct CalendarItemRow: View {
                         availableContentWidth: proxy.size.width,
                         categoryName: category?.name ?? "未分类",
                         schedule: item.schedule,
-                        title: item.title
+                        title: item.title,
+                        timeTextStyle: timeTextStyle
                     )
                     HStack(spacing: presentation.layout.inlineSpacing) {
                         ItemPriorityBadge(priority: item.priority)
@@ -443,6 +479,27 @@ struct CalendarItemRow: View {
             in: RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius, style: .continuous)
         )
         .contentShape(RoundedRectangle(cornerRadius: CalendarTheme.cornerRadius, style: .continuous))
+        .contextMenu {
+            if let onSetPriority {
+                Picker(
+                    "设置优先级",
+                    selection: Binding(
+                        get: { item.priority },
+                        set: { onSetPriority($0) }
+                    )
+                ) {
+                    ForEach(ItemPriority.allCases, id: \.self) { value in
+                        Text(value.title).tag(value)
+                    }
+                }
+            }
+            if onSetPriority != nil, onDelete != nil {
+                Divider()
+            }
+            if let onDelete {
+                Button("删除事项", role: .destructive, action: onDelete)
+            }
+        }
         .draggable(transferPayload) {
             ItemDragPreviewChip(
                 title: item.title,
@@ -454,6 +511,7 @@ struct CalendarItemRow: View {
             .frame(width: 168)
             .padding(4)
         }
+        .modifier(UntimedReorderDropModifier(onDropTransfer: onDropTransfer))
     }
 
     private var transferPayload: CalendarTransferPayload {
@@ -486,5 +544,20 @@ struct CalendarItemRow: View {
             .accessibilityLabel(accessibility.label)
             .accessibilityValue(accessibility.value)
             .help("\(accessibility.label)，拖动以调整 · \(accessibility.value)")
+    }
+}
+
+private struct UntimedReorderDropModifier: ViewModifier {
+    let onDropTransfer: ((CalendarTransferPayload) -> Bool)?
+
+    func body(content: Content) -> some View {
+        if let onDropTransfer {
+            content.dropDestination(for: CalendarTransferPayload.self) { payloads, _ in
+                guard let payload = payloads.first else { return false }
+                return onDropTransfer(payload)
+            }
+        } else {
+            content
+        }
     }
 }
