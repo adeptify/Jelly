@@ -483,6 +483,49 @@ struct ItemEditorViewModelTests {
         #expect(store.canUndo == false)
     }
 
+    @Test func settingStartTimeDefaultsEndToOneHourLater() {
+        let day = CalendarDate(year: 2026, month: 8, day: 26)!
+        var draft = ItemDraft.newItem(from: day, through: day, categoryID: UUID())
+        draft.usesTime = true
+        let vm = ItemEditorViewModel(mode: .create, draft: draft)
+
+        vm.draft.startTime = MinuteOfDay(hour: 15, minute: 30)!
+        vm.startTimeDidChange()
+
+        #expect(vm.draft.startDate == day)
+        #expect(vm.draft.endDate == day)
+        #expect(vm.draft.startTime == MinuteOfDay(hour: 15, minute: 30)!)
+        #expect(vm.draft.endTime == MinuteOfDay(hour: 16, minute: 30)!)
+    }
+
+    @Test func settingLateStartTimeWrapsEndOntoTheNextDay() {
+        let day = CalendarDate(year: 2026, month: 8, day: 26)!
+        var draft = ItemDraft.newItem(from: day, through: day, categoryID: UUID())
+        draft.usesTime = true
+        let vm = ItemEditorViewModel(mode: .create, draft: draft)
+
+        vm.draft.startTime = MinuteOfDay(hour: 23, minute: 30)!
+        vm.startTimeDidChange()
+
+        #expect(vm.draft.startDate == day)
+        #expect(vm.draft.endDate == day.addingDays(1))
+        #expect(vm.draft.endTime == MinuteOfDay(hour: 0, minute: 30)!)
+    }
+
+    @Test func enablingTimeNormalizesAnInvalidSameDayPairToOneHour() {
+        let day = CalendarDate(year: 2026, month: 8, day: 26)!
+        var draft = ItemDraft.newItem(from: day, through: day, categoryID: UUID())
+        draft.usesTime = true
+        draft.startTime = MinuteOfDay(hour: 15, minute: 30)!
+        draft.endTime = MinuteOfDay(hour: 10, minute: 0)!
+        let vm = ItemEditorViewModel(mode: .create, draft: draft)
+
+        vm.usesTimeDidChange()
+
+        #expect(vm.draft.endDate == day)
+        #expect(vm.draft.endTime == MinuteOfDay(hour: 16, minute: 30)!)
+    }
+
     @Test func editorRejectsReversedTimeWithoutClearingDraft() {
         let draft = ItemDraft(
             kind: .event,

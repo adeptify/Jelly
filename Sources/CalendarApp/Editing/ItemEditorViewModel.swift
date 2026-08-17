@@ -43,16 +43,27 @@ final class ItemEditorViewModel: ObservableObject {
         normalizeTimedDraftIfNeeded()
     }
 
+    /// User set a start clock: default the block to one hour.
+    func startTimeDidChange() {
+        guard draft.usesTime else { return }
+        applyDefaultEndOneHourAfterStart()
+    }
+
     private func normalizeTimedDraftIfNeeded() {
         if draft.startDate == draft.endDate, draft.endTime <= draft.startTime {
-            // Default 1-hour block; wrap past midnight onto the next day.
-            let next = draft.startTime.value + 60
-            if next < 24 * 60 {
-                draft.endTime = MinuteOfDay(hour: next / 60, minute: next % 60)!
-            } else {
-                draft.endDate = draft.endDate.addingDays(1)
-                draft.endTime = MinuteOfDay(hour: 0, minute: 0)!
-            }
+            applyDefaultEndOneHourAfterStart()
+        }
+    }
+
+    private func applyDefaultEndOneHourAfterStart() {
+        let next = draft.startTime.value + 60
+        if next < 24 * 60 {
+            draft.endDate = draft.startDate
+            draft.endTime = MinuteOfDay(hour: next / 60, minute: next % 60)!
+        } else {
+            let wrapped = next - 24 * 60
+            draft.endDate = draft.startDate.addingDays(1)
+            draft.endTime = MinuteOfDay(hour: wrapped / 60, minute: wrapped % 60)!
         }
     }
 
