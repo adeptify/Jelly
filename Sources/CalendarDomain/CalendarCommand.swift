@@ -12,6 +12,8 @@ public enum CalendarCommand: Sendable {
     case setOccurrenceCompleted(OccurrenceKey, Date?)
     case setItemPriority(UUID, ItemPriority)
     case setItemPinned(UUID, Bool)
+    /// Sets `untimedRank` for untimed single-day items on one civil day.
+    case reorderUntimedItems(on: CalendarDate, orderedIDs: [UUID])
     case createSeries(WeeklySeries)
     case mutateSeries(
         OccurrenceKey,

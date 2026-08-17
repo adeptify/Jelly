@@ -68,11 +68,12 @@ private struct CalendarItemFieldWrite: Equatable, Sendable {
     let priority: ValueChange<ItemPriority>?
     let isPinned: ValueChange<Bool>?
     let notes: ValueChange<String>?
+    let untimedRank: ValueChange<Int>?
     let completedAt: ValueChange<Date?>?
     let updatedAt: ValueChange<Date>?
 
     var isEmpty: Bool {
-        kind == nil && title == nil && categoryID == nil && schedule == nil && creationTimeZoneIdentifier == nil && priority == nil && isPinned == nil && notes == nil && completedAt == nil && updatedAt == nil
+        kind == nil && title == nil && categoryID == nil && schedule == nil && creationTimeZoneIdentifier == nil && priority == nil && isPinned == nil && notes == nil && untimedRank == nil && completedAt == nil && updatedAt == nil
     }
 }
 
@@ -223,6 +224,7 @@ private func makeItemChanges(_ before: [UUID: CalendarItem], _ after: [UUID: Cal
             priority: old.priority == new.priority ? nil : .init(before: old.priority, after: new.priority),
             isPinned: old.isPinned == new.isPinned ? nil : .init(before: old.isPinned, after: new.isPinned),
             notes: old.notes == new.notes ? nil : .init(before: old.notes, after: new.notes),
+            untimedRank: old.untimedRank == new.untimedRank ? nil : .init(before: old.untimedRank, after: new.untimedRank),
             completedAt: old.completedAt == new.completedAt ? nil : .init(before: old.completedAt, after: new.completedAt),
             updatedAt: old.updatedAt == new.updatedAt ? nil : .init(before: old.updatedAt, after: new.updatedAt)
         )
@@ -410,6 +412,7 @@ public enum WorkspaceUndoReducer {
                 try applyItem(fields.priority, value: &next.priority, undo: undo)
                 try applyItem(fields.isPinned, value: &next.isPinned, undo: undo)
                 try applyItem(fields.notes, value: &next.notes, undo: undo)
+                try applyItem(fields.untimedRank, value: &next.untimedRank, undo: undo)
                 try applyItem(fields.completedAt, value: &next.completedAt, undo: undo)
                 restoreTimestamp(fields.updatedAt, value: &next.updatedAt, undo: undo)
                 items[id] = next

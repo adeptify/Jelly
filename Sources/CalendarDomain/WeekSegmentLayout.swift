@@ -180,6 +180,13 @@ private func candidatePrecedes(_ lhs: Candidate, _ rhs: Candidate) -> Bool {
     default:
         break
     }
+    if lhs.entry.schedule.startTime == nil,
+       rhs.entry.schedule.startTime == nil,
+       lhs.entry.schedule.durationDays == 1,
+       rhs.entry.schedule.durationDays == 1,
+       lhs.entry.untimedRank != rhs.entry.untimedRank {
+        return lhs.entry.untimedRank < rhs.entry.untimedRank
+    }
     if lhs.entry.createdAt != rhs.entry.createdAt {
         return lhs.entry.createdAt < rhs.entry.createdAt
     }

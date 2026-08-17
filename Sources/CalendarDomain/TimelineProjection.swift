@@ -113,6 +113,13 @@ public enum ProjectedEntry: Identifiable, Equatable, Sendable {
         }
     }
 
+    public var untimedRank: Int {
+        switch self {
+        case let .item(item): item.untimedRank
+        case .occurrence: 0
+        }
+    }
+
     public var notes: String {
         switch self {
         case let .item(item): item.notes
@@ -152,6 +159,14 @@ private func projectedEntryPrecedes(_ lhs: ProjectedEntry, _ rhs: ProjectedEntry
         return left < right
     default:
         break
+    }
+
+    if lhs.schedule.startTime == nil,
+       rhs.schedule.startTime == nil,
+       lhs.schedule.durationDays == 1,
+       rhs.schedule.durationDays == 1,
+       lhs.untimedRank != rhs.untimedRank {
+        return lhs.untimedRank < rhs.untimedRank
     }
 
     if lhs.createdAt != rhs.createdAt {

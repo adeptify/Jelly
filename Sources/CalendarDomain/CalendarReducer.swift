@@ -114,6 +114,30 @@ public enum CalendarReducer {
             item.updatedAt = now
             result.items[id] = item
 
+        case let .reorderUntimedItems(date, orderedIDs):
+            guard !orderedIDs.isEmpty, Set(orderedIDs).count == orderedIDs.count else {
+                throw ReducerError.invalidState
+            }
+            let alreadyOrdered = orderedIDs.enumerated().allSatisfy { index, id in
+                result.items[id]?.untimedRank == index
+            }
+            if !alreadyOrdered {
+                for (index, id) in orderedIDs.enumerated() {
+                    guard var item = result.items[id] else {
+                        throw ReducerError.missingItem
+                    }
+                    guard UntimedItemReorder.isReorderable(item),
+                          item.schedule.startDate <= date,
+                          date <= item.schedule.endDate
+                    else {
+                        throw ReducerError.invalidState
+                    }
+                    item.untimedRank = index
+                    item.updatedAt = now
+                    result.items[id] = item
+                }
+            }
+
         case let .createSeries(series):
             guard result.recurrence.series[series.id] == nil else {
                 throw ReducerError.invalidState

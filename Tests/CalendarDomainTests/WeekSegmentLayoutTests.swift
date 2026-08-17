@@ -80,6 +80,33 @@ struct WeekSegmentLayoutTests {
         #expect(layout.overflowByDate.isEmpty)
     }
 
+    @Test func sameDayUntimedLanesFollowUntimedRankInsteadOfCreatedAt() throws {
+        let day = "2026-08-17"
+        let earlier = entry(
+            day,
+            day,
+            id: uuid("550"),
+            createdAt: Date(timeIntervalSince1970: 1),
+            untimedRank: 1
+        )
+        let later = entry(
+            day,
+            day,
+            id: uuid("551"),
+            createdAt: Date(timeIntervalSince1970: 2),
+            untimedRank: 0
+        )
+        let layout = try #require(WeekSegmentLayout.make(
+            entries: [earlier, later],
+            weekStarts: [date(2026, 8, 17)],
+            laneCapacity: 8
+        ).first)
+        let lanes = Dictionary(uniqueKeysWithValues: layout.visibleSegments.map { ($0.source, $0.lane) })
+
+        #expect(lanes[later.id] == 0)
+        #expect(lanes[earlier.id] == 1)
+    }
+
     @Test func duplicateSourceProducesOneSegmentWithoutOverflowAtAnyCapacity() throws {
         let duplicate = entry("2026-08-11", "2026-08-12", id: uuid("544"))
 
@@ -98,7 +125,13 @@ struct WeekSegmentLayoutTests {
         }
     }
 
-    private func entry(_ start: String, _ end: String, id: UUID) -> ProjectedEntry {
+    private func entry(
+        _ start: String,
+        _ end: String,
+        id: UUID,
+        createdAt: Date = .distantPast,
+        untimedRank: Int = 0
+    ) -> ProjectedEntry {
         .item(try! CalendarItem(
             id: id,
             kind: .task,
@@ -111,9 +144,10 @@ struct WeekSegmentLayoutTests {
                 endTime: nil
             ),
             creationTimeZoneIdentifier: "Asia/Shanghai",
+            untimedRank: untimedRank,
             completedAt: nil,
-            createdAt: .distantPast,
-            updatedAt: .distantPast
+            createdAt: createdAt,
+            updatedAt: createdAt
         ))
     }
 
