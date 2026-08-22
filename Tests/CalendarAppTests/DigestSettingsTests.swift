@@ -4,6 +4,57 @@ import Testing
 
 @Suite("DigestSettingsTests")
 struct DigestSettingsTests {
+    @Test func productionCredentialNamespaceRemainsStable() {
+        let service = DigestCredentialService.resolve(
+            environment: [:],
+            dataRoot: URL(fileURLWithPath: "/private/tmp/jelly-production")
+        )
+
+        #expect(service == "ai.adeptify.jelly.digest")
+    }
+
+    @Test func acceptanceDataDirectoriesUseDistinctCredentialNamespaces() {
+        let firstRoot = URL(fileURLWithPath: "/private/tmp/jelly-acceptance-a")
+        let secondRoot = URL(fileURLWithPath: "/private/tmp/jelly-acceptance-b")
+        let first = DigestCredentialService.resolve(
+            environment: ["JELLY_ACCEPTANCE_DATA_DIRECTORY": firstRoot.path],
+            dataRoot: firstRoot
+        )
+        let second = DigestCredentialService.resolve(
+            environment: ["JELLY_ACCEPTANCE_DATA_DIRECTORY": secondRoot.path],
+            dataRoot: secondRoot
+        )
+
+        #expect(first != "ai.adeptify.jelly.digest")
+        #expect(second != "ai.adeptify.jelly.digest")
+        #expect(first != second)
+    }
+
+    @Test func acceptanceDataDirectoriesDoNotShareDigestPreferences() throws {
+        let firstRoot = URL(fileURLWithPath: "/private/tmp/jelly-settings-a-\(UUID().uuidString)")
+        let secondRoot = URL(fileURLWithPath: "/private/tmp/jelly-settings-b-\(UUID().uuidString)")
+        let firstDefaults = try DigestSettingsDefaults.resolve(
+            environment: ["JELLY_ACCEPTANCE_DATA_DIRECTORY": firstRoot.path],
+            dataRoot: firstRoot
+        )
+        let secondDefaults = try DigestSettingsDefaults.resolve(
+            environment: ["JELLY_ACCEPTANCE_DATA_DIRECTORY": secondRoot.path],
+            dataRoot: secondRoot
+        )
+        defer {
+            for defaults in [firstDefaults, secondDefaults] {
+                defaults.removeObject(forKey: DigestSettingsStore.endpointKey)
+                defaults.removeObject(forKey: DigestSettingsStore.modelKey)
+            }
+        }
+        let first = DigestSettingsStore(defaults: firstDefaults)
+        let second = DigestSettingsStore(defaults: secondDefaults)
+
+        #expect(first.save(endpoint: "https://api.example.com/v1", model: "model-a"))
+        #expect(second.endpoint.isEmpty)
+        #expect(second.model.isEmpty)
+    }
+
     @Test func inMemoryCredentialsSaveOverwriteDeleteAndNeverTreatEmptyAsConfigured() throws {
         let store = InMemoryDigestCredentialStore()
         #expect(try store.load() == nil)

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Swift 6.3、SwiftUI、Foundation/URLSession、Security/Keychain、AVFoundation、swift-testing、macOS 14+、Apple silicon、Argmax OSS Swift Package `1.0.0` 的 `WhisperKit` 产品、JSON 本地持久化 schema V4 可选扩展。
 
-> **Codex review 修订（2026-08-22）：** 本计划后文保留 Grok 当时的逐步执行记录，但最终候选的审查修订优先于原计划：持久化不升 V5，而是在 V4 中增加可选派生 Digest 以保住旧版回滚读取原始链接/笔记；401 与 403 分别呈现密钥错误和模型权限错误；来源请求采用有上限的流式读取、逐跳 SSRF 校验，并兼容系统代理的 fake-IP 模式；写入提交不确定时保留原灵感和精确事务令牌，不静默成功；写入后的 V4 文档必须能重新解码，且回执只能持有笔记内真实存在的摘要块。旧版 Jelly 回写会丢派生 Digest，这不是无损双向兼容，正式升级前仍需备份。
+> **Codex review 修订（2026-08-22）：** 本计划后文保留 Grok 当时的逐步执行记录，但最终候选的审查修订优先于原计划：持久化不升 V5，而是在 V4 中增加可选派生 Digest 以保住旧版回滚读取原始链接/笔记；401 与 403 分别呈现密钥错误和模型权限错误；来源请求采用有上限的流式读取、逐跳 SSRF 校验，并兼容系统代理的 fake-IP 模式；写入提交不确定时保留原灵感和精确事务令牌，不静默成功；写入后的 V4 文档必须能重新解码，且回执只能持有笔记内真实存在的摘要块；隔离验收目录同时隔离 Workspace、Whisper 模型、Keychain 服务和 endpoint/model 偏好，不能触碰正式 Jelly 配置。旧版 Jelly 回写会丢派生 Digest，这不是无损双向兼容，正式升级前仍需备份。
 
 **Spec:** `docs/superpowers/specs/2026-08-22-inspiration-material-digest-design.md`
 
@@ -969,7 +969,7 @@ Expected: 至少一个 B 站字幕/音频 acquisition 和一个小宇宙 audio a
 
 - [ ] **Step 5: 启动最终打包 App 做无凭据旅程实操**
 
-使用隔离数据目录启动最终 `.app`：捕获普通文章（无提炼区）、捕获 B 站/小宇宙（出现主动提炼）、未配置模型点击后进入设置、取消返回、原始链接仍可复制、退出重启后状态诚实。另用合法 succeeded Digest fixture 实操“写入笔记”：若遇到 `commitPending`，必须立即显示“继续确认写入”，后续只能用原事务令牌继续确认，直到明确提交后才出现成功提示并移动到“已成笔记”；打开笔记后检查原链接和摘要结构，再退出重开同一隔离数据，确认笔记与回执仍可读取。观察点击到可见反馈，不把自动化工具等待算作 App 响应；fixture 只进入隔离验收数据，不得进入发布默认路径。
+使用隔离数据目录启动最终 `.app`；隔离目录必须同时派生独立 Keychain 服务和 endpoint/model 偏好域，不读取或覆盖正式 Jelly 配置。捕获普通文章（无提炼区）、捕获 B 站/小宇宙（出现主动提炼）、未配置模型点击后进入设置、取消返回、原始链接仍可复制、退出重启后状态诚实。另用合法 succeeded Digest fixture 实操“写入笔记”：若遇到 `commitPending`，必须立即显示“继续确认写入”，后续只能用原事务令牌继续确认，直到明确提交后才出现成功提示并移动到“已成笔记”；打开笔记后检查原链接和摘要结构，再退出重开同一隔离数据，确认笔记与回执仍可读取。观察点击到可见反馈，不把自动化工具等待算作 App 响应；fixture 只进入隔离验收数据，不得进入发布默认路径。
 
 Expected: 逐项记录 PASS/FAIL/UNVERIFIED；仅无凭据旅程可在本阶段判定产品实操。
 

@@ -40,8 +40,16 @@ struct AppEnvironment {
         let whisperDirectory = dataURLs.root.appendingPathComponent("Models/WhisperKit", isDirectory: true)
         try fileManager.createDirectory(at: whisperDirectory, withIntermediateDirectories: true)
         let store = WorkspaceStore(initialState: seed, repository: repository, journal: journal)
-        let digestSettingsStore = DigestSettingsStore()
-        let digestCredentialStore = KeychainDigestCredentialStore()
+        let digestSettingsStore = DigestSettingsStore(defaults: try DigestSettingsDefaults.resolve(
+            environment: environment,
+            dataRoot: dataURLs.root
+        ))
+        let digestCredentialStore = KeychainDigestCredentialStore(
+            service: DigestCredentialService.resolve(
+                environment: environment,
+                dataRoot: dataURLs.root
+            )
+        )
         let coordinator = MaterialDigestCoordinator(
             store: store,
             acquirer: RoutedMaterialAcquirer(),

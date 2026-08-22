@@ -33,6 +33,22 @@ enum DigestRuntimeConfiguration {
     }
 }
 
+enum DigestSettingsDefaults {
+    enum ResolutionError: Error { case unavailable }
+
+    static func resolve(environment: [String: String], dataRoot: URL) throws -> UserDefaults {
+        let namespace = DigestCredentialService.resolve(
+            environment: environment,
+            dataRoot: dataRoot
+        )
+        guard namespace != DigestCredentialService.production else { return .standard }
+        guard let defaults = UserDefaults(suiteName: namespace) else {
+            throw ResolutionError.unavailable
+        }
+        return defaults
+    }
+}
+
 @Observable
 final class DigestSettingsStore {
     static let endpointKey = "digest.endpoint.v1"

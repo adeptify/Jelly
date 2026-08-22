@@ -201,6 +201,7 @@ Coordinator 只提交候选结果；Reducer 和 Validator 决定候选是否仍�
 - 音视频不上传到 Jelly 自有服务器。
 - 摘要使用用户配置的 OpenAI 兼容端点和模型。
 - 凭据只进入系统钥匙串或既有安全设置，不写进 Workspace、日志、表单持久化或导出文件。
+- 使用 `JELLY_ACCEPTANCE_DATA_DIRECTORY` 启动隔离验收时，Keychain 服务名和 endpoint/model 偏好域必须由该目录派生；不同验收目录互不共享，也不得读取或覆盖正式 Jelly 的配置。隔离命名空间创建失败时启动失败，不回退到正式配置。
 - 模型必须一次返回结构化 JSON；解析或业务校验失败即失败，不用占位文案冒充摘要。
 - provenance 保存模型标识、生成时间、输入指纹和摘要合同版本，不保存密钥。
 

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 
@@ -18,14 +19,32 @@ enum DigestCredentialStoreError: Error, Equatable {
     case keychain(OSStatus)
 }
 
+enum DigestCredentialService {
+    static let production = "ai.adeptify.jelly.digest"
+
+    static func resolve(environment: [String: String], dataRoot: URL) -> String {
+        guard let acceptanceRoot = environment["JELLY_ACCEPTANCE_DATA_DIRECTORY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !acceptanceRoot.isEmpty
+        else { return production }
+        let digest = SHA256.hash(data: Data(dataRoot.standardizedFileURL.path.utf8))
+        let namespace = digest.map { String(format: "%02x", $0) }.joined()
+        return "\(production).acceptance.\(namespace)"
+    }
+}
+
 struct KeychainDigestCredentialStore: DigestCredentialStoring {
-    static let service = "ai.adeptify.jelly.digest"
     static let account = "openai-compatible-api-key"
+    private let service: String
+
+    init(service: String = DigestCredentialService.production) {
+        self.service = service
+    }
 
     func load() throws -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
+            kSecAttrService as String: service,
             kSecAttrAccount as String: Self.account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
@@ -50,7 +69,7 @@ struct KeychainDigestCredentialStore: DigestCredentialStoring {
         let data = Data(trimmed.utf8)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
+            kSecAttrService as String: service,
             kSecAttrAccount as String: Self.account
         ]
         let updateStatus = SecItemUpdate(
@@ -71,7 +90,7 @@ struct KeychainDigestCredentialStore: DigestCredentialStoring {
     func delete() throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
+            kSecAttrService as String: service,
             kSecAttrAccount as String: Self.account
         ]
         let status = SecItemDelete(query as CFDictionary)
