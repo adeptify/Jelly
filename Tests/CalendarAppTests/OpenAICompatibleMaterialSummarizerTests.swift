@@ -37,6 +37,13 @@ struct OpenAICompatibleMaterialSummarizerTests {
         #expect(format?["type"] as? String == "json_schema")
         let schema = format?["json_schema"] as? [String: Any]
         #expect(schema?["strict"] as? Bool == true)
+        let rootSchema = try #require(schema?["schema"] as? [String: Any])
+        let rootProperties = try #require(rootSchema["properties"] as? [String: Any])
+        let quotes = try #require(rootProperties["quotes"] as? [String: Any])
+        let quoteItems = try #require(quotes["items"] as? [String: Any])
+        let quoteProperties = try #require(quoteItems["properties"] as? [String: Any])
+        let speaker = try #require(quoteProperties["speaker"] as? [String: Any])
+        #expect(speaker["type"] as? String == "string")
         let bodyText = String(data: SummarizerURLProtocol.lastBody ?? Data(), encoding: .utf8) ?? ""
         #expect(!bodyText.contains("sk-test-secret-value"))
         #expect(!bodyText.contains("/tmp/"))
@@ -44,6 +51,11 @@ struct OpenAICompatibleMaterialSummarizerTests {
         let system = try #require(messages.first?["content"] as? String)
         #expect(system.contains("dropped"))
         #expect(system.contains("不得从原文稿中删除"))
+        #expect(system.contains(#""thesis""#))
+        #expect(system.contains(#""takeaways""#))
+        #expect(system.contains(#""chapters""#))
+        #expect(system.contains(#""quotes""#))
+        #expect(system.contains(#""speaker":"""#))
         let user = try #require(messages.last?["content"] as? String)
         #expect(user.contains("[00:00-00:08]"))
         #expect(user.contains("开场"))
@@ -64,6 +76,23 @@ struct OpenAICompatibleMaterialSummarizerTests {
         let system = try #require(messages.first?["content"] as? String)
         #expect(system.contains("视频"))
         #expect(!system.contains("赞助口播"))
+    }
+
+    @Test func discardsLeadingReasoningBlockBeforeDecodingStructuredJSON() async throws {
+        SummarizerURLProtocol.reset()
+        SummarizerURLProtocol.response = .init(
+            status: 200,
+            json: completionJSON("<think>内部推理不会进入摘要。</think>\n" + validSummaryJSON())
+        )
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+
+        let output = try await summarizer.summarize(sampleTranscript, source: videoSource)
+        #expect(output.summary.thesis == "核心论点")
+        #expect(output.summary.takeaways == ["观点1", "观点2", "观点3"])
     }
 
     @Test func mapsUnauthorizedContextLengthAndServerErrors() async throws {

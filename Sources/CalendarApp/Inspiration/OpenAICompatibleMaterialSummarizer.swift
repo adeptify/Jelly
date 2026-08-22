@@ -150,6 +150,11 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
 
     private static func unwrapJSON(_ raw: String) -> String {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("<think>"),
+           let closingTag = text.range(of: "</think>") {
+            text = String(text[closingTag.upperBound...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         if text.hasPrefix("```") {
             if let firstNewline = text.firstIndex(of: "\n") {
                 text = String(text[text.index(after: firstNewline)...])
@@ -319,7 +324,10 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
     }
 
     private static func systemPrompt(for source: MaterialSource) -> String {
-        var prompt = "你是 Jelly 的材料提炼器。只根据给定的带时间戳文稿输出符合 schema 的 JSON，不要编造文稿中没有的内容，也不要输出除 JSON 以外的文字。"
+        var prompt = """
+        你是 Jelly 的材料提炼器。只根据给定的带时间戳文稿输出符合 schema 的 JSON，不要编造文稿中没有的内容，也不要输出除 JSON 以外的文字。
+        字段名和形状必须固定为：{"thesis":"字符串","takeaways":["字符串，3 到 7 项"],"chapters":[{"startSeconds":0,"title":"字符串","points":["字符串，至少 1 项"]}],"quotes":[{"speaker":"","startSeconds":0,"text":"字符串"}],"dropped":["字符串"]}。speaker 不确定时用空字符串；chapters、quotes、dropped 可以是空数组；所有 startSeconds 必须来自文稿时间范围并按先后排序。
+        """
         if source.kind == .video {
             prompt += "这是视频材料：提炼核心论点和可执行观点，章节按时间排序。"
         }
@@ -400,7 +408,7 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
                     "required": ["speaker", "startSeconds", "text"],
                     "properties": [
                         "speaker": [
-                            "type": ["string", "null"],
+                            "type": "string",
                             "maxLength": MaterialDigestContentLimits.maximumSpeakerCharacters
                         ],
                         "startSeconds": [
