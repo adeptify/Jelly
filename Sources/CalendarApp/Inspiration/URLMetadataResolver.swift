@@ -54,13 +54,13 @@ final class URLMetadataResolver: URLMetadataResolving, @unchecked Sendable {
             }
         }
         let html = String(decoding: data, as: UTF8.self)
-        let title = Self.extractTitle(from: html) ?? url.host ?? ""
+        let title = Self.extractTitle(from: html) ?? url.host
         return Self.resolvedResult(url: url, title: title, classifiedKind: classifiedKind)
     }
 
     private static func resolvedResult(
         url: URL,
-        title: String,
+        title: String?,
         classifiedKind: ResolvedSourceKind?
     ) -> URLMetadataResolveResult {
         .init(

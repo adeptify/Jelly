@@ -89,6 +89,18 @@ struct URLMetadataResolverTests {
         #expect(result.metadata.title == "普通文章")
     }
 
+    @Test func keepsMissingTitleNilWhenHostlessHTMLHasNoTitle() async throws {
+        let resolver = makeResolver(
+            contentType: "text/html; charset=utf-8",
+            data: Data("<html><head></head><body>no title</body></html>".utf8),
+            maxBytes: 256_000
+        )
+
+        let result = try await resolver.resolve(URL(string: "app:untitled")!)
+
+        #expect(result.metadata.title == nil)
+    }
+
     private func makeResolver(
         contentType: String,
         data: Data,
