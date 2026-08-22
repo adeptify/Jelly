@@ -803,7 +803,7 @@ Expected: compile failure，缺少 transcriber wrapper。
 
 - [ ] **Step 2: 实现模型准备 wrapper**
 
-wrapper 是 actor，`WhisperKit` 实例只在 actor 内创建和使用。下载调用官方 `WhisperKit.download(variant:downloadBase:from:progressCallback:)`，`downloadBase` 精确传 App 数据目录的 `Models/WhisperKit`；完成后以 `WhisperKitConfig(modelFolder: downloadedFolder.path, download: false, prewarm: true, load: true)` 初始化。进度 callback 映射 0...1，取消后不发布 ready。
+wrapper 是 actor，`WhisperKit` 实例只在 actor 内创建和使用。下载调用官方 `WhisperKit.download(variant:downloadBase:from:progressCallback:)`，`downloadBase` 精确传 App 数据目录的 `Models/WhisperKit`；完成后以 `WhisperKitConfig(modelFolder: downloadedFolder.path, download: false, prewarm: loadPolicy.prewarm, load: true)` 初始化。`loadPolicy` 的最终合同见 Task 11：高内存 Mac 优先首次响应，低内存 Mac 保留顺序预热；进度 callback 映射 0...1，取消后不发布 ready。
 
 Run: `swift test --filter WhisperKitMaterialTranscriberContractTests`
 
@@ -980,3 +980,164 @@ Grok 最终消息必须包含：候选分支/HEAD、Task 1-10 提交、实际 di
 - [ ] **Step 7: 停止写入，等待 Codex 独立 review**
 
 不要 merge、push、tag、release、安装覆盖用户现有 Jelly、修改原始 dirty `main`，也不要清理候选 worktree。Codex 将独立检查 diff、重跑门禁、修复 review findings，并用最终包继续真实旅程。
+
+---
+
+### Task 11: 缩短 large-v3 首次识别等待，不降低转写模型
+
+> **2026-08-22 性能补充：** 最终候选在 M5 Pro、48 GiB 内存上，对约 11.08 秒真实小宇宙音频，从进入识别到友好终态实测约 285.3 秒。统一日志显示 MiniMax 摘要约 1 秒，主要时间落在 WhisperKit/Core ML 首次加载、设备特化和识别。当前 `LiveWhisperKitEngine` 已按进程缓存 `WhisperKit`，但无条件使用 `prewarm: true`。WhisperKit 1.0.0 源码说明该选项以较低峰值内存换取一次 load-unload-load，命中 Core ML 特化缓存时加载时间约乘 2；因此不能把“再加一层缓存”当成修复。
+
+**Files:**
+- Modify: `Sources/CalendarApp/Inspiration/WhisperKitMaterialTranscriber.swift`
+- Modify: `Tests/CalendarAppTests/WhisperKitMaterialTranscriberContractTests.swift`
+- Do not modify: 模型 variant、下载确认、解码参数、摘要模型、来源获取或 Workspace schema
+
+**Interfaces:**
+- Produces: `struct WhisperKitLoadPolicy: Equatable, Sendable`。
+- Produces: `static let fastLoadMinimumPhysicalMemoryBytes: UInt64 = 32 * 1_024 * 1_024 * 1_024`。
+- Produces: `static func automatic(physicalMemoryBytes: UInt64) -> WhisperKitLoadPolicy`；物理内存不少于 32 GiB 时 `prewarm == false`，低于 32 GiB 时 `prewarm == true`。
+- Consumes: `LiveWhisperKitEngine(loadPolicy:)`；生产默认值只从 `ProcessInfo.processInfo.physicalMemory` 计算一次。
+- Preserves: `cachedKit` 与 `cachedModelFolder` 的进程内复用；同一模型目录的第二次识别不得重新构造 `WhisperKit`。
+
+32 GiB 是 Jelly 的产品工程阈值，不是 WhisperKit 官方推荐值：它让本次 48 GiB 目标设备走低等待路线，同时不拿 8/16/24 GiB 设备的峰值内存冒险。真实基准若证明该阈值仍造成系统内存压力，必须另开有证据的调整，不得在本 Task 猜测扩大适用范围。
+
+- [ ] **Step 1: 写加载策略 RED 测试**
+
+在 `WhisperKitMaterialTranscriberContractTests` 增加纯函数边界表：
+
+```swift
+@Test func loadPolicyUsesFastPathOnlyAtOrAboveThirtyTwoGiB() {
+    let gib: UInt64 = 1_024 * 1_024 * 1_024
+    #expect(WhisperKitLoadPolicy.automatic(physicalMemoryBytes: 16 * gib).prewarm)
+    #expect(WhisperKitLoadPolicy.automatic(physicalMemoryBytes: 31 * gib).prewarm)
+    #expect(!WhisperKitLoadPolicy.automatic(physicalMemoryBytes: 32 * gib).prewarm)
+    #expect(!WhisperKitLoadPolicy.automatic(physicalMemoryBytes: 48 * gib).prewarm)
+}
+```
+
+Run: `swift test --filter WhisperKitMaterialTranscriberContractTests.loadPolicyUsesFastPathOnlyAtOrAboveThirtyTwoGiB`
+
+Expected: compile failure `cannot find 'WhisperKitLoadPolicy' in scope`；不能先改生产代码。
+
+- [ ] **Step 2: 实现最小纯策略并转绿**
+
+在 transcriber 文件中加入：
+
+```swift
+struct WhisperKitLoadPolicy: Equatable, Sendable {
+    static let fastLoadMinimumPhysicalMemoryBytes: UInt64 = 32 * 1_024 * 1_024 * 1_024
+
+    let prewarm: Bool
+
+    static func automatic(physicalMemoryBytes: UInt64) -> Self {
+        Self(prewarm: physicalMemoryBytes < fastLoadMinimumPhysicalMemoryBytes)
+    }
+
+    static func automatic(processInfo: ProcessInfo = ProcessInfo.processInfo) -> Self {
+        automatic(physicalMemoryBytes: processInfo.physicalMemory)
+    }
+}
+```
+
+Run: `swift test --filter WhisperKitMaterialTranscriberContractTests.loadPolicyUsesFastPathOnlyAtOrAboveThirtyTwoGiB`
+
+Expected: PASS。
+
+- [ ] **Step 3: 写生产配置 RED 合同并让策略可观察**
+
+测试直接读取尚不存在的纯配置工厂，不加载模型：
+
+```swift
+@Test func liveEngineConfigurationUsesInjectedLoadPolicy() {
+    let gib: UInt64 = 1_024 * 1_024 * 1_024
+    let folder = URL(fileURLWithPath: "/tmp/jelly-whisper-model", isDirectory: true)
+    let fast = LiveWhisperKitEngine.makeConfiguration(
+        modelFolder: folder,
+        loadPolicy: .automatic(physicalMemoryBytes: 48 * gib)
+    )
+    let conservative = LiveWhisperKitEngine.makeConfiguration(
+        modelFolder: folder,
+        loadPolicy: .automatic(physicalMemoryBytes: 16 * gib)
+    )
+    #expect(fast.modelFolder == folder.path)
+    #expect(fast.prewarm == false)
+    #expect(fast.load == true)
+    #expect(fast.download == false)
+    #expect(conservative.prewarm == true)
+}
+```
+
+该测试同时锁定模型目录、`load` 和 `download`，避免为了改 `prewarm` 意外恢复运行时下载。
+
+Run: `swift test --filter WhisperKitMaterialTranscriberContractTests.liveEngineConfigurationUsesInjectedLoadPolicy`
+
+Expected: compile failure，缺少 `makeConfiguration(modelFolder:loadPolicy:)`。
+
+- [ ] **Step 4: 把策略接到唯一 WhisperKit 初始化点**
+
+生产实现精确保持缓存合同，只改配置来源：
+
+```swift
+actor LiveWhisperKitEngine: WhisperKitEngine {
+    private let loadPolicy: WhisperKitLoadPolicy
+    private var cachedKit: WhisperKit?
+    private var cachedModelFolder: URL?
+
+    init(loadPolicy: WhisperKitLoadPolicy = .automatic()) {
+        self.loadPolicy = loadPolicy
+    }
+
+    nonisolated static func makeConfiguration(
+        modelFolder: URL,
+        loadPolicy: WhisperKitLoadPolicy
+    ) -> WhisperKitConfig {
+        WhisperKitConfig(
+            modelFolder: modelFolder.path,
+            prewarm: loadPolicy.prewarm,
+            load: true,
+            download: false
+        )
+    }
+}
+```
+
+在现有缓存 miss 分支里，把内联 `WhisperKitConfig(...)` 精确替换为 `Self.makeConfiguration(modelFolder: modelFolder, loadPolicy: loadPolicy)`；下载方法、缓存 hit 分支和识别调用逐行保持不变。禁止改为 `prewarm: false` 常量；禁止删除 `cachedKit`；禁止换成 tiny/base/small/turbo 或把音频上传到新服务。
+
+Run: `swift test --filter WhisperKitMaterialTranscriberContractTests`
+
+Expected: 全套合同 PASS，测试不访问网络、不下载模型。
+
+- [ ] **Step 5: 跑相关回归并提交 Grok 候选**
+
+```bash
+swift test --filter 'WhisperKitMaterialTranscriberContractTests|MaterialDigestCoordinatorTests|MaterialDigestPresentationTests'
+git diff --check
+git add Sources/CalendarApp/Inspiration/WhisperKitMaterialTranscriber.swift \
+  Tests/CalendarAppTests/WhisperKitMaterialTranscriberContractTests.swift
+git diff --cached --check
+git commit -m "perf(inspiration): 缩短高内存设备识别预热"
+```
+
+Expected: exit 0；提交只包含上述两个实现/测试文件，计划文档仍由 Codex 单独持有或另作计划提交，不混入 Grok 实现提交。
+
+- [ ] **Step 6: Codex 独立性能验收，不接受只测纯函数**
+
+Codex 用最终打包 `.app`、隔离 Workspace/偏好/Keychain/模型目录和同一约 11.08 秒公开小宇宙样本重复实操。不得删除系统 Core ML 缓存来制造结果，也不得把 Computer Use 工具等待算进 App 响应。分别记录：
+
+1. 新进程从 UI 进入 `.transcribing` 到离开 `.transcribing` 的秒数；
+2. 同一 App 进程、同一已安装模型的第二次识别秒数；
+3. 点击“取消”到 UI 离开运行态的可见反馈时间；
+4. 运行前后 App 峰值 RSS、系统是否出现内存压力、App 是否崩溃或失去响应；
+5. 最终结果/友好失败、临时音频清理和重启状态是否仍符合原合同。
+
+性能进入用户验收的硬门：
+
+- 模型仍精确为 `large-v3-v20240930_626MB`，解码参数与摘要模型不变；
+- 48 GiB 设备实际选择 `prewarm == false`；
+- 新进程识别阶段不超过 120 秒，并且相对 285.3 秒基线至少缩短 40%；
+- 同进程热识别阶段不超过 30 秒；
+- 点击取消在 300 ms 内出现可见状态变化，取消后不发布文稿、摘要或笔记写入；
+- 峰值 RSS 不超过 8 GiB，系统无黄色/红色内存压力，最终 App 无崩溃或持续卡死；
+- 原链接、旧成功结果、重试、临时文件清理和重启恢复没有回归。
+
+任一硬门失败只能报告该性能方案未达到产品实操门禁。若新进程识别仍超过 120 秒，停止继续微调这个布尔值，保留 large-v3 质量证据并向用户提交下一步选择：评测更快的本地模型、增加可选云端转写，或接受首次等待；未经用户选择不得偷偷切换。
