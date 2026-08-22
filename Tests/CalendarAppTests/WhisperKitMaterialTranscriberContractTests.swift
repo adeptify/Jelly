@@ -234,6 +234,24 @@ struct WhisperKitMaterialTranscriberContractTests {
         ])
     }
 
+    @Test func threeIdenticalHighDiversityNormalizedSegmentsStillReturnTranscript() async throws {
+        let directory = try makeModelDirectory()
+        let repeatedText = "大家好，这是第一条独立的内容。"
+        #expect(
+            MaterialTranscriptSemantics.semanticDiversityMass(repeatedText)
+                > MaterialTranscriptSemantics.repetitiveNoiseMaximumSemanticDiversityMass
+        )
+        let segments = [
+            TranscriptSegment(startSeconds: 0, endSeconds: 40, text: repeatedText),
+            TranscriptSegment(startSeconds: 40, endSeconds: 80, text: repeatedText),
+            TranscriptSegment(startSeconds: 80, endSeconds: 120, text: repeatedText)
+        ]
+        let engine = FakeWhisperKitEngine(segments: segments)
+        let transcriber = WhisperKitMaterialTranscriber(modelDirectory: directory, engine: engine)
+        let result = try await transcriber.transcribe(URL(fileURLWithPath: "/tmp/source-audio.m4a")) { _ in }
+        #expect(result == TimestampedTranscript(segments: segments))
+    }
+
     @Test func transcriptionDecodeOptionsSkipSpecialTokens() {
         #expect(WhisperKitMaterialTranscriber.transcriptionDecodeOptionsSkipSpecialTokens)
     }
