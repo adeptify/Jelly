@@ -1222,3 +1222,61 @@ Codex 逐行检查候选 diff，重跑摘要器与完整回归，并通过 `appk
 - 401/403/413/400 schema/429/5xx、4 MB 响应上限、短材料友好失败与取消语义不回归；
 - `swift test`、release build、最终 `.app` 打包和严格签名验证通过；
 - 只据此报告工程验证和真实模型集成验证，最终 App 的完整点击旅程与主观等待体验仍需产品实操和用户本人验收。
+
+## Task 13：让短而重复的测试材料稳定得到友好失败
+
+**结论与边界：** 同一个约 11 秒小宇宙测试片段，WhisperKit 可能给出“测试”重复若干次并带 `Thank you`，总 semantic mass 为 12。MiniMax-M3 对这种没有可提炼观点的输入可能合法地给出无法通过摘要合同的结果；现有 `isShortAndSparse` 只看总 mass `<= 3`，因此会把它暴露成“摘要无法校验”，而不是“没有识别到可提炼的内容”。Task 13 只在**模型结果已是 invalidSummary**、材料不超过 30 秒且语义单元高度重复时，把失败映射为 `insufficientContent`；有效摘要仍照常成功，超过 30 秒的材料仍保持严格 `invalidSummary`，绝不放松 schema、证据、时间戳或内容长度校验。
+
+**Files:**
+
+- Modify: `Sources/CalendarApp/Inspiration/MaterialDigestProtocols.swift`
+- Modify: `Tests/CalendarAppTests/OpenAICompatibleMaterialSummarizerTests.swift`
+
+### Step 1：写重复材料 RED 合同
+
+在 `shortSparseClassificationUsesDurationAndMassNotPhrases` 附近增加精确样本：
+
+```swift
+let repetitiveTestTranscript = TimestampedTranscript(segments: [
+    TranscriptSegment(startSeconds: 0, endSeconds: 7.4, text: "测试 测试 测试 测试"),
+    TranscriptSegment(startSeconds: 7.4, endSeconds: 9.5, text: "测试"),
+    TranscriptSegment(startSeconds: 9.5, endSeconds: 11.04, text: "Thank you.")
+])
+#expect(MaterialTranscriptSemantics.semanticMass(repetitiveTestTranscript) == 12)
+#expect(MaterialTranscriptSemantics.semanticDiversityMass(repetitiveTestTranscript) == 4)
+#expect(MaterialTranscriptSemantics.isShortAndSparse(repetitiveTestTranscript))
+```
+
+再让 mock 模型对该 transcript 返回空 thesis/takeaways，断言最终错误为 `.insufficientContent`；同时保留已有“短材料有效单条 takeaway 成功”和“超过 30 秒仍 invalidSummary”合同。
+
+Run: `swift test --filter OpenAICompatibleMaterialSummarizerTests`
+
+Expected: compile failure，缺少 `semanticDiversityMass`，或重复样本尚未被识别为 sparse。
+
+### Step 2：实现去重后的语义单元计数
+
+在 `MaterialTranscriptSemantics` 增加纯函数：英文/数字按不区分大小写的连续单词去重，非西文的字母或数字按 Unicode scalar 去重，先移除 Whisper special tokens。`isShortAndSparse` 在原有 duration `<= 30` 前提下改为：
+
+```swift
+return semanticMass(transcript) <= shortSparseMaximumSemanticMass
+    || semanticDiversityMass(transcript) <= 4
+```
+
+该策略只影响 invalidSummary 的错误映射，不得在调用模型前拒绝 transcript，不得改 `hasSemanticContent`，不得把正常 11 秒中文句子“大家好，这是一条测试。”判成 sparse。
+
+Run: `swift test --filter OpenAICompatibleMaterialSummarizerTests`
+
+Expected: 全套 PASS。
+
+### Step 3：相关回归与提交
+
+```bash
+swift test --filter 'OpenAICompatibleMaterialSummarizerTests|MaterialDigestCoordinatorTests|MaterialDigestPresentationTests|WhisperKitMaterialTranscriberContractTests'
+git diff --check
+git add Sources/CalendarApp/Inspiration/MaterialDigestProtocols.swift \
+  Tests/CalendarAppTests/OpenAICompatibleMaterialSummarizerTests.swift
+git diff --cached --check
+git commit -m "fix(inspiration): 友好处理重复短材料"
+```
+
+进入 Codex 复核的硬门：有效短摘要仍成功；重复 11 秒样本 invalid 时稳定映射为内容不足；正常中文短句和超过 30 秒材料不被降级；完整测试、release build 与最终打包签名通过。产品实操与用户本人验收仍分开报告。
