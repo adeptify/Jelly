@@ -15,6 +15,10 @@ struct AppEnvironment {
     let digestSettingsStore: DigestSettingsStore
     let digestCredentialStore: any DigestCredentialStoring
 
+    var whisperModelDirectory: URL {
+        dataURLs.root.appendingPathComponent("Models/WhisperKit", isDirectory: true)
+    }
+
     static func live(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default
@@ -33,6 +37,10 @@ struct AppEnvironment {
             recoveryManifestURL: dataURLs.recoveryManifest
         )
         let journal = DraftJournalRepository(fileURL: dataURLs.draftJournal)
+        try fileManager.createDirectory(
+            at: dataURLs.root.appendingPathComponent("Models/WhisperKit", isDirectory: true),
+            withIntermediateDirectories: true
+        )
         return AppEnvironment(
             store: WorkspaceStore(initialState: seed, repository: repository, journal: journal),
             dataURLs: dataURLs,

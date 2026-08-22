@@ -22,6 +22,17 @@ struct MaterialDigestCoordinatorTests {
         #expect(await waitUntil { harness.downloader.cleanedRunIDs.count == 1 })
     }
 
+    @Test func audioPathDownloadsAndTranscribesWhenModelReady() async throws {
+        let harness = try await MaterialDigestCoordinatorHarness.audio(modelReady: true)
+        await harness.coordinator.start(inspirationID: harness.inspirationID)
+        #expect(await waitUntil {
+            harness.store.state.materialDigests[harness.inspirationID]?.result != nil
+        })
+        #expect(harness.downloader.downloadCount == 1)
+        #expect(await harness.transcriber.transcribeCount == 1)
+        #expect(await harness.transcriber.prepareCount == 0)
+    }
+
     @Test func audioPathStopsAtAwaitingConsentWithoutDownloading() async throws {
         let harness = try await MaterialDigestCoordinatorHarness.audio(modelReady: false)
         await harness.coordinator.start(inspirationID: harness.inspirationID)
