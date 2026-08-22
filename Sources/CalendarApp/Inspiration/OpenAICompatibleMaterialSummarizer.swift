@@ -15,12 +15,18 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
     ) {
         self.settings = settings
         self.credentials = credentials
+        self.session = URLSession(configuration: Self.makeSessionConfiguration(from: configuration))
+    }
+
+    nonisolated static func makeSessionConfiguration(
+        from configuration: URLSessionConfiguration
+    ) -> URLSessionConfiguration {
         let config = (configuration.copy() as? URLSessionConfiguration) ?? .ephemeral
-        config.timeoutIntervalForRequest = 20
+        config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 120
         config.httpCookieAcceptPolicy = .never
         config.httpShouldSetCookies = false
-        self.session = URLSession(configuration: config)
+        return config
     }
 
     var isConfigured: Bool {

@@ -5,6 +5,20 @@ import WorkspaceDomain
 
 @Suite("OpenAICompatibleMaterialSummarizerTests", .serialized)
 struct OpenAICompatibleMaterialSummarizerTests {
+    @Test func productionTransportAllowsModelLatencyJitterWithoutUnboundedWait() {
+        let base = URLSessionConfiguration.ephemeral
+        base.timeoutIntervalForRequest = 3
+        base.timeoutIntervalForResource = 4
+
+        let configured = OpenAICompatibleMaterialSummarizer.makeSessionConfiguration(from: base)
+
+        #expect(configured !== base)
+        #expect(configured.timeoutIntervalForRequest == 60)
+        #expect(configured.timeoutIntervalForResource == 120)
+        #expect(configured.httpCookieAcceptPolicy == .never)
+        #expect(configured.httpShouldSetCookies == false)
+    }
+
     @Test func requestUsesHTTPSJSONSchemaAndDoesNotPutSecretsInBody() async throws {
         SummarizerURLProtocol.reset()
         SummarizerURLProtocol.response = .init(
