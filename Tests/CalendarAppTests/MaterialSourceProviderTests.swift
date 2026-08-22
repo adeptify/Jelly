@@ -370,6 +370,68 @@ struct MaterialSourceProviderTests {
         )
     }
 
+    @Test func audioDownloadWritesWholeChunksInsteadOfSingleBytes() async throws {
+        ChunkedMaterialURLProtocol.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChunkedMaterialURLProtocol.self]
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-digest-chunks-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let destination = root.appendingPathComponent("audio.partial")
+        let client = MaterialHTTPClient(configuration: configuration, urlValidator: { _ in true })
+        let writes = ChunkWriteRecorder()
+        _ = try await client.streamDownload(
+            URL(string: "https://cdn.test/stream.m4a")!,
+            headers: [:],
+            to: destination,
+            maxBytes: 1_000_000,
+            progress: { _ in },
+            onWrite: { size in writes.append(size) }
+        )
+        let sizes = writes.snapshot()
+        #expect(!sizes.isEmpty)
+        #expect(sizes.allSatisfy { $0 > 1 })
+        #expect(sizes.contains(where: { $0 >= 65_536 }))
+    }
+
+    @Test func cancelledDownloaderRemovesPartialFilesWithoutManualCleanup() async throws {
+        ChunkedMaterialURLProtocol.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChunkedMaterialURLProtocol.self]
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-digest-cancel-\(UUID().uuidString)", isDirectory: true)
+        let downloader = TemporaryMaterialAudioDownloader(
+            client: MaterialHTTPClient(configuration: configuration, urlValidator: { _ in true }),
+            rootDirectory: root
+        )
+        let runID = MaterialDigestRunID()
+        let task = Task {
+            try await downloader.download(
+                RemoteAudioAsset(
+                    url: URL(string: "https://cdn.test/stream.m4a")!,
+                    requestHeaders: [:],
+                    estimatedBytes: nil
+                ),
+                runID: runID,
+                progress: { _ in }
+            )
+        }
+        #expect(await waitForChunkedProtocol { ChunkedMaterialURLProtocol.sentFirstChunk })
+        task.cancel()
+        do {
+            _ = try await task.value
+            Issue.record("cancelled download should not complete")
+        } catch {
+            // CancellationError or URLSession cancellation.
+        }
+        #expect(await waitForChunkedProtocol { ChunkedMaterialURLProtocol.wasStopped })
+        #expect(
+            FileManager.default.fileExists(
+                atPath: root.appendingPathComponent(runID.rawValue.uuidString).path
+            ) == false
+        )
+    }
+
     @Test func audioDownloadWritesIncrementallyAndCancellationStopsTheRequest() async throws {
         ChunkedMaterialURLProtocol.reset()
         let configuration = URLSessionConfiguration.ephemeral
@@ -436,6 +498,23 @@ private func testHTTPClient() -> MaterialHTTPClient {
         configuration: protocolConfiguration(),
         urlValidator: { _ in true }
     )
+}
+
+private final class ChunkWriteRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Int] = []
+
+    func append(_ value: Int) {
+        lock.lock()
+        values.append(value)
+        lock.unlock()
+    }
+
+    func snapshot() -> [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
+    }
 }
 
 private func waitForChunkedProtocol(

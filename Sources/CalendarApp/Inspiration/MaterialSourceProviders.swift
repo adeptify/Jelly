@@ -22,8 +22,10 @@ enum MaterialHTTPClientError: Error, Equatable {
 
 final class MaterialHTTPClient: @unchecked Sendable {
     typealias URLValidator = @Sendable (URL) -> Bool
+    typealias WriteObserver = @Sendable (Int) -> Void
 
     private let session: URLSession
+    private let sessionConfiguration: URLSessionConfiguration
     private let limits: MaterialHTTPLimits
     private let redirectState = RedirectState()
     private let urlValidator: URLValidator
@@ -41,6 +43,7 @@ final class MaterialHTTPClient: @unchecked Sendable {
         config.httpCookieAcceptPolicy = .never
         config.httpShouldSetCookies = false
         config.httpMaximumConnectionsPerHost = 4
+        self.sessionConfiguration = config
         let delegate = RedirectDelegate(
             state: redirectState,
             maxRedirects: limits.maxRedirects,
@@ -83,7 +86,8 @@ final class MaterialHTTPClient: @unchecked Sendable {
         headers: [String: String],
         to destination: URL,
         maxBytes: Int64,
-        progress: @escaping @Sendable (Double) -> Void
+        progress: @escaping @Sendable (Double) -> Void,
+        onWrite: WriteObserver? = nil
     ) async throws -> String? {
         guard urlValidator(url) else { throw MaterialHTTPClientError.unavailable }
         var request = URLRequest(url: url)
@@ -91,49 +95,222 @@ final class MaterialHTTPClient: @unchecked Sendable {
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
         }
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let http = response as? HTTPURLResponse else { throw MaterialHTTPClientError.unavailable }
-        if http.statusCode == 401 || http.statusCode == 403 { throw MaterialHTTPClientError.restricted }
-        guard (200..<300).contains(http.statusCode) else { throw MaterialHTTPClientError.unavailable }
-        guard let finalURL = http.url, urlValidator(finalURL) else {
-            throw MaterialHTTPClientError.unavailable
+        let delegate = StreamDownloadDelegate(
+            destination: destination,
+            maxBytes: maxBytes,
+            maxRedirects: limits.maxRedirects,
+            urlValidator: urlValidator,
+            progress: progress,
+            onWrite: onWrite
+        )
+        let session = URLSession(configuration: sessionConfiguration, delegate: delegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        let task = session.dataTask(with: request)
+        return try await withTaskCancellationHandler {
+            try await delegate.start(task)
+        } onCancel: {
+            task.cancel()
         }
-        if http.expectedContentLength > maxBytes { throw MaterialHTTPClientError.tooLarge }
-        let fileManager = FileManager.default
-        if !fileManager.fileExists(atPath: destination.path) {
-            guard fileManager.createFile(atPath: destination.path, contents: nil) else {
-                throw MaterialHTTPClientError.unavailable
-            }
+    }
+}
+
+private final class StreamDownloadDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let destination: URL
+    private let maxBytes: Int64
+    private let maxRedirects: Int
+    private let urlValidator: MaterialHTTPClient.URLValidator
+    private let progress: @Sendable (Double) -> Void
+    private let onWrite: MaterialHTTPClient.WriteObserver?
+    private let redirectState = RedirectState()
+    private let lock = NSLock()
+    private var handle: FileHandle?
+    private var writtenBytes: Int64 = 0
+    private var expectedLength: Int64 = NSURLSessionTransferSizeUnknown
+    private var mimeType: String?
+    private var lastReportedPercent = -1
+    private var continuation: CheckedContinuation<String?, Error>?
+    private var settled = false
+
+    init(
+        destination: URL,
+        maxBytes: Int64,
+        maxRedirects: Int,
+        urlValidator: @escaping MaterialHTTPClient.URLValidator,
+        progress: @escaping @Sendable (Double) -> Void,
+        onWrite: MaterialHTTPClient.WriteObserver?
+    ) {
+        self.destination = destination
+        self.maxBytes = maxBytes
+        self.maxRedirects = maxRedirects
+        self.urlValidator = urlValidator
+        self.progress = progress
+        self.onWrite = onWrite
+    }
+
+    func start(_ task: URLSessionDataTask) async throws -> String? {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            self.continuation = continuation
+            lock.unlock()
+            task.resume()
         }
-        let handle = try FileHandle(forWritingTo: destination)
-        defer { try? handle.close() }
-        try handle.truncate(atOffset: 0)
-        var buffer = Data()
-        buffer.reserveCapacity(64 * 1_024)
-        var writtenBytes: Int64 = 0
-        var lastReportedPercent = -1
-        for try await byte in bytes {
-            try Task.checkCancellation()
-            guard writtenBytes < maxBytes else { throw MaterialHTTPClientError.tooLarge }
-            buffer.append(byte)
-            writtenBytes += 1
-            if buffer.count >= 64 * 1_024 {
-                try handle.write(contentsOf: buffer)
-                buffer.removeAll(keepingCapacity: true)
-            }
-            if http.expectedContentLength > 0 {
-                let fraction = min(1, Double(writtenBytes) / Double(http.expectedContentLength))
-                let percent = Int((fraction * 100).rounded(.down))
-                if percent != lastReportedPercent {
-                    lastReportedPercent = percent
-                    progress(fraction)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        let count = redirectState.increment(task)
+        guard count <= maxRedirects,
+              let url = request.url,
+              urlValidator(url)
+        else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let http = response as? HTTPURLResponse else {
+            completionHandler(.cancel)
+            fail(.unavailable)
+            return
+        }
+        if http.statusCode == 401 || http.statusCode == 403 {
+            completionHandler(.cancel)
+            fail(.restricted)
+            return
+        }
+        guard (200..<300).contains(http.statusCode),
+              let finalURL = http.url ?? dataTask.currentRequest?.url,
+              urlValidator(finalURL)
+        else {
+            completionHandler(.cancel)
+            fail(.unavailable)
+            return
+        }
+        let expected = http.expectedContentLength
+        if expected > maxBytes {
+            completionHandler(.cancel)
+            fail(.tooLarge)
+            return
+        }
+        do {
+            let fileManager = FileManager.default
+            if !fileManager.fileExists(atPath: destination.path) {
+                guard fileManager.createFile(atPath: destination.path, contents: nil) else {
+                    throw MaterialHTTPClientError.unavailable
                 }
             }
+            let handle = try FileHandle(forWritingTo: destination)
+            try handle.truncate(atOffset: 0)
+            lock.lock()
+            self.handle = handle
+            expectedLength = expected
+            mimeType = http.value(forHTTPHeaderField: "Content-Type")
+            lock.unlock()
+            completionHandler(.allow)
+        } catch {
+            completionHandler(.cancel)
+            fail(.unavailable)
         }
-        if !buffer.isEmpty { try handle.write(contentsOf: buffer) }
-        try handle.synchronize()
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        let handle = self.handle
+        let nextCount = writtenBytes + Int64(data.count)
+        lock.unlock()
+        guard let handle else { return }
+        if nextCount > maxBytes {
+            dataTask.cancel()
+            fail(.tooLarge)
+            return
+        }
+        do {
+            try handle.write(contentsOf: data)
+            lock.lock()
+            writtenBytes = nextCount
+            let expected = expectedLength
+            let percent: Int?
+            if expected > 0 {
+                let fraction = min(1, Double(nextCount) / Double(expected))
+                percent = Int((fraction * 100).rounded(.down))
+            } else {
+                percent = nil
+            }
+            let last = lastReportedPercent
+            if let percent, percent != last {
+                lastReportedPercent = percent
+                lock.unlock()
+                progress(min(1, Double(nextCount) / Double(expected)))
+            } else {
+                lock.unlock()
+            }
+            onWrite?(data.count)
+        } catch {
+            dataTask.cancel()
+            fail(.unavailable)
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        redirectState.remove(task)
+        lock.lock()
+        try? handle?.synchronize()
+        try? handle?.close()
+        handle = nil
+        lock.unlock()
+        if let error {
+            if (error as? URLError)?.code == .cancelled || error is CancellationError {
+                fail(CancellationError())
+            } else {
+                fail(.unavailable)
+            }
+            return
+        }
         progress(1)
-        return http.value(forHTTPHeaderField: "Content-Type")
+        succeed()
+    }
+
+    private func succeed() {
+        lock.lock()
+        guard !settled, let continuation else {
+            lock.unlock()
+            return
+        }
+        settled = true
+        let mime = mimeType
+        self.continuation = nil
+        lock.unlock()
+        continuation.resume(returning: mime)
+    }
+
+    private func fail(_ error: Error) {
+        lock.lock()
+        guard !settled, let continuation else {
+            lock.unlock()
+            return
+        }
+        settled = true
+        self.continuation = nil
+        try? handle?.close()
+        handle = nil
+        lock.unlock()
+        continuation.resume(throwing: error)
+    }
+
+    private func fail(_ error: MaterialHTTPClientError) {
+        fail(error as Error)
     }
 }
 

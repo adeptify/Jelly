@@ -39,6 +39,9 @@ struct OpenAICompatibleMaterialSummarizerTests {
         #expect(schema?["strict"] as? Bool == true)
         let rootSchema = try #require(schema?["schema"] as? [String: Any])
         let rootProperties = try #require(rootSchema["properties"] as? [String: Any])
+        let takeawaysSchema = try #require(rootProperties["takeaways"] as? [String: Any])
+        #expect(takeawaysSchema["minItems"] as? Int == 1)
+        #expect(takeawaysSchema["maxItems"] as? Int == 7)
         let quotes = try #require(rootProperties["quotes"] as? [String: Any])
         let quoteItems = try #require(quotes["items"] as? [String: Any])
         let quoteProperties = try #require(quoteItems["properties"] as? [String: Any])
@@ -101,6 +104,8 @@ struct OpenAICompatibleMaterialSummarizerTests {
         #expect(user.contains("00:00.0") || user.contains("0.0"))
         #expect(user.contains("00:00.8") || user.contains("0.8") || user.contains("0.86"))
         #expect(system.contains("空数组"))
+        #expect(system.contains("1 到 7"))
+        #expect(!system.contains("3 到 7"))
         #expect(system.contains("不要编造文稿中没有的内容"))
         #expect(!system.contains("即使只有一两句"))
         #expect(!system.contains("可从同一句拆"))
@@ -151,7 +156,7 @@ struct OpenAICompatibleMaterialSummarizerTests {
             status: 200,
             json: completionJSON(
                 """
-                {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长很短","没有广告或赞助"],"chapters":[{"startSeconds":0,"title":"","points":[]}],"quotes":[{"speaker":"","startSeconds":0,"text":""}],"dropped":[""]}
+                {"thesis":"这是一句测试。","takeaways":["测试"],"chapters":[{"startSeconds":0,"title":"","points":[]}],"quotes":[{"speaker":"","startSeconds":0,"text":""}],"dropped":[""]}
                 """
             )
         )
@@ -162,8 +167,8 @@ struct OpenAICompatibleMaterialSummarizerTests {
         )
 
         let output = try await summarizer.summarize(shortTranscript, source: audioSource)
-        #expect(output.summary.thesis == "这是一条测试口播。")
-        #expect(output.summary.takeaways == ["内容为一句测试", "时长很短", "没有广告或赞助"])
+        #expect(output.summary.thesis == "这是一句测试。")
+        #expect(output.summary.takeaways == ["测试"])
         #expect(output.summary.chapters.isEmpty)
         #expect(output.summary.quotes.isEmpty)
         #expect(output.summary.dropped.isEmpty)
@@ -176,8 +181,8 @@ struct OpenAICompatibleMaterialSummarizerTests {
             configuration: protocolConfiguration()
         )
         let cases = [
-            ["内容为一句测试", "时长很短", "没有广告或赞助", ""],
-            ["内容为一句测试", "时长很短", "没有广告或赞助", "", "", "", "", ""]
+            ["测试", ""],
+            ["测试", "", "", "", "", "", ""]
         ]
         for takeaways in cases {
             SummarizerURLProtocol.reset()
@@ -195,7 +200,7 @@ struct OpenAICompatibleMaterialSummarizerTests {
             status: 200,
             json: completionJSON(
                 """
-                {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长约十一秒","没有广告或赞助"],"chapters":[],"quotes":[{"speaker":"","startSeconds":0.2,"text":"大家好，这是一条测试"}],"dropped":[]}
+                {"thesis":"这是一句测试。","takeaways":["大家好，这是一条测试"],"chapters":[],"quotes":[{"speaker":"","startSeconds":0.2,"text":"大家好，这是一条测试"}],"dropped":[]}
                 """
             )
         )
@@ -209,13 +214,49 @@ struct OpenAICompatibleMaterialSummarizerTests {
         #expect(output.summary.quotes[0].startSeconds == 0.2)
     }
 
+    @Test func dropsUnsupportedSpeakerWhileKeepingQuotedOriginalText() async throws {
+        SummarizerURLProtocol.reset()
+        SummarizerURLProtocol.response = .init(
+            status: 200,
+            json: completionJSON(
+                """
+                {"thesis":"这是一句测试。","takeaways":["大家好，这是一条测试"],"chapters":[],"quotes":[{"speaker":"专家","startSeconds":0.2,"text":"大家好，这是一条测试"}],"dropped":[]}
+                """
+            )
+        )
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+        let output = try await summarizer.summarize(elevenSecondTranscript, source: audioSource)
+        #expect(output.summary.quotes.count == 1)
+        #expect(output.summary.quotes[0].text == "大家好，这是一条测试")
+        #expect(output.summary.quotes[0].speaker == nil)
+    }
+
+    @Test func acceptsSingleGroundedTakeawayFromShortSemanticTranscript() async throws {
+        SummarizerURLProtocol.reset()
+        SummarizerURLProtocol.response = .init(
+            status: 200,
+            json: completionJSON(shortMaterialSummaryJSON(takeaways: ["测试"]))
+        )
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+        let output = try await summarizer.summarize(shortTranscript, source: audioSource)
+        #expect(output.summary.takeaways == ["测试"])
+    }
+
     @Test func dropsFabricatedExpertQuotesThatAreNotInTheTranscript() async throws {
         SummarizerURLProtocol.reset()
         SummarizerURLProtocol.response = .init(
             status: 200,
             json: completionJSON(
                 """
-                {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长约十一秒","没有广告或赞助"],"chapters":[],"quotes":[{"speaker":"专家","startSeconds":0,"text":"专家指出大模型已经具备通用智能。"}],"dropped":[]}
+                {"thesis":"这是一句测试。","takeaways":["大家好，这是一条测试"],"chapters":[],"quotes":[{"speaker":"专家","startSeconds":0,"text":"专家指出大模型已经具备通用智能。"}],"dropped":[]}
                 """
             )
         )
@@ -226,7 +267,7 @@ struct OpenAICompatibleMaterialSummarizerTests {
         )
         let output = try await summarizer.summarize(elevenSecondTranscript, source: audioSource)
         #expect(output.summary.quotes.isEmpty)
-        #expect(output.summary.thesis == "这是一条测试口播。")
+        #expect(output.summary.thesis == "这是一句测试。")
     }
 
     @Test func rejectsTimestampsPastTranscriptEndWithoutClamping() async throws {
@@ -241,7 +282,7 @@ struct OpenAICompatibleMaterialSummarizerTests {
             status: 200,
             json: completionJSON(
                 """
-                {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长约十一秒","没有广告或赞助"],"chapters":[{"startSeconds":11,"title":"测试口播","points":["一句中文测试"]}],"quotes":[],"dropped":[]}
+                {"thesis":"这是一句测试。","takeaways":["大家好，这是一条测试"],"chapters":[{"startSeconds":11,"title":"测试口播","points":["一句中文测试"]}],"quotes":[],"dropped":[]}
                 """
             )
         )
@@ -252,7 +293,7 @@ struct OpenAICompatibleMaterialSummarizerTests {
             status: 200,
             json: completionJSON(
                 """
-                {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长约十一秒","没有广告或赞助"],"chapters":[],"quotes":[{"speaker":"","startSeconds":11,"text":"大家好，这是一条测试。"}],"dropped":[]}
+                {"thesis":"这是一句测试。","takeaways":["大家好，这是一条测试"],"chapters":[],"quotes":[{"speaker":"","startSeconds":11,"text":"大家好，这是一条测试。"}],"dropped":[]}
                 """
             )
         )
@@ -270,10 +311,10 @@ struct OpenAICompatibleMaterialSummarizerTests {
             {"thesis":"","takeaways":[],"chapters":[{"startSeconds":0,"title":"测试","points":[]}],"quotes":[],"dropped":[]}
             """,
             """
-            {"thesis":"这是一条测试口播。","takeaways":["只有一条"],"chapters":[],"quotes":[],"dropped":[]}
+            {"thesis":"这是一句测试。","takeaways":[],"chapters":[],"quotes":[],"dropped":[]}
             """,
             """
-            {"thesis":"这是一条测试口播。","takeaways":["观点1","",""],"chapters":[],"quotes":[],"dropped":[]}
+            {"thesis":"这是一句测试。","takeaways":["测试","",""],"chapters":[],"quotes":[],"dropped":[]}
             """
         ]
         for json in cases {
@@ -336,7 +377,7 @@ struct OpenAICompatibleMaterialSummarizerTests {
         let cases = [
             completionJSON("```json\n{\"thesis\":\"\"}\n```"),
             completionJSON(validSummaryJSON(thesis: "")),
-            completionJSON(validSummaryJSON(takeaways: ["a", "b"])),
+            completionJSON(validSummaryJSON(takeaways: [])),
             completionJSON(validSummaryJSON(takeaways: (1...8).map { "观点\($0)" })),
             completionJSON(validSummaryJSON(chaptersReversed: true)),
             completionJSON(validSummaryJSON(chapterStart: -1)),
@@ -488,12 +529,12 @@ private func validSummaryJSON(
         : #"[{"startSeconds":\#(chapterStart),"title":"开场","points":["引入"]},{"startSeconds":8,"title":"主体","points":["展开"]}]"#
     let takeawayJSON = takeaways.map { "\"\($0)\"" }.joined(separator: ",")
     return """
-    {"thesis":"\(thesis)","takeaways":[\(takeawayJSON)],"chapters":\(chapters),"quotes":[{"speaker":"讲者","startSeconds":8,"text":"主体"}],"dropped":["片头"]}
+    {"thesis":"\(thesis)","takeaways":[\(takeawayJSON)],"chapters":\(chapters),"quotes":[{"speaker":"","startSeconds":8,"text":"主体"}],"dropped":["片头"]}
     """
 }
 
 private func shortMaterialSummaryJSON(
-    takeaways: [String] = ["内容为一句测试", "时长很短", "没有广告或赞助"]
+    takeaways: [String] = ["测试"]
 ) -> String {
     let takeawayJSON = takeaways.map { "\"\($0)\"" }.joined(separator: ",")
     return """

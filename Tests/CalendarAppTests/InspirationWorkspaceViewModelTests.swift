@@ -656,7 +656,7 @@ private func seedSucceededDigest(
                 DigestChapter(startSeconds: 0, title: "开场", points: ["引入"]),
                 DigestChapter(startSeconds: 8, title: "主体", points: ["展开"])
             ],
-            quotes: [DigestQuote(speaker: "讲者", startSeconds: 8, text: "一句原话")],
+            quotes: [DigestQuote(speaker: nil, startSeconds: 8, text: "主体")],
             dropped: ["片头"]
         ),
         provenance: DigestProvenance(

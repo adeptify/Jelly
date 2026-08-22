@@ -114,10 +114,18 @@ struct MaterialDigestPresentationTests {
     @Test func awaitingConsentShowsDownloadSizeAndContinue() {
         let presentation = MaterialDigestPresentation.project(
             inspiration: videoInspiration(),
-            digest: runningDigest(stage: .awaitingModelDownloadConsent),
+            digest: runningDigest(
+                stage: .awaitingModelDownloadConsent,
+                modelDownloadApproximateBytes: 700_000_000
+            ),
             operatorAvailable: true
         )
-        #expect(presentation.statusText.contains("首次需要下载约 626 MB"))
+        #expect(
+            presentation.statusText
+                == MaterialDigestPresentation.modelDownloadConsentText(approximateBytes: 700_000_000)
+        )
+        #expect(presentation.statusText.contains("700"))
+        #expect(!presentation.statusText.contains("626"))
         #expect(presentation.showsConfirmDownload)
         #expect(presentation.confirmDownloadTitle == "下载并继续")
         #expect(presentation.showsCancel)
@@ -197,7 +205,7 @@ struct MaterialDigestPresentationTests {
         #expect(presentation.thesis == "核心论点")
         #expect(presentation.takeaways == ["观点1", "观点2", "观点3"])
         #expect(presentation.chapters.map(\.title) == ["开场", "主体"])
-        #expect(presentation.quotes.map(\.text) == ["一句原话"])
+        #expect(presentation.quotes.map(\.text) == ["主体"])
         #expect(presentation.dropped == ["片头"])
         #expect(presentation.transcriptAvailable)
         #expect(presentation.transcriptSegments.map(\.text) == ["开场", "主体"])
@@ -260,7 +268,8 @@ private func inspiration(kind: ResolvedSourceKind, url: URL) -> Inspiration {
 
 private func runningDigest(
     stage: MaterialDigestStage,
-    result: MaterialDigestResult? = nil
+    result: MaterialDigestResult? = nil,
+    modelDownloadApproximateBytes: Int64? = nil
 ) -> MaterialDigest {
     let item = videoInspiration()
     return MaterialDigest(
@@ -271,7 +280,8 @@ private func runningDigest(
             id: MaterialDigestRunID(),
             stage: stage,
             startedAt: MaterialDigestPresentationFixture.now,
-            updatedAt: MaterialDigestPresentationFixture.now
+            updatedAt: MaterialDigestPresentationFixture.now,
+            modelDownloadApproximateBytes: modelDownloadApproximateBytes
         ),
         result: result,
         lastFailure: nil,
@@ -307,7 +317,7 @@ private func succeededResult() -> MaterialDigestResult {
                 DigestChapter(startSeconds: 0, title: "开场", points: ["引入"]),
                 DigestChapter(startSeconds: 8, title: "主体", points: ["展开"])
             ],
-            quotes: [DigestQuote(speaker: "讲者", startSeconds: 8, text: "一句原话")],
+            quotes: [DigestQuote(speaker: nil, startSeconds: 8, text: "主体")],
             dropped: ["片头"]
         ),
         provenance: DigestProvenance(

@@ -231,7 +231,7 @@ public enum WorkspaceValidator {
 
     private static func validate(_ result: MaterialDigestResult, for inspirationID: InspirationID) throws {
         try validate(result.transcript, for: inspirationID)
-        try validate(result.summary, for: inspirationID)
+        try validate(result.summary, transcript: result.transcript, for: inspirationID)
         try validate(result.provenance, for: inspirationID)
     }
 
@@ -262,7 +262,11 @@ public enum WorkspaceValidator {
         }
     }
 
-    private static func validate(_ summary: InspirationSummary, for inspirationID: InspirationID) throws {
+    private static func validate(
+        _ summary: InspirationSummary,
+        transcript: TimestampedTranscript,
+        for inspirationID: InspirationID
+    ) throws {
         let thesis = summary.thesis.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !thesis.isEmpty,
               thesis.count <= MaterialDigestContentLimits.maximumThesisCharacters
@@ -272,7 +276,8 @@ public enum WorkspaceValidator {
         let takeaways = summary.takeaways.map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        guard (3...7).contains(takeaways.count),
+        let maximumSourceTime = MaterialDigestEvidence.transcriptEnd(transcript)
+        guard MaterialDigestContentLimits.takeawayCountRange.contains(takeaways.count),
               takeaways.allSatisfy({
                   !$0.isEmpty && $0.count <= MaterialDigestContentLimits.maximumTakeawayCharacters
               }),
@@ -291,6 +296,7 @@ public enum WorkspaceValidator {
             guard chapter.startSeconds.isFinite,
                   chapter.startSeconds >= 0,
                   chapter.startSeconds <= MaterialDigestContentLimits.maximumTimestampSeconds,
+                  chapter.startSeconds <= maximumSourceTime,
                   chapter.startSeconds >= previousStart,
                   !title.isEmpty,
                   title.count <= MaterialDigestContentLimits.maximumChapterTitleCharacters,
@@ -311,12 +317,27 @@ public enum WorkspaceValidator {
             guard quote.startSeconds.isFinite,
                   quote.startSeconds >= 0,
                   quote.startSeconds <= MaterialDigestContentLimits.maximumTimestampSeconds,
+                  quote.startSeconds <= maximumSourceTime,
                   !text.isEmpty,
                   text.count <= MaterialDigestContentLimits.maximumQuoteCharacters,
                   (speaker?.count ?? 0) <= MaterialDigestContentLimits.maximumSpeakerCharacters,
-                  totalCharacters <= MaterialDigestContentLimits.maximumSummaryCharacters
+                  totalCharacters <= MaterialDigestContentLimits.maximumSummaryCharacters,
+                  MaterialDigestEvidence.textAppearsNearby(
+                    text,
+                    at: quote.startSeconds,
+                    in: transcript
+                  )
             else {
                 throw WorkspaceValidationError.invalidMaterialDigestResult(inspirationID)
+            }
+            if let speaker, !speaker.isEmpty {
+                guard MaterialDigestEvidence.speakerAppearsNearby(
+                    speaker,
+                    at: quote.startSeconds,
+                    in: transcript
+                ) else {
+                    throw WorkspaceValidationError.invalidMaterialDigestResult(inspirationID)
+                }
             }
         }
         for item in summary.dropped {

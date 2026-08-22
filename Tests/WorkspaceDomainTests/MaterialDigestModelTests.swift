@@ -43,16 +43,60 @@ struct MaterialDigestModelTests {
         try WorkspaceValidator.validate(seven)
     }
 
-    @Test func validatorRejectsTwoOrEightTakeaways() throws {
+    @Test func validatorAcceptsOneTakeaway() throws {
+        try WorkspaceValidator.validate(
+            MaterialDigestFixture.workspaceWithSucceededDigest(takeawayCount: 1)
+        )
+    }
+
+    @Test func validatorRejectsZeroOrEightTakeaways() throws {
         #expect(throws: WorkspaceValidationError.self) {
             try WorkspaceValidator.validate(
-                MaterialDigestFixture.workspaceWithSucceededDigest(takeawayCount: 2)
+                MaterialDigestFixture.workspaceWithSucceededDigest(takeawayCount: 0)
             )
         }
         #expect(throws: WorkspaceValidationError.self) {
             try WorkspaceValidator.validate(
                 MaterialDigestFixture.workspaceWithSucceededDigest(takeawayCount: 8)
             )
+        }
+    }
+
+    @Test func validatorRejectsChapterOrQuotePastTranscriptEnd() throws {
+        var chapterState = MaterialDigestFixture.workspaceWithSucceededDigest(takeawayCount: 1)
+        let inspirationID = try #require(chapterState.inspirations.keys.first)
+        chapterState.materialDigests[inspirationID]?.result?.summary.chapters = [
+            DigestChapter(startSeconds: 20.6, title: "越界", points: ["点"])
+        ]
+        #expect(throws: WorkspaceValidationError.self) {
+            try WorkspaceValidator.validate(chapterState)
+        }
+
+        var quoteState = MaterialDigestFixture.workspaceWithSucceededDigest(takeawayCount: 1)
+        quoteState.materialDigests[inspirationID]?.result?.summary.quotes = [
+            DigestQuote(speaker: nil, startSeconds: 20.6, text: "主体")
+        ]
+        #expect(throws: WorkspaceValidationError.self) {
+            try WorkspaceValidator.validate(quoteState)
+        }
+    }
+
+    @Test func validatorRejectsQuoteTextOrSpeakerMissingFromTranscript() throws {
+        var textState = MaterialDigestFixture.workspaceWithSucceededDigest(takeawayCount: 1)
+        let inspirationID = try #require(textState.inspirations.keys.first)
+        textState.materialDigests[inspirationID]?.result?.summary.quotes = [
+            DigestQuote(speaker: nil, startSeconds: 8, text: "专家指出大模型已经具备通用智能。")
+        ]
+        #expect(throws: WorkspaceValidationError.self) {
+            try WorkspaceValidator.validate(textState)
+        }
+
+        var speakerState = MaterialDigestFixture.workspaceWithSucceededDigest(takeawayCount: 1)
+        speakerState.materialDigests[inspirationID]?.result?.summary.quotes = [
+            DigestQuote(speaker: "专家", startSeconds: 8, text: "主体")
+        ]
+        #expect(throws: WorkspaceValidationError.self) {
+            try WorkspaceValidator.validate(speakerState)
         }
     }
 
@@ -180,7 +224,7 @@ enum MaterialDigestFixture {
         for inspiration: Inspiration,
         takeawayCount: Int = 3
     ) -> MaterialDigest {
-        let takeaways = (1...max(takeawayCount, 0)).map { "观点\($0)" }
+        let takeaways = takeawayCount <= 0 ? [] : (1...takeawayCount).map { "观点\($0)" }
         return MaterialDigest(
             id: digestID,
             inspirationID: inspiration.id,
@@ -199,7 +243,7 @@ enum MaterialDigestFixture {
                         DigestChapter(startSeconds: 8, title: "主体", points: ["展开"])
                     ],
                     quotes: [
-                        DigestQuote(speaker: "讲者", startSeconds: 8, text: "一句原话")
+                        DigestQuote(speaker: nil, startSeconds: 8, text: "主体")
                     ],
                     dropped: ["片头"]
                 ),

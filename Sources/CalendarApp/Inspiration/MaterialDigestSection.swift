@@ -79,7 +79,9 @@ struct MaterialDigestPresentation: Equatable {
                     ? "正在获取音频"
                     : "正在获取字幕", fraction: progressFraction)
             case .awaitingModelDownloadConsent:
-                presentation.statusText = "首次需要下载约 626 MB 识别模型，有字幕的材料不会下载。"
+                presentation.statusText = modelDownloadConsentText(
+                    approximateBytes: digest?.currentRun?.modelDownloadApproximateBytes
+                )
                 presentation.showsConfirmDownload = true
                 presentation.confirmDownloadTitle = "下载并继续"
             case .downloadingModel:
@@ -122,6 +124,19 @@ struct MaterialDigestPresentation: Equatable {
         presentation.statusText = "尚未提炼"
         presentation.primaryActionTitle = "提炼这个链接"
         return presentation
+    }
+
+    static func modelDownloadConsentText(approximateBytes: Int64?) -> String {
+        let suffix = "识别模型，有字幕的材料不会下载。"
+        guard let approximateBytes, approximateBytes > 0 else {
+            return "首次需要下载\(suffix)"
+        }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.includesUnit = true
+        let size = formatter.string(fromByteCount: approximateBytes)
+        return "首次需要下载约 \(size) \(suffix)"
     }
 
     private static func withProgress(_ text: String, fraction: Double?) -> String {

@@ -14,6 +14,9 @@ public enum MaterialDigestContentLimits {
     public static let maximumTranscriptCharacters = 2_000_000
     public static let maximumSegmentCharacters = 10_000
     public static let maximumThesisCharacters = 4_000
+    public static let minimumTakeaways = 1
+    public static let maximumTakeaways = 7
+    public static let takeawayCountRange = minimumTakeaways...maximumTakeaways
     public static let maximumTakeawayCharacters = 2_000
     public static let maximumChapters = 100
     public static let maximumChapterPoints = 20
@@ -32,17 +35,20 @@ public struct MaterialDigestRun: Codable, Equatable, Sendable {
     public var stage: MaterialDigestStage
     public let startedAt: Date
     public var updatedAt: Date
+    public var modelDownloadApproximateBytes: Int64?
 
     public init(
         id: MaterialDigestRunID,
         stage: MaterialDigestStage,
         startedAt: Date,
-        updatedAt: Date
+        updatedAt: Date,
+        modelDownloadApproximateBytes: Int64? = nil
     ) {
         self.id = id
         self.stage = stage
         self.startedAt = startedAt
         self.updatedAt = updatedAt
+        self.modelDownloadApproximateBytes = modelDownloadApproximateBytes
     }
 }
 

@@ -258,8 +258,13 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
             return
         }
         switch requirement {
-        case .downloadRequired:
-            try await advance(.awaitingModelDownloadConsent, source: source, runID: runID)
+        case let .downloadRequired(approximateBytes):
+            try await advance(
+                .awaitingModelDownloadConsent,
+                source: source,
+                runID: runID,
+                modelDownloadApproximateBytes: approximateBytes
+            )
             return
         case .ready:
             let fileURL = try await audioDownloader.download(
@@ -333,7 +338,8 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
     private func advance(
         _ stage: MaterialDigestStage,
         source: MaterialSource,
-        runID: MaterialDigestRunID
+        runID: MaterialDigestRunID,
+        modelDownloadApproximateBytes: Int64? = nil
     ) async throws {
         try Task.checkCancellation()
         guard isCurrent(inspirationID: source.inspirationID, runID: runID, checksum: source.sourceChecksum) else {
@@ -347,7 +353,8 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
                         runID: runID,
                         sourceChecksum: source.sourceChecksum
                     ),
-                    stage: stage
+                    stage: stage,
+                    modelDownloadApproximateBytes: modelDownloadApproximateBytes
                 )
             )
         )

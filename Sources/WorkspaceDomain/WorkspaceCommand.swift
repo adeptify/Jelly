@@ -263,10 +263,16 @@ public struct StartMaterialDigestPayload: Equatable, Sendable {
 public struct AdvanceMaterialDigestStagePayload: Equatable, Sendable {
     public let expectation: MaterialDigestRunExpectation
     public let stage: MaterialDigestStage
+    public let modelDownloadApproximateBytes: Int64?
 
-    public init(expectation: MaterialDigestRunExpectation, stage: MaterialDigestStage) {
+    public init(
+        expectation: MaterialDigestRunExpectation,
+        stage: MaterialDigestStage,
+        modelDownloadApproximateBytes: Int64? = nil
+    ) {
         self.expectation = expectation
         self.stage = stage
+        self.modelDownloadApproximateBytes = modelDownloadApproximateBytes
     }
 }
 

@@ -64,6 +64,9 @@ extension WorkspaceReducer {
             var digest = digest
             var run = run
             run.stage = payload.stage
+            if payload.stage == .awaitingModelDownloadConsent {
+                run.modelDownloadApproximateBytes = payload.modelDownloadApproximateBytes
+            }
             run.updatedAt = now
             digest.currentRun = run
             digest.updatedAt = now

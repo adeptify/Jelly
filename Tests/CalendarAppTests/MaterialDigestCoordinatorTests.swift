@@ -44,6 +44,49 @@ struct MaterialDigestCoordinatorTests {
         #expect(harness.downloader.downloadCount == 0)
         #expect(await harness.transcriber.prepareCount == 0)
         #expect(harness.store.state.materialDigests[harness.inspirationID]?.result == nil)
+        #expect(
+            harness.store.state.materialDigests[harness.inspirationID]?.currentRun?.modelDownloadApproximateBytes
+                == 700_000_000
+        )
+    }
+
+    @Test func modelDownloadFailureMapsToSafeFailureAndKeepsRetry() async throws {
+        let harness = try await MaterialDigestCoordinatorHarness.audio(modelReady: false)
+        await harness.coordinator.start(inspirationID: harness.inspirationID)
+        #expect(await waitUntil {
+            harness.store.state.materialDigests[harness.inspirationID]?.currentRun?.stage
+                == .awaitingModelDownloadConsent
+        })
+        await harness.transcriber.setPrepareError(.modelDownloadFailed)
+        await harness.coordinator.confirmModelDownload(inspirationID: harness.inspirationID)
+        #expect(await waitUntil {
+            harness.store.state.materialDigests[harness.inspirationID]?.lastFailure?.code
+                == .modelDownloadFailed
+        })
+        #expect(harness.store.state.materialDigests[harness.inspirationID]?.result == nil)
+        #expect(harness.store.state.materialDigests[harness.inspirationID]?.currentRun == nil)
+        #expect(
+            harness.store.state.materialDigests[harness.inspirationID]?.lastFailure?.userMessage
+                == "模型下载失败，可以稍后重试。"
+        )
+    }
+
+    @Test func cancellingWhileModelDownloadIsRunningDoesNotComplete() async throws {
+        let harness = try await MaterialDigestCoordinatorHarness.audio(modelReady: false)
+        await harness.coordinator.start(inspirationID: harness.inspirationID)
+        #expect(await waitUntil {
+            harness.store.state.materialDigests[harness.inspirationID]?.currentRun?.stage
+                == .awaitingModelDownloadConsent
+        })
+        await harness.transcriber.setHoldPrepare(true)
+        await harness.coordinator.confirmModelDownload(inspirationID: harness.inspirationID)
+        await harness.transcriber.waitUntilPrepareStarted()
+        await harness.coordinator.cancel(inspirationID: harness.inspirationID)
+        #expect(await waitUntil {
+            harness.store.state.materialDigests[harness.inspirationID]?.lastFailure?.code == .cancelled
+        })
+        #expect(harness.store.state.materialDigests[harness.inspirationID]?.result == nil)
+        #expect(await harness.transcriber.prepareCount == 1)
     }
 
     @Test func confirmingModelDownloadPreparesRefetchesAndCompletes() async throws {
@@ -114,7 +157,7 @@ struct MaterialDigestCoordinatorTests {
         let first = try #require(harness.store.state.materialDigests[harness.inspirationID]?.result)
 
         harness.acquirer.result = .remoteAudio(MaterialDigestCoordinatorHarness.audioAsset)
-        await harness.transcriber.setRequirement(.downloadRequired(approximateBytes: 626_000_000))
+        await harness.transcriber.setRequirement(.downloadRequired(approximateBytes: 700_000_000))
         await harness.coordinator.start(inspirationID: harness.inspirationID)
         #expect(await waitUntil {
             harness.store.state.materialDigests[harness.inspirationID]?.currentRun?.stage
@@ -203,7 +246,7 @@ private struct MaterialDigestCoordinatorHarness {
                 DigestChapter(startSeconds: 0, title: "开场", points: ["引入"]),
                 DigestChapter(startSeconds: 8, title: "主体", points: ["展开"])
             ],
-            quotes: [DigestQuote(speaker: "讲者", startSeconds: 8, text: "一句原话")],
+            quotes: [DigestQuote(speaker: nil, startSeconds: 8, text: "主体")],
             dropped: ["片头"]
         ),
         endpointHost: "api.example.com",
@@ -269,7 +312,7 @@ private struct MaterialDigestCoordinatorHarness {
         let transcriber = FakeMaterialTranscriber(
             requirement: modelReady
                 ? .ready
-                : .downloadRequired(approximateBytes: 626_000_000),
+                : .downloadRequired(approximateBytes: 700_000_000),
             transcript: transcript
         )
         let summarizer = ControllableMaterialSummarizer(
@@ -336,6 +379,11 @@ private actor FakeMaterialTranscriber: MaterialTranscribing {
     var transcribeCount = 0
     let transcript: TimestampedTranscript
     var readyAfterPrepare = false
+    private var prepareError: MaterialDigestPipelineError?
+    private var holdPrepare = false
+    private var prepareHasStarted = false
+    private var prepareStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var prepareHold: CheckedContinuation<Void, Error>?
 
     init(requirement: MaterialModelRequirement, transcript: TimestampedTranscript) {
         self.requirement = requirement
@@ -352,10 +400,46 @@ private actor FakeMaterialTranscriber: MaterialTranscribing {
         readyAfterPrepare = value
     }
 
+    func setPrepareError(_ error: MaterialDigestPipelineError?) {
+        prepareError = error
+    }
+
+    func setHoldPrepare(_ value: Bool) {
+        holdPrepare = value
+    }
+
+    func waitUntilPrepareStarted() async {
+        if prepareHasStarted { return }
+        await withCheckedContinuation { prepareStartedWaiters.append($0) }
+    }
+
     func prepareModel(progress: @escaping @Sendable (Double) -> Void) async throws {
         prepareCount += 1
+        prepareHasStarted = true
+        let waiters = prepareStartedWaiters
+        prepareStartedWaiters = []
+        waiters.forEach { $0.resume() }
+        if holdPrepare {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    if Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
+                    prepareHold = continuation
+                }
+            } onCancel: {
+                Task { await self.cancelHeldPrepare() }
+            }
+        }
+        if let prepareError { throw prepareError }
         if readyAfterPrepare { requirement = .ready }
         progress(1)
+    }
+
+    private func cancelHeldPrepare() {
+        prepareHold?.resume(throwing: CancellationError())
+        prepareHold = nil
     }
 
     func transcribe(

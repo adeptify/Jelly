@@ -227,56 +227,16 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
                 )
             },
             quotes: summary.quotes.compactMap { quote in
-                let text = quote.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty else { return nil }
-                let speaker = quote.speaker?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let kept = DigestQuote(
-                    speaker: speaker?.isEmpty == false ? speaker : nil,
-                    startSeconds: quote.startSeconds,
-                    text: text
+                MaterialDigestEvidence.sanitizedQuote(
+                    quote,
+                    transcript: transcript,
+                    maximumSourceTime: maximumSourceTime
                 )
-                if quote.startSeconds.isFinite,
-                   quote.startSeconds >= 0,
-                   quote.startSeconds <= maximumSourceTime,
-                   !quoteAppearsInNearbyTranscript(kept, transcript: transcript) {
-                    return nil
-                }
-                return kept
             },
             dropped: summary.dropped
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
         )
-    }
-
-    private static func quoteAppearsInNearbyTranscript(
-        _ quote: DigestQuote,
-        transcript: TimestampedTranscript
-    ) -> Bool {
-        let needle = foldedQuoteText(quote.text)
-        guard !needle.isEmpty else { return false }
-        return foldedQuoteText(nearbyTranscriptText(transcript, at: quote.startSeconds)).contains(needle)
-    }
-
-    private static func nearbyTranscriptText(
-        _ transcript: TimestampedTranscript,
-        at startSeconds: Double
-    ) -> String {
-        let window = 2.0
-        return transcript.segments
-            .filter {
-                $0.endSeconds >= startSeconds - window
-                    && $0.startSeconds <= startSeconds + window
-            }
-            .map(\.text)
-            .joined()
-    }
-
-    private static func foldedQuoteText(_ text: String) -> String {
-        text.lowercased().unicodeScalars
-            .filter { CharacterSet.alphanumerics.contains($0) }
-            .map(String.init)
-            .joined()
     }
 
     private static func validate(
@@ -290,7 +250,7 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
             throw MaterialDigestPipelineError.invalidSummary
         }
         let takeaways = summary.takeaways.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        guard (3...7).contains(takeaways.count),
+        guard MaterialDigestContentLimits.takeawayCountRange.contains(takeaways.count),
               takeaways.allSatisfy({
                   !$0.isEmpty && $0.count <= MaterialDigestContentLimits.maximumTakeawayCharacters
               }),
@@ -383,7 +343,7 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
     private static func systemPrompt(for source: MaterialSource) -> String {
         var prompt = """
         你是 Jelly 的材料提炼器。只根据给定的带时间戳文稿输出符合 schema 的 JSON，不要编造文稿中没有的内容，也不要输出除 JSON 以外的文字。
-        字段名和形状必须固定为：{"thesis":"字符串","takeaways":["字符串，3 到 7 项"],"chapters":[{"startSeconds":0,"title":"字符串","points":["字符串，至少 1 项"]}],"quotes":[{"speaker":"","startSeconds":0,"text":"字符串"}],"dropped":["字符串"]}。speaker 不确定时用空字符串；没有章节、引用或广告时 chapters、quotes、dropped 必须是空数组，不要输出 title、points 或 text 为空的占位对象。所有 startSeconds 必须是数字，来自文稿时间范围，且不超过最后一段结束时间，并按先后排序。
+        字段名和形状必须固定为：{"thesis":"字符串","takeaways":["字符串，1 到 7 项"],"chapters":[{"startSeconds":0,"title":"字符串","points":["字符串，至少 1 项"]}],"quotes":[{"speaker":"","startSeconds":0,"text":"字符串"}],"dropped":["字符串"]}。speaker 不确定时用空字符串，且必须出现在附近原文中才能填写；没有章节、引用或广告时 chapters、quotes、dropped 必须是空数组，不要输出 title、points 或 text 为空的占位对象。所有 startSeconds 必须是数字，来自文稿时间范围，且不超过最后一段结束时间，并按先后排序。
         """
         if source.kind == .video {
             prompt += "这是视频材料：提炼核心论点和可执行观点，章节按时间排序。"
@@ -420,8 +380,8 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
             ],
             "takeaways": [
                 "type": "array",
-                "minItems": 3,
-                "maxItems": 7,
+                "minItems": MaterialDigestContentLimits.minimumTakeaways,
+                "maxItems": MaterialDigestContentLimits.maximumTakeaways,
                 "items": [
                     "type": "string",
                     "maxLength": MaterialDigestContentLimits.maximumTakeawayCharacters
