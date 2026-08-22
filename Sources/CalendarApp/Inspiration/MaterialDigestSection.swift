@@ -4,6 +4,7 @@ import WorkspaceDomain
 struct MaterialDigestPresentation: Equatable {
     var isVisible: Bool
     var statusText: String
+    var progressFraction: Double?
     var primaryActionTitle: String?
     var showsCancel: Bool
     var showsRetry: Bool
@@ -16,11 +17,13 @@ struct MaterialDigestPresentation: Equatable {
     var quotes: [DigestQuote]
     var dropped: [String]
     var transcriptAvailable: Bool
+    var transcriptSegments: [TranscriptSegment]
     var transcriptCollapsedByDefault: Bool
 
     static let hidden = MaterialDigestPresentation(
         isVisible: false,
         statusText: "",
+        progressFraction: nil,
         primaryActionTitle: nil,
         showsCancel: false,
         showsRetry: false,
@@ -33,6 +36,7 @@ struct MaterialDigestPresentation: Equatable {
         quotes: [],
         dropped: [],
         transcriptAvailable: false,
+        transcriptSegments: [],
         transcriptCollapsedByDefault: true
     )
 
@@ -40,7 +44,8 @@ struct MaterialDigestPresentation: Equatable {
         inspiration: Inspiration,
         digest: MaterialDigest?,
         operatorAvailable: Bool,
-        modelConfigured: Bool = true
+        modelConfigured: Bool = true,
+        progressFraction: Double? = nil
     ) -> MaterialDigestPresentation {
         guard operatorAvailable,
               inspiration.inputKind == .url,
@@ -49,6 +54,7 @@ struct MaterialDigestPresentation: Equatable {
 
         var presentation = MaterialDigestPresentation.hidden
         presentation.isVisible = true
+        presentation.progressFraction = progressFraction
         if let result = digest?.result {
             presentation.thesis = result.summary.thesis
             presentation.takeaways = result.summary.takeaways
@@ -56,24 +62,30 @@ struct MaterialDigestPresentation: Equatable {
             presentation.quotes = result.summary.quotes
             presentation.dropped = result.summary.dropped
             presentation.transcriptAvailable = !result.transcript.segments.isEmpty
+            presentation.transcriptSegments = result.transcript.segments
             presentation.transcriptCollapsedByDefault = true
+        }
+        if inspiration.lifecycle != .active {
+            guard digest?.result != nil else { return .hidden }
+            presentation.statusText = "已归档，提炼结果仅供查看。"
+            return presentation
         }
         if let run = digest?.currentRun {
             presentation.showsCancel = true
             presentation.primaryActionTitle = nil
             switch run.stage {
             case .fetchingSource:
-                presentation.statusText = inspiration.resolvedSourceKind == .audio
+                presentation.statusText = withProgress(inspiration.resolvedSourceKind == .audio
                     ? "正在获取音频"
-                    : "正在获取字幕"
+                    : "正在获取字幕", fraction: progressFraction)
             case .awaitingModelDownloadConsent:
                 presentation.statusText = "首次需要下载约 626 MB 识别模型，有字幕的材料不会下载。"
                 presentation.showsConfirmDownload = true
                 presentation.confirmDownloadTitle = "下载并继续"
             case .downloadingModel:
-                presentation.statusText = "正在下载识别模型"
+                presentation.statusText = withProgress("正在下载识别模型", fraction: progressFraction)
             case .transcribing:
-                presentation.statusText = "正在识别"
+                presentation.statusText = withProgress("正在识别", fraction: progressFraction)
             case .summarizing:
                 presentation.statusText = "正在生成摘要"
             }
@@ -81,7 +93,10 @@ struct MaterialDigestPresentation: Equatable {
         }
         if let failure = digest?.lastFailure {
             presentation.statusText = failure.userMessage
-            if failure.code == .modelNotConfigured || !modelConfigured {
+            if failure.code == .modelNotConfigured
+                || failure.code == .authenticationFailed
+                || failure.code == .accessDenied
+                || !modelConfigured {
                 presentation.showsOpenSettings = true
                 presentation.primaryActionTitle = "打开设置"
             } else {
@@ -103,6 +118,12 @@ struct MaterialDigestPresentation: Equatable {
         presentation.statusText = "尚未提炼"
         presentation.primaryActionTitle = "提炼这个链接"
         return presentation
+    }
+
+    private static func withProgress(_ text: String, fraction: Double?) -> String {
+        guard let fraction, fraction.isFinite else { return text }
+        let percent = min(100, max(0, Int((fraction * 100).rounded())))
+        return "\(text) \(percent)%"
     }
 }
 
@@ -170,12 +191,18 @@ struct MaterialDigestSection: View {
                     .font(.system(size: 13))
             }
             ForEach(Array(presentation.chapters.enumerated()), id: \.offset) { _, chapter in
-                Text("\(timestamp(chapter.startSeconds)) \(chapter.title)")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(timestamp(chapter.startSeconds)) \(chapter.title)")
+                        .font(.system(size: 12, weight: .medium))
+                    ForEach(Array(chapter.points.enumerated()), id: \.offset) { _, point in
+                        Text("• \(point)")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             ForEach(Array(presentation.quotes.enumerated()), id: \.offset) { _, quote in
-                Text(quote.text)
+                Text(quoteLine(quote))
                     .font(.system(size: 12).italic())
             }
             if !presentation.dropped.isEmpty {
@@ -185,9 +212,15 @@ struct MaterialDigestSection: View {
             }
             if presentation.transcriptAvailable {
                 DisclosureGroup("完整文稿", isExpanded: $transcriptExpanded) {
-                    Text("文稿已保存在提炼结果中，不会默认写入笔记。")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(presentation.transcriptSegments.enumerated()), id: \.offset) { _, segment in
+                            Text("\(timestamp(segment.startSeconds))  \(segment.text)")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .textSelection(.enabled)
                 }
             }
         }
@@ -196,7 +229,19 @@ struct MaterialDigestSection: View {
     }
 
     private func timestamp(_ seconds: Double) -> String {
+        guard seconds.isFinite,
+              seconds >= 0,
+              seconds <= MaterialDigestContentLimits.maximumTimestampSeconds
+        else { return "--:--" }
         let total = max(0, Int(seconds.rounded(.towardZero)))
         return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+
+    private func quoteLine(_ quote: DigestQuote) -> String {
+        let prefix = "\(timestamp(quote.startSeconds)) "
+        guard let speaker = quote.speaker?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !speaker.isEmpty
+        else { return prefix + quote.text }
+        return "\(prefix)\(speaker)：\(quote.text)"
     }
 }

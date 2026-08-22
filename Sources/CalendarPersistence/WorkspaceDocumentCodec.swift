@@ -46,33 +46,23 @@ public enum WorkspaceDocumentCodec {
                 throw WorkspacePersistenceError.invalidDocument
             }
         case 3:
-            let migrated = migrateV3TaskTitles(try decodeV3V4(data).materializedV5())
+            let migrated = migrateV3TaskTitles(try decodeWorkspace(data))
             let report = WorkspaceConsistencyInspector.inspect(migrated)
             guard !report.hasFatalIssues else { throw WorkspacePersistenceError.invalidDocument }
             return .init(state: migrated, provenance: provenance, consistencyIssues: report.issues)
-        case 4:
-            let materialized = try decodeV3V4(data).materializedV5()
-            let report = WorkspaceConsistencyInspector.inspect(materialized)
-            guard !report.hasFatalIssues else { throw WorkspacePersistenceError.invalidDocument }
-            return .init(state: materialized, provenance: provenance, consistencyIssues: report.issues)
         case WorkspaceDocument.currentSchemaVersion:
-            let document: WorkspaceDocument
-            do {
-                document = try JSONDecoder.workspaceDeterministic.decode(WorkspaceDocument.self, from: data)
-            } catch {
-                throw WorkspacePersistenceError.invalidDocument
-            }
-            let report = WorkspaceConsistencyInspector.inspect(document.state)
+            let state = try decodeWorkspace(data)
+            let report = WorkspaceConsistencyInspector.inspect(state)
             guard !report.hasFatalIssues else { throw WorkspacePersistenceError.invalidDocument }
-            return .init(state: document.state, provenance: provenance, consistencyIssues: report.issues)
+            return .init(state: state, provenance: provenance, consistencyIssues: report.issues)
         default:
             throw WorkspacePersistenceError.unsupportedSchema(schema)
         }
     }
 
-    private static func decodeV3V4(_ data: Data) throws -> WorkspaceStateV3V4 {
+    private static func decodeWorkspace(_ data: Data) throws -> WorkspaceState {
         do {
-            return try JSONDecoder.workspaceDeterministic.decode(WorkspaceDocumentV3V4.self, from: data).state
+            return try JSONDecoder.workspaceDeterministic.decode(WorkspaceDocument.self, from: data).state
         } catch {
             throw WorkspacePersistenceError.invalidDocument
         }

@@ -74,7 +74,8 @@ enum InspirationTextSaveState: Equatable {
             inspiration: selected,
             digest: selectedDigest,
             operatorAvailable: digestOperator != nil,
-            modelConfigured: isDigestConfigured()
+            modelConfigured: isDigestConfigured(),
+            progressFraction: digestOperator?.progress(for: selected.id)
         )
     }
 
@@ -109,7 +110,19 @@ enum InspirationTextSaveState: Equatable {
     }
 
     var selectedPrimaryActionTitle: String {
-        selectedConvertedNoteID == nil ? "继续写成笔记" : "打开笔记"
+        if selectedConvertedNoteID != nil {
+            guard selectedDigestNeedsWriting else { return "打开笔记" }
+            return selectedDigest?.noteWrite == nil ? "写入笔记" : "更新笔记摘要"
+        }
+        return selectedDigest?.result == nil ? "继续写成笔记" : "写入笔记"
+    }
+
+    private var selectedDigestNeedsWriting: Bool {
+        guard selectedConvertedNoteID != nil,
+              let result = selectedDigest?.result,
+              let fingerprint = try? WorkspaceChecksum.materialDigestResultFingerprint(result)
+        else { return false }
+        return selectedDigest?.noteWrite?.resultFingerprint != fingerprint
     }
 
     var selectedTextIsEditable: Bool {
@@ -213,13 +226,14 @@ enum InspirationTextSaveState: Equatable {
         let inspiration: Inspiration
         if let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(),
            scheme == "http" || scheme == "https" {
+            let classifiedKind = SourceKindClassifier.classify(url) ?? .unknown
             inspiration = Inspiration(
                 id: id,
                 inputKind: .url,
                 rawText: nil,
                 rawURL: url,
                 rawFile: nil,
-                resolvedSourceKind: .unknown,
+                resolvedSourceKind: classifiedKind,
                 resolvedMetadata: SourceMetadata(
                     title: nil, siteName: nil, domain: url.host, thumbnailURL: nil, fetchStatus: .loading
                 ),
@@ -263,7 +277,32 @@ enum InspirationTextSaveState: Equatable {
             if case let .live(id) = $0.source { return id == inspiration.id }
             return false
         }) {
-            return existing.noteID
+            guard selectedDigestNeedsWriting,
+                  let note = store.state.notes[existing.noteID],
+                  let result = selectedDigest?.result,
+                  let fingerprint = try? WorkspaceChecksum.materialDigestResultFingerprint(result)
+            else { return existing.noteID }
+            let blocks = InspirationNoteDocumentBuilder.summaryBlocks(for: result)
+            let outcome = try await store.sendWorkspace(
+                .writeMaterialDigestToNote(.init(
+                    inspirationID: inspiration.id,
+                    noteID: existing.noteID,
+                    expectedNoteRevision: note.revision,
+                    resultFingerprint: fingerprint,
+                    proposedBlocks: blocks
+                )),
+                undoLabel: selectedDigest?.noteWrite == nil ? "写入提炼摘要" : "更新提炼摘要"
+            )
+            refresh()
+            switch outcome {
+            case .committed:
+                return existing.noteID
+            case let .noChange(reason, _):
+                if case .materialDigestAlreadyWritten = reason { return existing.noteID }
+                return nil
+            default:
+                return nil
+            }
         }
         let now = clock()
         var note = Note.empty(id: NoteID(), categoryID: inspiration.categoryID, now: now)
@@ -272,8 +311,22 @@ enum InspirationTextSaveState: Equatable {
             for: inspiration,
             digest: store.state.materialDigests[inspiration.id]
         )
+        let digestWrite: MaterialDigestNoteWritePlan?
+        if let result = store.state.materialDigests[inspiration.id]?.result,
+           let fingerprint = try? WorkspaceChecksum.materialDigestResultFingerprint(result) {
+            digestWrite = MaterialDigestNoteWritePlan(
+                resultFingerprint: fingerprint,
+                blockIDs: Array(note.document.blocks.dropFirst()).map(\.id)
+            )
+        } else {
+            digestWrite = nil
+        }
         let outcome = try await store.sendWorkspace(
-            .convertInspirationToNote(.init(inspirationID: inspiration.id, proposedNote: note)),
+            .convertInspirationToNote(.init(
+                inspirationID: inspiration.id,
+                proposedNote: note,
+                digestWrite: digestWrite
+            )),
             undoLabel: "转成笔记"
         )
         refresh()
@@ -403,6 +456,7 @@ enum InspirationTextSaveState: Equatable {
             undoLabel: "永久删除灵感"
         )
         guard case .committed = outcome else { return false }
+        await digestOperator?.stopExternalWork(inspirationID: request.inspirationID)
         if selectedID == request.inspirationID { selectedID = nil }
         statusMessage = nil
         refresh()
@@ -506,30 +560,32 @@ enum InspirationNoteDocumentBuilder {
             var blocks = [linkBlock(title: inspiration.resolvedMetadata?.title ?? url.absoluteString, url: url)]
             let checksum = WorkspaceChecksum.inspirationSourceChecksum(inspiration)
             if let result = digest?.result, digest?.sourceChecksum == checksum {
-                blocks.append(heading2("核心观点"))
-                blocks.append(paragraph(result.summary.thesis))
-                blocks.append(heading2("主要观点"))
-                blocks.append(contentsOf: result.summary.takeaways.map(bullet))
-                if !result.summary.chapters.isEmpty {
-                    blocks.append(heading2("章节"))
-                    blocks.append(contentsOf: result.summary.chapters.map { chapter in
-                        bullet("\(timestamp(chapter.startSeconds)) \(chapter.title)")
-                    })
-                }
-                if !result.summary.quotes.isEmpty {
-                    blocks.append(heading2("引用"))
-                    blocks.append(contentsOf: result.summary.quotes.map { quote in
-                        if let speaker = quote.speaker, !speaker.isEmpty {
-                            bullet("\(speaker)：\(quote.text)")
-                        } else {
-                            bullet(quote.text)
-                        }
-                    })
-                }
+                blocks.append(contentsOf: summaryBlocks(for: result))
             }
             return .init(blocks: blocks)
         }
         return .init(blocks: [paragraph(inspiration.rawText ?? "")])
+    }
+
+    static func summaryBlocks(for result: MaterialDigestResult) -> [DocumentBlock] {
+        var blocks = [heading2("核心观点"), paragraph(result.summary.thesis), heading2("主要观点")]
+        blocks.append(contentsOf: result.summary.takeaways.map(bullet))
+        if !result.summary.chapters.isEmpty {
+            blocks.append(heading2("章节"))
+            blocks.append(contentsOf: result.summary.chapters.map { chapter in
+                bullet("\(timestamp(chapter.startSeconds)) \(chapter.title)")
+            })
+        }
+        if !result.summary.quotes.isEmpty {
+            blocks.append(heading2("引用"))
+            blocks.append(contentsOf: result.summary.quotes.map { quote in
+                if let speaker = quote.speaker, !speaker.isEmpty {
+                    return bullet("\(speaker)：\(quote.text)")
+                }
+                return bullet(quote.text)
+            })
+        }
+        return blocks
     }
 
     private static func linkBlock(title: String, url: URL) -> DocumentBlock {
@@ -555,6 +611,10 @@ enum InspirationNoteDocumentBuilder {
     }
 
     private static func timestamp(_ seconds: Double) -> String {
+        guard seconds.isFinite,
+              seconds >= 0,
+              seconds <= MaterialDigestContentLimits.maximumTimestampSeconds
+        else { return "--:--" }
         let total = max(0, Int(seconds.rounded(.towardZero)))
         return String(format: "%02d:%02d", total / 60, total % 60)
     }

@@ -41,6 +41,16 @@ public enum WorkspaceChecksum {
         return sha256Hex(data)
     }
 
+    public static func materialDigestResultFingerprint(_ result: MaterialDigestResult) throws -> String {
+        let normalized = NormalizedMaterialDigestResult(
+            summary: result.summary,
+            modelIdentifier: result.provenance.modelIdentifier,
+            inputFingerprint: result.provenance.inputFingerprint,
+            summaryContractVersion: result.provenance.summaryContractVersion
+        )
+        return sha256Hex(try JSONEncoder.workspaceDeterministic.encode(normalized))
+    }
+
     public static func diagnosticsChecksum(_ diagnostics: [BlockMarkdownDiagnostic]) -> String {
         var data = Data("legacy-diagnostics-v1".utf8)
         var count = UInt64(diagnostics.count).bigEndian
@@ -58,6 +68,13 @@ public enum WorkspaceChecksum {
         withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
         data.append(value)
     }
+}
+
+private struct NormalizedMaterialDigestResult: Codable {
+    let summary: InspirationSummary
+    let modelIdentifier: String
+    let inputFingerprint: String
+    let summaryContractVersion: String
 }
 
 public extension JSONEncoder {

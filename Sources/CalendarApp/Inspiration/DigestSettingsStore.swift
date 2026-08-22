@@ -5,12 +5,18 @@ enum DigestSettingsNormalization {
     static func endpoint(_ raw: String) -> String? {
         var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         while trimmed.hasSuffix("/") { trimmed.removeLast() }
-        guard let url = URL(string: trimmed),
-              url.scheme?.lowercased() == "https",
-              url.host != nil,
-              !url.host!.isEmpty
+        guard var components = URLComponents(string: trimmed),
+              components.scheme?.lowercased() == "https",
+              let host = components.host,
+              !host.isEmpty,
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil
         else { return nil }
-        return trimmed
+        components.scheme = "https"
+        guard let normalized = components.url?.absoluteString else { return nil }
+        return normalized.hasSuffix("/") ? String(normalized.dropLast()) : normalized
     }
 
     static func model(_ raw: String) -> String? {

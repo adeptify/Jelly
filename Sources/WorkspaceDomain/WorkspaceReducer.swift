@@ -123,6 +123,8 @@ public enum WorkspaceReducer {
             )
         case let .convertInspirationToNote(payload):
             return try convertInspiration(payload, in: &candidate, now: now)
+        case let .writeMaterialDigestToNote(payload):
+            return try writeMaterialDigestToNote(payload, in: &candidate, now: now)
         case let .changeInspirationCategory(id, categoryID, at):
             return try changeInspirationCategory(id, categoryID: categoryID, in: &candidate, now: at)
         case let .archiveInspiration(id, at):

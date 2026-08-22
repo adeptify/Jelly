@@ -133,14 +133,29 @@ struct WorkspaceDocumentCodecTests {
         try WorkspaceValidator.validate(result.state)
     }
 
-    @Test func v5RoundTripPreservesSucceededAwaitingAndRetryDigests() throws {
+    @Test func v4CompatibleRoundTripPreservesSucceededAwaitingAndRetryDigests() throws {
         let expected = try WorkspacePersistenceFixtures.workspaceWithMaterialDigests()
         let encoded = try WorkspaceDocumentCodec.encode(expected)
         let decoded = try WorkspaceDocumentCodec.decode(encoded)
-        #expect(decoded.provenance.sourceSchema == 5)
+        #expect(decoded.provenance.sourceSchema == 4)
         #expect(decoded.state == expected)
         #expect(decoded.state.materialDigests.count == 3)
         #expect(try WorkspaceDocumentCodec.encode(decoded.state) == encoded)
+    }
+
+    @Test func previousV4ReaderCanStillRecoverOriginalNotesAndInspirations() throws {
+        let expected = try WorkspacePersistenceFixtures.workspaceWithMaterialDigests()
+        let encoded = try WorkspaceDocumentCodec.encode(expected)
+
+        let legacy = try JSONDecoder.workspaceDeterministic.decode(
+            LegacyWorkspaceDocumentV3V4.self,
+            from: encoded
+        )
+
+        #expect(legacy.schemaVersion == 4)
+        #expect(legacy.state.notes == expected.notes)
+        #expect(legacy.state.inspirations == expected.inspirations)
+        #expect(legacy.state.inspirationNoteLinks == expected.inspirationNoteLinks)
     }
 
     @Test func currentLinkedTaskTitleMismatchIsRejectedAsFatal() throws {

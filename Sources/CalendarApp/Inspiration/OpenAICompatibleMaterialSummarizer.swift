@@ -3,6 +3,7 @@ import WorkspaceDomain
 
 final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked Sendable {
     static let contractVersion = "summary-contract-v1"
+    private static let maximumResponseBytes = 4_000_000
     private let settings: DigestSettingsStore
     private let credentials: any DigestCredentialStoring
     private let session: URLSession
@@ -34,6 +35,7 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
         _ transcript: TimestampedTranscript,
         source: MaterialSource
     ) async throws -> MaterialSummarizerOutput {
+        let transcriptEnd = try Self.validateTranscript(transcript)
         guard let endpoint = DigestSettingsNormalization.endpoint(settings.endpoint),
               let model = DigestSettingsNormalization.model(settings.model),
               let secret = try credentials.load(),
@@ -42,11 +44,13 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
             throw MaterialDigestPipelineError.modelNotConfigured
         }
         guard let endpointURL = URL(string: endpoint),
-              let host = endpointURL.host,
-              let requestURL = URL(string: endpoint + "/chat/completions")
+              let host = endpointURL.host
         else {
             throw MaterialDigestPipelineError.modelNotConfigured
         }
+        let requestURL = endpointURL
+            .appendingPathComponent("chat", isDirectory: true)
+            .appendingPathComponent("completions", isDirectory: false)
         var request = URLRequest(url: requestURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -58,7 +62,24 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            let (bytes, receivedResponse) = try await session.bytes(for: request)
+            if receivedResponse.expectedContentLength > Int64(Self.maximumResponseBytes) {
+                throw MaterialDigestPipelineError.summarizationFailed
+            }
+            var bounded = Data()
+            bounded.reserveCapacity(min(
+                Self.maximumResponseBytes,
+                max(0, Int(receivedResponse.expectedContentLength))
+            ))
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                guard bounded.count < Self.maximumResponseBytes else {
+                    throw MaterialDigestPipelineError.summarizationFailed
+                }
+                bounded.append(byte)
+            }
+            data = bounded
+            response = receivedResponse
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -68,8 +89,8 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
             throw MaterialDigestPipelineError.summarizationFailed
         }
         try Self.throwForStatus(http.statusCode, data: data)
-        let summary = try Self.decodeSummary(from: data)
-        try Self.validate(summary)
+        let summary = Self.normalized(try Self.decodeSummary(from: data))
+        try Self.validate(summary, maximumSourceTime: transcriptEnd)
         return MaterialSummarizerOutput(
             summary: summary,
             endpointHost: host,
@@ -80,9 +101,8 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
 
     private static func throwForStatus(_ status: Int, data: Data) throws {
         if (200..<300).contains(status) { return }
-        if status == 401 || status == 403 {
-            throw MaterialDigestPipelineError.modelNotConfigured
-        }
+        if status == 401 { throw MaterialDigestPipelineError.authenticationFailed }
+        if status == 403 { throw MaterialDigestPipelineError.accessDenied }
         if status == 413 || containsContextLengthError(data) {
             throw MaterialDigestPipelineError.contextTooLong
         }
@@ -141,22 +161,131 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func validate(_ summary: InspirationSummary) throws {
-        guard !summary.thesis.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    private static func validateTranscript(_ transcript: TimestampedTranscript) throws -> Double {
+        guard !transcript.segments.isEmpty else {
+            throw MaterialDigestPipelineError.sourceUnavailable
+        }
+        guard transcript.segments.count <= MaterialDigestContentLimits.maximumTranscriptSegments else {
+            throw MaterialDigestPipelineError.contextTooLong
+        }
+        var previousStart = -Double.infinity
+        var totalCharacters = 0
+        var maximumEnd = 0.0
+        for segment in transcript.segments {
+            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            totalCharacters += text.count
+            guard totalCharacters <= MaterialDigestContentLimits.maximumTranscriptCharacters else {
+                throw MaterialDigestPipelineError.contextTooLong
+            }
+            guard segment.startSeconds.isFinite,
+                  segment.endSeconds.isFinite,
+                  segment.startSeconds >= 0,
+                  segment.endSeconds >= segment.startSeconds,
+                  segment.endSeconds <= MaterialDigestContentLimits.maximumTimestampSeconds,
+                  segment.startSeconds >= previousStart,
+                  !text.isEmpty,
+                  text.count <= MaterialDigestContentLimits.maximumSegmentCharacters
+            else {
+                throw MaterialDigestPipelineError.sourceUnavailable
+            }
+            previousStart = segment.startSeconds
+            maximumEnd = max(maximumEnd, segment.endSeconds)
+        }
+        return maximumEnd
+    }
+
+    private static func normalized(_ summary: InspirationSummary) -> InspirationSummary {
+        InspirationSummary(
+            thesis: summary.thesis.trimmingCharacters(in: .whitespacesAndNewlines),
+            takeaways: summary.takeaways.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) },
+            chapters: summary.chapters.map { chapter in
+                DigestChapter(
+                    startSeconds: chapter.startSeconds,
+                    title: chapter.title.trimmingCharacters(in: .whitespacesAndNewlines),
+                    points: chapter.points.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                )
+            },
+            quotes: summary.quotes.map { quote in
+                let speaker = quote.speaker?.trimmingCharacters(in: .whitespacesAndNewlines)
+                return DigestQuote(
+                    speaker: speaker?.isEmpty == false ? speaker : nil,
+                    startSeconds: quote.startSeconds,
+                    text: quote.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            },
+            dropped: summary.dropped.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        )
+    }
+
+    private static func validate(
+        _ summary: InspirationSummary,
+        maximumSourceTime: Double
+    ) throws {
+        let thesis = summary.thesis.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !thesis.isEmpty,
+              thesis.count <= MaterialDigestContentLimits.maximumThesisCharacters
+        else {
             throw MaterialDigestPipelineError.invalidSummary
         }
         let takeaways = summary.takeaways.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        guard (3...7).contains(takeaways.count), takeaways.allSatisfy({ !$0.isEmpty }) else {
+        guard (3...7).contains(takeaways.count),
+              takeaways.allSatisfy({
+                  !$0.isEmpty && $0.count <= MaterialDigestContentLimits.maximumTakeawayCharacters
+              }),
+              summary.chapters.count <= MaterialDigestContentLimits.maximumChapters,
+              summary.quotes.count <= MaterialDigestContentLimits.maximumQuotes,
+              summary.dropped.count <= MaterialDigestContentLimits.maximumDroppedItems
+        else {
             throw MaterialDigestPipelineError.invalidSummary
         }
         var previous = -Double.infinity
+        var totalCharacters = thesis.count + takeaways.reduce(0) { $0 + $1.count }
         for chapter in summary.chapters {
-            guard chapter.startSeconds >= previous,
-                  !chapter.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let title = chapter.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let points = chapter.points.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            totalCharacters += title.count + points.reduce(0) { $0 + $1.count }
+            guard chapter.startSeconds.isFinite,
+                  chapter.startSeconds >= 0,
+                  chapter.startSeconds <= MaterialDigestContentLimits.maximumTimestampSeconds,
+                  chapter.startSeconds <= maximumSourceTime,
+                  chapter.startSeconds >= previous,
+                  !title.isEmpty,
+                  title.count <= MaterialDigestContentLimits.maximumChapterTitleCharacters,
+                  (1...MaterialDigestContentLimits.maximumChapterPoints).contains(points.count),
+                  points.allSatisfy({
+                      !$0.isEmpty && $0.count <= MaterialDigestContentLimits.maximumPointCharacters
+                  }),
+                  totalCharacters <= MaterialDigestContentLimits.maximumSummaryCharacters
             else {
                 throw MaterialDigestPipelineError.invalidSummary
             }
             previous = chapter.startSeconds
+        }
+        for quote in summary.quotes {
+            let text = quote.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let speaker = quote.speaker?.trimmingCharacters(in: .whitespacesAndNewlines)
+            totalCharacters += text.count + (speaker?.count ?? 0)
+            guard quote.startSeconds.isFinite,
+                  quote.startSeconds >= 0,
+                  quote.startSeconds <= MaterialDigestContentLimits.maximumTimestampSeconds,
+                  quote.startSeconds <= maximumSourceTime,
+                  !text.isEmpty,
+                  text.count <= MaterialDigestContentLimits.maximumQuoteCharacters,
+                  (speaker?.count ?? 0) <= MaterialDigestContentLimits.maximumSpeakerCharacters,
+                  totalCharacters <= MaterialDigestContentLimits.maximumSummaryCharacters
+            else {
+                throw MaterialDigestPipelineError.invalidSummary
+            }
+        }
+        for item in summary.dropped {
+            let text = item.trimmingCharacters(in: .whitespacesAndNewlines)
+            totalCharacters += text.count
+            guard !text.isEmpty,
+                  text.count <= MaterialDigestContentLimits.maximumDroppedItemCharacters,
+                  totalCharacters <= MaterialDigestContentLimits.maximumSummaryCharacters
+            else {
+                throw MaterialDigestPipelineError.invalidSummary
+            }
         }
     }
 
@@ -207,6 +336,10 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
     }
 
     private static func timestamp(_ seconds: Double) -> String {
+        guard seconds.isFinite,
+              seconds >= 0,
+              seconds <= MaterialDigestContentLimits.maximumTimestampSeconds
+        else { return "--:--" }
         let total = max(0, Int(seconds.rounded(.towardZero)))
         return String(format: "%02d:%02d", total / 60, total % 60)
     }
@@ -216,45 +349,79 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
         "additionalProperties": false,
         "required": ["thesis", "takeaways", "chapters", "quotes", "dropped"],
         "properties": [
-            "thesis": ["type": "string"],
+            "thesis": [
+                "type": "string",
+                "maxLength": MaterialDigestContentLimits.maximumThesisCharacters
+            ],
             "takeaways": [
                 "type": "array",
                 "minItems": 3,
                 "maxItems": 7,
-                "items": ["type": "string"]
+                "items": [
+                    "type": "string",
+                    "maxLength": MaterialDigestContentLimits.maximumTakeawayCharacters
+                ]
             ],
             "chapters": [
                 "type": "array",
+                "maxItems": MaterialDigestContentLimits.maximumChapters,
                 "items": [
                     "type": "object",
                     "additionalProperties": false,
                     "required": ["startSeconds", "title", "points"],
                     "properties": [
-                        "startSeconds": ["type": "number"],
-                        "title": ["type": "string"],
+                        "startSeconds": [
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": MaterialDigestContentLimits.maximumTimestampSeconds
+                        ],
+                        "title": [
+                            "type": "string",
+                            "maxLength": MaterialDigestContentLimits.maximumChapterTitleCharacters
+                        ],
                         "points": [
                             "type": "array",
-                            "items": ["type": "string"]
+                            "minItems": 1,
+                            "maxItems": MaterialDigestContentLimits.maximumChapterPoints,
+                            "items": [
+                                "type": "string",
+                                "maxLength": MaterialDigestContentLimits.maximumPointCharacters
+                            ]
                         ]
                     ]
                 ]
             ],
             "quotes": [
                 "type": "array",
+                "maxItems": MaterialDigestContentLimits.maximumQuotes,
                 "items": [
                     "type": "object",
                     "additionalProperties": false,
                     "required": ["speaker", "startSeconds", "text"],
                     "properties": [
-                        "speaker": ["type": ["string", "null"]],
-                        "startSeconds": ["type": "number"],
-                        "text": ["type": "string"]
+                        "speaker": [
+                            "type": ["string", "null"],
+                            "maxLength": MaterialDigestContentLimits.maximumSpeakerCharacters
+                        ],
+                        "startSeconds": [
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": MaterialDigestContentLimits.maximumTimestampSeconds
+                        ],
+                        "text": [
+                            "type": "string",
+                            "maxLength": MaterialDigestContentLimits.maximumQuoteCharacters
+                        ]
                     ]
                 ]
             ],
             "dropped": [
                 "type": "array",
-                "items": ["type": "string"]
+                "maxItems": MaterialDigestContentLimits.maximumDroppedItems,
+                "items": [
+                    "type": "string",
+                    "maxLength": MaterialDigestContentLimits.maximumDroppedItemCharacters
+                ]
             ]
         ]
     ] }

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Observation
 import SwiftUI
 import Testing
 import WorkspaceDomain
@@ -167,10 +168,12 @@ struct InspirationWorkspaceViewModelTests {
             metadataResolver: resolver,
             digestOperator: recorder
         )
-        _ = try await model.capture("https://www.bilibili.com/video/BV1xx411c7mD/")
+        let id = try await model.capture("https://www.bilibili.com/video/BV1xx411c7mD/")
         #expect(recorder.starts.isEmpty)
         #expect(recorder.confirms.isEmpty)
-        model.select(store.state.inspirations.keys.first)
+        #expect(store.state.inspirations[id]?.resolvedSourceKind == .video)
+        #expect(model.selectedDigestPresentation.primaryActionTitle == "提炼这个链接")
+        model.select(id)
         #expect(try await model.archiveSelected())
         #expect(recorder.starts.isEmpty)
     }
@@ -426,6 +429,48 @@ struct InspirationWorkspaceViewModelTests {
         #expect(model.converted.map(\.id).contains(id))
     }
 
+    @Test func digestCompletedAfterConversionCanBeWrittenToTheExistingNoteOnce() async throws {
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let now = Date(timeIntervalSince1970: 1_800_310_200)
+        let inspiration = Inspiration(
+            id: InspirationID(),
+            inputKind: .url,
+            rawText: nil,
+            rawURL: URL(string: "https://www.bilibili.com/video/BV1xx411c7mD/")!,
+            rawFile: nil,
+            resolvedSourceKind: .video,
+            resolvedMetadata: nil,
+            categoryID: calendar.uncategorizedID,
+            lifecycle: .active,
+            createdAt: now,
+            updatedAt: now
+        )
+        _ = try await store.sendWorkspace(.createInspiration(.init(inspiration: inspiration)))
+        let model = InspirationViewModel(store: store)
+        model.select(inspiration.id)
+        let noteID = try #require(try await model.convertSelectedToNote())
+        #expect(store.state.notes[noteID]?.document.blocks.map(\.kind) == [.link])
+
+        try await seedSucceededDigest(for: inspiration, in: store, now: now)
+        #expect(model.selectedPrimaryActionTitle == "写入笔记")
+        #expect(try await model.convertSelectedToNote() == noteID)
+        let firstWrite = try #require(store.state.notes[noteID]?.document.blocks)
+        #expect(firstWrite.first?.kind == .link)
+        #expect(firstWrite.contains(where: {
+            $0.inlineContent.spans.map(\.text).joined() == "核心论点"
+        }))
+
+        #expect(model.selectedPrimaryActionTitle == "打开笔记")
+        #expect(try await model.convertSelectedToNote() == noteID)
+        #expect(store.state.notes[noteID]?.document.blocks == firstWrite)
+        #expect(store.state.notes.count == 1)
+    }
+
     @Test func archiveAndRestorePartitionLifecycle() async throws {
         let calendar = makeEmptyState()
         let store = WorkspaceStore(
@@ -486,7 +531,12 @@ struct InspirationWorkspaceViewModelTests {
         )
         await store.load()
         let deletedAt = Date(timeIntervalSince1970: 1_700_002_000)
-        let model = InspirationViewModel(store: store, clock: { deletedAt })
+        let digestOperator = RecordingMaterialDigestOperator()
+        let model = InspirationViewModel(
+            store: store,
+            digestOperator: digestOperator,
+            clock: { deletedAt }
+        )
         let id = try await model.capture("准备删除的灵感")
         model.select(id)
         #expect(try await model.archiveSelected())
@@ -499,21 +549,26 @@ struct InspirationWorkspaceViewModelTests {
         )
         #expect(try await model.permanentlyDelete(request, authorization: authorization))
         #expect(store.state.inspirations[id] == nil)
+        #expect(digestOperator.stops == [id])
         #expect(model.selectedID == nil)
     }
 }
 
 @MainActor
+@Observable
 final class RecordingMaterialDigestOperator: MaterialDigestOperating {
     var starts: [InspirationID] = []
     var confirms: [InspirationID] = []
     var cancels: [InspirationID] = []
+    var stops: [InspirationID] = []
     var reconciles = 0
 
     func start(inspirationID: InspirationID) async { starts.append(inspirationID) }
     func confirmModelDownload(inspirationID: InspirationID) async { confirms.append(inspirationID) }
     func cancel(inspirationID: InspirationID) async { cancels.append(inspirationID) }
+    func stopExternalWork(inspirationID: InspirationID) async { stops.append(inspirationID) }
     func reconcileInterruptedRuns() async { reconciles += 1 }
+    func progress(for inspirationID: InspirationID) -> Double? { nil }
 }
 
 @MainActor

@@ -102,6 +102,17 @@ struct MaterialDigestPresentationTests {
         #expect(presentation.showsCancel)
     }
 
+    @Test func longRunningStagesExposeProgressAsText() {
+        let presentation = MaterialDigestPresentation.project(
+            inspiration: videoInspiration(),
+            digest: runningDigest(stage: .downloadingModel),
+            operatorAvailable: true,
+            progressFraction: 0.34
+        )
+        #expect(presentation.progressFraction == 0.34)
+        #expect(presentation.statusText == "正在下载识别模型 34%")
+    }
+
     @Test func retryKeepsPreviousResultVisibleWithNewProgress() {
         let digest = runningDigest(stage: .summarizing, result: succeededResult())
         let presentation = MaterialDigestPresentation.project(
@@ -146,8 +157,33 @@ struct MaterialDigestPresentationTests {
         #expect(presentation.quotes.map(\.text) == ["一句原话"])
         #expect(presentation.dropped == ["片头"])
         #expect(presentation.transcriptAvailable)
+        #expect(presentation.transcriptSegments.map(\.text) == ["开场", "主体"])
         #expect(presentation.transcriptCollapsedByDefault)
         #expect(presentation.showsCancel == false)
+    }
+
+    @Test func archivedSourceNeverShowsActionsThatSilentlyDoNothing() {
+        var archived = videoInspiration()
+        archived.lifecycle = .archived
+
+        let withoutResult = MaterialDigestPresentation.project(
+            inspiration: archived,
+            digest: nil,
+            operatorAvailable: true
+        )
+        #expect(withoutResult.isVisible == false)
+
+        let withResult = MaterialDigestPresentation.project(
+            inspiration: archived,
+            digest: succeededDigest(),
+            operatorAvailable: true
+        )
+        #expect(withResult.isVisible)
+        #expect(withResult.thesis == "核心论点")
+        #expect(withResult.primaryActionTitle == nil)
+        #expect(withResult.showsRetry == false)
+        #expect(withResult.showsConfirmDownload == false)
+        #expect(withResult.showsCancel == false)
     }
 }
 

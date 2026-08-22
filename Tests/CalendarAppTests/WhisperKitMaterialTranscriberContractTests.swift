@@ -26,6 +26,58 @@ struct WhisperKitMaterialTranscriberContractTests {
         #expect(requirement == .ready)
     }
 
+    @Test func partialModelFolderIsNotReportedReady() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-whisper-partial-\(UUID().uuidString)", isDirectory: true)
+        let model = directory.appendingPathComponent(
+            "openai_whisper-large-v3-v20240930_626MB",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
+        try Data("partial".utf8).write(to: model.appendingPathComponent("config.json"))
+        let transcriber = WhisperKitMaterialTranscriber(
+            modelDirectory: directory,
+            engine: FakeWhisperKitEngine()
+        )
+
+        #expect(await transcriber.modelRequirement() == .downloadRequired(approximateBytes: 626_000_000))
+    }
+
+    @Test func prepareModelRequiresCompleteDownloadedArtifacts() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-whisper-incomplete-download-\(UUID().uuidString)", isDirectory: true)
+        let engine = FakeWhisperKitEngine(installCompleteModel: false)
+        let transcriber = WhisperKitMaterialTranscriber(modelDirectory: directory, engine: engine)
+
+        do {
+            try await transcriber.prepareModel { _ in }
+            Issue.record("incomplete model download should not be reported as ready")
+        } catch let error as MaterialDigestPipelineError {
+            #expect(error == .modelDownloadFailed)
+        }
+        #expect(await transcriber.modelRequirement() == .downloadRequired(approximateBytes: 626_000_000))
+    }
+
+    @Test func prepareModelCancellationDoesNotPublishReadyState() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-whisper-cancel-download-\(UUID().uuidString)", isDirectory: true)
+        let engine = FakeWhisperKitEngine(downloadDelayNanoseconds: 200_000_000)
+        let transcriber = WhisperKitMaterialTranscriber(modelDirectory: directory, engine: engine)
+        let task = Task { try await transcriber.prepareModel { _ in } }
+        try await Task.sleep(for: .milliseconds(20))
+        task.cancel()
+
+        do {
+            try await task.value
+            Issue.record("cancelled model download should throw")
+        } catch is CancellationError {
+            // expected
+        } catch {
+            Issue.record("unexpected \(error)")
+        }
+        #expect(await transcriber.modelRequirement() == .downloadRequired(approximateBytes: 626_000_000))
+    }
+
     @Test func mapsSegmentsDropsBlanksAndKeepsMonotonicTimes() async throws {
         let directory = try makeModelDirectory()
         let engine = FakeWhisperKitEngine(segments: [
@@ -74,7 +126,11 @@ private func makeModelDirectory() throws -> URL {
         isDirectory: true
     )
     try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
-    try Data("model".utf8).write(to: model.appendingPathComponent("config.json"))
+    for name in ["MelSpectrogram", "AudioEncoder", "TextDecoder"] {
+        let artifact = model.appendingPathComponent("\(name).mlmodelc", isDirectory: true)
+        try FileManager.default.createDirectory(at: artifact, withIntermediateDirectories: true)
+        try Data("model".utf8).write(to: artifact.appendingPathComponent("coremldata.bin"))
+    }
     return directory
 }
 
@@ -82,6 +138,7 @@ private final class FakeWhisperKitEngine: WhisperKitEngine, @unchecked Sendable 
     var segments: [TranscriptSegment]
     var downloadDelayNanoseconds: UInt64
     var transcribeDelayNanoseconds: UInt64
+    var installCompleteModel: Bool
     var downloadStarted = false
     var markedReady = false
     var transcribeStarted = false
@@ -92,11 +149,13 @@ private final class FakeWhisperKitEngine: WhisperKitEngine, @unchecked Sendable 
             .init(startSeconds: 0, endSeconds: 1, text: "hello")
         ],
         downloadDelayNanoseconds: UInt64 = 0,
-        transcribeDelayNanoseconds: UInt64 = 0
+        transcribeDelayNanoseconds: UInt64 = 0,
+        installCompleteModel: Bool = true
     ) {
         self.segments = segments
         self.downloadDelayNanoseconds = downloadDelayNanoseconds
         self.transcribeDelayNanoseconds = transcribeDelayNanoseconds
+        self.installCompleteModel = installCompleteModel
     }
 
     func download(
@@ -109,9 +168,19 @@ private final class FakeWhisperKitEngine: WhisperKitEngine, @unchecked Sendable 
             try await Task.sleep(nanoseconds: downloadDelayNanoseconds)
         }
         try Task.checkCancellation()
+        let folder = downloadBase.appendingPathComponent("openai_whisper-\(variant)", isDirectory: true)
+        if installCompleteModel {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            for name in ["MelSpectrogram", "AudioEncoder", "TextDecoder"] {
+                try FileManager.default.createDirectory(
+                    at: folder.appendingPathComponent("\(name).mlmodelc", isDirectory: true),
+                    withIntermediateDirectories: true
+                )
+            }
+        }
         markedReady = true
         progress(1)
-        return downloadBase.appendingPathComponent("openai_whisper-\(variant)", isDirectory: true)
+        return folder
     }
 
     func transcribe(

@@ -6,7 +6,9 @@
 
 **Architecture:** 原始 `Inspiration` 保持 raw-first；新增独立 `MaterialDigest` 领域对象和 runID/checksum 状态机。App 层的 `MaterialDigestCoordinator` 组合来源解析、本机 WhisperKit 识别与 OpenAI 兼容结构化摘要，所有持久状态仍通过 Workspace Reducer 写入；视图只呈现状态和发出用户动作。
 
-**Tech Stack:** Swift 6.3、SwiftUI、Foundation/URLSession、Security/Keychain、AVFoundation、swift-testing、macOS 14+、Apple silicon、Argmax OSS Swift Package `1.0.0` 的 `WhisperKit` 产品、JSON 本地持久化 schema V5。
+**Tech Stack:** Swift 6.3、SwiftUI、Foundation/URLSession、Security/Keychain、AVFoundation、swift-testing、macOS 14+、Apple silicon、Argmax OSS Swift Package `1.0.0` 的 `WhisperKit` 产品、JSON 本地持久化 schema V4 可选扩展。
+
+> **Codex review 修订（2026-08-22）：** 本计划后文保留 Grok 当时的逐步执行记录，但最终候选有三项安全修订优先于原计划：持久化不升 V5，而是在 V4 中增加可选派生 Digest 以保住旧版回滚读取原始链接/笔记；401 与 403 分别呈现密钥错误和模型权限错误；来源请求采用有上限的流式读取、逐跳 SSRF 校验，并兼容系统代理的 fake-IP 模式。旧版 Jelly 回写会丢派生 Digest，这不是无损双向兼容，正式升级前仍需备份。
 
 **Spec:** `docs/superpowers/specs/2026-08-22-inspiration-material-digest-design.md`
 

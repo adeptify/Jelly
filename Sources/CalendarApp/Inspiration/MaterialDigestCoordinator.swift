@@ -1,14 +1,29 @@
 import Foundation
+import Observation
 import WorkspaceDomain
 
 @MainActor
+@Observable
 final class MaterialDigestCoordinator: MaterialDigestOperating {
-    private let store: WorkspaceStore
-    private let acquirer: any MaterialAcquiring
-    private let audioDownloader: any MaterialAudioDownloading
-    private let transcriber: any MaterialTranscribing
-    private let summarizer: any MaterialSummarizing
-    private var tasks: [InspirationID: Task<Void, Never>] = [:]
+    private enum TaskPurpose: Equatable {
+        case pipeline
+        case confirmedModelDownload
+    }
+
+    private struct TaskEntry {
+        let token: UUID
+        let runID: MaterialDigestRunID
+        let purpose: TaskPurpose
+        let task: Task<Void, Never>
+    }
+
+    @ObservationIgnored private let store: WorkspaceStore
+    @ObservationIgnored private let acquirer: any MaterialAcquiring
+    @ObservationIgnored private let audioDownloader: any MaterialAudioDownloading
+    @ObservationIgnored private let transcriber: any MaterialTranscribing
+    @ObservationIgnored private let summarizer: any MaterialSummarizing
+    @ObservationIgnored private var tasks: [InspirationID: TaskEntry] = [:]
+    private var progressValues: [InspirationID: Double] = [:]
 
     init(
         store: WorkspaceStore,
@@ -39,7 +54,12 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
             )
         )
         guard case .committed = outcome else { return }
-        launch(inspirationID: inspirationID, runID: runID, checksum: source.sourceChecksum) {
+        launch(
+            inspirationID: inspirationID,
+            runID: runID,
+            checksum: source.sourceChecksum,
+            purpose: .pipeline
+        ) {
             try await self.runFromFetching(source: source, runID: runID)
         }
     }
@@ -52,12 +72,23 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
               source.sourceChecksum == digest.sourceChecksum
         else { return }
         let runID = run.id
-        launch(inspirationID: inspirationID, runID: runID, checksum: source.sourceChecksum) {
+        if let existing = tasks[inspirationID],
+           existing.runID == runID,
+           existing.purpose == .confirmedModelDownload {
+            return
+        }
+        launch(
+            inspirationID: inspirationID,
+            runID: runID,
+            checksum: source.sourceChecksum,
+            purpose: .confirmedModelDownload
+        ) {
             try await self.runConfirmedDownload(source: source, runID: runID)
         }
     }
 
     func cancel(inspirationID: InspirationID) async {
+        let runningTask = tasks[inspirationID]?.task
         if let digest = store.state.materialDigests[inspirationID],
            let run = digest.currentRun {
             _ = try? await store.sendWorkspace(
@@ -70,11 +101,22 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
                 )
             )
         }
-        tasks[inspirationID]?.cancel()
-        tasks[inspirationID] = nil
+        runningTask?.cancel()
+        progressValues.removeValue(forKey: inspirationID)
+    }
+
+    func stopExternalWork(inspirationID: InspirationID) async {
+        tasks[inspirationID]?.task.cancel()
+        progressValues.removeValue(forKey: inspirationID)
+    }
+
+    func progress(for inspirationID: InspirationID) -> Double? {
+        progressValues[inspirationID]
     }
 
     func reconcileInterruptedRuns() async {
+        let activeRunIDs = Set(store.state.materialDigests.values.compactMap { $0.currentRun?.id })
+        audioDownloader.cleanupOrphans(keeping: activeRunIDs)
         for (inspirationID, digest) in store.state.materialDigests {
             guard let run = digest.currentRun else { continue }
             _ = try? await store.sendWorkspace(
@@ -87,8 +129,9 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
                 )
             )
             if run.stage != .awaitingModelDownloadConsent {
-                tasks[inspirationID]?.cancel()
-                tasks[inspirationID] = nil
+                tasks[inspirationID]?.task.cancel()
+                audioDownloader.cleanup(runID: run.id)
+                progressValues.removeValue(forKey: inspirationID)
             }
         }
     }
@@ -97,19 +140,22 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
         inspirationID: InspirationID,
         runID: MaterialDigestRunID,
         checksum: String,
+        purpose: TaskPurpose,
         operation: @escaping () async throws -> Void
     ) {
-        tasks[inspirationID]?.cancel()
-        tasks[inspirationID] = Task { [weak self] in
+        let token = UUID()
+        tasks[inspirationID]?.task.cancel()
+        progressValues.removeValue(forKey: inspirationID)
+        let task = Task { [weak self] in
             defer {
-                self?.tasks[inspirationID] = nil
-                self?.audioDownloader.cleanup(runID: runID)
+                self?.finishTask(inspirationID: inspirationID, runID: runID, token: token)
             }
             guard let self else { return }
             do {
                 try Task.checkCancellation()
                 try await operation()
             } catch is CancellationError {
+                guard self.isTaskCurrent(inspirationID: inspirationID, token: token) else { return }
                 await self.failIfCurrent(
                     inspirationID: inspirationID,
                     runID: runID,
@@ -117,6 +163,7 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
                     error: .cancelled
                 )
             } catch let error as MaterialDigestPipelineError {
+                guard self.isTaskCurrent(inspirationID: inspirationID, token: token) else { return }
                 await self.failIfCurrent(
                     inspirationID: inspirationID,
                     runID: runID,
@@ -124,6 +171,7 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
                     error: error
                 )
             } catch {
+                guard self.isTaskCurrent(inspirationID: inspirationID, token: token) else { return }
                 await self.failIfCurrent(
                     inspirationID: inspirationID,
                     runID: runID,
@@ -132,6 +180,29 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
                 )
             }
         }
+        tasks[inspirationID] = TaskEntry(token: token, runID: runID, purpose: purpose, task: task)
+    }
+
+    private func isTaskCurrent(inspirationID: InspirationID, token: UUID) -> Bool {
+        tasks[inspirationID]?.token == token
+    }
+
+    private func finishTask(
+        inspirationID: InspirationID,
+        runID: MaterialDigestRunID,
+        token: UUID
+    ) {
+        guard let current = tasks[inspirationID] else {
+            audioDownloader.cleanup(runID: runID)
+            return
+        }
+        guard current.token == token else {
+            if current.runID != runID { audioDownloader.cleanup(runID: runID) }
+            return
+        }
+        tasks[inspirationID] = nil
+        progressValues.removeValue(forKey: inspirationID)
+        audioDownloader.cleanup(runID: runID)
     }
 
     private func runConfirmedDownload(
@@ -139,7 +210,10 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
         runID: MaterialDigestRunID
     ) async throws {
         try await advance(.downloadingModel, source: source, runID: runID)
-        try await transcriber.prepareModel { _ in }
+        try await transcriber.prepareModel(progress: progressHandler(
+            inspirationID: source.inspirationID,
+            runID: runID
+        ))
         try Task.checkCancellation()
         try await advance(.fetchingSource, source: source, runID: runID)
         try await runFromFetching(source: source, runID: runID)
@@ -188,7 +262,11 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
             try await advance(.awaitingModelDownloadConsent, source: source, runID: runID)
             return
         case .ready:
-            let fileURL = try await audioDownloader.download(asset, runID: runID) { _ in }
+            let fileURL = try await audioDownloader.download(
+                asset,
+                runID: runID,
+                progress: progressHandler(inspirationID: source.inspirationID, runID: runID)
+            )
             try Task.checkCancellation()
             guard isCurrent(inspirationID: source.inspirationID, runID: runID, checksum: source.sourceChecksum) else {
                 return
@@ -196,7 +274,10 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
             try await advance(.transcribing, source: source, runID: runID)
             let transcript: TimestampedTranscript
             do {
-                transcript = try await transcriber.transcribe(fileURL) { _ in }
+                transcript = try await transcriber.transcribe(
+                    fileURL,
+                    progress: progressHandler(inspirationID: source.inspirationID, runID: runID)
+                )
             } catch is CancellationError {
                 throw CancellationError()
             } catch let error as MaterialDigestPipelineError {
@@ -273,6 +354,33 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
         guard case .committed = outcome else {
             throw CancellationError()
         }
+        progressValues.removeValue(forKey: source.inspirationID)
+    }
+
+    private func progressHandler(
+        inspirationID: InspirationID,
+        runID: MaterialDigestRunID
+    ) -> @Sendable (Double) -> Void {
+        { [weak self] fraction in
+            Task { @MainActor [weak self] in
+                self?.publishProgress(fraction, inspirationID: inspirationID, runID: runID)
+            }
+        }
+    }
+
+    private func publishProgress(
+        _ fraction: Double,
+        inspirationID: InspirationID,
+        runID: MaterialDigestRunID
+    ) {
+        guard fraction.isFinite,
+              tasks[inspirationID]?.runID == runID,
+              store.state.materialDigests[inspirationID]?.currentRun?.id == runID
+        else { return }
+        let clamped = min(1, max(0, fraction))
+        let quantized = Double(Int((clamped * 100).rounded(.down))) / 100
+        guard progressValues[inspirationID] != quantized else { return }
+        progressValues[inspirationID] = quantized
     }
 
     private func failIfCurrent(
@@ -348,6 +456,10 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
             (.transcriptionFailed, "本机识别失败，原始链接仍然保留。")
         case .modelNotConfigured:
             (.modelNotConfigured, "尚未配置摘要模型，请先在设置中填写。")
+        case .authenticationFailed:
+            (.authenticationFailed, "摘要接口拒绝了密钥，请在设置中检查后重试。")
+        case .accessDenied:
+            (.accessDenied, "当前密钥没有该模型的访问权限，请检查模型或权限。")
         case .summarizationFailed:
             (.summarizationFailed, "摘要请求失败，可以稍后重试。")
         case .contextTooLong:

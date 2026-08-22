@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import WorkspaceDomain
 
 struct MaterialSource: Equatable, Sendable {
@@ -26,11 +27,6 @@ struct MaterialSummarizerOutput: Equatable, Sendable {
     let summaryContractVersion: String
 }
 
-struct MaterialDigestCandidate: Equatable, Sendable {
-    let transcript: TimestampedTranscript
-    let summarizerOutput: MaterialSummarizerOutput
-}
-
 enum MaterialModelRequirement: Equatable, Sendable {
     case ready
     case downloadRequired(approximateBytes: Int64)
@@ -43,6 +39,8 @@ enum MaterialDigestPipelineError: Error, Equatable, Sendable {
     case modelDownloadFailed
     case transcriptionFailed
     case modelNotConfigured
+    case authenticationFailed
+    case accessDenied
     case summarizationFailed
     case contextTooLong
     case jsonSchemaUnsupported
@@ -61,6 +59,11 @@ protocol MaterialAudioDownloading: Sendable {
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> URL
     func cleanup(runID: MaterialDigestRunID)
+    func cleanupOrphans(keeping activeRunIDs: Set<MaterialDigestRunID>)
+}
+
+extension MaterialAudioDownloading {
+    func cleanupOrphans(keeping activeRunIDs: Set<MaterialDigestRunID>) {}
 }
 
 protocol MaterialTranscribing: Sendable {
@@ -81,9 +84,11 @@ protocol MaterialSummarizing: Sendable {
 }
 
 @MainActor
-protocol MaterialDigestOperating: AnyObject {
+protocol MaterialDigestOperating: AnyObject, Observable {
     func start(inspirationID: InspirationID) async
     func confirmModelDownload(inspirationID: InspirationID) async
     func cancel(inspirationID: InspirationID) async
+    func stopExternalWork(inspirationID: InspirationID) async
     func reconcileInterruptedRuns() async
+    func progress(for inspirationID: InspirationID) -> Double?
 }

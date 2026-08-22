@@ -169,10 +169,48 @@ public struct CreateInspirationPayload: Equatable, Sendable {
 public struct ConvertInspirationToNotePayload: Equatable, Sendable {
     public let inspirationID: InspirationID
     public let proposedNote: Note
+    public let digestWrite: MaterialDigestNoteWritePlan?
 
-    public init(inspirationID: InspirationID, proposedNote: Note) {
+    public init(
+        inspirationID: InspirationID,
+        proposedNote: Note,
+        digestWrite: MaterialDigestNoteWritePlan? = nil
+    ) {
         self.inspirationID = inspirationID
         self.proposedNote = proposedNote
+        self.digestWrite = digestWrite
+    }
+}
+
+public struct MaterialDigestNoteWritePlan: Equatable, Sendable {
+    public let resultFingerprint: String
+    public let blockIDs: [BlockID]
+
+    public init(resultFingerprint: String, blockIDs: [BlockID]) {
+        self.resultFingerprint = resultFingerprint
+        self.blockIDs = blockIDs
+    }
+}
+
+public struct WriteMaterialDigestToNotePayload: Equatable, Sendable {
+    public let inspirationID: InspirationID
+    public let noteID: NoteID
+    public let expectedNoteRevision: Int64
+    public let resultFingerprint: String
+    public let proposedBlocks: [DocumentBlock]
+
+    public init(
+        inspirationID: InspirationID,
+        noteID: NoteID,
+        expectedNoteRevision: Int64,
+        resultFingerprint: String,
+        proposedBlocks: [DocumentBlock]
+    ) {
+        self.inspirationID = inspirationID
+        self.noteID = noteID
+        self.expectedNoteRevision = expectedNoteRevision
+        self.resultFingerprint = resultFingerprint
+        self.proposedBlocks = proposedBlocks
     }
 }
 
@@ -321,6 +359,7 @@ public enum WorkspaceCommand: Sendable {
         resolvedKind: ResolvedSourceKind
     )
     case convertInspirationToNote(ConvertInspirationToNotePayload)
+    case writeMaterialDigestToNote(WriteMaterialDigestToNotePayload)
     case changeInspirationCategory(InspirationID, categoryID: UUID, at: Date)
     case archiveInspiration(InspirationID, at: Date)
     case restoreInspiration(InspirationID, at: Date)
@@ -355,6 +394,8 @@ public enum WorkspaceNoChangeReason: Equatable, Sendable {
     case staleMaterialDigestSource
     case materialDigestNotRunning
     case materialDigestAlreadyRunning
+    case materialDigestAlreadyWritten(NoteID)
+    case staleMaterialDigestNote
 }
 
 public enum WorkspaceConflict: Equatable, Sendable {

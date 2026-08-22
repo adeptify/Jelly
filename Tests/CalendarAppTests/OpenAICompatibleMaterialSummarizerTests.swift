@@ -74,7 +74,10 @@ struct OpenAICompatibleMaterialSummarizerTests {
         )
         SummarizerURLProtocol.reset()
         SummarizerURLProtocol.response = .init(status: 401, json: #"{"error":{"message":"bad key sk-test-secret-value"}}"#)
-        await expectPipeline(summarizer, .modelNotConfigured)
+        await expectPipeline(summarizer, .authenticationFailed)
+
+        SummarizerURLProtocol.response = .init(status: 403, json: #"{"error":{"message":"forbidden"}}"#)
+        await expectPipeline(summarizer, .accessDenied)
 
         SummarizerURLProtocol.response = .init(status: 413, json: #"{"error":{"message":"context_length exceeded"}}"#)
         await expectPipeline(summarizer, .contextTooLong)
@@ -102,6 +105,9 @@ struct OpenAICompatibleMaterialSummarizerTests {
             completionJSON(validSummaryJSON(takeaways: ["a", "b"])),
             completionJSON(validSummaryJSON(takeaways: (1...8).map { "观点\($0)" })),
             completionJSON(validSummaryJSON(chaptersReversed: true)),
+            completionJSON(validSummaryJSON(chapterStart: -1)),
+            completionJSON(validSummaryJSON(chapterStart: 1e300)),
+            completionJSON(validSummaryJSON(chapterStart: 30)),
             #"{"choices":[{"message":{"content":"not-json \(secret)"}}]}"#,
             #"{"choices":[{"message":{"refusal":"no"}}]}"#,
             #"{"choices":[]}"#
@@ -120,6 +126,55 @@ struct OpenAICompatibleMaterialSummarizerTests {
                 Issue.record("unexpected \(error)")
             }
         }
+    }
+
+    @Test func rejectsOversizedEndpointResponseBeforePersistingAnything() async throws {
+        SummarizerURLProtocol.reset()
+        SummarizerURLProtocol.response = .init(
+            status: 200,
+            json: String(repeating: "x", count: 4_000_001)
+        )
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+        await expectPipeline(summarizer, .summarizationFailed)
+    }
+
+    @Test func rejectsInvalidOrOversizedTranscriptBeforeSendingARequest() async throws {
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+
+        SummarizerURLProtocol.reset()
+        let invalid = TimestampedTranscript(segments: [
+            TranscriptSegment(startSeconds: 8, endSeconds: 4, text: "倒序")
+        ])
+        do {
+            _ = try await summarizer.summarize(invalid, source: videoSource)
+            Issue.record("invalid transcript was sent")
+        } catch let error as MaterialDigestPipelineError {
+            #expect(error == .sourceUnavailable)
+        }
+        #expect(SummarizerURLProtocol.lastRequest == nil)
+
+        let oversized = TimestampedTranscript(segments: [
+            TranscriptSegment(
+                startSeconds: 0,
+                endSeconds: 1,
+                text: String(repeating: "字", count: MaterialDigestContentLimits.maximumSegmentCharacters + 1)
+            )
+        ])
+        do {
+            _ = try await summarizer.summarize(oversized, source: videoSource)
+            Issue.record("oversized transcript was sent")
+        } catch let error as MaterialDigestPipelineError {
+            #expect(error == .sourceUnavailable)
+        }
+        #expect(SummarizerURLProtocol.lastRequest == nil)
     }
 }
 
@@ -181,11 +236,12 @@ private let audioSource = MaterialSource(
 private func validSummaryJSON(
     thesis: String = "核心论点",
     takeaways: [String] = ["观点1", "观点2", "观点3"],
-    chaptersReversed: Bool = false
+    chaptersReversed: Bool = false,
+    chapterStart: Double = 0
 ) -> String {
     let chapters = chaptersReversed
         ? #"[{"startSeconds":90,"title":"后","points":["b"]},{"startSeconds":10,"title":"前","points":["a"]}]"#
-        : #"[{"startSeconds":0,"title":"开场","points":["引入"]},{"startSeconds":8,"title":"主体","points":["展开"]}]"#
+        : #"[{"startSeconds":\#(chapterStart),"title":"开场","points":["引入"]},{"startSeconds":8,"title":"主体","points":["展开"]}]"#
     let takeawayJSON = takeaways.map { "\"\($0)\"" }.joined(separator: ",")
     return """
     {"thesis":"\(thesis)","takeaways":[\(takeawayJSON)],"chapters":\(chapters),"quotes":[{"speaker":"讲者","startSeconds":8,"text":"一句原话"}],"dropped":["片头"]}

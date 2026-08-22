@@ -5,6 +5,43 @@ import WorkspaceDomain
 
 @Suite("MaterialSourceProviderTests", .serialized)
 struct MaterialSourceProviderTests {
+    @Test func networkPolicyRejectsLocalAndPrivateTargets() {
+        #expect(MaterialURLSafety.isPublicHTTPS(URL(string: "https://localhost/private")!) == false)
+        #expect(MaterialURLSafety.isPublicHTTPS(URL(string: "https://127.0.0.1/private")!) == false)
+        #expect(MaterialURLSafety.isPublicHTTPS(URL(string: "https://[::1]/private")!) == false)
+        #expect(MaterialURLSafety.isPublicHTTPS(URL(string: "http://www.bilibili.com/video/1")!) == false)
+    }
+
+    @Test func proxyFakeIPModeAllowsHostnamesButNeverLiteralPrivateAddresses() {
+        let publicHostname = URL(string: "https://www.bilibili.com/video/1")!
+        let fakeAddresses = ["198.18.0.4", "fdfe:dcba:9876::4"]
+        #expect(MaterialURLSafety.isPublicHTTPS(
+            publicHostname,
+            resolvedAddresses: fakeAddresses,
+            httpsProxyEnabled: true
+        ))
+        #expect(MaterialURLSafety.isPublicHTTPS(
+            publicHostname,
+            resolvedAddresses: fakeAddresses,
+            httpsProxyEnabled: false
+        ) == false)
+        #expect(MaterialURLSafety.isPublicHTTPS(
+            URL(string: "https://198.18.0.4/private")!,
+            resolvedAddresses: fakeAddresses,
+            httpsProxyEnabled: true
+        ) == false)
+        #expect(MaterialURLSafety.isPublicHTTPS(
+            URL(string: "https://public.example/private")!,
+            resolvedAddresses: ["93.184.216.34", "10.0.0.2"],
+            httpsProxyEnabled: true
+        ) == false)
+    }
+
+    @Test func hugeExternalCIDIsRejectedWithoutIntegerConversionTrap() {
+        let html = "<script>window.__INITIAL_STATE__={\"bvid\":\"BV1xx411c7mD\",\"cid\":1e300};</script>"
+        #expect(BilibiliPageParser.initialState(in: html) == nil)
+    }
+
     @Test func b23RedirectsThenPrefersChineseHumanSubtitles() async throws {
         MaterialSourceURLProtocol.reset()
         MaterialSourceURLProtocol.set(
@@ -36,7 +73,7 @@ struct MaterialSourceProviderTests {
             data: qualifiedSubtitleData(prefix: "自动")
         )
 
-        let acquirer = RoutedMaterialAcquirer(client: MaterialHTTPClient(configuration: protocolConfiguration()))
+        let acquirer = RoutedMaterialAcquirer(client: testHTTPClient())
         let result = try await acquirer.acquire(videoSource(url: "https://b23.tv/jKx2Ab"))
         guard case let .transcript(transcript) = result else {
             Issue.record("expected transcript")
@@ -67,7 +104,7 @@ struct MaterialSourceProviderTests {
             contentType: "application/json",
             data: qualifiedSubtitleData(prefix: "人工")
         )
-        let acquirer = RoutedMaterialAcquirer(client: MaterialHTTPClient(configuration: protocolConfiguration()))
+        let acquirer = RoutedMaterialAcquirer(client: testHTTPClient())
         let result = try await acquirer.acquire(videoSource())
         guard case let .transcript(transcript) = result else {
             Issue.record("expected transcript from undefined-tolerant INITIAL_STATE")
@@ -95,7 +132,7 @@ struct MaterialSourceProviderTests {
             """
         )
 
-        let acquirer = RoutedMaterialAcquirer(client: MaterialHTTPClient(configuration: protocolConfiguration()))
+        let acquirer = RoutedMaterialAcquirer(client: testHTTPClient())
         let result = try await acquirer.acquire(videoSource())
         guard case let .remoteAudio(asset) = result else {
             Issue.record("expected playurl dash audio when player v2 has no captions or dash")
@@ -124,7 +161,7 @@ struct MaterialSourceProviderTests {
             json: #"{"body":[{"from":0,"to":1,"content":"短"}]}"#
         )
 
-        let acquirer = RoutedMaterialAcquirer(client: MaterialHTTPClient(configuration: protocolConfiguration()))
+        let acquirer = RoutedMaterialAcquirer(client: testHTTPClient())
         let result = try await acquirer.acquire(videoSource())
         guard case let .remoteAudio(asset) = result else {
             Issue.record("expected remote audio")
@@ -136,6 +173,41 @@ struct MaterialSourceProviderTests {
         #expect(asset.requestHeaders["User-Agent"]?.isEmpty == false)
     }
 
+    @Test func forbiddenPreferredSubtitleFallsBackToNextSubtitle() async throws {
+        MaterialSourceURLProtocol.reset()
+        MaterialSourceURLProtocol.setHTML(
+            url: "https://www.bilibili.com/video/BV1xx411c7mD/",
+            html: bilibiliHTML()
+        )
+        MaterialSourceURLProtocol.setJSON(
+            url: "https://api.bilibili.com/x/player/v2?bvid=BV1xx411c7mD&cid=170001",
+            json: """
+            {"code":0,"data":{"subtitle":{"subtitles":[
+              {"lan":"zh-CN","subtitle_url":"https://subtitle.test/forbidden.json"},
+              {"lan":"ai-zh","subtitle_url":"https://subtitle.test/available.json"}
+            ]}}}
+            """
+        )
+        MaterialSourceURLProtocol.set(
+            url: "https://subtitle.test/forbidden.json",
+            status: 403,
+            contentType: "application/json"
+        )
+        MaterialSourceURLProtocol.setData(
+            url: "https://subtitle.test/available.json",
+            contentType: "application/json",
+            data: qualifiedSubtitleData(prefix: "后备")
+        )
+
+        let acquirer = RoutedMaterialAcquirer(client: testHTTPClient())
+        let result = try await acquirer.acquire(videoSource())
+        guard case let .transcript(transcript) = result else {
+            Issue.record("expected fallback transcript after a forbidden preferred subtitle")
+            return
+        }
+        #expect(transcript.segments.first?.text.contains("后备") == true)
+    }
+
     @Test func bilibiliForbiddenPageMapsToRestricted() async throws {
         MaterialSourceURLProtocol.reset()
         MaterialSourceURLProtocol.set(
@@ -144,7 +216,7 @@ struct MaterialSourceProviderTests {
             contentType: "text/html",
             data: Data("forbidden".utf8)
         )
-        let acquirer = RoutedMaterialAcquirer(client: MaterialHTTPClient(configuration: protocolConfiguration()))
+        let acquirer = RoutedMaterialAcquirer(client: testHTTPClient())
         do {
             _ = try await acquirer.acquire(videoSource())
             Issue.record("restricted video was acquired")
@@ -161,7 +233,7 @@ struct MaterialSourceProviderTests {
             html: #"<meta property="og:audio" content="https://media.test/og.m4a">"#
         )
         let og = try await XiaoyuzhouMaterialAcquirer(
-            client: MaterialHTTPClient(configuration: protocolConfiguration())
+            client: testHTTPClient()
         ).acquire(audioSource(url: episode))
         guard case let .remoteAudio(ogAsset) = og else {
             Issue.record("og:audio missing")
@@ -175,7 +247,7 @@ struct MaterialSourceProviderTests {
             html: #"<script type="application/ld+json">{"@type":"AudioObject","contentUrl":"https://media.test/ld.m4a"}</script>"#
         )
         let ld = try await XiaoyuzhouMaterialAcquirer(
-            client: MaterialHTTPClient(configuration: protocolConfiguration())
+            client: testHTTPClient()
         ).acquire(audioSource(url: episode))
         guard case let .remoteAudio(ldAsset) = ld else {
             Issue.record("json-ld missing")
@@ -189,7 +261,7 @@ struct MaterialSourceProviderTests {
             html: #"<script>window.__NEXT_DATA__={"props":{"pageProps":{"episode":{"enclosure":{"url":"https://media.test/next.m4a"}}}}}</script>"#
         )
         let next = try await XiaoyuzhouMaterialAcquirer(
-            client: MaterialHTTPClient(configuration: protocolConfiguration())
+            client: testHTTPClient()
         ).acquire(audioSource(url: episode))
         guard case let .remoteAudio(nextAsset) = next else {
             Issue.record("next data missing")
@@ -199,7 +271,7 @@ struct MaterialSourceProviderTests {
     }
 
     @Test func xiaoyuzhouPodcastHomeAndMissingAudioAreRejected() async throws {
-        let acquirer = RoutedMaterialAcquirer(client: MaterialHTTPClient(configuration: protocolConfiguration()))
+        let acquirer = RoutedMaterialAcquirer(client: testHTTPClient())
         do {
             _ = try await acquirer.acquire(
                 audioSource(url: "https://www.xiaoyuzhoufm.com/podcast/5e2c8f0be1b3f16a04cb0f2e")
@@ -216,7 +288,7 @@ struct MaterialSourceProviderTests {
         )
         do {
             _ = try await XiaoyuzhouMaterialAcquirer(
-                client: MaterialHTTPClient(configuration: protocolConfiguration())
+                client: testHTTPClient()
             ).acquire(audioSource())
             Issue.record("empty episode page succeeded")
         } catch let error as MaterialDigestPipelineError {
@@ -234,7 +306,7 @@ struct MaterialSourceProviderTests {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("jelly-digest-audio-\(UUID().uuidString)", isDirectory: true)
         let downloader = TemporaryMaterialAudioDownloader(
-            client: MaterialHTTPClient(configuration: protocolConfiguration()),
+            client: testHTTPClient(),
             rootDirectory: root
         )
         let runID = MaterialDigestRunID()
@@ -271,7 +343,7 @@ struct MaterialSourceProviderTests {
         var limits = MaterialHTTPLimits()
         limits.maxAudioBytes = 8
         let downloader = TemporaryMaterialAudioDownloader(
-            client: MaterialHTTPClient(configuration: protocolConfiguration()),
+            client: testHTTPClient(),
             rootDirectory: root,
             limits: limits
         )
@@ -297,12 +369,85 @@ struct MaterialSourceProviderTests {
             ) == false
         )
     }
+
+    @Test func audioDownloadWritesIncrementallyAndCancellationStopsTheRequest() async throws {
+        ChunkedMaterialURLProtocol.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChunkedMaterialURLProtocol.self]
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-digest-stream-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let destination = root.appendingPathComponent("audio.partial")
+        let client = MaterialHTTPClient(configuration: configuration, urlValidator: { _ in true })
+        let task = Task {
+            try await client.streamDownload(
+                URL(string: "https://cdn.test/stream.m4a")!,
+                headers: [:],
+                to: destination,
+                maxBytes: 1_000_000,
+                progress: { _ in }
+            )
+        }
+
+        #expect(await waitForChunkedProtocol { ChunkedMaterialURLProtocol.sentFirstChunk })
+        #expect(await waitForChunkedProtocol {
+            ((try? FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? NSNumber)?
+                .intValue ?? 0) >= 65_536
+        })
+        task.cancel()
+        do {
+            _ = try await task.value
+            Issue.record("cancelled stream should not complete")
+        } catch {
+            // Cancellation may surface as CancellationError or URLSession cancelled.
+        }
+        #expect(await waitForChunkedProtocol { ChunkedMaterialURLProtocol.wasStopped })
+    }
+
+    @Test func unknownLengthBodyStopsAsSoonAsTheReadLimitIsCrossed() async throws {
+        ChunkedMaterialURLProtocol.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChunkedMaterialURLProtocol.self]
+        let client = MaterialHTTPClient(configuration: configuration, urlValidator: { _ in true })
+        let started = ContinuousClock.now
+        do {
+            _ = try await client.get(
+                URL(string: "https://cdn.test/page")!,
+                headers: [:],
+                maxBytes: 8
+            )
+            Issue.record("oversized body should fail")
+        } catch let error as MaterialHTTPClientError {
+            #expect(error == .tooLarge)
+        }
+        #expect(ContinuousClock.now - started < .milliseconds(250))
+        #expect(await waitForChunkedProtocol { ChunkedMaterialURLProtocol.wasStopped })
+    }
 }
 
 private func protocolConfiguration() -> URLSessionConfiguration {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [MaterialSourceURLProtocol.self]
     return configuration
+}
+
+private func testHTTPClient() -> MaterialHTTPClient {
+    MaterialHTTPClient(
+        configuration: protocolConfiguration(),
+        urlValidator: { _ in true }
+    )
+}
+
+private func waitForChunkedProtocol(
+    timeoutNanoseconds: UInt64 = 1_000_000_000,
+    _ predicate: () -> Bool
+) async -> Bool {
+    let started = DispatchTime.now().uptimeNanoseconds
+    while DispatchTime.now().uptimeNanoseconds - started < timeoutNanoseconds {
+        if predicate() { return true }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+    return predicate()
 }
 
 private func videoSource(
@@ -432,5 +577,60 @@ private final class MaterialSourceURLProtocol: URLProtocol, @unchecked Sendable 
 
     private static func normalized(_ raw: String) -> String {
         raw.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+    }
+}
+
+private final class ChunkedMaterialURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var firstChunkFlag = false
+    nonisolated(unsafe) private static var stoppedFlag = false
+    private var stopped = false
+
+    static var sentFirstChunk: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return firstChunkFlag
+    }
+
+    static var wasStopped: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stoppedFlag
+    }
+
+    static func reset() {
+        lock.lock()
+        firstChunkFlag = false
+        stoppedFlag = false
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "audio/mp4"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(repeating: 1, count: 65_536))
+        Self.lock.lock()
+        Self.firstChunkFlag = true
+        Self.lock.unlock()
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(300)) { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.client?.urlProtocol(self, didLoad: Data(repeating: 2, count: 65_536))
+            self.client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+
+    override func stopLoading() {
+        stopped = true
+        Self.lock.lock()
+        Self.stoppedFlag = true
+        Self.lock.unlock()
     }
 }

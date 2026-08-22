@@ -348,6 +348,10 @@ extension WorkspaceReducer {
         }
         candidate.taskBlockLinks = Set(candidate.taskBlockLinks.filter { $0.noteID != id })
         candidate.inspirationNoteLinks = Set(candidate.inspirationNoteLinks.filter { $0.noteID != id })
+        for inspirationID in Array(candidate.materialDigests.keys) {
+            guard candidate.materialDigests[inspirationID]?.noteWrite?.noteID == id else { continue }
+            candidate.materialDigests[inspirationID]?.noteWrite = nil
+        }
         candidate.notes.removeValue(forKey: id)
         return .proceed
     }

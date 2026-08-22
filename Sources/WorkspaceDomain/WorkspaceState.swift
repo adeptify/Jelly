@@ -43,4 +43,30 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
             materialDigests: [:]
         )
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case revision
+        case calendar
+        case notes
+        case inspirations
+        case calendarNoteRelations
+        case taskBlockLinks
+        case inspirationNoteLinks
+        case materialDigests
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        revision = try container.decode(Int64.self, forKey: .revision)
+        calendar = try container.decode(CalendarState.self, forKey: .calendar)
+        notes = try container.decode([NoteID: Note].self, forKey: .notes)
+        inspirations = try container.decode([InspirationID: Inspiration].self, forKey: .inspirations)
+        calendarNoteRelations = try container.decode(CalendarNoteRelationGraph.self, forKey: .calendarNoteRelations)
+        taskBlockLinks = try container.decode(Set<TaskBlockCalendarLink>.self, forKey: .taskBlockLinks)
+        inspirationNoteLinks = try container.decode(Set<InspirationNoteLink>.self, forKey: .inspirationNoteLinks)
+        materialDigests = try container.decodeIfPresent(
+            [InspirationID: MaterialDigest].self,
+            forKey: .materialDigests
+        ) ?? [:]
+    }
 }

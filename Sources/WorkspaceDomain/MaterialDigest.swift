@@ -8,6 +8,25 @@ public enum MaterialDigestStage: String, Codable, Equatable, Sendable {
     case summarizing
 }
 
+public enum MaterialDigestContentLimits {
+    public static let maximumTimestampSeconds: Double = 604_800
+    public static let maximumTranscriptSegments = 50_000
+    public static let maximumTranscriptCharacters = 2_000_000
+    public static let maximumSegmentCharacters = 10_000
+    public static let maximumThesisCharacters = 4_000
+    public static let maximumTakeawayCharacters = 2_000
+    public static let maximumChapters = 100
+    public static let maximumChapterPoints = 20
+    public static let maximumChapterTitleCharacters = 500
+    public static let maximumPointCharacters = 1_000
+    public static let maximumQuotes = 100
+    public static let maximumQuoteCharacters = 2_000
+    public static let maximumSpeakerCharacters = 200
+    public static let maximumDroppedItems = 100
+    public static let maximumDroppedItemCharacters = 1_000
+    public static let maximumSummaryCharacters = 200_000
+}
+
 public struct MaterialDigestRun: Codable, Equatable, Sendable {
     public let id: MaterialDigestRunID
     public var stage: MaterialDigestStage
@@ -139,6 +158,8 @@ public struct MaterialDigestFailure: Codable, Equatable, Sendable {
         case modelDownloadFailed
         case transcriptionFailed
         case modelNotConfigured
+        case authenticationFailed
+        case accessDenied
         case summarizationFailed
         case invalidSummary
         case cancelled
@@ -156,6 +177,20 @@ public struct MaterialDigestFailure: Codable, Equatable, Sendable {
     }
 }
 
+public struct MaterialDigestNoteWrite: Codable, Equatable, Sendable {
+    public let noteID: NoteID
+    public let resultFingerprint: String
+    public let blockIDs: [BlockID]
+    public let writtenAt: Date
+
+    public init(noteID: NoteID, resultFingerprint: String, blockIDs: [BlockID], writtenAt: Date) {
+        self.noteID = noteID
+        self.resultFingerprint = resultFingerprint
+        self.blockIDs = blockIDs
+        self.writtenAt = writtenAt
+    }
+}
+
 public struct MaterialDigest: Identifiable, Codable, Equatable, Sendable {
     public let id: MaterialDigestID
     public let inspirationID: InspirationID
@@ -163,6 +198,7 @@ public struct MaterialDigest: Identifiable, Codable, Equatable, Sendable {
     public var currentRun: MaterialDigestRun?
     public var result: MaterialDigestResult?
     public var lastFailure: MaterialDigestFailure?
+    public var noteWrite: MaterialDigestNoteWrite?
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -173,6 +209,7 @@ public struct MaterialDigest: Identifiable, Codable, Equatable, Sendable {
         currentRun: MaterialDigestRun?,
         result: MaterialDigestResult?,
         lastFailure: MaterialDigestFailure?,
+        noteWrite: MaterialDigestNoteWrite? = nil,
         createdAt: Date,
         updatedAt: Date
     ) {
@@ -182,6 +219,7 @@ public struct MaterialDigest: Identifiable, Codable, Equatable, Sendable {
         self.currentRun = currentRun
         self.result = result
         self.lastFailure = lastFailure
+        self.noteWrite = noteWrite
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

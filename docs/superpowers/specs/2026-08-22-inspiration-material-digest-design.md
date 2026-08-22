@@ -207,14 +207,14 @@ Coordinator 只提交候选结果；Reducer 和 Validator 决定候选是否仍�
 
 `WorkspaceState` 新增 `materialDigests: [InspirationID: MaterialDigest]`。
 
-`WorkspaceDocument.currentSchemaVersion` 从 4 升到 5：
+`WorkspaceDocument.currentSchemaVersion` 保持为 4，把 Digest 作为可选的派生扩展字段：
 
-- V5 DTO 显式包含 Digest 集合；
-- V4 → V5 迁移把 Digest 初始化为空；
+- 新版 V4 显式编码 Digest 集合；旧 V4 文档缺少该字段时解码为空集合；
 - 原有日历、笔记、灵感、关系、revision 和墓碑保持不变；
-- 不依赖 Codable 新字段默认值猜测旧数据；
 - 备份、恢复和内容快照显式包含 Digest；
-- 校验失败的 V5 文档不得覆盖当前可读数据。
+- 新文档仍可由旧版 Jelly 打开，保证回滚时原始链接和用户笔记可读；
+- 边界：旧版 Jelly 保存新文档时会忽略并丢弃派生 Digest，但不会丢原始链接和笔记。正式升级前必须保留备份，不能把这一点描述成无损双向兼容；
+- 校验失败的文档不得覆盖当前可读数据。
 
 ## 7. 笔记转换
 
@@ -269,7 +269,7 @@ Coordinator 只提交候选结果；Reducer 和 Validator 决定候选是否仍�
 - 修正 CC 新增测试目前无法编译的问题；
 - 不带入同一 `main` 工作区里的日历和周视图改动。
 
-### Slice B：Digest 合同和 V5 迁移
+### Slice B：Digest 合同和 V4 可选扩展
 
 新增模型、Reducer 命令、Validator、删除/恢复/快照语义和显式迁移。用 fixture 结果跑通完整状态机，不接真实模型。
 
@@ -299,7 +299,7 @@ Coordinator 只提交候选结果；Reducer 和 Validator 决定候选是否仍�
 - runID、checksum、取消和重试的迟到结果拒绝；
 - 重试保留上次成功结果；
 - 永久删除、归档、恢复和内容快照；
-- V4 → V5 迁移及 V5 round-trip；
+- 旧 V4 缺字段兼容、新 V4 round-trip，以及旧 V4 reader 对原始链接和笔记的回读；
 - 失败不改 Inspiration 和 Note；
 - 笔记 Block 类型、顺序和重复转换；
 - App 重启后的中断恢复；

@@ -247,6 +247,91 @@ struct MaterialDigestReducerTests {
         #expect(fetchingInterrupted.materialDigests[fixture.inspiration.id]?.lastFailure?.code == .interrupted)
         #expect(fetchingInterrupted.materialDigests[fixture.inspiration.id]?.result == nil)
     }
+
+    @Test func writingAndUpdatingDigestPreservesUserBlocksAndIsIdempotent() throws {
+        let fixture = MaterialDigestReducerFixture()
+        let succeeded = try fixture.succeededState()
+        let noteID = NoteID()
+        let userBlock = DocumentBlock(
+            id: BlockID(),
+            kind: .paragraph,
+            inlineContent: .plain("这是用户自己写的内容"),
+            taskState: nil,
+            indentLevel: 0
+        )
+        var note = Note.empty(id: noteID, categoryID: fixture.inspiration.categoryID, now: fixture.now)
+        note.title = "材料笔记"
+        note.document = BlockDocument(blocks: [userBlock])
+        let converted = try fixture.reduce(
+            .convertInspirationToNote(.init(
+                inspirationID: fixture.inspiration.id,
+                proposedNote: note
+            )),
+            from: succeeded
+        )
+
+        let firstResult = try #require(converted.materialDigests[fixture.inspiration.id]?.result)
+        let firstFingerprint = try WorkspaceChecksum.materialDigestResultFingerprint(firstResult)
+        let firstDigestBlock = DocumentBlock(
+            id: BlockID(),
+            kind: .paragraph,
+            inlineContent: .plain("第一版摘要"),
+            taskState: nil,
+            indentLevel: 0
+        )
+        let firstWrite = try fixture.reduce(
+            .writeMaterialDigestToNote(.init(
+                inspirationID: fixture.inspiration.id,
+                noteID: noteID,
+                expectedNoteRevision: try #require(converted.notes[noteID]?.revision),
+                resultFingerprint: firstFingerprint,
+                proposedBlocks: [firstDigestBlock]
+            )),
+            from: converted
+        )
+        #expect(firstWrite.notes[noteID]?.document.blocks == [userBlock, firstDigestBlock])
+        #expect(try fixture.outcome(
+            .writeMaterialDigestToNote(.init(
+                inspirationID: fixture.inspiration.id,
+                noteID: noteID,
+                expectedNoteRevision: try #require(firstWrite.notes[noteID]?.revision),
+                resultFingerprint: firstFingerprint,
+                proposedBlocks: [DocumentBlock(
+                    id: BlockID(),
+                    kind: .paragraph,
+                    inlineContent: .plain("不该重复写入"),
+                    taskState: nil,
+                    indentLevel: 0
+                )]
+            )),
+            from: firstWrite
+        ) == .noChange(.materialDigestAlreadyWritten(noteID)))
+
+        var retried = firstWrite
+        retried.materialDigests[fixture.inspiration.id]?.result?.summary.thesis = "更新后的核心论点"
+        let updatedResult = try #require(retried.materialDigests[fixture.inspiration.id]?.result)
+        let updatedFingerprint = try WorkspaceChecksum.materialDigestResultFingerprint(updatedResult)
+        let updatedDigestBlock = DocumentBlock(
+            id: BlockID(),
+            kind: .paragraph,
+            inlineContent: .plain("第二版摘要"),
+            taskState: nil,
+            indentLevel: 0
+        )
+        let updated = try fixture.reduce(
+            .writeMaterialDigestToNote(.init(
+                inspirationID: fixture.inspiration.id,
+                noteID: noteID,
+                expectedNoteRevision: try #require(retried.notes[noteID]?.revision),
+                resultFingerprint: updatedFingerprint,
+                proposedBlocks: [updatedDigestBlock]
+            )),
+            from: retried
+        )
+        #expect(updated.notes[noteID]?.document.blocks == [userBlock, updatedDigestBlock])
+        #expect(updated.notes[noteID]?.document.blocks.contains(firstDigestBlock) == false)
+        #expect(updated.materialDigests[fixture.inspiration.id]?.noteWrite?.blockIDs == [updatedDigestBlock.id])
+    }
 }
 
 struct MaterialDigestReducerFixture {

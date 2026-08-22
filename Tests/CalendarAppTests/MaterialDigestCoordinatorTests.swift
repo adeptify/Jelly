@@ -46,6 +46,27 @@ struct MaterialDigestCoordinatorTests {
         #expect(harness.store.state.materialDigests[harness.inspirationID]?.result == nil)
     }
 
+    @Test func confirmingModelDownloadPreparesRefetchesAndCompletes() async throws {
+        let harness = try await MaterialDigestCoordinatorHarness.audio(modelReady: false)
+        await harness.coordinator.start(inspirationID: harness.inspirationID)
+        #expect(await waitUntil {
+            harness.store.state.materialDigests[harness.inspirationID]?.currentRun?.stage
+                == .awaitingModelDownloadConsent
+        })
+
+        await harness.transcriber.setReadyAfterPrepare(true)
+        await harness.coordinator.confirmModelDownload(inspirationID: harness.inspirationID)
+        await harness.coordinator.confirmModelDownload(inspirationID: harness.inspirationID)
+
+        #expect(await waitUntil(timeoutNanoseconds: 2_000_000_000) {
+            harness.store.state.materialDigests[harness.inspirationID]?.result != nil
+        })
+        #expect(await harness.transcriber.prepareCount == 1)
+        #expect(harness.acquirer.acquireCount == 2)
+        #expect(harness.downloader.downloadCount == 1)
+        #expect(await harness.transcriber.transcribeCount == 1)
+    }
+
     @Test func cancelPreventsLateSummaryFromWritingBack() async throws {
         let harness = try await MaterialDigestCoordinatorHarness.caption(summarizer: .suspended)
         await harness.coordinator.start(inspirationID: harness.inspirationID)
@@ -300,6 +321,7 @@ private actor FakeMaterialTranscriber: MaterialTranscribing {
     var prepareCount = 0
     var transcribeCount = 0
     let transcript: TimestampedTranscript
+    var readyAfterPrepare = false
 
     init(requirement: MaterialModelRequirement, transcript: TimestampedTranscript) {
         self.requirement = requirement
@@ -312,8 +334,13 @@ private actor FakeMaterialTranscriber: MaterialTranscribing {
         requirement = value
     }
 
+    func setReadyAfterPrepare(_ value: Bool) {
+        readyAfterPrepare = value
+    }
+
     func prepareModel(progress: @escaping @Sendable (Double) -> Void) async throws {
         prepareCount += 1
+        if readyAfterPrepare { requirement = .ready }
         progress(1)
     }
 

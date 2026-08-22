@@ -53,6 +53,9 @@ actor WhisperKitMaterialTranscriber: MaterialTranscribing {
             throw MaterialDigestPipelineError.modelDownloadFailed
         }
         try Task.checkCancellation()
+        guard usableModelFolder() != nil else {
+            throw MaterialDigestPipelineError.modelDownloadFailed
+        }
     }
 
     func transcribe(
@@ -93,8 +96,13 @@ actor WhisperKitMaterialTranscriber: MaterialTranscribing {
                   isDirectory.boolValue,
                   url.lastPathComponent.contains(Self.variant)
             else { return false }
-            let files = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
-            return !files.isEmpty
+            return ["MelSpectrogram", "AudioEncoder", "TextDecoder"].allSatisfy { name in
+                FileManager.default.fileExists(
+                    atPath: url.appendingPathComponent("\(name).mlmodelc", isDirectory: true).path
+                ) || FileManager.default.fileExists(
+                    atPath: url.appendingPathComponent("\(name).mlpackage", isDirectory: true).path
+                )
+            }
         }
     }
 
@@ -107,7 +115,13 @@ actor WhisperKitMaterialTranscriber: MaterialTranscribing {
                     text: $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 )
             }
-            .filter { !$0.text.isEmpty }
+            .filter {
+                !$0.text.isEmpty
+                    && $0.startSeconds.isFinite
+                    && $0.endSeconds.isFinite
+                    && $0.startSeconds <= MaterialDigestContentLimits.maximumTimestampSeconds
+                    && $0.endSeconds <= MaterialDigestContentLimits.maximumTimestampSeconds
+            }
             .sorted { $0.startSeconds < $1.startSeconds }
         var previousStart = -Double.infinity
         return cleaned.map { segment in
@@ -119,7 +133,10 @@ actor WhisperKitMaterialTranscriber: MaterialTranscribing {
     }
 }
 
-struct LiveWhisperKitEngine: WhisperKitEngine {
+actor LiveWhisperKitEngine: WhisperKitEngine {
+    private var cachedKit: WhisperKit?
+    private var cachedModelFolder: URL?
+
     func download(
         variant: String,
         downloadBase: URL,
@@ -145,14 +162,22 @@ struct LiveWhisperKitEngine: WhisperKitEngine {
         audioPath: String,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> [TranscriptSegment] {
-        let kit = try await WhisperKit(
-            WhisperKitConfig(
-                modelFolder: modelFolder.path,
-                prewarm: true,
-                load: true,
-                download: false
+        let kit: WhisperKit
+        if let cachedKit, cachedModelFolder == modelFolder {
+            kit = cachedKit
+        } else {
+            let loaded = try await WhisperKit(
+                WhisperKitConfig(
+                    modelFolder: modelFolder.path,
+                    prewarm: true,
+                    load: true,
+                    download: false
+                )
             )
-        )
+            cachedKit = loaded
+            cachedModelFolder = modelFolder
+            kit = loaded
+        }
         let results = try await kit.transcribe(
             audioPath: audioPath,
             decodeOptions: DecodingOptions(),

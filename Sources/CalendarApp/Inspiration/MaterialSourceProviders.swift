@@ -1,3 +1,5 @@
+import Darwin
+import CFNetwork
 import Foundation
 import UniformTypeIdentifiers
 import WorkspaceDomain
@@ -19,19 +21,31 @@ enum MaterialHTTPClientError: Error, Equatable {
 }
 
 final class MaterialHTTPClient: @unchecked Sendable {
+    typealias URLValidator = @Sendable (URL) -> Bool
+
     private let session: URLSession
     private let limits: MaterialHTTPLimits
     private let redirectState = RedirectState()
+    private let urlValidator: URLValidator
 
-    init(limits: MaterialHTTPLimits = .init(), configuration: URLSessionConfiguration? = nil) {
+    init(
+        limits: MaterialHTTPLimits = .init(),
+        configuration: URLSessionConfiguration? = nil,
+        urlValidator: @escaping URLValidator = MaterialURLSafety.isPublicHTTPS
+    ) {
         self.limits = limits
+        self.urlValidator = urlValidator
         let config = ((configuration ?? .ephemeral).copy() as? URLSessionConfiguration) ?? .ephemeral
         config.timeoutIntervalForRequest = limits.requestTimeout
         config.timeoutIntervalForResource = limits.resourceTimeout
         config.httpCookieAcceptPolicy = .never
         config.httpShouldSetCookies = false
         config.httpMaximumConnectionsPerHost = 4
-        let delegate = RedirectDelegate(state: redirectState, maxRedirects: limits.maxRedirects)
+        let delegate = RedirectDelegate(
+            state: redirectState,
+            maxRedirects: limits.maxRedirects,
+            urlValidator: urlValidator
+        )
         self.session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
     }
 
@@ -40,19 +54,27 @@ final class MaterialHTTPClient: @unchecked Sendable {
         headers: [String: String],
         maxBytes: Int
     ) async throws -> (data: Data, response: HTTPURLResponse, finalURL: URL) {
+        guard urlValidator(url) else { throw MaterialHTTPClientError.unavailable }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
         }
-        let (data, response) = try await session.data(for: request)
+        let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw MaterialHTTPClientError.unavailable }
         if http.statusCode == 401 || http.statusCode == 403 { throw MaterialHTTPClientError.restricted }
         guard (200..<400).contains(http.statusCode) else { throw MaterialHTTPClientError.unavailable }
-        guard let finalURL = http.url ?? request.url, finalURL.scheme?.lowercased() == "https" else {
+        guard let finalURL = http.url ?? request.url, urlValidator(finalURL) else {
             throw MaterialHTTPClientError.unavailable
         }
-        if data.count > maxBytes { throw MaterialHTTPClientError.tooLarge }
+        if http.expectedContentLength > Int64(maxBytes) { throw MaterialHTTPClientError.tooLarge }
+        var data = Data()
+        data.reserveCapacity(min(maxBytes, max(0, Int(http.expectedContentLength))))
+        for try await byte in bytes {
+            try Task.checkCancellation()
+            guard data.count < maxBytes else { throw MaterialHTTPClientError.tooLarge }
+            data.append(byte)
+        }
         return (data, http, finalURL)
     }
 
@@ -63,6 +85,7 @@ final class MaterialHTTPClient: @unchecked Sendable {
         maxBytes: Int64,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> String? {
+        guard urlValidator(url) else { throw MaterialHTTPClientError.unavailable }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         for (key, value) in headers {
@@ -72,19 +95,43 @@ final class MaterialHTTPClient: @unchecked Sendable {
         guard let http = response as? HTTPURLResponse else { throw MaterialHTTPClientError.unavailable }
         if http.statusCode == 401 || http.statusCode == 403 { throw MaterialHTTPClientError.restricted }
         guard (200..<300).contains(http.statusCode) else { throw MaterialHTTPClientError.unavailable }
-        guard http.url?.scheme?.lowercased() == "https" else { throw MaterialHTTPClientError.unavailable }
+        guard let finalURL = http.url, urlValidator(finalURL) else {
+            throw MaterialHTTPClientError.unavailable
+        }
         if http.expectedContentLength > maxBytes { throw MaterialHTTPClientError.tooLarge }
-        var data = Data()
-        data.reserveCapacity(min(Int(max(0, http.expectedContentLength)), 1_048_576))
-        for try await byte in bytes {
-            try Task.checkCancellation()
-            data.append(byte)
-            if Int64(data.count) > maxBytes { throw MaterialHTTPClientError.tooLarge }
-            if http.expectedContentLength > 0 {
-                progress(min(1, Double(data.count) / Double(http.expectedContentLength)))
+        let fileManager = FileManager.default
+        if !fileManager.fileExists(atPath: destination.path) {
+            guard fileManager.createFile(atPath: destination.path, contents: nil) else {
+                throw MaterialHTTPClientError.unavailable
             }
         }
-        try data.write(to: destination, options: .atomic)
+        let handle = try FileHandle(forWritingTo: destination)
+        defer { try? handle.close() }
+        try handle.truncate(atOffset: 0)
+        var buffer = Data()
+        buffer.reserveCapacity(64 * 1_024)
+        var writtenBytes: Int64 = 0
+        var lastReportedPercent = -1
+        for try await byte in bytes {
+            try Task.checkCancellation()
+            guard writtenBytes < maxBytes else { throw MaterialHTTPClientError.tooLarge }
+            buffer.append(byte)
+            writtenBytes += 1
+            if buffer.count >= 64 * 1_024 {
+                try handle.write(contentsOf: buffer)
+                buffer.removeAll(keepingCapacity: true)
+            }
+            if http.expectedContentLength > 0 {
+                let fraction = min(1, Double(writtenBytes) / Double(http.expectedContentLength))
+                let percent = Int((fraction * 100).rounded(.down))
+                if percent != lastReportedPercent {
+                    lastReportedPercent = percent
+                    progress(fraction)
+                }
+            }
+        }
+        if !buffer.isEmpty { try handle.write(contentsOf: buffer) }
+        try handle.synchronize()
         progress(1)
         return http.value(forHTTPHeaderField: "Content-Type")
     }
@@ -101,15 +148,27 @@ private final class RedirectState: @unchecked Sendable {
         counts[key, default: 0] += 1
         return counts[key] ?? 0
     }
+
+    func remove(_ task: URLSessionTask) {
+        lock.lock()
+        counts.removeValue(forKey: ObjectIdentifier(task))
+        lock.unlock()
+    }
 }
 
 private final class RedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     let state: RedirectState
     let maxRedirects: Int
+    let urlValidator: MaterialHTTPClient.URLValidator
 
-    init(state: RedirectState, maxRedirects: Int) {
+    init(
+        state: RedirectState,
+        maxRedirects: Int,
+        urlValidator: @escaping MaterialHTTPClient.URLValidator
+    ) {
         self.state = state
         self.maxRedirects = maxRedirects
+        self.urlValidator = urlValidator
     }
 
     func urlSession(
@@ -122,12 +181,185 @@ private final class RedirectDelegate: NSObject, URLSessionTaskDelegate, @uncheck
         let count = state.increment(task)
         guard count <= maxRedirects,
               let url = request.url,
-              url.scheme?.lowercased() == "https"
+              urlValidator(url)
         else {
             completionHandler(nil)
             return
         }
         completionHandler(request)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        state.remove(task)
+    }
+}
+
+enum MaterialURLSafety {
+    static func isPublicHTTPS(_ url: URL) -> Bool {
+        guard let host = validatedHost(for: url) else { return false }
+        return isPublicHTTPS(
+            url,
+            resolvedAddresses: resolvedAddresses(for: host),
+            httpsProxyEnabled: systemProxyEnabled()
+        )
+    }
+
+    static func isPublicHTTPS(
+        _ url: URL,
+        resolvedAddresses: [String],
+        httpsProxyEnabled: Bool
+    ) -> Bool {
+        guard let host = validatedHost(for: url), !resolvedAddresses.isEmpty else { return false }
+        let literalDisposition = addressDisposition(host)
+        if literalDisposition != nil {
+            return literalDisposition == .publicAddress
+        }
+
+        var foundPublicAddress = false
+        var foundProxyIPv4 = false
+        for rawAddress in resolvedAddresses {
+            guard let disposition = addressDisposition(rawAddress) else { return false }
+            switch disposition {
+            case .publicAddress:
+                foundPublicAddress = true
+            case .proxySyntheticIPv4:
+                foundProxyIPv4 = true
+            case .proxySyntheticIPv6:
+                continue
+            case .privateAddress:
+                return false
+            }
+        }
+        return foundPublicAddress || (httpsProxyEnabled && foundProxyIPv4)
+    }
+
+    private enum AddressDisposition: Equatable {
+        case publicAddress
+        case proxySyntheticIPv4
+        case proxySyntheticIPv6
+        case privateAddress
+    }
+
+    private static func validatedHost(for url: URL) -> String? {
+        guard url.scheme?.lowercased() == "https",
+              url.user == nil,
+              url.password == nil,
+              let rawHost = url.host?.lowercased(),
+              !rawHost.isEmpty
+        else { return nil }
+        let host = rawHost.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        guard !host.isEmpty,
+              host != "localhost",
+              !host.hasSuffix(".localhost"),
+              !host.hasSuffix(".local"),
+              !host.hasSuffix(".internal"),
+              !host.hasSuffix(".lan"),
+              !host.hasSuffix(".home"),
+              !host.hasSuffix(".corp")
+        else { return nil }
+        return host
+    }
+
+    private static func resolvedAddresses(for host: String) -> [String] {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, &hints, &result) == 0, let first = result else { return [] }
+        defer { freeaddrinfo(first) }
+
+        var addresses: [String] = []
+        var cursor: UnsafeMutablePointer<addrinfo>? = first
+        while let info = cursor?.pointee {
+            defer { cursor = info.ai_next }
+            guard let address = info.ai_addr else { continue }
+            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let status = buffer.withUnsafeMutableBufferPointer { pointer in
+                getnameinfo(
+                    address,
+                    socklen_t(info.ai_addrlen),
+                    pointer.baseAddress,
+                    socklen_t(pointer.count),
+                    nil,
+                    0,
+                    NI_NUMERICHOST
+                )
+            }
+            if status == 0 {
+                let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+                addresses.append(String(decoding: bytes, as: UTF8.self))
+            }
+        }
+        return addresses
+    }
+
+    private static func systemProxyEnabled() -> Bool {
+        guard let settings = CFNetworkCopySystemProxySettings()?.takeRetainedValue() as? [String: Any]
+        else { return false }
+        return ["HTTPSEnable", "SOCKSEnable", "ProxyAutoConfigEnable"].contains { key in
+            (settings[key] as? NSNumber)?.boolValue == true
+        }
+    }
+
+    private static func addressDisposition(_ rawAddress: String) -> AddressDisposition? {
+        var ipv4 = in_addr()
+        if inet_pton(AF_INET, rawAddress, &ipv4) == 1 {
+            let value = UInt32(bigEndian: ipv4.s_addr)
+            let first = UInt8((value >> 24) & 0xff)
+            let second = UInt8((value >> 16) & 0xff)
+            if first == 198, second == 18 || second == 19 {
+                return .proxySyntheticIPv4
+            }
+            return isPublicIPv4(value) ? .publicAddress : .privateAddress
+        }
+        var ipv6 = in6_addr()
+        if inet_pton(AF_INET6, rawAddress, &ipv6) == 1 {
+            let bytes = withUnsafeBytes(of: &ipv6) { Array($0) }
+            if bytes.count == 16, bytes[0] & 0xfe == 0xfc {
+                return .proxySyntheticIPv6
+            }
+            return isPublicIPv6(bytes) ? .publicAddress : .privateAddress
+        }
+        return nil
+    }
+
+    private static func isPublicIPv4(_ address: UInt32) -> Bool {
+        let first = UInt8((address >> 24) & 0xff)
+        let second = UInt8((address >> 16) & 0xff)
+        let third = UInt8((address >> 8) & 0xff)
+        if first == 0 || first == 10 || first == 127 || first >= 224 { return false }
+        if first == 100, (64...127).contains(second) { return false }
+        if first == 169, second == 254 { return false }
+        if first == 172, (16...31).contains(second) { return false }
+        if first == 192, second == 168 { return false }
+        if first == 192, second == 0 { return false }
+        if first == 192, second == 0, third == 2 { return false }
+        if first == 198, second == 18 || second == 19 { return false }
+        if first == 198, second == 51, third == 100 { return false }
+        if first == 203, second == 0, third == 113 { return false }
+        return true
+    }
+
+    private static func isPublicIPv6(_ bytes: [UInt8]) -> Bool {
+        guard bytes.count == 16 else { return false }
+        if bytes.allSatisfy({ $0 == 0 }) { return false }
+        if bytes.dropLast().allSatisfy({ $0 == 0 }), bytes.last == 1 { return false }
+        if bytes[0] & 0xfe == 0xfc { return false }
+        if bytes[0] == 0xfe, bytes[1] & 0xc0 == 0x80 { return false }
+        if bytes[0] == 0xff { return false }
+        if bytes[0] == 0x20, bytes[1] == 0x01, bytes[2] == 0x0d, bytes[3] == 0xb8 { return false }
+        if bytes[0...9].allSatisfy({ $0 == 0 }), bytes[10] == 0xff, bytes[11] == 0xff {
+            let ipv4 = UInt32(bytes[12]) << 24
+                | UInt32(bytes[13]) << 16
+                | UInt32(bytes[14]) << 8
+                | UInt32(bytes[15])
+            return isPublicIPv4(ipv4)
+        }
+        return true
     }
 }
 
@@ -279,7 +511,7 @@ struct BilibiliMaterialAcquirer: MaterialAcquiring {
                 let transcript = try BilibiliPageParser.transcript(from: result.data)
                 if BilibiliPageParser.isQualified(transcript) { return transcript }
             } catch MaterialHTTPClientError.restricted {
-                throw MaterialDigestPipelineError.restrictedSource
+                continue
             } catch {
                 continue
             }
@@ -367,12 +599,16 @@ final class TemporaryMaterialAudioDownloader: MaterialAudioDownloading, @uncheck
                 progress: progress
             )
         } catch is CancellationError {
+            cleanup(runID: runID)
             throw CancellationError()
         } catch MaterialHTTPClientError.restricted {
+            cleanup(runID: runID)
             throw MaterialDigestPipelineError.restrictedSource
         } catch MaterialHTTPClientError.tooLarge {
+            cleanup(runID: runID)
             throw MaterialDigestPipelineError.sourceUnavailable
         } catch {
+            cleanup(runID: runID)
             throw MaterialDigestPipelineError.sourceUnavailable
         }
         let destination = directory.appendingPathComponent("source-audio\(Self.extension(for: mime))")
@@ -388,6 +624,20 @@ final class TemporaryMaterialAudioDownloader: MaterialAudioDownloading, @uncheck
             try FileManager.default.removeItem(at: runDirectory(runID))
         } catch {
             // Cleanup must not change digest outcome; omit absolute paths from diagnostics.
+        }
+    }
+
+    func cleanupOrphans(keeping activeRunIDs: Set<MaterialDigestRunID>) {
+        guard let directories = try? FileManager.default.contentsOfDirectory(
+            at: rootDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        let activeNames = Set(activeRunIDs.map { $0.rawValue.uuidString.lowercased() })
+        for directory in directories {
+            let name = directory.lastPathComponent.lowercased()
+            guard UUID(uuidString: name) != nil, !activeNames.contains(name) else { continue }
+            try? FileManager.default.removeItem(at: directory)
         }
     }
 
@@ -737,19 +987,34 @@ private func absoluteHTTPSURL(_ raw: String) -> URL? {
 
 private func int64(_ value: Any?) -> Int64? {
     switch value {
-    case let number as Int64: number
-    case let number as Int: Int64(number)
-    case let number as Double: Int64(number)
-    case let number as NSNumber: number.int64Value
-    default: nil
+    case let number as Int64: return number
+    case let number as Int: return Int64(number)
+    case let number as Double:
+        guard number.isFinite,
+              number.rounded(.towardZero) == number,
+              number >= Double(Int64.min),
+              number <= Double(Int64.max)
+        else { return nil }
+        return Int64(number)
+    case let number as NSNumber:
+        let value = number.doubleValue
+        guard value.isFinite,
+              value.rounded(.towardZero) == value,
+              value >= Double(Int64.min),
+              value <= Double(Int64.max)
+        else { return nil }
+        return Int64(value)
+    default: return nil
     }
 }
 
 private func double(_ value: Any?) -> Double? {
     switch value {
-    case let number as Double: number
-    case let number as Int: Double(number)
-    case let number as NSNumber: number.doubleValue
-    default: nil
+    case let number as Double: return number.isFinite ? number : nil
+    case let number as Int: return Double(number)
+    case let number as NSNumber:
+        let value = number.doubleValue
+        return value.isFinite ? value : nil
+    default: return nil
     }
 }
