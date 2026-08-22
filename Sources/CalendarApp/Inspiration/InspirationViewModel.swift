@@ -7,6 +7,13 @@ struct InspirationPermanentDeleteRequest: Equatable, Sendable {
     let preview: PermanentDeletePreview
 }
 
+private struct PendingInspirationNoteWrite {
+    let inspirationID: InspirationID
+    let noteID: NoteID
+    let transactionID: UUID
+    let isNewNote: Bool
+}
+
 enum InspirationTextSaveState: Equatable {
     case idle
     case waiting
@@ -30,6 +37,7 @@ enum InspirationTextSaveState: Equatable {
     private var pendingTextSaveTasks: [InspirationID: Task<Void, Never>] = [:]
     private var dirtyTextDraftIDs: Set<InspirationID> = []
     private var textDraftGenerations: [InspirationID: UInt64] = [:]
+    private var pendingNoteWrite: PendingInspirationNoteWrite?
 
     var captureText = ""
     var searchText = "" { didSet { refresh() } }
@@ -110,6 +118,7 @@ enum InspirationTextSaveState: Equatable {
     }
 
     var selectedPrimaryActionTitle: String {
+        if pendingNoteWrite != nil { return "继续确认写入" }
         if selectedConvertedNoteID != nil {
             guard selectedDigestNeedsWriting else { return "打开笔记" }
             return selectedDigest?.noteWrite == nil ? "写入笔记" : "更新笔记摘要"
@@ -270,6 +279,9 @@ enum InspirationTextSaveState: Equatable {
 
     @discardableResult
     func convertSelectedToNote() async throws -> NoteID? {
+        if let pendingNoteWrite {
+            return try await retryPendingNoteWrite(pendingNoteWrite)
+        }
         await flushSelectedTextEdit()
         guard selectedTextSaveState != .invalid, selectedTextSaveState != .failed else { return nil }
         guard let inspiration = selected else { return nil }
@@ -296,11 +308,23 @@ enum InspirationTextSaveState: Equatable {
             refresh()
             switch outcome {
             case .committed:
+                statusMessage = "笔记摘要已更新。"
                 return existing.noteID
             case let .noChange(reason, _):
                 if case .materialDigestAlreadyWritten = reason { return existing.noteID }
+                statusMessage = WorkspaceMutationOutcomePresenter.presentation(for: outcome).message
+                return nil
+            case let .commitPending(transactionID, _):
+                pendingNoteWrite = .init(
+                    inspirationID: inspiration.id,
+                    noteID: existing.noteID,
+                    transactionID: transactionID,
+                    isNewNote: false
+                )
+                statusMessage = "写入结果尚未确认，原始灵感仍保留。请继续确认。"
                 return nil
             default:
+                statusMessage = WorkspaceMutationOutcomePresenter.presentation(for: outcome).message
                 return nil
             }
         }
@@ -332,11 +356,54 @@ enum InspirationTextSaveState: Equatable {
         refresh()
         switch outcome {
         case .committed:
+            statusMessage = "提炼摘要已写入笔记。"
             return note.id
         case let .noChange(reason, _):
             if case let .inspirationAlreadyConverted(noteID) = reason { return noteID }
+            statusMessage = WorkspaceMutationOutcomePresenter.presentation(for: outcome).message
+            return nil
+        case let .commitPending(transactionID, _):
+            pendingNoteWrite = .init(
+                inspirationID: inspiration.id,
+                noteID: note.id,
+                transactionID: transactionID,
+                isNewNote: true
+            )
+            statusMessage = "写入结果尚未确认，原始灵感仍保留。请继续确认。"
             return nil
         default:
+            statusMessage = WorkspaceMutationOutcomePresenter.presentation(for: outcome).message
+            return nil
+        }
+    }
+
+    private func retryPendingNoteWrite(_ pending: PendingInspirationNoteWrite) async throws -> NoteID? {
+        let outcome = try await store.retryPendingCommit(pending.transactionID)
+        switch outcome {
+        case .committed:
+            pendingNoteWrite = nil
+            select(pending.inspirationID)
+            refresh()
+            guard store.state.inspirationNoteLinks.contains(where: {
+                $0.noteID == pending.noteID && $0.source == .live(pending.inspirationID)
+            }) else {
+                statusMessage = "写入已确认，但没有找到对应笔记；请在恢复与备份中检查。"
+                return nil
+            }
+            statusMessage = pending.isNewNote ? "提炼摘要已写入笔记。" : "笔记摘要已更新。"
+            return pending.noteID
+        case .stillPending:
+            statusMessage = "写入结果仍未确认，请稍后继续确认。"
+            return nil
+        case .notCommitted:
+            pendingNoteWrite = nil
+            refresh()
+            statusMessage = "已确认没有写入笔记，原始灵感仍保留。"
+            return nil
+        case .sourceChanged:
+            pendingNoteWrite = nil
+            refresh()
+            statusMessage = "本地数据已经变化，没有覆盖现有内容；请检查后重试。"
             return nil
         }
     }

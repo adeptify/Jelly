@@ -1,4 +1,5 @@
 import AppKit
+import CalendarPersistence
 import Foundation
 import Observation
 import SwiftUI
@@ -9,6 +10,59 @@ import WorkspaceDomain
 @Suite("InspirationWorkspaceViewModelTests")
 @MainActor
 struct InspirationWorkspaceViewModelTests {
+    @Test func uncertainDigestWriteKeepsVisibleRecoveryUntilTheExactCommitIsConfirmed() async throws {
+        let calendar = makeEmptyState()
+        let repository = WorkspaceStoreTestRepository(initial: .empty(calendar: calendar))
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: repository
+        )
+        await store.load()
+        let now = Date(timeIntervalSince1970: 1_800_320_000)
+        let inspiration = Inspiration(
+            id: InspirationID(),
+            inputKind: .url,
+            rawText: nil,
+            rawURL: URL(string: "https://www.bilibili.com/video/BV1xx411c7mD/")!,
+            rawFile: nil,
+            resolvedSourceKind: .video,
+            resolvedMetadata: .init(
+                title: "待写入的视频",
+                siteName: "B站",
+                domain: "bilibili.com",
+                thumbnailURL: nil,
+                fetchStatus: .succeeded
+            ),
+            categoryID: calendar.uncategorizedID,
+            lifecycle: .active,
+            createdAt: now,
+            updatedAt: now
+        )
+        _ = try await store.sendWorkspace(.createInspiration(.init(inspiration: inspiration)))
+        try await seedSucceededDigest(for: inspiration, in: store, now: now)
+        let model = InspirationViewModel(store: store)
+        model.select(inspiration.id)
+        let expectedRevision = store.state.revision + 1
+        await repository.makeNextSaveUncertain()
+
+        #expect(try await model.convertSelectedToNote() == nil)
+        #expect(model.selectedPrimaryActionTitle == "继续确认写入")
+        #expect(model.statusMessage == "写入结果尚未确认，原始灵感仍保留。请继续确认。")
+        #expect(store.state.inspirationNoteLinks.isEmpty)
+
+        await repository.setReconciliation(.committed(.save(.init(
+            workspaceRevision: expectedRevision,
+            persistedDraft: nil
+        ))))
+        let noteID = try #require(try await model.convertSelectedToNote())
+
+        #expect(store.state.inspirationNoteLinks.contains { link in
+            link.noteID == noteID && link.source == .live(inspiration.id)
+        })
+        #expect(model.selectedPrimaryActionTitle == "打开笔记")
+        #expect(model.statusMessage == "提炼摘要已写入笔记。")
+    }
+
     @Test func deepLinkRouterOpensTheExactInspirationInsteadOfKeepingTheFirstRow() async throws {
         _ = NSApplication.shared
         let calendar = makeEmptyState()

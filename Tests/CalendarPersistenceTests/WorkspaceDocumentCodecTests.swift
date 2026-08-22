@@ -143,6 +143,30 @@ struct WorkspaceDocumentCodecTests {
         #expect(try WorkspaceDocumentCodec.encode(decoded.state) == encoded)
     }
 
+    @Test func v4RoundTripPreservesDigestNoteWriteAfterConversion() throws {
+        let fixture = try WorkspacePersistenceFixtures.workspaceWithWrittenMaterialDigest()
+
+        let encoded = try WorkspaceDocumentCodec.encode(fixture.state)
+        let decoded = try WorkspaceDocumentCodec.decode(encoded)
+
+        #expect(decoded.state == fixture.state)
+        #expect(decoded.state.materialDigests[fixture.inspirationID]?.noteWrite?.noteID == fixture.noteID)
+        #expect(decoded.state.notes[fixture.noteID]?.document.blocks == [fixture.digestBlock])
+    }
+
+    @Test func v4DigestNoteWriteCannotClaimAUserBlockThatIsNotInTheNote() throws {
+        let fixture = try WorkspacePersistenceFixtures.workspaceWithWrittenMaterialDigest()
+        var invalid = fixture.state
+        invalid.notes[fixture.noteID]?.document = .empty()
+        let raw = try JSONEncoder.workspaceDeterministic.encode(
+            WorkspaceDocument(state: invalid)
+        )
+
+        #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try WorkspaceDocumentCodec.decode(raw)
+        }
+    }
+
     @Test func previousV4ReaderCanStillRecoverOriginalNotesAndInspirations() throws {
         let expected = try WorkspacePersistenceFixtures.workspaceWithMaterialDigests()
         let encoded = try WorkspaceDocumentCodec.encode(expected)
@@ -274,6 +298,52 @@ enum WorkspacePersistenceFixtures {
         ]
         try WorkspaceValidator.validate(state)
         return state
+    }
+
+    static func workspaceWithWrittenMaterialDigest() throws -> (
+        state: WorkspaceState,
+        inspirationID: InspirationID,
+        noteID: NoteID,
+        digestBlock: DocumentBlock
+    ) {
+        let source = try workspaceWithMaterialDigests()
+        let inspirationID = try #require(source.materialDigests.first(where: {
+            $0.value.result != nil && $0.value.currentRun == nil
+        })?.key)
+        let inspiration = try #require(source.inspirations[inspirationID])
+        let result = try #require(source.materialDigests[inspirationID]?.result)
+        let digestBlock = DocumentBlock(
+            id: BlockID(uuid(811)),
+            kind: .paragraph,
+            inlineContent: .plain("核心论点"),
+            taskState: nil,
+            indentLevel: 0
+        )
+        var note = Note.empty(
+            id: NoteID(uuid(810)),
+            categoryID: inspiration.categoryID,
+            now: result.completedAt
+        )
+        note.title = "材料提炼"
+        note.document = BlockDocument(blocks: [digestBlock])
+        let reduction = try WorkspaceReducer.reduce(
+            source,
+            command: .convertInspirationToNote(.init(
+                inspirationID: inspirationID,
+                proposedNote: note,
+                digestWrite: .init(
+                    resultFingerprint: WorkspaceChecksum.materialDigestResultFingerprint(result),
+                    blockIDs: [digestBlock.id]
+                )
+            )),
+            now: result.completedAt
+        )
+        return (
+            state: try #require(reduction.change?.state),
+            inspirationID: inspirationID,
+            noteID: note.id,
+            digestBlock: digestBlock
+        )
     }
 
     private static func materialInspiration(index: Int, now: Date) throws -> Inspiration {

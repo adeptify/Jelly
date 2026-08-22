@@ -179,7 +179,7 @@ public enum WorkspaceValidator {
         }
     }
 
-    private static func validateMaterialDigests(_ state: WorkspaceState) throws {
+    static func validateMaterialDigests(_ state: WorkspaceState) throws {
         for (key, digest) in state.materialDigests {
             guard key == digest.inspirationID else {
                 throw WorkspaceValidationError.inconsistentMaterialDigestKey(key)
@@ -205,10 +205,11 @@ public enum WorkspaceValidator {
                 try validate(failure, for: digest.inspirationID)
             }
             if let noteWrite = digest.noteWrite {
-                guard state.notes[noteWrite.noteID] != nil,
+                guard let note = state.notes[noteWrite.noteID],
                       !noteWrite.resultFingerprint.isEmpty,
                       !noteWrite.blockIDs.isEmpty,
                       Set(noteWrite.blockIDs).count == noteWrite.blockIDs.count,
+                      Set(noteWrite.blockIDs).isSubset(of: Set(note.document.blocks.map(\.id))),
                       state.inspirationNoteLinks.contains(where: { link in
                           guard link.noteID == noteWrite.noteID,
                                 case let .live(linkedID) = link.source
