@@ -250,6 +250,114 @@ struct InspirationWorkspaceViewModelTests {
         #expect(model.statusMessage == nil)
     }
 
+    @Test func convertSuccessfulDigestWritesLinkThenStructuredSummaryBlocks() async throws {
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let model = InspirationViewModel(store: store)
+        let now = Date(timeIntervalSince1970: 1_800_310_000)
+        let inspiration = Inspiration(
+            id: InspirationID(),
+            inputKind: .url,
+            rawText: nil,
+            rawURL: URL(string: "https://www.bilibili.com/video/BV1xx411c7mD/")!,
+            rawFile: nil,
+            resolvedSourceKind: .video,
+            resolvedMetadata: .init(
+                title: "视频标题",
+                siteName: "B站",
+                domain: "bilibili.com",
+                thumbnailURL: nil,
+                fetchStatus: .succeeded
+            ),
+            categoryID: calendar.uncategorizedID,
+            lifecycle: .active,
+            createdAt: now,
+            updatedAt: now
+        )
+        _ = try await store.sendWorkspace(.createInspiration(.init(inspiration: inspiration)))
+        try await seedSucceededDigest(for: inspiration, in: store, now: now)
+        model.select(inspiration.id)
+        let noteID = try #require(try await model.convertSelectedToNote())
+        let blocks = try #require(store.state.notes[noteID]?.document.blocks)
+        #expect(blocks.map(\.kind) == [
+            .link, .heading2, .paragraph, .heading2, .bullet, .bullet, .bullet, .heading2, .bullet, .bullet, .heading2, .bullet
+        ])
+        #expect(blocks[0].inlineContent.spans[0].linkURL == inspiration.rawURL)
+        #expect(blocks[1].inlineContent.spans.map(\.text).joined() == "核心观点")
+        #expect(blocks[2].inlineContent.spans.map(\.text).joined() == "核心论点")
+        #expect(blocks[3].inlineContent.spans.map(\.text).joined() == "主要观点")
+        #expect(blocks[4].kind == .bullet)
+        #expect(blocks[7].inlineContent.spans.map(\.text).joined() == "章节")
+        #expect(blocks[10].inlineContent.spans.map(\.text).joined() == "引用")
+        let repeated = try await model.convertSelectedToNote()
+        #expect(repeated == noteID)
+        #expect(store.state.notes.count == 1)
+    }
+
+    @Test func convertWithoutUsableDigestKeepsOnlyTheOriginalLink() async throws {
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let model = InspirationViewModel(store: store)
+        let now = Date(timeIntervalSince1970: 1_800_310_100)
+        let inspiration = Inspiration(
+            id: InspirationID(),
+            inputKind: .url,
+            rawText: nil,
+            rawURL: URL(string: "https://www.bilibili.com/video/BV1xx411c7mD/")!,
+            rawFile: nil,
+            resolvedSourceKind: .video,
+            resolvedMetadata: nil,
+            categoryID: calendar.uncategorizedID,
+            lifecycle: .active,
+            createdAt: now,
+            updatedAt: now
+        )
+        _ = try await store.sendWorkspace(.createInspiration(.init(inspiration: inspiration)))
+        model.select(inspiration.id)
+        let runningNoteID = try #require(try await model.convertSelectedToNote())
+        let runningBlocks = try #require(store.state.notes[runningNoteID]?.document.blocks)
+        #expect(runningBlocks.map(\.kind) == [.link])
+
+        let failed = Inspiration(
+            id: InspirationID(),
+            inputKind: .url,
+            rawText: nil,
+            rawURL: URL(string: "https://www.xiaoyuzhoufm.com/episode/650a1b2ce1b3f16a04cb0f2e")!,
+            rawFile: nil,
+            resolvedSourceKind: .audio,
+            resolvedMetadata: nil,
+            categoryID: calendar.uncategorizedID,
+            lifecycle: .active,
+            createdAt: now,
+            updatedAt: now
+        )
+        _ = try await store.sendWorkspace(.createInspiration(.init(inspiration: failed)))
+        let checksum = WorkspaceChecksum.inspirationSourceChecksum(failed)
+        let runID = MaterialDigestRunID()
+        _ = try await store.sendWorkspace(.startMaterialDigest(.init(
+            inspirationID: failed.id,
+            digestID: MaterialDigestID(),
+            runID: runID,
+            expectedSourceChecksum: checksum
+        )))
+        _ = try await store.sendWorkspace(.failMaterialDigest(.init(
+            expectation: .init(inspirationID: failed.id, runID: runID, sourceChecksum: checksum),
+            code: .sourceUnavailable,
+            userMessage: "暂时无法获取材料，原始链接仍然保留。"
+        )))
+        model.select(failed.id)
+        let failedNoteID = try #require(try await model.convertSelectedToNote())
+        #expect(store.state.notes[failedNoteID]?.document.blocks.map(\.kind) == [.link])
+    }
+
     @Test func convertToNoteIsIdempotentAndOpensExisting() async throws {
         let calendar = makeEmptyState()
         let store = WorkspaceStore(
@@ -343,6 +451,49 @@ struct InspirationWorkspaceViewModelTests {
         #expect(store.state.inspirations[id] == nil)
         #expect(model.selectedID == nil)
     }
+}
+
+@MainActor
+private func seedSucceededDigest(
+    for inspiration: Inspiration,
+    in store: WorkspaceStore,
+    now: Date
+) async throws {
+    let checksum = WorkspaceChecksum.inspirationSourceChecksum(inspiration)
+    let runID = MaterialDigestRunID()
+    _ = try await store.sendWorkspace(.startMaterialDigest(.init(
+        inspirationID: inspiration.id,
+        digestID: MaterialDigestID(),
+        runID: runID,
+        expectedSourceChecksum: checksum
+    )))
+    _ = try await store.sendWorkspace(.advanceMaterialDigestStage(.init(
+        expectation: .init(inspirationID: inspiration.id, runID: runID, sourceChecksum: checksum),
+        stage: .summarizing
+    )))
+    _ = try await store.sendWorkspace(.completeMaterialDigest(.init(
+        expectation: .init(inspirationID: inspiration.id, runID: runID, sourceChecksum: checksum),
+        transcript: TimestampedTranscript(segments: [
+            TranscriptSegment(startSeconds: 0, endSeconds: 8, text: "开场"),
+            TranscriptSegment(startSeconds: 8, endSeconds: 20, text: "主体")
+        ]),
+        summary: InspirationSummary(
+            thesis: "核心论点",
+            takeaways: ["观点1", "观点2", "观点3"],
+            chapters: [
+                DigestChapter(startSeconds: 0, title: "开场", points: ["引入"]),
+                DigestChapter(startSeconds: 8, title: "主体", points: ["展开"])
+            ],
+            quotes: [DigestQuote(speaker: "讲者", startSeconds: 8, text: "一句原话")],
+            dropped: ["片头"]
+        ),
+        provenance: DigestProvenance(
+            modelIdentifier: "api.example.com/test-model",
+            generatedAt: now,
+            inputFingerprint: checksum,
+            summaryContractVersion: "summary-contract-v1"
+        )
+    )))
 }
 
 @MainActor

@@ -225,7 +225,10 @@ enum InspirationTextSaveState: Equatable {
         let now = clock()
         var note = Note.empty(id: NoteID(), categoryID: inspiration.categoryID, now: now)
         note.title = suggestedTitle(for: inspiration)
-        note.document = document(for: inspiration)
+        note.document = InspirationNoteDocumentBuilder.document(
+            for: inspiration,
+            digest: store.state.materialDigests[inspiration.id]
+        )
         let outcome = try await store.sendWorkspace(
             .convertInspirationToNote(.init(inspirationID: inspiration.id, proposedNote: note)),
             undoLabel: "转成笔记"
@@ -449,28 +452,68 @@ enum InspirationTextSaveState: Equatable {
         return inspiration.rawURL?.host ?? "灵感笔记"
     }
 
-    private func document(for inspiration: Inspiration) -> BlockDocument {
+}
+
+enum InspirationNoteDocumentBuilder {
+    static func document(
+        for inspiration: Inspiration,
+        digest: MaterialDigest?
+    ) -> BlockDocument {
         if let url = inspiration.rawURL {
-            let title = inspiration.resolvedMetadata?.title ?? url.absoluteString
-            return .init(blocks: [
-                .init(
-                    id: BlockID(),
-                    kind: .link,
-                    inlineContent: .init(spans: [.init(text: title, marks: [], linkURL: url)]),
-                    taskState: nil,
-                    indentLevel: 0
-                )
-            ])
+            var blocks = [linkBlock(title: inspiration.resolvedMetadata?.title ?? url.absoluteString, url: url)]
+            let checksum = WorkspaceChecksum.inspirationSourceChecksum(inspiration)
+            if let result = digest?.result, digest?.sourceChecksum == checksum {
+                blocks.append(heading2("核心观点"))
+                blocks.append(paragraph(result.summary.thesis))
+                blocks.append(heading2("主要观点"))
+                blocks.append(contentsOf: result.summary.takeaways.map(bullet))
+                if !result.summary.chapters.isEmpty {
+                    blocks.append(heading2("章节"))
+                    blocks.append(contentsOf: result.summary.chapters.map { chapter in
+                        bullet("\(timestamp(chapter.startSeconds)) \(chapter.title)")
+                    })
+                }
+                if !result.summary.quotes.isEmpty {
+                    blocks.append(heading2("引用"))
+                    blocks.append(contentsOf: result.summary.quotes.map { quote in
+                        if let speaker = quote.speaker, !speaker.isEmpty {
+                            bullet("\(speaker)：\(quote.text)")
+                        } else {
+                            bullet(quote.text)
+                        }
+                    })
+                }
+            }
+            return .init(blocks: blocks)
         }
-        return .init(blocks: [
-            .init(
-                id: BlockID(),
-                kind: .paragraph,
-                inlineContent: .plain(inspiration.rawText ?? ""),
-                taskState: nil,
-                indentLevel: 0
-            )
-        ])
+        return .init(blocks: [paragraph(inspiration.rawText ?? "")])
+    }
+
+    private static func linkBlock(title: String, url: URL) -> DocumentBlock {
+        .init(
+            id: BlockID(),
+            kind: .link,
+            inlineContent: .init(spans: [.init(text: title, marks: [], linkURL: url)]),
+            taskState: nil,
+            indentLevel: 0
+        )
+    }
+
+    private static func heading2(_ text: String) -> DocumentBlock {
+        .init(id: BlockID(), kind: .heading2, inlineContent: .plain(text), taskState: nil, indentLevel: 0)
+    }
+
+    private static func paragraph(_ text: String) -> DocumentBlock {
+        .init(id: BlockID(), kind: .paragraph, inlineContent: .plain(text), taskState: nil, indentLevel: 0)
+    }
+
+    private static func bullet(_ text: String) -> DocumentBlock {
+        .init(id: BlockID(), kind: .bullet, inlineContent: .plain(text), taskState: nil, indentLevel: 0)
+    }
+
+    private static func timestamp(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded(.towardZero)))
+        return String(format: "%02d:%02d", total / 60, total % 60)
     }
 }
 
