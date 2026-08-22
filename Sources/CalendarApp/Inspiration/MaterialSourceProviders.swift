@@ -175,17 +175,24 @@ struct BilibiliMaterialAcquirer: MaterialAcquiring {
         if let transcript = try await preferredTranscript(from: player, referer: page.finalURL) {
             return .transcript(transcript)
         }
-        guard let audio = player.audioURL else {
+        var audioURL = player.audioURL
+        var audioBytes = player.audioBytes
+        if audioURL == nil {
+            let playurl = try await fetchPlayurlAudio(bvid: state.bvid, cid: state.cid, referer: page.finalURL)
+            audioURL = playurl?.url
+            audioBytes = playurl?.bytes
+        }
+        guard let audioURL else {
             throw MaterialDigestPipelineError.sourceUnavailable
         }
         return .remoteAudio(
             RemoteAudioAsset(
-                url: audio,
+                url: audioURL,
                 requestHeaders: [
                     "User-Agent": MaterialRequestHeaders.desktopUserAgent,
                     "Referer": page.finalURL.absoluteString
                 ],
-                estimatedBytes: player.audioBytes
+                estimatedBytes: audioBytes
             )
         )
     }
@@ -227,6 +234,34 @@ struct BilibiliMaterialAcquirer: MaterialAcquiring {
             throw MaterialDigestPipelineError.restrictedSource
         } catch {
             throw MaterialDigestPipelineError.sourceUnavailable
+        }
+    }
+
+    private func fetchPlayurlAudio(
+        bvid: String,
+        cid: Int64,
+        referer: URL
+    ) async throws -> (url: URL, bytes: Int64?)? {
+        var components = URLComponents(string: "https://api.bilibili.com/x/player/playurl")!
+        components.queryItems = [
+            URLQueryItem(name: "bvid", value: bvid),
+            URLQueryItem(name: "cid", value: String(cid)),
+            URLQueryItem(name: "fnval", value: "16")
+        ]
+        guard let url = components.url else { return nil }
+        do {
+            let result = try await client.get(
+                url,
+                headers: MaterialRequestHeaders.pageHeaders(referer: referer),
+                maxBytes: limits.maxHTMLBytes
+            )
+            return try BilibiliPageParser.playurlAudio(from: result.data)
+        } catch let error as MaterialDigestPipelineError {
+            throw error
+        } catch MaterialHTTPClientError.restricted {
+            throw MaterialDigestPipelineError.restrictedSource
+        } catch {
+            return nil
         }
     }
 
@@ -428,15 +463,35 @@ enum BilibiliPageParser {
             }
             .sorted { $0.0 < $1.0 }
             .map(\.1)
-        let audio = ((dataObject["dash"] as? [String: Any])?["audio"] as? [[String: Any]])?.first
-        let audioURL = (audio?["baseUrl"] as? String).flatMap(absoluteHTTPSURL)
-            ?? (audio?["base_url"] as? String).flatMap(absoluteHTTPSURL)
-        let audioBytes = int64(audio?["size"])
+        let audio = dashAudio(from: dataObject)
         return BilibiliPlayerPayload(
             rankedSubtitleURLs: ranked,
-            audioURL: audioURL,
-            audioBytes: audioBytes
+            audioURL: audio?.url,
+            audioBytes: audio?.bytes
         )
+    }
+
+    static func playurlAudio(from data: Data) throws -> (url: URL, bytes: Int64?) {
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw MaterialDigestPipelineError.sourceUnavailable
+        }
+        if let code = object["code"] as? Int, code != 0 {
+            if code == -403 || code == 403 { throw MaterialDigestPipelineError.restrictedSource }
+            throw MaterialDigestPipelineError.sourceUnavailable
+        }
+        let dataObject = object["data"] as? [String: Any] ?? [:]
+        guard let audio = dashAudio(from: dataObject) else {
+            throw MaterialDigestPipelineError.sourceUnavailable
+        }
+        return audio
+    }
+
+    private static func dashAudio(from dataObject: [String: Any]) -> (url: URL, bytes: Int64?)? {
+        let audio = ((dataObject["dash"] as? [String: Any])?["audio"] as? [[String: Any]])?.first
+        guard let audioURL = (audio?["baseUrl"] as? String).flatMap(absoluteHTTPSURL)
+            ?? (audio?["base_url"] as? String).flatMap(absoluteHTTPSURL)
+        else { return nil }
+        return (audioURL, int64(audio?["size"]))
     }
 
     static func transcript(from data: Data) throws -> TimestampedTranscript {
@@ -553,8 +608,68 @@ private func extractJSONObject(named name: String, from html: String) -> Any? {
         }
     }
     guard depth == 0 else { return nil }
-    let raw = String(tail[brace...end])
+    let raw = sanitizeJavaScriptObjectLiteral(String(tail[brace...end]))
     return try? JSONSerialization.jsonObject(with: Data(raw.utf8))
+}
+
+private func sanitizeJavaScriptObjectLiteral(_ raw: String) -> String {
+    var output = ""
+    output.reserveCapacity(raw.count)
+    var inString = false
+    var escaped = false
+    var index = raw.startIndex
+    while index < raw.endIndex {
+        let character = raw[index]
+        if inString {
+            output.append(character)
+            if escaped {
+                escaped = false
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "\"" {
+                inString = false
+            }
+            index = raw.index(after: index)
+            continue
+        }
+        if character == "\"" {
+            inString = true
+            output.append(character)
+            index = raw.index(after: index)
+            continue
+        }
+        if replaceJavaScriptLiteral(named: "undefined", with: "null", in: raw, at: &index, output: &output) {
+            continue
+        }
+        if replaceJavaScriptLiteral(named: "NaN", with: "null", in: raw, at: &index, output: &output) {
+            continue
+        }
+        if replaceJavaScriptLiteral(named: "Infinity", with: "null", in: raw, at: &index, output: &output) {
+            continue
+        }
+        output.append(character)
+        index = raw.index(after: index)
+    }
+    return output
+}
+
+private func replaceJavaScriptLiteral(
+    named token: String,
+    with replacement: String,
+    in raw: String,
+    at index: inout String.Index,
+    output: inout String
+) -> Bool {
+    guard raw[index...].hasPrefix(token) else { return false }
+    let end = raw.index(index, offsetBy: token.count, limitedBy: raw.endIndex) ?? raw.endIndex
+    let previous = output.last
+    let next = end < raw.endIndex ? raw[end] : " "
+    let previousIsBoundary = previous == nil || !(previous!.isLetter || previous!.isNumber || previous == "_")
+    let nextIsBoundary = !next.isLetter && !next.isNumber && next != "_"
+    guard previousIsBoundary, nextIsBoundary else { return false }
+    output.append(contentsOf: replacement)
+    index = end
+    return true
 }
 
 private func firstMatch(_ text: String, pattern: String) -> String? {

@@ -48,6 +48,65 @@ struct MaterialSourceProviderTests {
         #expect(transcript.segments[0].endSeconds == 1)
     }
 
+    @Test func bilibiliInitialStateToleratesUndefinedJSONLiterals() async throws {
+        MaterialSourceURLProtocol.reset()
+        MaterialSourceURLProtocol.setHTML(
+            url: "https://www.bilibili.com/video/BV1xx411c7mD/",
+            html: """
+            <html><script>window.__INITIAL_STATE__={"bvid":"BV1xx411c7mD","cid":170001,"videoData":{"bvid":"BV1xx411c7mD","cid":170001,"title": undefined, "extra":[undefined,1]}};</script></html>
+            """
+        )
+        MaterialSourceURLProtocol.setJSON(
+            url: "https://api.bilibili.com/x/player/v2?bvid=BV1xx411c7mD&cid=170001",
+            json: """
+            {"code":0,"data":{"subtitle":{"subtitles":[{"lan":"zh-CN","subtitle_url":"https://subtitle.test/zh.json"}]}}}
+            """
+        )
+        MaterialSourceURLProtocol.setData(
+            url: "https://subtitle.test/zh.json",
+            contentType: "application/json",
+            data: qualifiedSubtitleData(prefix: "人工")
+        )
+        let acquirer = RoutedMaterialAcquirer(client: MaterialHTTPClient(configuration: protocolConfiguration()))
+        let result = try await acquirer.acquire(videoSource())
+        guard case let .transcript(transcript) = result else {
+            Issue.record("expected transcript from undefined-tolerant INITIAL_STATE")
+            return
+        }
+        #expect(transcript.segments[0].text.contains("人工"))
+    }
+
+    @Test func emptyPlayerSubtitlesFallBackToPlayurlDashAudio() async throws {
+        MaterialSourceURLProtocol.reset()
+        MaterialSourceURLProtocol.setHTML(
+            url: "https://www.bilibili.com/video/BV1xx411c7mD/",
+            html: bilibiliHTML()
+        )
+        MaterialSourceURLProtocol.setJSON(
+            url: "https://api.bilibili.com/x/player/v2?bvid=BV1xx411c7mD&cid=170001",
+            json: """
+            {"code":0,"data":{"subtitle":{"subtitles":[]},"need_login_subtitle":true}}
+            """
+        )
+        MaterialSourceURLProtocol.setJSON(
+            url: "https://api.bilibili.com/x/player/playurl",
+            json: """
+            {"code":0,"data":{"dash":{"audio":[{"baseUrl":"https://upos.test/playurl-audio.m4s","size":4096}]}}}
+            """
+        )
+
+        let acquirer = RoutedMaterialAcquirer(client: MaterialHTTPClient(configuration: protocolConfiguration()))
+        let result = try await acquirer.acquire(videoSource())
+        guard case let .remoteAudio(asset) = result else {
+            Issue.record("expected playurl dash audio when player v2 has no captions or dash")
+            return
+        }
+        #expect(asset.url == URL(string: "https://upos.test/playurl-audio.m4s"))
+        #expect(asset.estimatedBytes == 4096)
+        #expect(asset.requestHeaders["Referer"] == "https://www.bilibili.com/video/BV1xx411c7mD/")
+        #expect(asset.requestHeaders["User-Agent"]?.isEmpty == false)
+    }
+
     @Test func missingQualifiedSubtitlesFallBackToDashAudio() async throws {
         MaterialSourceURLProtocol.reset()
         MaterialSourceURLProtocol.setHTML(
