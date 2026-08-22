@@ -371,6 +371,7 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
         var prompt = """
         你是 Jelly 的材料提炼器。只根据给定的带时间戳文稿输出符合 schema 的 JSON，不要编造文稿中没有的内容，也不要输出除 JSON 以外的文字。
         字段名和形状必须固定为：{"thesis":"字符串","takeaways":["字符串，1 到 7 项"],"chapters":[{"startSeconds":0,"title":"字符串","points":["字符串，至少 1 项"]}],"quotes":[{"speaker":"","startSeconds":0,"text":"字符串"}],"dropped":["字符串"]}。speaker 不确定时用空字符串，且必须出现在附近原文中才能填写；没有章节、引用或广告时 chapters、quotes、dropped 必须是空数组，不要输出 title、points 或 text 为空的占位对象。所有 startSeconds 必须是数字，来自文稿时间范围，且不超过最后一段结束时间，并按先后排序。
+        面向 Jelly 用户的派生内容必须使用简体中文：thesis、takeaways、chapters.title、chapters.points、dropped 均用简体中文，必要的专有名词可保留原文。quotes.text 是原文证据，必须保持文稿中的原语言和原句，不得翻译或改写；quotes.speaker 保留原文姓名。完整文稿也保持原语言。
         """
         if source.kind == .video {
             prompt += "这是视频材料：提炼核心论点和可执行观点，章节按时间排序。"

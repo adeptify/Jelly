@@ -95,6 +95,54 @@ struct OpenAICompatibleMaterialSummarizerTests {
         #expect(!system.contains("赞助口播"))
     }
 
+    @Test func productionRequestRequiresSimplifiedChineseDerivedFieldsAndOriginalQuotes() async throws {
+        let englishQuote = "The future of intelligence is not just bigger models."
+        SummarizerURLProtocol.reset()
+        SummarizerURLProtocol.response = .init(
+            status: 200,
+            json: completionJSON(
+                """
+                {"thesis":"智能的未来不只是把模型做大。","takeaways":["真正交付产品的人仍需要更好的工具","模型规模不是智能的全部","落地工具链同样关键"],"chapters":[{"startSeconds":0,"title":"智能的边界","points":["更大的模型并不是答案的全部"]},{"startSeconds":12,"title":"交付工具","points":["真正交付的人仍需要更好的工具"]}],"quotes":[{"speaker":"","startSeconds":0,"text":"\(englishQuote)"}],"dropped":["片头口播"]}
+                """
+            )
+        )
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+
+        let output = try await summarizer.summarize(englishVideoTranscript, source: videoSource)
+        #expect(output.summary.thesis == "智能的未来不只是把模型做大。")
+        #expect(output.summary.takeaways == [
+            "真正交付产品的人仍需要更好的工具",
+            "模型规模不是智能的全部",
+            "落地工具链同样关键"
+        ])
+        #expect(output.summary.chapters.map(\.title) == ["智能的边界", "交付工具"])
+        #expect(output.summary.chapters.flatMap(\.points) == [
+            "更大的模型并不是答案的全部",
+            "真正交付的人仍需要更好的工具"
+        ])
+        #expect(output.summary.dropped == ["片头口播"])
+        #expect(output.summary.quotes.map(\.text) == [englishQuote])
+
+        let body = try #require(SummarizerURLProtocol.lastBody)
+        let object = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let messages = try #require(object["messages"] as? [[String: Any]])
+        let system = try #require(messages.first?["content"] as? String)
+        let user = try #require(messages.last?["content"] as? String)
+        #expect(user.contains(englishQuote))
+        #expect(system.contains("thesis、takeaways、chapters.title、chapters.points、dropped 均用简体中文"))
+        #expect(system.contains("必要的专有名词可保留原文"))
+        #expect(system.contains("quotes.text 是原文证据"))
+        #expect(system.contains("必须保持文稿中的原语言和原句"))
+        #expect(system.contains("不得翻译或改写"))
+        #expect(system.contains("quotes.speaker 保留原文姓名"))
+        #expect(system.contains("完整文稿也保持原语言"))
+        #expect(!system.contains("只输出中文"))
+    }
+
     @Test func shortTranscriptPromptKeepsSubsecondRangeAndForbidsEmptyPadding() async throws {
         SummarizerURLProtocol.reset()
         SummarizerURLProtocol.response = .init(
@@ -673,6 +721,19 @@ private func protocolConfiguration() -> URLSessionConfiguration {
 private let sampleTranscript = TimestampedTranscript(segments: [
     TranscriptSegment(startSeconds: 0, endSeconds: 8, text: "开场"),
     TranscriptSegment(startSeconds: 8, endSeconds: 20, text: "主体")
+])
+
+private let englishVideoTranscript = TimestampedTranscript(segments: [
+    TranscriptSegment(
+        startSeconds: 0,
+        endSeconds: 12,
+        text: "The future of intelligence is not just bigger models."
+    ),
+    TranscriptSegment(
+        startSeconds: 12,
+        endSeconds: 24,
+        text: "We still need better tools for people who actually ship."
+    )
 ])
 
 private let shortTranscript = TimestampedTranscript(segments: [
