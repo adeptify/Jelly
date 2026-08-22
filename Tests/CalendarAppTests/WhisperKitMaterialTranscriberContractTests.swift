@@ -180,6 +180,32 @@ struct WhisperKitMaterialTranscriberContractTests {
         #expect(WhisperKitMaterialTranscriber.transcriptionDecodeOptionsSkipSpecialTokens)
     }
 
+    @Test func loadPolicyUsesFastPathOnlyAtOrAboveThirtyTwoGiB() {
+        let gib: UInt64 = 1_024 * 1_024 * 1_024
+        #expect(WhisperKitLoadPolicy.automatic(physicalMemoryBytes: 16 * gib).prewarm)
+        #expect(WhisperKitLoadPolicy.automatic(physicalMemoryBytes: 31 * gib).prewarm)
+        #expect(!WhisperKitLoadPolicy.automatic(physicalMemoryBytes: 32 * gib).prewarm)
+        #expect(!WhisperKitLoadPolicy.automatic(physicalMemoryBytes: 48 * gib).prewarm)
+    }
+
+    @Test func liveEngineConfigurationUsesInjectedLoadPolicy() {
+        let gib: UInt64 = 1_024 * 1_024 * 1_024
+        let folder = URL(fileURLWithPath: "/tmp/jelly-whisper-model", isDirectory: true)
+        let fast = LiveWhisperKitEngine.makeConfiguration(
+            modelFolder: folder,
+            loadPolicy: .automatic(physicalMemoryBytes: 48 * gib)
+        )
+        let conservative = LiveWhisperKitEngine.makeConfiguration(
+            modelFolder: folder,
+            loadPolicy: .automatic(physicalMemoryBytes: 16 * gib)
+        )
+        #expect(fast.modelFolder == folder.path)
+        #expect(fast.prewarm == false)
+        #expect(fast.load == true)
+        #expect(fast.download == false)
+        #expect(conservative.prewarm == true)
+    }
+
     @Test func cancellationStopsPublishingAndLeavesInstalledModel() async throws {
         let directory = try makeModelDirectory()
         let engine = FakeWhisperKitEngine(transcribeDelayNanoseconds: 200_000_000)

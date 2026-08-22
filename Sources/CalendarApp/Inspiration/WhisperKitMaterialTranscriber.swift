@@ -2,6 +2,20 @@ import Foundation
 import WhisperKit
 import WorkspaceDomain
 
+struct WhisperKitLoadPolicy: Equatable, Sendable {
+    static let fastLoadMinimumPhysicalMemoryBytes: UInt64 = 32 * 1_024 * 1_024 * 1_024
+
+    let prewarm: Bool
+
+    static func automatic(physicalMemoryBytes: UInt64) -> Self {
+        Self(prewarm: physicalMemoryBytes < fastLoadMinimumPhysicalMemoryBytes)
+    }
+
+    static func automatic(processInfo: ProcessInfo = ProcessInfo.processInfo) -> Self {
+        automatic(physicalMemoryBytes: processInfo.physicalMemory)
+    }
+}
+
 protocol WhisperKitEngine: Sendable {
     func download(
         variant: String,
@@ -172,8 +186,25 @@ actor WhisperKitMaterialTranscriber: MaterialTranscribing {
 }
 
 actor LiveWhisperKitEngine: WhisperKitEngine {
+    private let loadPolicy: WhisperKitLoadPolicy
     private var cachedKit: WhisperKit?
     private var cachedModelFolder: URL?
+
+    init(loadPolicy: WhisperKitLoadPolicy = .automatic()) {
+        self.loadPolicy = loadPolicy
+    }
+
+    nonisolated static func makeConfiguration(
+        modelFolder: URL,
+        loadPolicy: WhisperKitLoadPolicy
+    ) -> WhisperKitConfig {
+        WhisperKitConfig(
+            modelFolder: modelFolder.path,
+            prewarm: loadPolicy.prewarm,
+            load: true,
+            download: false
+        )
+    }
 
     func download(
         variant: String,
@@ -205,12 +236,7 @@ actor LiveWhisperKitEngine: WhisperKitEngine {
             kit = cachedKit
         } else {
             let loaded = try await WhisperKit(
-                WhisperKitConfig(
-                    modelFolder: modelFolder.path,
-                    prewarm: true,
-                    load: true,
-                    download: false
-                )
+                Self.makeConfiguration(modelFolder: modelFolder, loadPolicy: loadPolicy)
             )
             cachedKit = loaded
             cachedModelFolder = modelFolder
