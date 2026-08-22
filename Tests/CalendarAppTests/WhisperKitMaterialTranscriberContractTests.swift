@@ -176,6 +176,64 @@ struct WhisperKitMaterialTranscriberContractTests {
         }
     }
 
+    @Test func eightIdenticalNormalizedSegmentsAreInsufficientContent() async throws {
+        let directory = try makeModelDirectory()
+        let variants = [
+            "Thank you.",
+            "thank you.",
+            "THANK YOU.",
+            "Thank you!",
+            " thank you ",
+            "Thank you...",
+            "<|startoftranscript|>Thank you.<|endoftext|>",
+            "Thank you"
+        ]
+        let segments = variants.enumerated().map { index, text in
+            TranscriptSegment(
+                startSeconds: Double(index) * 30,
+                endSeconds: Double(index + 1) * 30,
+                text: text
+            )
+        }
+        let engine = FakeWhisperKitEngine(segments: segments)
+        let transcriber = WhisperKitMaterialTranscriber(modelDirectory: directory, engine: engine)
+        do {
+            _ = try await transcriber.transcribe(URL(fileURLWithPath: "/tmp/source-audio.m4a")) { _ in }
+            Issue.record("eight identical normalized whisper segments should not become a transcript")
+        } catch let error as MaterialDigestPipelineError {
+            #expect(error == .insufficientContent)
+        } catch {
+            Issue.record("unexpected \(error)")
+        }
+    }
+
+    @Test func twoIdenticalSegmentsStillReturnTranscript() async throws {
+        let directory = try makeModelDirectory()
+        let engine = FakeWhisperKitEngine(segments: [
+            .init(startSeconds: 0, endSeconds: 30, text: "Thank you."),
+            .init(startSeconds: 30, endSeconds: 60, text: "Thank you.")
+        ])
+        let transcriber = WhisperKitMaterialTranscriber(modelDirectory: directory, engine: engine)
+        let result = try await transcriber.transcribe(URL(fileURLWithPath: "/tmp/source-audio.m4a")) { _ in }
+        #expect(result.segments.map(\.text) == ["Thank you.", "Thank you."])
+    }
+
+    @Test func threeDistinctMeaningfulSegmentsStillReturnTranscript() async throws {
+        let directory = try makeModelDirectory()
+        let engine = FakeWhisperKitEngine(segments: [
+            .init(startSeconds: 0, endSeconds: 40, text: "大家好，这是第一条独立的内容。"),
+            .init(startSeconds: 40, endSeconds: 80, text: "中间这段讲了完全不同的观点。"),
+            .init(startSeconds: 80, endSeconds: 120, text: "结尾补充了第三个独立的事实。")
+        ])
+        let transcriber = WhisperKitMaterialTranscriber(modelDirectory: directory, engine: engine)
+        let result = try await transcriber.transcribe(URL(fileURLWithPath: "/tmp/source-audio.m4a")) { _ in }
+        #expect(result.segments.map(\.text) == [
+            "大家好，这是第一条独立的内容。",
+            "中间这段讲了完全不同的观点。",
+            "结尾补充了第三个独立的事实。"
+        ])
+    }
+
     @Test func transcriptionDecodeOptionsSkipSpecialTokens() {
         #expect(WhisperKitMaterialTranscriber.transcriptionDecodeOptionsSkipSpecialTokens)
     }

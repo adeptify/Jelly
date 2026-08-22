@@ -64,6 +64,25 @@ enum MaterialTranscriptSemantics {
         }
     }
 
+    static let repetitiveNoiseMinimumSemanticSegmentCount = 3
+    static let repetitiveNoiseMaximumSemanticDiversityMass = 4
+
+    static func isLikelyRepetitiveTranscriptionNoise(
+        _ transcript: TimestampedTranscript
+    ) -> Bool {
+        let fingerprints = transcript.segments.compactMap { segment -> String? in
+            let fingerprint = normalizedSemanticFingerprint(segment.text)
+            return fingerprint.isEmpty ? nil : fingerprint
+        }
+        guard fingerprints.count >= repetitiveNoiseMinimumSemanticSegmentCount,
+              fingerprints.allSatisfy({ $0 == fingerprints[0] }),
+              semanticDiversityMass(transcript) <= repetitiveNoiseMaximumSemanticDiversityMass
+        else {
+            return false
+        }
+        return true
+    }
+
     static func isShortAndSparse(_ transcript: TimestampedTranscript) -> Bool {
         let duration = transcript.segments.reduce(0.0) { max($0, $1.endSeconds) }
         guard duration.isFinite, duration <= shortSparseMaximumDurationSeconds else {
@@ -155,6 +174,17 @@ enum MaterialTranscriptSemantics {
 
     private static func isWesternAlphanumeric(_ scalar: Unicode.Scalar) -> Bool {
         westernAlphanumerics.contains(scalar)
+    }
+
+    private static func normalizedSemanticFingerprint(_ text: String) -> String {
+        let stripped = strippingWhisperSpecialTokens(text).lowercased()
+        var scalars = String.UnicodeScalarView()
+        for scalar in stripped.unicodeScalars {
+            if CharacterSet.letters.contains(scalar) || CharacterSet.decimalDigits.contains(scalar) {
+                scalars.append(scalar)
+            }
+        }
+        return String(scalars)
     }
 
     static func strippingWhisperSpecialTokens(_ text: String) -> String {

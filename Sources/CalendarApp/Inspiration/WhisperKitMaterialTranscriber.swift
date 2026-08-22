@@ -104,13 +104,13 @@ actor WhisperKitMaterialTranscriber: MaterialTranscribing {
             throw MaterialDigestPipelineError.transcriptionFailed
         }
         try Task.checkCancellation()
-        let normalized = Self.normalized(segments)
-        guard MaterialTranscriptSemantics.hasSemanticContent(
-            TimestampedTranscript(segments: normalized)
-        ) else {
+        let transcript = TimestampedTranscript(segments: Self.normalized(segments))
+        guard MaterialTranscriptSemantics.hasSemanticContent(transcript),
+              !MaterialTranscriptSemantics.isLikelyRepetitiveTranscriptionNoise(transcript)
+        else {
             throw MaterialDigestPipelineError.insufficientContent
         }
-        return TimestampedTranscript(segments: normalized)
+        return transcript
     }
 
     private func usableModelFolder() -> URL? {
