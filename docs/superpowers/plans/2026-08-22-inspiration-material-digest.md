@@ -1141,3 +1141,84 @@ Codex 用最终打包 `.app`、隔离 Workspace/偏好/Keychain/模型目录和�
 - 原链接、旧成功结果、重试、临时文件清理和重启恢复没有回归。
 
 任一硬门失败只能报告该性能方案未达到产品实操门禁。若新进程识别仍超过 120 秒，停止继续微调这个布尔值，保留 large-v3 质量证据并向用户提交下一步选择：评测更快的本地模型、增加可选云端转写，或接受首次等待；未经用户选择不得偷偷切换。
+
+## Task 12：让 MiniMax-M3 的真实摘要延迟落在可靠窗口内
+
+**结论与边界：** 当前生产摘要器把 `timeoutIntervalForRequest` 固定为 20 秒。真实 MiniMax-M3 结构化请求曾在约 21 秒时被映射为 `summarizationFailed`；同一密钥、endpoint、model、schema 和输入在诊断性 90 秒窗口下于 13.4 秒成功并通过 `summary-contract-v2`。这证明 MiniMax 链路可用，也证明 20 秒门槛对正常延迟抖动过于脆弱。Task 12 只扩大单次请求窗口到 60 秒，不改 endpoint、模型、schema、响应大小上限、错误映射、资源总上限或取消语义，不增加自动重试，避免重复计费和重复请求。
+
+**Files:**
+
+- Modify: `Sources/CalendarApp/Inspiration/OpenAICompatibleMaterialSummarizer.swift`
+- Modify: `Tests/CalendarAppTests/OpenAICompatibleMaterialSummarizerTests.swift`
+
+### Step 1：写配置工厂 RED 合同
+
+新增一个测试，直接读取尚不存在的纯配置工厂；测试不得访问网络：
+
+```swift
+@Test func productionTransportAllowsModelLatencyJitterWithoutUnboundedWait() {
+    let base = URLSessionConfiguration.ephemeral
+    base.timeoutIntervalForRequest = 3
+    base.timeoutIntervalForResource = 4
+
+    let configured = OpenAICompatibleMaterialSummarizer.makeSessionConfiguration(from: base)
+
+    #expect(configured !== base)
+    #expect(configured.timeoutIntervalForRequest == 60)
+    #expect(configured.timeoutIntervalForResource == 120)
+    #expect(configured.httpCookieAcceptPolicy == .never)
+    #expect(configured.httpShouldSetCookies == false)
+}
+```
+
+Run: `swift test --filter OpenAICompatibleMaterialSummarizerTests.productionTransportAllowsModelLatencyJitterWithoutUnboundedWait`
+
+Expected: compile failure，缺少 `makeSessionConfiguration(from:)`。
+
+### Step 2：最小实现并接回唯一 URLSession 初始化点
+
+在 `OpenAICompatibleMaterialSummarizer` 内增加可由 `@testable` 读取的纯工厂，并让初始化器只使用该工厂：
+
+```swift
+nonisolated static func makeSessionConfiguration(
+    from configuration: URLSessionConfiguration
+) -> URLSessionConfiguration {
+    let config = (configuration.copy() as? URLSessionConfiguration) ?? .ephemeral
+    config.timeoutIntervalForRequest = 60
+    config.timeoutIntervalForResource = 120
+    config.httpCookieAcceptPolicy = .never
+    config.httpShouldSetCookies = false
+    return config
+}
+```
+
+禁止改成无限等待；禁止把 resource timeout 提高到 120 秒以上；禁止增加 retry；禁止改变 `session.bytes(for:)` 的逐字节上限与 `Task.checkCancellation()`；禁止打印请求、响应或密钥。
+
+Run: `swift test --filter OpenAICompatibleMaterialSummarizerTests`
+
+Expected: 全套摘要器合同 PASS。
+
+### Step 3：相关回归与 Grok 候选提交
+
+```bash
+swift test --filter 'OpenAICompatibleMaterialSummarizerTests|MaterialDigestCoordinatorTests|DigestSettingsTests|MaterialDigestPresentationTests'
+git diff --check
+git add Sources/CalendarApp/Inspiration/OpenAICompatibleMaterialSummarizer.swift \
+  Tests/CalendarAppTests/OpenAICompatibleMaterialSummarizerTests.swift
+git diff --cached --check
+git commit -m "fix(inspiration): 放宽真实摘要等待窗口"
+```
+
+Expected: exit 0；提交只包含两个指定文件。
+
+### Step 4：Codex 独立复核与真实 MiniMax 门禁
+
+Codex 逐行检查候选 diff，重跑摘要器与完整回归，并通过 `appkey exec minimax -- sh -c '...'` 注入密钥，至少连续执行三次同一生产摘要器、MiniMax-M3、`https://api.minimaxi.com/v1`、真实结构化 schema 的探针。密钥、Authorization、请求/响应原文不得出现在日志；临时探针不得提交。
+
+进入最终打包的硬门：
+
+- 三次请求都不再因 20 秒边界失败；每次在 60 秒内结束；
+- 成功结果都通过 `summary-contract-v2` 本地解码和校验；
+- 401/403/413/400 schema/429/5xx、4 MB 响应上限、短材料友好失败与取消语义不回归；
+- `swift test`、release build、最终 `.app` 打包和严格签名验证通过；
+- 只据此报告工程验证和真实模型集成验证，最终 App 的完整点击旅程与主观等待体验仍需产品实操和用户本人验收。
