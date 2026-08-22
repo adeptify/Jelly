@@ -73,6 +73,7 @@ protocol MaterialTranscribing: Sendable {
 }
 
 protocol MaterialSummarizing: Sendable {
+    var isConfigured: Bool { get }
     func summarize(
         _ transcript: TimestampedTranscript,
         source: MaterialSource

@@ -19,6 +19,14 @@ enum DigestSettingsNormalization {
     }
 }
 
+enum DigestRuntimeConfiguration {
+    static func isConfigured(endpoint: String, model: String, secret: String?) -> Bool {
+        DigestSettingsNormalization.endpoint(endpoint) != nil
+            && DigestSettingsNormalization.model(model) != nil
+            && !(secret ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
 @Observable
 final class DigestSettingsStore {
     static let endpointKey = "digest.endpoint.v1"

@@ -175,6 +175,34 @@ struct InspirationWorkspaceViewModelTests {
         #expect(recorder.starts.isEmpty)
     }
 
+    @Test func unconfiguredDigestOpensSettingsStateAndDoesNotStart() async throws {
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let recorder = RecordingMaterialDigestOperator()
+        let resolver = SuspendedURLMetadataResolver()
+        let model = InspirationViewModel(
+            store: store,
+            metadataResolver: resolver,
+            digestOperator: recorder,
+            isDigestConfigured: { false }
+        )
+        let id = try await model.capture("https://www.bilibili.com/video/BV1xx411c7mD/")
+        #expect(await waitUntil { resolver.startedURLs.count == 1 })
+        resolver.fail(URLMetadataResolverError.httpFailure)
+        #expect(await waitUntil {
+            store.state.inspirations[id]?.resolvedSourceKind == .video
+        })
+        model.select(id)
+        #expect(model.selectedDigestPresentation.showsOpenSettings)
+        #expect(model.selectedDigestPresentation.primaryActionTitle == "打开设置")
+        await model.startSelectedDigest()
+        #expect(recorder.starts.isEmpty)
+    }
+
     @Test func urlIsDurableBeforeMetadataStarts() async throws {
         let calendar = makeEmptyState()
         let store = WorkspaceStore(

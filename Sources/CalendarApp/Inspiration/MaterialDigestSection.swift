@@ -7,6 +7,7 @@ struct MaterialDigestPresentation: Equatable {
     var primaryActionTitle: String?
     var showsCancel: Bool
     var showsRetry: Bool
+    var showsOpenSettings: Bool
     var showsConfirmDownload: Bool
     var confirmDownloadTitle: String?
     var thesis: String?
@@ -23,6 +24,7 @@ struct MaterialDigestPresentation: Equatable {
         primaryActionTitle: nil,
         showsCancel: false,
         showsRetry: false,
+        showsOpenSettings: false,
         showsConfirmDownload: false,
         confirmDownloadTitle: nil,
         thesis: nil,
@@ -37,7 +39,8 @@ struct MaterialDigestPresentation: Equatable {
     static func project(
         inspiration: Inspiration,
         digest: MaterialDigest?,
-        operatorAvailable: Bool
+        operatorAvailable: Bool,
+        modelConfigured: Bool = true
     ) -> MaterialDigestPresentation {
         guard operatorAvailable,
               inspiration.inputKind == .url,
@@ -78,12 +81,23 @@ struct MaterialDigestPresentation: Equatable {
         }
         if let failure = digest?.lastFailure {
             presentation.statusText = failure.userMessage
-            presentation.showsRetry = true
-            presentation.primaryActionTitle = "重试"
+            if failure.code == .modelNotConfigured || !modelConfigured {
+                presentation.showsOpenSettings = true
+                presentation.primaryActionTitle = "打开设置"
+            } else {
+                presentation.showsRetry = true
+                presentation.primaryActionTitle = "重试"
+            }
             return presentation
         }
         if digest?.result != nil {
             presentation.statusText = "提炼完成，可以审阅后写入笔记。"
+            return presentation
+        }
+        if !modelConfigured {
+            presentation.statusText = "尚未配置摘要模型，请先在设置中填写。"
+            presentation.showsOpenSettings = true
+            presentation.primaryActionTitle = "打开设置"
             return presentation
         }
         presentation.statusText = "尚未提炼"
@@ -123,10 +137,17 @@ struct MaterialDigestSection: View {
     private var actionRow: some View {
         HStack(spacing: 8) {
             if let title = presentation.primaryActionTitle {
-                Button(title) {
-                    if presentation.showsRetry { onRetry() } else { onStart() }
+                if presentation.showsOpenSettings {
+                    SettingsLink {
+                        Text(title)
+                    }
+                    .accessibilityLabel(title)
+                } else {
+                    Button(title) {
+                        if presentation.showsRetry { onRetry() } else { onStart() }
+                    }
+                    .accessibilityLabel(title)
                 }
-                .accessibilityLabel(title)
             }
             if presentation.showsConfirmDownload, let title = presentation.confirmDownloadTitle {
                 Button(title, action: onConfirmDownload)

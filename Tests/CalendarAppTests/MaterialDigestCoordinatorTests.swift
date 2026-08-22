@@ -118,12 +118,13 @@ struct MaterialDigestCoordinatorTests {
         #expect(!restrictedMessage.contains("Bearer "))
 
         let unconfigured = try await MaterialDigestCoordinatorHarness.caption()
-        unconfigured.summarizer.error = MaterialDigestPipelineError.modelNotConfigured
+        unconfigured.summarizer.isConfigured = false
         await unconfigured.coordinator.start(inspirationID: unconfigured.inspirationID)
         #expect(await waitUntil {
             unconfigured.store.state.materialDigests[unconfigured.inspirationID]?.lastFailure?.code
                 == .modelNotConfigured
         })
+        #expect(unconfigured.acquirer.acquireCount == 0)
         let unconfiguredMessage = try #require(
             unconfigured.store.state.materialDigests[unconfigured.inspirationID]?.lastFailure?.userMessage
         )
@@ -262,12 +263,14 @@ private struct MaterialDigestCoordinatorHarness {
 private final class FixtureMaterialAcquirer: MaterialAcquiring, @unchecked Sendable {
     var result: MaterialAcquisition
     var error: MaterialDigestPipelineError?
+    var acquireCount = 0
 
     init(result: MaterialAcquisition) {
         self.result = result
     }
 
     func acquire(_ source: MaterialSource) async throws -> MaterialAcquisition {
+        acquireCount += 1
         if let error { throw error }
         return result
     }
@@ -331,6 +334,7 @@ private final class ControllableMaterialSummarizer: MaterialSummarizing, @unchec
     }
 
     var started = false
+    var isConfigured = true
     var error: MaterialDigestPipelineError?
     private let mode: Mode
     private let output: MaterialSummarizerOutput

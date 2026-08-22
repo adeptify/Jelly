@@ -69,7 +69,14 @@ struct PersonalCalendarApp: App {
                         focusRegistry: editorFocusRegistry,
                         transitionCoordinator: transitionCoordinator,
                         terminationCoordinator: terminationCoordinator,
-                        materialDigestOperator: environment.materialDigestOperator
+                        materialDigestOperator: environment.materialDigestOperator,
+                        isDigestConfigured: {
+                            DigestRuntimeConfiguration.isConfigured(
+                                endpoint: environment.digestSettingsStore.endpoint,
+                                model: environment.digestSettingsStore.model,
+                                secret: try? environment.digestCredentialStore.load()
+                            )
+                        }
                     )
                     .task {
                         await environment.store.load()

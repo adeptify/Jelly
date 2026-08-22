@@ -22,6 +22,14 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
         self.session = URLSession(configuration: config)
     }
 
+    var isConfigured: Bool {
+        DigestRuntimeConfiguration.isConfigured(
+            endpoint: settings.endpoint,
+            model: settings.model,
+            secret: try? credentials.load()
+        )
+    }
+
     func summarize(
         _ transcript: TimestampedTranscript,
         source: MaterialSource

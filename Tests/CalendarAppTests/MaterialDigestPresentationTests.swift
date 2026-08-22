@@ -36,6 +36,22 @@ struct MaterialDigestPresentationTests {
         #expect(presentation.showsCancel == false)
         #expect(presentation.showsRetry == false)
         #expect(presentation.showsConfirmDownload == false)
+        #expect(presentation.showsOpenSettings == false)
+    }
+
+    @Test func unconfiguredModelOpensSettingsInsteadOfStarting() {
+        let presentation = MaterialDigestPresentation.project(
+            inspiration: videoInspiration(),
+            digest: nil,
+            operatorAvailable: true,
+            modelConfigured: false
+        )
+        #expect(presentation.isVisible)
+        #expect(presentation.statusText == "尚未配置摘要模型，请先在设置中填写。")
+        #expect(presentation.primaryActionTitle == "打开设置")
+        #expect(presentation.showsOpenSettings)
+        #expect(presentation.showsRetry == false)
+        #expect(presentation.showsCancel == false)
     }
 
     @Test func hiddenWhenOperatorIsUnavailable() {

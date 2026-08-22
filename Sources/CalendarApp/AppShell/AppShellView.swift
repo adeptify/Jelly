@@ -99,6 +99,7 @@ struct AppShellView: View {
         transitionCoordinator: WorkspaceRouteTransitionCoordinator? = nil,
         terminationCoordinator: NotesApplicationTerminationCoordinator? = nil,
         materialDigestOperator: (any MaterialDigestOperating)? = nil,
+        isDigestConfigured: @escaping @MainActor () -> Bool = { true },
         moduleHostBuilder: ((WorkspaceRoute) -> WorkspaceModuleHost)? = nil
     ) {
         self.store = store
@@ -150,7 +151,8 @@ struct AppShellView: View {
                         transitionCoordinator: coordinator,
                         deepLinkRouter: deepLinkRouter,
                         searchIndex: searchIndex,
-                        digestOperator: materialDigestOperator
+                        digestOperator: materialDigestOperator,
+                        isDigestConfigured: isDigestConfigured
                     )),
                     lifetimeToken: WorkspaceModuleLifetimeToken()
                 )

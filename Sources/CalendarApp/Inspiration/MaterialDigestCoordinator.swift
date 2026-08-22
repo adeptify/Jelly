@@ -150,6 +150,9 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
         runID: MaterialDigestRunID
     ) async throws {
         try Task.checkCancellation()
+        guard summarizer.isConfigured else {
+            throw MaterialDigestPipelineError.modelNotConfigured
+        }
         let acquisition: MaterialAcquisition
         do {
             acquisition = try await acquirer.acquire(source)

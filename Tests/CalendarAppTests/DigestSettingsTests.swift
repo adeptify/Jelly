@@ -34,6 +34,27 @@ struct DigestSettingsTests {
         #expect(DigestSettingsNormalization.endpoint("not-a-url") == nil)
         #expect(DigestSettingsNormalization.model("  gpt-4o-mini  ") == "gpt-4o-mini")
         #expect(DigestSettingsNormalization.model("   ") == nil)
+        #expect(
+            DigestRuntimeConfiguration.isConfigured(
+                endpoint: "https://api.example.com/v1",
+                model: "gpt-test",
+                secret: "sk-test"
+            )
+        )
+        #expect(
+            DigestRuntimeConfiguration.isConfigured(
+                endpoint: "https://api.example.com/v1",
+                model: "gpt-test",
+                secret: nil
+            ) == false
+        )
+        #expect(
+            DigestRuntimeConfiguration.isConfigured(
+                endpoint: "http://api.example.com/v1",
+                model: "gpt-test",
+                secret: "sk-test"
+            ) == false
+        )
     }
 
     @Test func settingsStorePersistsOnlyNonSecretPreferences() {

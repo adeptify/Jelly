@@ -22,6 +22,7 @@ enum InspirationTextSaveState: Equatable {
     private let clock: @Sendable () -> Date
     private let metadataResolver: any URLMetadataResolving
     private let digestOperator: (any MaterialDigestOperating)?
+    private let isDigestConfigured: @MainActor () -> Bool
     private let searchIndex: WorkspaceSearchIndex
     private let textSaveDelay: Duration
     private var textDrafts: [InspirationID: String] = [:]
@@ -43,6 +44,7 @@ enum InspirationTextSaveState: Equatable {
         store: WorkspaceStore,
         metadataResolver: any URLMetadataResolving = URLMetadataResolver(),
         digestOperator: (any MaterialDigestOperating)? = nil,
+        isDigestConfigured: @escaping @MainActor () -> Bool = { true },
         searchIndex: WorkspaceSearchIndex = WorkspaceSearchIndex(),
         textSaveDelay: Duration = .milliseconds(450),
         clock: @escaping @Sendable () -> Date = Date.init
@@ -50,6 +52,7 @@ enum InspirationTextSaveState: Equatable {
         self.store = store
         self.metadataResolver = metadataResolver
         self.digestOperator = digestOperator
+        self.isDigestConfigured = isDigestConfigured
         self.searchIndex = searchIndex
         self.textSaveDelay = textSaveDelay
         self.clock = clock
@@ -70,12 +73,13 @@ enum InspirationTextSaveState: Equatable {
         return MaterialDigestPresentation.project(
             inspiration: selected,
             digest: selectedDigest,
-            operatorAvailable: digestOperator != nil
+            operatorAvailable: digestOperator != nil,
+            modelConfigured: isDigestConfigured()
         )
     }
 
     func startSelectedDigest() async {
-        guard let selectedID else { return }
+        guard let selectedID, isDigestConfigured() else { return }
         await digestOperator?.start(inspirationID: selectedID)
         refresh()
     }

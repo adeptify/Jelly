@@ -33,7 +33,8 @@ struct InspirationSplitView: View {
         transitionCoordinator: WorkspaceRouteTransitionCoordinator? = nil,
         deepLinkRouter: WorkspaceDeepLinkRouter = WorkspaceDeepLinkRouter(),
         searchIndex: WorkspaceSearchIndex = WorkspaceSearchIndex(),
-        digestOperator: (any MaterialDigestOperating)? = nil
+        digestOperator: (any MaterialDigestOperating)? = nil,
+        isDigestConfigured: @escaping @MainActor () -> Bool = { true }
     ) {
         self.store = store
         self.newItemRouter = newItemRouter
@@ -42,6 +43,7 @@ struct InspirationSplitView: View {
         _model = State(initialValue: InspirationViewModel(
             store: store,
             digestOperator: digestOperator,
+            isDigestConfigured: isDigestConfigured,
             searchIndex: searchIndex
         ))
     }
