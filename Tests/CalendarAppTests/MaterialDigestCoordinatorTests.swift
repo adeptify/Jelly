@@ -162,6 +162,20 @@ struct MaterialDigestCoordinatorTests {
             invalid.store.state.materialDigests[invalid.inspirationID]?.lastFailure?.userMessage
                 == "模型返回的摘要无法校验，没有写入占位内容。"
         )
+
+        let empty = try await MaterialDigestCoordinatorHarness.caption()
+        empty.summarizer.error = MaterialDigestPipelineError.insufficientContent
+        await empty.coordinator.start(inspirationID: empty.inspirationID)
+        #expect(await waitUntil {
+            empty.store.state.materialDigests[empty.inspirationID]?.lastFailure?.code
+                == .insufficientContent
+        })
+        #expect(empty.store.state.materialDigests[empty.inspirationID]?.result == nil)
+        #expect(empty.store.state.materialDigests[empty.inspirationID]?.currentRun == nil)
+        #expect(
+            empty.store.state.materialDigests[empty.inspirationID]?.lastFailure?.userMessage
+                == "没有识别到可提炼的内容，原始链接仍然保留。"
+        )
     }
 }
 

@@ -199,6 +199,9 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
             previousStart = segment.startSeconds
             maximumEnd = max(maximumEnd, segment.endSeconds)
         }
+        guard MaterialTranscriptSemantics.hasSemanticContent(transcript) else {
+            throw MaterialDigestPipelineError.insufficientContent
+        }
         return maximumEnd
     }
 
@@ -367,9 +370,8 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
 
     private static func systemPrompt(for source: MaterialSource) -> String {
         var prompt = """
-        你是 Jelly 的材料提炼器。只根据给定的带时间戳文稿输出符合 schema 的 JSON，不要编造文稿中没有的事实，也不要输出除 JSON 以外的文字。
-        字段名和形状必须固定为：{"thesis":"字符串","takeaways":["字符串，3 到 7 项"],"chapters":[{"startSeconds":0,"title":"字符串","points":["字符串，至少 1 项"]}],"quotes":[{"speaker":"","startSeconds":0,"text":"字符串"}],"dropped":["字符串"]}。speaker 不确定时用空字符串；没有章节、引用或广告时 chapters、quotes、dropped 必须是空数组，不要输出 title、points 或 text 为空的占位对象。
-        文稿即使只有一两句或时间范围极短，也必须输出非空 thesis 和 3 到 7 条非空 takeaways；可从同一句拆出内容、语气、形式和用途，禁止用空字符串凑数。所有 startSeconds 必须是数字，来自文稿时间范围，且不超过最后一段结束时间，并按先后排序。
+        你是 Jelly 的材料提炼器。只根据给定的带时间戳文稿输出符合 schema 的 JSON，不要编造文稿中没有的内容，也不要输出除 JSON 以外的文字。
+        字段名和形状必须固定为：{"thesis":"字符串","takeaways":["字符串，3 到 7 项"],"chapters":[{"startSeconds":0,"title":"字符串","points":["字符串，至少 1 项"]}],"quotes":[{"speaker":"","startSeconds":0,"text":"字符串"}],"dropped":["字符串"]}。speaker 不确定时用空字符串；没有章节、引用或广告时 chapters、quotes、dropped 必须是空数组，不要输出 title、points 或 text 为空的占位对象。所有 startSeconds 必须是数字，来自文稿时间范围，且不超过最后一段结束时间，并按先后排序。
         """
         if source.kind == .video {
             prompt += "这是视频材料：提炼核心论点和可执行观点，章节按时间排序。"

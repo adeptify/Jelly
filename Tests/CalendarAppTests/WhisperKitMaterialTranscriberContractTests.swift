@@ -131,6 +131,37 @@ struct WhisperKitMaterialTranscriberContractTests {
         #expect(result.segments[0].endSeconds == 0.8)
     }
 
+    @Test func dropsPunctuationNoiseAndKeepsSemanticSpeech() async throws {
+        let directory = try makeModelDirectory()
+        let engine = FakeWhisperKitEngine(segments: [
+            .init(startSeconds: 0, endSeconds: 0.4, text: "\""),
+            .init(startSeconds: 0.4, endSeconds: 2.0, text: "大家好"),
+            .init(startSeconds: 2.0, endSeconds: 2.2, text: "。")
+        ])
+        let transcriber = WhisperKitMaterialTranscriber(modelDirectory: directory, engine: engine)
+        let result = try await transcriber.transcribe(URL(fileURLWithPath: "/tmp/source-audio.m4a")) { _ in }
+        #expect(result.segments.map(\.text) == ["大家好"])
+    }
+
+    @Test func punctuationOnlyWhisperOutputIsInsufficientContent() async throws {
+        let directory = try makeModelDirectory()
+        let engine = FakeWhisperKitEngine(segments: [
+            .init(startSeconds: 0, endSeconds: 11.0799999, text: "\""),
+            .init(
+                startSeconds: 0,
+                endSeconds: 1,
+                text: "<|startoftranscript|><|endoftext|>"
+            )
+        ])
+        let transcriber = WhisperKitMaterialTranscriber(modelDirectory: directory, engine: engine)
+        do {
+            _ = try await transcriber.transcribe(URL(fileURLWithPath: "/tmp/source-audio.m4a")) { _ in }
+            Issue.record("punctuation-only whisper output should not become a transcript")
+        } catch let error as MaterialDigestPipelineError {
+            #expect(error == .insufficientContent)
+        }
+    }
+
     @Test func transcriptionDecodeOptionsSkipSpecialTokens() {
         #expect(WhisperKitMaterialTranscriber.transcriptionDecodeOptionsSkipSpecialTokens)
     }

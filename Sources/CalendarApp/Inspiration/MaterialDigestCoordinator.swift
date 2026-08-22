@@ -468,6 +468,8 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
             (.summarizationFailed, "当前接口不支持可校验的 JSON 摘要，请更换兼容端点。")
         case .invalidSummary:
             (.invalidSummary, "模型返回的摘要无法校验，没有写入占位内容。")
+        case .insufficientContent:
+            (.insufficientContent, "没有识别到可提炼的内容，原始链接仍然保留。")
         case .cancelled, .none:
             (.summarizationFailed, "提炼未完成，原始链接仍然保留。")
         }

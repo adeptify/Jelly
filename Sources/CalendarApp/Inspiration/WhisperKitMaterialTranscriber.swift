@@ -90,7 +90,13 @@ actor WhisperKitMaterialTranscriber: MaterialTranscribing {
             throw MaterialDigestPipelineError.transcriptionFailed
         }
         try Task.checkCancellation()
-        return TimestampedTranscript(segments: Self.normalized(segments))
+        let normalized = Self.normalized(segments)
+        guard MaterialTranscriptSemantics.hasSemanticContent(
+            TimestampedTranscript(segments: normalized)
+        ) else {
+            throw MaterialDigestPipelineError.insufficientContent
+        }
+        return TimestampedTranscript(segments: normalized)
     }
 
     private func usableModelFolder() -> URL? {
@@ -144,11 +150,11 @@ actor WhisperKitMaterialTranscriber: MaterialTranscribing {
                 TranscriptSegment(
                     startSeconds: $0.startSeconds,
                     endSeconds: $0.endSeconds,
-                    text: strippingWhisperSpecialTokens($0.text)
+                    text: MaterialTranscriptSemantics.strippingWhisperSpecialTokens($0.text)
                 )
             }
             .filter {
-                !$0.text.isEmpty
+                MaterialTranscriptSemantics.hasSemanticContent($0.text)
                     && $0.startSeconds.isFinite
                     && $0.endSeconds.isFinite
                     && $0.startSeconds <= MaterialDigestContentLimits.maximumTimestampSeconds
@@ -162,15 +168,6 @@ actor WhisperKitMaterialTranscriber: MaterialTranscribing {
             previousStart = start
             return TranscriptSegment(startSeconds: start, endSeconds: end, text: segment.text)
         }
-    }
-
-    private static func strippingWhisperSpecialTokens(_ text: String) -> String {
-        var result = text
-        while let start = result.range(of: "<|"),
-              let end = result.range(of: "|>", range: start.lowerBound..<result.endIndex) {
-            result.removeSubrange(start.lowerBound..<end.upperBound)
-        }
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

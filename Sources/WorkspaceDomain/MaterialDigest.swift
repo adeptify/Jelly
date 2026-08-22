@@ -162,6 +162,7 @@ public struct MaterialDigestFailure: Codable, Equatable, Sendable {
         case accessDenied
         case summarizationFailed
         case invalidSummary
+        case insufficientContent
         case cancelled
         case interrupted
     }

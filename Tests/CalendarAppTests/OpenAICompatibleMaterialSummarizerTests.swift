@@ -101,8 +101,48 @@ struct OpenAICompatibleMaterialSummarizerTests {
         #expect(user.contains("00:00.0") || user.contains("0.0"))
         #expect(user.contains("00:00.8") || user.contains("0.8") || user.contains("0.86"))
         #expect(system.contains("空数组"))
-        #expect(system.contains("非空"))
-        #expect(system.contains("很短") || system.contains("极短"))
+        #expect(system.contains("不要编造文稿中没有的内容"))
+        #expect(!system.contains("即使只有一两句"))
+        #expect(!system.contains("可从同一句拆"))
+        #expect(!system.contains("必须输出非空 thesis"))
+    }
+
+    @Test func punctuationOnlyTranscriptDoesNotCallTheModel() async throws {
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+        let cases = [
+            TimestampedTranscript(segments: [
+                TranscriptSegment(startSeconds: 0, endSeconds: 11.0799999, text: "\"")
+            ]),
+            TimestampedTranscript(segments: [
+                TranscriptSegment(startSeconds: 0, endSeconds: 1, text: "。！？……")
+            ]),
+            TimestampedTranscript(segments: [
+                TranscriptSegment(
+                    startSeconds: 0,
+                    endSeconds: 1,
+                    text: "<|startoftranscript|><|endoftext|>"
+                )
+            ]),
+            TimestampedTranscript(segments: [
+                TranscriptSegment(startSeconds: 0, endSeconds: 1, text: "\"...\"")
+            ])
+        ]
+        for transcript in cases {
+            SummarizerURLProtocol.reset()
+            do {
+                _ = try await summarizer.summarize(transcript, source: audioSource)
+                Issue.record("punctuation-only transcript was sent to the model")
+            } catch let error as MaterialDigestPipelineError {
+                #expect(error == .insufficientContent)
+            } catch {
+                Issue.record("unexpected \(error)")
+            }
+            #expect(SummarizerURLProtocol.lastRequest == nil)
+        }
     }
 
     @Test func acceptsMiniMaxShortMaterialJSONWithPaddedEmptyOptionalFields() async throws {

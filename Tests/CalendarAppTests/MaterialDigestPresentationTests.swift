@@ -166,6 +166,28 @@ struct MaterialDigestPresentationTests {
         #expect(presentation.thesis == nil)
     }
 
+    @Test func insufficientContentShowsRetryWithoutWriteNote() {
+        var digest = runningDigest(stage: .summarizing)
+        digest.currentRun = nil
+        digest.lastFailure = MaterialDigestFailure(
+            code: .insufficientContent,
+            userMessage: "没有识别到可提炼的内容，原始链接仍然保留。",
+            occurredAt: MaterialDigestPresentationFixture.now
+        )
+        let presentation = MaterialDigestPresentation.project(
+            inspiration: audioInspiration(),
+            digest: digest,
+            operatorAvailable: true
+        )
+        #expect(presentation.statusText == "没有识别到可提炼的内容，原始链接仍然保留。")
+        #expect(presentation.showsRetry)
+        #expect(presentation.primaryActionTitle == "重试")
+        #expect(presentation.thesis == nil)
+        #expect(presentation.takeaways.isEmpty)
+        #expect(!presentation.statusText.contains("提炼完成"))
+        #expect(!presentation.statusText.contains("写入笔记"))
+    }
+
     @Test func successShowsStructuredReviewFields() {
         let presentation = MaterialDigestPresentation.project(
             inspiration: videoInspiration(),

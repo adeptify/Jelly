@@ -45,7 +45,29 @@ enum MaterialDigestPipelineError: Error, Equatable, Sendable {
     case contextTooLong
     case jsonSchemaUnsupported
     case invalidSummary
+    case insufficientContent
     case cancelled
+}
+
+enum MaterialTranscriptSemantics {
+    static func hasSemanticContent(_ transcript: TimestampedTranscript) -> Bool {
+        transcript.segments.contains { hasSemanticContent($0.text) }
+    }
+
+    static func hasSemanticContent(_ text: String) -> Bool {
+        strippingWhisperSpecialTokens(text).unicodeScalars.contains {
+            CharacterSet.alphanumerics.contains($0)
+        }
+    }
+
+    static func strippingWhisperSpecialTokens(_ text: String) -> String {
+        var result = text
+        while let start = result.range(of: "<|"),
+              let end = result.range(of: "|>", range: start.lowerBound..<result.endIndex) {
+            result.removeSubrange(start.lowerBound..<end.upperBound)
+        }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 protocol MaterialAcquiring: Sendable {
