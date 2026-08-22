@@ -430,7 +430,7 @@ enum InspirationTextSaveState: Equatable {
                             id,
                             expectedSource: .init(sourceChecksum: sourceChecksum),
                             metadata: failedMetadata,
-                            resolvedKind: latest.resolvedSourceKind
+                            resolvedKind: SourceKindClassifier.classify(url) ?? latest.resolvedSourceKind
                         )
                     )
                 } catch {

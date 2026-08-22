@@ -168,6 +168,30 @@ struct InspirationWorkspaceViewModelTests {
         #expect(resolver.startedURLs.count == 1)
     }
 
+    @Test func failedBilibiliMetadataKeepsVideoKindAndRawURL() async throws {
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let resolver = SuspendedURLMetadataResolver()
+        let model = InspirationViewModel(store: store, metadataResolver: resolver)
+        let raw = "https://www.bilibili.com/video/BV1xx411c7mD/"
+        let id = try await model.capture(raw)
+        #expect(store.state.inspirations[id]?.rawURL == URL(string: raw))
+        #expect(await waitUntil { resolver.startedURLs.count == 1 })
+
+        resolver.fail(URLMetadataResolverError.httpFailure)
+
+        #expect(await waitUntil {
+            store.state.inspirations[id]?.resolvedMetadata?.fetchStatus == .failed
+        })
+        #expect(store.state.inspirations[id]?.resolvedSourceKind == .video)
+        #expect(store.state.inspirations[id]?.rawURL == URL(string: raw))
+        #expect(model.statusMessage == "链接元数据获取失败，原文已保存。")
+    }
+
     @Test func metadataFailureIsPersistedInsteadOfRemainingLoadingForever() async throws {
         let calendar = makeEmptyState()
         let store = WorkspaceStore(

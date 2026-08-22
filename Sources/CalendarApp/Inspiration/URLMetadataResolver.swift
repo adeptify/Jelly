@@ -24,6 +24,7 @@ final class URLMetadataResolver: URLMetadataResolving, @unchecked Sendable {
     }
 
     func resolve(_ url: URL) async throws -> URLMetadataResolveResult {
+        let classifiedKind = SourceKindClassifier.classify(url)
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
@@ -56,7 +57,7 @@ final class URLMetadataResolver: URLMetadataResolving, @unchecked Sendable {
             thumbnailURL: nil,
             fetchStatus: .succeeded
         )
-        return .init(metadata: metadata, resolvedKind: .article)
+        return .init(metadata: metadata, resolvedKind: classifiedKind ?? .article)
     }
 
     private static func extractTitle(from html: String) -> String? {
