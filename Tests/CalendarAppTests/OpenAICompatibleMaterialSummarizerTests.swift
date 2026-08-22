@@ -22,7 +22,7 @@ struct OpenAICompatibleMaterialSummarizerTests {
         let output = try await summarizer.summarize(sampleTranscript, source: audioSource)
         #expect(output.endpointHost == "api.example.com")
         #expect(output.model == "gpt-test")
-        #expect(output.summaryContractVersion == "summary-contract-v1")
+        #expect(output.summaryContractVersion == "summary-contract-v2")
         #expect(output.summary.takeaways.count == 3)
 
         let request = try #require(SummarizerURLProtocol.lastRequest)
@@ -167,6 +167,7 @@ struct OpenAICompatibleMaterialSummarizerTests {
         )
 
         let output = try await summarizer.summarize(shortTranscript, source: audioSource)
+        #expect(output.summaryContractVersion == "summary-contract-v2")
         #expect(output.summary.thesis == "这是一句测试。")
         #expect(output.summary.takeaways == ["测试"])
         #expect(output.summary.chapters.isEmpty)

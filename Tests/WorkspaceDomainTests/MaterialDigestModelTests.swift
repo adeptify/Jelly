@@ -62,8 +62,11 @@ struct MaterialDigestModelTests {
         }
     }
 
-    @Test func validatorRejectsChapterOrQuotePastTranscriptEnd() throws {
-        var chapterState = MaterialDigestFixture.workspaceWithSucceededDigest(takeawayCount: 1)
+    @Test func validatorRejectsChapterOrQuotePastTranscriptEndOnV2() throws {
+        var chapterState = MaterialDigestFixture.workspaceWithSucceededDigest(
+            takeawayCount: 1,
+            contractVersion: "summary-contract-v2"
+        )
         let inspirationID = try #require(chapterState.inspirations.keys.first)
         chapterState.materialDigests[inspirationID]?.result?.summary.chapters = [
             DigestChapter(startSeconds: 20.6, title: "越界", points: ["点"])
@@ -72,7 +75,10 @@ struct MaterialDigestModelTests {
             try WorkspaceValidator.validate(chapterState)
         }
 
-        var quoteState = MaterialDigestFixture.workspaceWithSucceededDigest(takeawayCount: 1)
+        var quoteState = MaterialDigestFixture.workspaceWithSucceededDigest(
+            takeawayCount: 1,
+            contractVersion: "summary-contract-v2"
+        )
         quoteState.materialDigests[inspirationID]?.result?.summary.quotes = [
             DigestQuote(speaker: nil, startSeconds: 20.6, text: "主体")
         ]
@@ -81,8 +87,11 @@ struct MaterialDigestModelTests {
         }
     }
 
-    @Test func validatorRejectsQuoteTextOrSpeakerMissingFromTranscript() throws {
-        var textState = MaterialDigestFixture.workspaceWithSucceededDigest(takeawayCount: 1)
+    @Test func validatorRejectsQuoteTextOrSpeakerMissingFromTranscriptOnV2() throws {
+        var textState = MaterialDigestFixture.workspaceWithSucceededDigest(
+            takeawayCount: 1,
+            contractVersion: "summary-contract-v2"
+        )
         let inspirationID = try #require(textState.inspirations.keys.first)
         textState.materialDigests[inspirationID]?.result?.summary.quotes = [
             DigestQuote(speaker: nil, startSeconds: 8, text: "专家指出大模型已经具备通用智能。")
@@ -91,12 +100,33 @@ struct MaterialDigestModelTests {
             try WorkspaceValidator.validate(textState)
         }
 
-        var speakerState = MaterialDigestFixture.workspaceWithSucceededDigest(takeawayCount: 1)
+        var speakerState = MaterialDigestFixture.workspaceWithSucceededDigest(
+            takeawayCount: 1,
+            contractVersion: "summary-contract-v2"
+        )
         speakerState.materialDigests[inspirationID]?.result?.summary.quotes = [
             DigestQuote(speaker: "专家", startSeconds: 8, text: "主体")
         ]
         #expect(throws: WorkspaceValidationError.self) {
             try WorkspaceValidator.validate(speakerState)
+        }
+    }
+
+    @Test func validatorAcceptsHistoricalV1WhenQuoteTimestampIsSecondsOffMatchingSegment() throws {
+        try WorkspaceValidator.validate(
+            MaterialDigestFixture.workspaceWithSkewedQuoteDigest(
+                contractVersion: "summary-contract-v1"
+            )
+        )
+    }
+
+    @Test func validatorRejectsTheSameSkewedQuoteWhenLabeledV2() throws {
+        #expect(throws: WorkspaceValidationError.self) {
+            try WorkspaceValidator.validate(
+                MaterialDigestFixture.workspaceWithSkewedQuoteDigest(
+                    contractVersion: "summary-contract-v2"
+                )
+            )
         }
     }
 
@@ -222,7 +252,15 @@ enum MaterialDigestFixture {
 
     static func succeeded(
         for inspiration: Inspiration,
-        takeawayCount: Int = 3
+        takeawayCount: Int = 3,
+        contractVersion: String = "summary-contract-v1",
+        transcript: TimestampedTranscript = TimestampedTranscript(segments: [
+            TranscriptSegment(startSeconds: 0, endSeconds: 8, text: "开场"),
+            TranscriptSegment(startSeconds: 8, endSeconds: 20, text: "主体")
+        ]),
+        quotes: [DigestQuote] = [
+            DigestQuote(speaker: nil, startSeconds: 8, text: "主体")
+        ]
     ) -> MaterialDigest {
         let takeaways = takeawayCount <= 0 ? [] : (1...takeawayCount).map { "观点\($0)" }
         return MaterialDigest(
@@ -231,10 +269,7 @@ enum MaterialDigestFixture {
             sourceChecksum: WorkspaceChecksum.inspirationSourceChecksum(inspiration),
             currentRun: nil,
             result: MaterialDigestResult(
-                transcript: TimestampedTranscript(segments: [
-                    TranscriptSegment(startSeconds: 0, endSeconds: 8, text: "开场"),
-                    TranscriptSegment(startSeconds: 8, endSeconds: 20, text: "主体")
-                ]),
+                transcript: transcript,
                 summary: InspirationSummary(
                     thesis: "核心论点",
                     takeaways: takeaways,
@@ -242,16 +277,14 @@ enum MaterialDigestFixture {
                         DigestChapter(startSeconds: 0, title: "开场", points: ["引入"]),
                         DigestChapter(startSeconds: 8, title: "主体", points: ["展开"])
                     ],
-                    quotes: [
-                        DigestQuote(speaker: nil, startSeconds: 8, text: "主体")
-                    ],
+                    quotes: quotes,
                     dropped: ["片头"]
                 ),
                 provenance: DigestProvenance(
                     modelIdentifier: "test-model",
                     generatedAt: later,
                     inputFingerprint: WorkspaceChecksum.inspirationSourceChecksum(inspiration),
-                    summaryContractVersion: "summary-contract-v1"
+                    summaryContractVersion: contractVersion
                 ),
                 completedAt: later
             ),
@@ -261,10 +294,42 @@ enum MaterialDigestFixture {
         )
     }
 
-    static func workspaceWithSucceededDigest(takeawayCount: Int) -> WorkspaceState {
+    static func workspaceWithSucceededDigest(
+        takeawayCount: Int,
+        contractVersion: String = "summary-contract-v1"
+    ) -> WorkspaceState {
         var state = workspace()
         let inspiration = state.inspirations[inspirationID]!
-        state.materialDigests[inspiration.id] = succeeded(for: inspiration, takeawayCount: takeawayCount)
+        state.materialDigests[inspiration.id] = succeeded(
+            for: inspiration,
+            takeawayCount: takeawayCount,
+            contractVersion: contractVersion
+        )
         return state
     }
+
+    static func workspaceWithSkewedQuoteDigest(contractVersion: String) -> WorkspaceState {
+        var state = workspace()
+        let inspiration = state.inspirations[inspirationID]!
+        state.materialDigests[inspiration.id] = succeeded(
+            for: inspiration,
+            takeawayCount: 3,
+            contractVersion: contractVersion,
+            transcript: skewedQuoteTranscript,
+            quotes: [skewedQuote]
+        )
+        return state
+    }
+
+    static let skewedQuoteTranscript = TimestampedTranscript(segments: [
+        TranscriptSegment(startSeconds: 0, endSeconds: 10, text: "片头预告"),
+        TranscriptSegment(startSeconds: 10, endSeconds: 25, text: "这句话才是真正的引用原文"),
+        TranscriptSegment(startSeconds: 25, endSeconds: 40, text: "收尾")
+    ])
+
+    static let skewedQuote = DigestQuote(
+        speaker: nil,
+        startSeconds: 38,
+        text: "这句话才是真正的引用原文"
+    )
 }

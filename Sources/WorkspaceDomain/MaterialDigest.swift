@@ -8,6 +8,16 @@ public enum MaterialDigestStage: String, Codable, Equatable, Sendable {
     case summarizing
 }
 
+public enum MaterialDigestSummaryContract {
+    public static let v1 = "summary-contract-v1"
+    public static let v2 = "summary-contract-v2"
+    public static let current = v2
+
+    public static func enforcesEvidenceAndTranscriptEnd(_ version: String) -> Bool {
+        version.trimmingCharacters(in: .whitespacesAndNewlines) != v1
+    }
+}
+
 public enum MaterialDigestContentLimits {
     public static let maximumTimestampSeconds: Double = 604_800
     public static let maximumTranscriptSegments = 50_000

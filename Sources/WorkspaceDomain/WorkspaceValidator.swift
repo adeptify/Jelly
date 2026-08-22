@@ -231,7 +231,12 @@ public enum WorkspaceValidator {
 
     private static func validate(_ result: MaterialDigestResult, for inspirationID: InspirationID) throws {
         try validate(result.transcript, for: inspirationID)
-        try validate(result.summary, transcript: result.transcript, for: inspirationID)
+        try validate(
+            result.summary,
+            transcript: result.transcript,
+            contractVersion: result.provenance.summaryContractVersion,
+            for: inspirationID
+        )
         try validate(result.provenance, for: inspirationID)
     }
 
@@ -265,6 +270,7 @@ public enum WorkspaceValidator {
     private static func validate(
         _ summary: InspirationSummary,
         transcript: TimestampedTranscript,
+        contractVersion: String,
         for inspirationID: InspirationID
     ) throws {
         let thesis = summary.thesis.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -276,7 +282,10 @@ public enum WorkspaceValidator {
         let takeaways = summary.takeaways.map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        let maximumSourceTime = MaterialDigestEvidence.transcriptEnd(transcript)
+        let enforceEvidence = MaterialDigestSummaryContract.enforcesEvidenceAndTranscriptEnd(contractVersion)
+        let maximumSourceTime = enforceEvidence
+            ? MaterialDigestEvidence.transcriptEnd(transcript)
+            : MaterialDigestContentLimits.maximumTimestampSeconds
         guard MaterialDigestContentLimits.takeawayCountRange.contains(takeaways.count),
               takeaways.allSatisfy({
                   !$0.isEmpty && $0.count <= MaterialDigestContentLimits.maximumTakeawayCharacters
@@ -321,22 +330,26 @@ public enum WorkspaceValidator {
                   !text.isEmpty,
                   text.count <= MaterialDigestContentLimits.maximumQuoteCharacters,
                   (speaker?.count ?? 0) <= MaterialDigestContentLimits.maximumSpeakerCharacters,
-                  totalCharacters <= MaterialDigestContentLimits.maximumSummaryCharacters,
-                  MaterialDigestEvidence.textAppearsNearby(
-                    text,
-                    at: quote.startSeconds,
-                    in: transcript
-                  )
+                  totalCharacters <= MaterialDigestContentLimits.maximumSummaryCharacters
             else {
                 throw WorkspaceValidationError.invalidMaterialDigestResult(inspirationID)
             }
-            if let speaker, !speaker.isEmpty {
-                guard MaterialDigestEvidence.speakerAppearsNearby(
-                    speaker,
+            if enforceEvidence {
+                guard MaterialDigestEvidence.textAppearsNearby(
+                    text,
                     at: quote.startSeconds,
                     in: transcript
                 ) else {
                     throw WorkspaceValidationError.invalidMaterialDigestResult(inspirationID)
+                }
+                if let speaker, !speaker.isEmpty {
+                    guard MaterialDigestEvidence.speakerAppearsNearby(
+                        speaker,
+                        at: quote.startSeconds,
+                        in: transcript
+                    ) else {
+                        throw WorkspaceValidationError.invalidMaterialDigestResult(inspirationID)
+                    }
                 }
             }
         }

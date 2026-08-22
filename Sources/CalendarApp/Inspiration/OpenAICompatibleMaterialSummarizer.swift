@@ -2,7 +2,7 @@ import Foundation
 import WorkspaceDomain
 
 final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked Sendable {
-    static let contractVersion = "summary-contract-v1"
+    static let contractVersion = MaterialDigestSummaryContract.v2
     private static let maximumResponseBytes = 4_000_000
     private let settings: DigestSettingsStore
     private let credentials: any DigestCredentialStoring
@@ -94,7 +94,7 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
             transcript: transcript,
             maximumSourceTime: transcriptEnd
         )
-        try Self.validate(summary, maximumSourceTime: transcriptEnd)
+        try Self.validate(summary, transcript: transcript, maximumSourceTime: transcriptEnd)
         return MaterialSummarizerOutput(
             summary: summary,
             endpointHost: host,
@@ -241,6 +241,7 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
 
     private static func validate(
         _ summary: InspirationSummary,
+        transcript: TimestampedTranscript,
         maximumSourceTime: Double
     ) throws {
         let thesis = summary.thesis.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -294,9 +295,23 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
                   !text.isEmpty,
                   text.count <= MaterialDigestContentLimits.maximumQuoteCharacters,
                   (speaker?.count ?? 0) <= MaterialDigestContentLimits.maximumSpeakerCharacters,
-                  totalCharacters <= MaterialDigestContentLimits.maximumSummaryCharacters
+                  totalCharacters <= MaterialDigestContentLimits.maximumSummaryCharacters,
+                  MaterialDigestEvidence.textAppearsNearby(
+                    text,
+                    at: quote.startSeconds,
+                    in: transcript
+                  )
             else {
                 throw MaterialDigestPipelineError.invalidSummary
+            }
+            if let speaker, !speaker.isEmpty {
+                guard MaterialDigestEvidence.speakerAppearsNearby(
+                    speaker,
+                    at: quote.startSeconds,
+                    in: transcript
+                ) else {
+                    throw MaterialDigestPipelineError.invalidSummary
+                }
             }
         }
         for item in summary.dropped {

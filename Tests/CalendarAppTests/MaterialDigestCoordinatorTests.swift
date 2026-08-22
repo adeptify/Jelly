@@ -18,7 +18,7 @@ struct MaterialDigestCoordinatorTests {
         let digest = try #require(harness.store.state.materialDigests[harness.inspirationID])
         #expect(digest.currentRun == nil)
         #expect(digest.result?.summary.thesis == "核心论点")
-        #expect(digest.result?.provenance.summaryContractVersion == "summary-contract-v1")
+        #expect(digest.result?.provenance.summaryContractVersion == "summary-contract-v2")
         #expect(await waitUntil { harness.downloader.cleanedRunIDs.count == 1 })
     }
 
@@ -251,7 +251,7 @@ private struct MaterialDigestCoordinatorHarness {
         ),
         endpointHost: "api.example.com",
         model: "test-model",
-        summaryContractVersion: "summary-contract-v1"
+        summaryContractVersion: "summary-contract-v2"
     )
 
     static let transcript = TimestampedTranscript(segments: [

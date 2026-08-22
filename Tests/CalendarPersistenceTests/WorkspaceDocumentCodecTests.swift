@@ -182,6 +182,44 @@ struct WorkspaceDocumentCodecTests {
         #expect(legacy.state.inspirationNoteLinks == expected.inspirationNoteLinks)
     }
 
+    @Test func v1DigestWithQuoteTimestampSkewRoundTripsNotesAndInspirationsWithoutSchemaBump() throws {
+        let expected = try WorkspacePersistenceFixtures.workspaceWithHistoricalV1SkewedQuote()
+        try WorkspaceValidator.validate(expected)
+
+        let encoded = try WorkspaceDocumentCodec.encode(expected)
+        let decoded = try WorkspaceDocumentCodec.decode(encoded)
+
+        #expect(decoded.provenance.sourceSchema == 4)
+        #expect(decoded.provenance.sourceSchema == WorkspaceDocument.currentSchemaVersion)
+        #expect(decoded.state.notes == expected.notes)
+        #expect(decoded.state.inspirations == expected.inspirations)
+        #expect(decoded.state.materialDigests == expected.materialDigests)
+        #expect(decoded.state.inspirationNoteLinks == expected.inspirationNoteLinks)
+        #expect(decoded.state == expected)
+
+        let legacy = try JSONDecoder.workspaceDeterministic.decode(
+            LegacyWorkspaceDocumentV3V4.self,
+            from: encoded
+        )
+        #expect(legacy.schemaVersion == 4)
+        #expect(legacy.state.notes == expected.notes)
+        #expect(legacy.state.inspirations == expected.inspirations)
+
+        var v2 = expected
+        let inspirationID = try #require(v2.materialDigests.keys.first)
+        v2.materialDigests[inspirationID]?.result?.provenance.summaryContractVersion = "summary-contract-v2"
+        #expect(throws: WorkspaceValidationError.self) {
+            try WorkspaceValidator.validate(v2)
+        }
+        #expect(throws: WorkspacePersistenceError.invalidWorkspace) {
+            _ = try WorkspaceDocumentCodec.encode(v2)
+        }
+        let rawV2 = try JSONEncoder.workspaceDeterministic.encode(WorkspaceDocument(state: v2))
+        #expect(throws: WorkspacePersistenceError.invalidDocument) {
+            _ = try WorkspaceDocumentCodec.decode(rawV2)
+        }
+    }
+
     @Test func currentLinkedTaskTitleMismatchIsRejectedAsFatal() throws {
         let (workspace, _) = try WorkspacePersistenceFixtures.linkedTaskWorkspace(
             calendarTitle: "冲突的日历标题"
@@ -297,6 +335,76 @@ enum WorkspacePersistenceFixtures {
             retrying.id: retryDigest(for: retrying, now: now)
         ]
         try WorkspaceValidator.validate(state)
+        return state
+    }
+
+    static func workspaceWithHistoricalV1SkewedQuote() throws -> WorkspaceState {
+        let now = Date(timeIntervalSince1970: 1_800_200_000)
+        var state = WorkspaceState.empty(calendar: calendarState)
+        state.revision = 9
+        let inspiration = try materialInspiration(index: 9, now: now)
+        let note = Note(
+            id: NoteID(uuid(820)),
+            title: "用户笔记",
+            document: .init(blocks: [
+                DocumentBlock(
+                    id: BlockID(uuid(821)),
+                    kind: .paragraph,
+                    inlineContent: .plain("保留这条笔记"),
+                    taskState: nil,
+                    indentLevel: 0
+                )
+            ]),
+            categoryID: categoryID,
+            archivedAt: nil,
+            revision: 2,
+            createdAt: now,
+            updatedAt: now
+        )
+        state.notes[note.id] = note
+        state.inspirations[inspiration.id] = inspiration
+        state.inspirationNoteLinks.insert(
+            InspirationNoteLink(source: .live(inspiration.id), noteID: note.id, createdAt: now)
+        )
+        state.materialDigests[inspiration.id] = digest(
+            for: inspiration,
+            now: now,
+            currentRun: nil,
+            result: MaterialDigestResult(
+                transcript: TimestampedTranscript(segments: [
+                    TranscriptSegment(startSeconds: 0, endSeconds: 10, text: "片头预告"),
+                    TranscriptSegment(
+                        startSeconds: 10,
+                        endSeconds: 25,
+                        text: "这句话才是真正的引用原文"
+                    ),
+                    TranscriptSegment(startSeconds: 25, endSeconds: 40, text: "收尾")
+                ]),
+                summary: InspirationSummary(
+                    thesis: "核心论点",
+                    takeaways: ["观点1", "观点2", "观点3"],
+                    chapters: [
+                        DigestChapter(startSeconds: 0, title: "开场", points: ["引入"]),
+                        DigestChapter(startSeconds: 10, title: "主体", points: ["展开"])
+                    ],
+                    quotes: [
+                        DigestQuote(
+                            speaker: nil,
+                            startSeconds: 38,
+                            text: "这句话才是真正的引用原文"
+                        )
+                    ],
+                    dropped: []
+                ),
+                provenance: DigestProvenance(
+                    modelIdentifier: "test-model",
+                    generatedAt: now,
+                    inputFingerprint: WorkspaceChecksum.inspirationSourceChecksum(inspiration),
+                    summaryContractVersion: "summary-contract-v1"
+                ),
+                completedAt: now
+            )
+        )
         return state
     }
 
