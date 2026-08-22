@@ -52,6 +52,7 @@ enum MaterialDigestPipelineError: Error, Equatable, Sendable {
 enum MaterialTranscriptSemantics {
     static let shortSparseMaximumDurationSeconds: Double = 30
     static let shortSparseMaximumSemanticMass = 3
+    static let shortSparseMaximumSemanticDiversityMass = 4
 
     static func hasSemanticContent(_ transcript: TimestampedTranscript) -> Bool {
         transcript.segments.contains { hasSemanticContent($0.text) }
@@ -68,7 +69,10 @@ enum MaterialTranscriptSemantics {
         guard duration.isFinite, duration <= shortSparseMaximumDurationSeconds else {
             return false
         }
-        return semanticMass(transcript) <= shortSparseMaximumSemanticMass
+        let mass = semanticMass(transcript)
+        let diversity = semanticDiversityMass(transcript)
+        return mass <= shortSparseMaximumSemanticMass
+            || (diversity <= shortSparseMaximumSemanticDiversityMass && mass > diversity)
     }
 
     static func semanticMass(_ transcript: TimestampedTranscript) -> Int {
@@ -94,6 +98,55 @@ enum MaterialTranscriptSemantics {
         }
         if inWesternWord { mass += 1 }
         return mass
+    }
+
+    static func semanticDiversityMass(_ transcript: TimestampedTranscript) -> Int {
+        var westernWords = Set<String>()
+        var nonWesternScalars = Set<Unicode.Scalar>()
+        for segment in transcript.segments {
+            collectDiversity(
+                from: segment.text,
+                westernWords: &westernWords,
+                nonWesternScalars: &nonWesternScalars
+            )
+        }
+        return westernWords.count + nonWesternScalars.count
+    }
+
+    static func semanticDiversityMass(_ text: String) -> Int {
+        var westernWords = Set<String>()
+        var nonWesternScalars = Set<Unicode.Scalar>()
+        collectDiversity(
+            from: text,
+            westernWords: &westernWords,
+            nonWesternScalars: &nonWesternScalars
+        )
+        return westernWords.count + nonWesternScalars.count
+    }
+
+    private static func collectDiversity(
+        from text: String,
+        westernWords: inout Set<String>,
+        nonWesternScalars: inout Set<Unicode.Scalar>
+    ) {
+        let stripped = strippingWhisperSpecialTokens(text)
+        var currentWord = ""
+        for scalar in stripped.unicodeScalars {
+            if isWesternAlphanumeric(scalar) {
+                currentWord.unicodeScalars.append(scalar)
+                continue
+            }
+            if !currentWord.isEmpty {
+                westernWords.insert(currentWord.lowercased())
+                currentWord = ""
+            }
+            if CharacterSet.letters.contains(scalar) || CharacterSet.decimalDigits.contains(scalar) {
+                nonWesternScalars.insert(scalar)
+            }
+        }
+        if !currentWord.isEmpty {
+            westernWords.insert(currentWord.lowercased())
+        }
     }
 
     private static let westernAlphanumerics = CharacterSet(charactersIn: "0"..."9")

@@ -225,6 +225,14 @@ struct OpenAICompatibleMaterialSummarizerTests {
         #expect(MaterialTranscriptSemantics.semanticMass("mm uh") == 2)
         #expect(MaterialTranscriptSemantics.semanticMass("测试") == 2)
         #expect(MaterialTranscriptSemantics.semanticMass("大家好，这是一条测试。") == 9)
+        #expect(MaterialTranscriptSemantics.semanticMass(repetitiveTestTranscript) == 12)
+        #expect(MaterialTranscriptSemantics.semanticDiversityMass(repetitiveTestTranscript) == 4)
+        #expect(MaterialTranscriptSemantics.isShortAndSparse(repetitiveTestTranscript))
+        #expect(MaterialTranscriptSemantics.hasSemanticContent(repetitiveTestTranscript))
+        #expect(MaterialTranscriptSemantics.semanticDiversityMass(sampleTranscript) == 4)
+        #expect(MaterialTranscriptSemantics.semanticMass(sampleTranscript) == 4)
+        #expect(MaterialTranscriptSemantics.semanticDiversityMass(elevenSecondTranscript) == 9)
+        #expect(MaterialTranscriptSemantics.semanticDiversityMass("大家好，这是一条测试。") == 9)
     }
 
     @Test func sparseShortTranscriptConvertsInvalidSummaryToInsufficientContent() async throws {
@@ -253,6 +261,47 @@ struct OpenAICompatibleMaterialSummarizerTests {
                 #expect(SummarizerURLProtocol.lastRequest != nil)
             }
         }
+    }
+
+    @Test func repetitiveShortTranscriptConvertsInvalidSummaryToInsufficientContent() async throws {
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+        let invalidPayloads = [
+            completionJSON(validSummaryJSON(thesis: "")),
+            completionJSON(validSummaryJSON(takeaways: []))
+        ]
+        for json in invalidPayloads {
+            SummarizerURLProtocol.reset()
+            SummarizerURLProtocol.response = .init(status: 200, json: json)
+            await expectPipeline(
+                summarizer,
+                .insufficientContent,
+                transcript: repetitiveTestTranscript,
+                source: audioSource
+            )
+            #expect(SummarizerURLProtocol.lastRequest != nil)
+        }
+    }
+
+    @Test func repetitiveShortTranscriptStillSucceedsWithValidSingleTakeaway() async throws {
+        SummarizerURLProtocol.reset()
+        SummarizerURLProtocol.response = .init(
+            status: 200,
+            json: completionJSON(shortMaterialSummaryJSON(takeaways: ["测试"]))
+        )
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+        let output = try await summarizer.summarize(repetitiveTestTranscript, source: audioSource)
+        #expect(output.summaryContractVersion == "summary-contract-v2")
+        #expect(output.summary.takeaways == ["测试"])
+        #expect(!output.summary.thesis.isEmpty)
+        #expect(SummarizerURLProtocol.lastRequest != nil)
     }
 
     @Test func sparseShortTranscriptStillSucceedsWithValidSingleTakeaway() async throws {
@@ -651,6 +700,12 @@ private let sparseShortTranscripts = [
 
 private let sparseOverThirtySecondsTranscript = TimestampedTranscript(segments: [
     TranscriptSegment(startSeconds: 0, endSeconds: 31, text: "a")
+])
+
+private let repetitiveTestTranscript = TimestampedTranscript(segments: [
+    TranscriptSegment(startSeconds: 0, endSeconds: 7.4, text: "测试 测试 测试 测试"),
+    TranscriptSegment(startSeconds: 7.4, endSeconds: 9.5, text: "测试"),
+    TranscriptSegment(startSeconds: 9.5, endSeconds: 11.04, text: "Thank you.")
 ])
 
 private let videoSource = MaterialSource(
