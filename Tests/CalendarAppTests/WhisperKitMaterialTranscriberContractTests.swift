@@ -111,6 +111,30 @@ struct WhisperKitMaterialTranscriberContractTests {
         #expect(result.segments[2].endSeconds >= result.segments[2].startSeconds)
     }
 
+    @Test func stripsWhisperSpecialTokensFromShortSegments() async throws {
+        let directory = try makeModelDirectory()
+        let engine = FakeWhisperKitEngine(segments: [
+            .init(
+                startSeconds: 0,
+                endSeconds: 0.8,
+                text: "<|startoftranscript|><|zh|><|transcribe|><|0.00|>测试<|endoftext|>"
+            ),
+            .init(
+                startSeconds: 0.8,
+                endSeconds: 1.1,
+                text: "<|startoftranscript|><|zh|><|transcribe|><|0.00|><|endoftext|>"
+            )
+        ])
+        let transcriber = WhisperKitMaterialTranscriber(modelDirectory: directory, engine: engine)
+        let result = try await transcriber.transcribe(URL(fileURLWithPath: "/tmp/source-audio.m4a")) { _ in }
+        #expect(result.segments.map(\.text) == ["测试"])
+        #expect(result.segments[0].endSeconds == 0.8)
+    }
+
+    @Test func transcriptionDecodeOptionsSkipSpecialTokens() {
+        #expect(WhisperKitMaterialTranscriber.transcriptionDecodeOptionsSkipSpecialTokens)
+    }
+
     @Test func cancellationStopsPublishingAndLeavesInstalledModel() async throws {
         let directory = try makeModelDirectory()
         let engine = FakeWhisperKitEngine(transcribeDelayNanoseconds: 200_000_000)

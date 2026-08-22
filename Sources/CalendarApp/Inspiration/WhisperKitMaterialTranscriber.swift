@@ -19,6 +19,12 @@ protocol WhisperKitEngine: Sendable {
 actor WhisperKitMaterialTranscriber: MaterialTranscribing {
     static let variant = "large-v3-v20240930_626MB"
     static let approximateBytes: Int64 = 626_000_000
+    static var transcriptionDecodeOptionsSkipSpecialTokens: Bool {
+        transcriptionDecodeOptions.skipSpecialTokens
+    }
+    static var transcriptionDecodeOptions: DecodingOptions {
+        DecodingOptions(skipSpecialTokens: true, suppressBlank: true)
+    }
 
     private let modelDirectory: URL
     private let engine: any WhisperKitEngine
@@ -138,7 +144,7 @@ actor WhisperKitMaterialTranscriber: MaterialTranscribing {
                 TranscriptSegment(
                     startSeconds: $0.startSeconds,
                     endSeconds: $0.endSeconds,
-                    text: $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    text: strippingWhisperSpecialTokens($0.text)
                 )
             }
             .filter {
@@ -156,6 +162,15 @@ actor WhisperKitMaterialTranscriber: MaterialTranscribing {
             previousStart = start
             return TranscriptSegment(startSeconds: start, endSeconds: end, text: segment.text)
         }
+    }
+
+    private static func strippingWhisperSpecialTokens(_ text: String) -> String {
+        var result = text
+        while let start = result.range(of: "<|"),
+              let end = result.range(of: "|>", range: start.lowerBound..<result.endIndex) {
+            result.removeSubrange(start.lowerBound..<end.upperBound)
+        }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -206,7 +221,7 @@ actor LiveWhisperKitEngine: WhisperKitEngine {
         }
         let results = try await kit.transcribe(
             audioPath: audioPath,
-            decodeOptions: DecodingOptions(),
+            decodeOptions: WhisperKitMaterialTranscriber.transcriptionDecodeOptions,
             callback: { _ in
                 if Task.isCancelled { return false }
                 progress(0.5)

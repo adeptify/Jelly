@@ -89,7 +89,10 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
             throw MaterialDigestPipelineError.summarizationFailed
         }
         try Self.throwForStatus(http.statusCode, data: data)
-        let summary = Self.normalized(try Self.decodeSummary(from: data))
+        let summary = Self.normalized(
+            try Self.decodeSummary(from: data),
+            maximumSourceTime: transcriptEnd
+        )
         try Self.validate(summary, maximumSourceTime: transcriptEnd)
         return MaterialSummarizerOutput(
             summary: summary,
@@ -199,27 +202,66 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
         return maximumEnd
     }
 
-    private static func normalized(_ summary: InspirationSummary) -> InspirationSummary {
+    private static let timestampSlackSeconds = 1.0
+
+    private static func normalized(
+        _ summary: InspirationSummary,
+        maximumSourceTime: Double
+    ) -> InspirationSummary {
         InspirationSummary(
             thesis: summary.thesis.trimmingCharacters(in: .whitespacesAndNewlines),
-            takeaways: summary.takeaways.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) },
-            chapters: summary.chapters.map { chapter in
-                DigestChapter(
-                    startSeconds: chapter.startSeconds,
-                    title: chapter.title.trimmingCharacters(in: .whitespacesAndNewlines),
-                    points: chapter.points.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                )
+            takeaways: summary.takeaways
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty },
+            chapters: summary.chapters.compactMap { chapter in
+                let title = chapter.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                let points = chapter.points
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                guard !title.isEmpty, !points.isEmpty else { return nil }
+                guard let start = clampedTimestamp(
+                    chapter.startSeconds,
+                    maximumSourceTime: maximumSourceTime
+                ) else { return DigestChapter(startSeconds: chapter.startSeconds, title: title, points: points) }
+                return DigestChapter(startSeconds: start, title: title, points: points)
             },
-            quotes: summary.quotes.map { quote in
+            quotes: summary.quotes.compactMap { quote in
+                let text = quote.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return nil }
                 let speaker = quote.speaker?.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let start = clampedTimestamp(
+                    quote.startSeconds,
+                    maximumSourceTime: maximumSourceTime
+                ) else {
+                    return DigestQuote(
+                        speaker: speaker?.isEmpty == false ? speaker : nil,
+                        startSeconds: quote.startSeconds,
+                        text: text
+                    )
+                }
                 return DigestQuote(
                     speaker: speaker?.isEmpty == false ? speaker : nil,
-                    startSeconds: quote.startSeconds,
-                    text: quote.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    startSeconds: start,
+                    text: text
                 )
             },
-            dropped: summary.dropped.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            dropped: summary.dropped
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
         )
+    }
+
+    private static func clampedTimestamp(
+        _ value: Double,
+        maximumSourceTime: Double
+    ) -> Double? {
+        guard value.isFinite,
+              value >= 0,
+              value <= MaterialDigestContentLimits.maximumTimestampSeconds
+        else { return nil }
+        if value <= maximumSourceTime { return value }
+        if value <= maximumSourceTime + timestampSlackSeconds { return maximumSourceTime }
+        return nil
     }
 
     private static func validate(
@@ -325,14 +367,15 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
 
     private static func systemPrompt(for source: MaterialSource) -> String {
         var prompt = """
-        你是 Jelly 的材料提炼器。只根据给定的带时间戳文稿输出符合 schema 的 JSON，不要编造文稿中没有的内容，也不要输出除 JSON 以外的文字。
-        字段名和形状必须固定为：{"thesis":"字符串","takeaways":["字符串，3 到 7 项"],"chapters":[{"startSeconds":0,"title":"字符串","points":["字符串，至少 1 项"]}],"quotes":[{"speaker":"","startSeconds":0,"text":"字符串"}],"dropped":["字符串"]}。speaker 不确定时用空字符串；chapters、quotes、dropped 可以是空数组；所有 startSeconds 必须来自文稿时间范围并按先后排序。
+        你是 Jelly 的材料提炼器。只根据给定的带时间戳文稿输出符合 schema 的 JSON，不要编造文稿中没有的事实，也不要输出除 JSON 以外的文字。
+        字段名和形状必须固定为：{"thesis":"字符串","takeaways":["字符串，3 到 7 项"],"chapters":[{"startSeconds":0,"title":"字符串","points":["字符串，至少 1 项"]}],"quotes":[{"speaker":"","startSeconds":0,"text":"字符串"}],"dropped":["字符串"]}。speaker 不确定时用空字符串；没有章节、引用或广告时 chapters、quotes、dropped 必须是空数组，不要输出 title、points 或 text 为空的占位对象。
+        文稿即使只有一两句或时间范围极短，也必须输出非空 thesis 和 3 到 7 条非空 takeaways；可从同一句拆出内容、语气、形式和用途，禁止用空字符串凑数。所有 startSeconds 必须是数字，来自文稿时间范围，且不超过最后一段结束时间，并按先后排序。
         """
         if source.kind == .video {
             prompt += "这是视频材料：提炼核心论点和可执行观点，章节按时间排序。"
         }
         if source.kind == .audio {
-            prompt += "这是音频单集：必须识别广告、片头片尾和赞助口播并写入 dropped；不得从原文稿中删除这些内容。"
+            prompt += "这是音频单集：必须识别广告、片头片尾和赞助口播并写入 dropped；没有这些内容时 dropped 用空数组，不要写空字符串；不得从原文稿中删除这些内容。"
         }
         return prompt
     }
@@ -348,8 +391,8 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
               seconds >= 0,
               seconds <= MaterialDigestContentLimits.maximumTimestampSeconds
         else { return "--:--" }
-        let total = max(0, Int(seconds.rounded(.towardZero)))
-        return String(format: "%02d:%02d", total / 60, total % 60)
+        let tenths = Int((seconds * 10).rounded(.towardZero))
+        return String(format: "%02d:%02d.%d", tenths / 600, (tenths % 600) / 10, tenths % 10)
     }
 
     private static func jsonSchema() -> [String: Any] { [

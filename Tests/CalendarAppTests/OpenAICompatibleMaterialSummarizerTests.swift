@@ -57,7 +57,7 @@ struct OpenAICompatibleMaterialSummarizerTests {
         #expect(system.contains(#""quotes""#))
         #expect(system.contains(#""speaker":"""#))
         let user = try #require(messages.last?["content"] as? String)
-        #expect(user.contains("[00:00-00:08]"))
+        #expect(user.contains("[00:00.0-00:08.0]"))
         #expect(user.contains("开场"))
     }
 
@@ -76,6 +76,115 @@ struct OpenAICompatibleMaterialSummarizerTests {
         let system = try #require(messages.first?["content"] as? String)
         #expect(system.contains("视频"))
         #expect(!system.contains("赞助口播"))
+    }
+
+    @Test func shortTranscriptPromptKeepsSubsecondRangeAndForbidsEmptyPadding() async throws {
+        SummarizerURLProtocol.reset()
+        SummarizerURLProtocol.response = .init(
+            status: 200,
+            json: completionJSON(shortMaterialSummaryJSON())
+        )
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+        _ = try await summarizer.summarize(shortTranscript, source: audioSource)
+
+        let body = try #require(SummarizerURLProtocol.lastBody)
+        let object = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let messages = try #require(object["messages"] as? [[String: Any]])
+        let system = try #require(messages.first?["content"] as? String)
+        let user = try #require(messages.last?["content"] as? String)
+        #expect(!user.contains("[00:00-00:00]"))
+        #expect(user.contains("测试"))
+        #expect(user.contains("00:00.0") || user.contains("0.0"))
+        #expect(user.contains("00:00.8") || user.contains("0.8") || user.contains("0.86"))
+        #expect(system.contains("空数组"))
+        #expect(system.contains("非空"))
+        #expect(system.contains("很短") || system.contains("极短"))
+    }
+
+    @Test func acceptsMiniMaxShortMaterialJSONWithPaddedEmptyOptionalFields() async throws {
+        SummarizerURLProtocol.reset()
+        SummarizerURLProtocol.response = .init(
+            status: 200,
+            json: completionJSON(
+                """
+                {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长很短","没有广告或赞助"],"chapters":[{"startSeconds":0,"title":"","points":[]}],"quotes":[{"speaker":"","startSeconds":0,"text":""}],"dropped":[""]}
+                """
+            )
+        )
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+
+        let output = try await summarizer.summarize(shortTranscript, source: audioSource)
+        #expect(output.summary.thesis == "这是一条测试口播。")
+        #expect(output.summary.takeaways == ["内容为一句测试", "时长很短", "没有广告或赞助"])
+        #expect(output.summary.chapters.isEmpty)
+        #expect(output.summary.quotes.isEmpty)
+        #expect(output.summary.dropped.isEmpty)
+    }
+
+    @Test func clampsNearEndTimestampOnShortTranscriptButRejectsFarHallucination() async throws {
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+
+        SummarizerURLProtocol.reset()
+        SummarizerURLProtocol.response = .init(
+            status: 200,
+            json: completionJSON(
+                """
+                {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长约十一秒","没有广告或赞助"],"chapters":[{"startSeconds":11,"title":"测试口播","points":["一句中文测试"]}],"quotes":[{"speaker":"","startSeconds":11,"text":"大家好，这是一条测试。"}],"dropped":[]}
+                """
+            )
+        )
+        let output = try await summarizer.summarize(elevenSecondTranscript, source: audioSource)
+        #expect(output.summary.chapters.count == 1)
+        #expect(output.summary.chapters[0].startSeconds == 10.4)
+        #expect(output.summary.quotes.count == 1)
+        #expect(output.summary.quotes[0].startSeconds == 10.4)
+
+        SummarizerURLProtocol.reset()
+        SummarizerURLProtocol.response = .init(
+            status: 200,
+            json: completionJSON(
+                """
+                {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长约十一秒","没有广告或赞助"],"chapters":[{"startSeconds":90,"title":"测试口播","points":["一句中文测试"]}],"quotes":[],"dropped":[]}
+                """
+            )
+        )
+        await expectPipeline(summarizer, .invalidSummary, transcript: elevenSecondTranscript, source: audioSource)
+    }
+
+    @Test func stillRejectsEmptyThesisAndTooFewTakeawaysOnShortMaterial() async throws {
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+        let cases = [
+            """
+            {"thesis":"","takeaways":[],"chapters":[{"startSeconds":0,"title":"测试","points":[]}],"quotes":[],"dropped":[]}
+            """,
+            """
+            {"thesis":"这是一条测试口播。","takeaways":["只有一条"],"chapters":[],"quotes":[],"dropped":[]}
+            """,
+            """
+            {"thesis":"这是一条测试口播。","takeaways":["观点1","",""],"chapters":[],"quotes":[],"dropped":[]}
+            """
+        ]
+        for json in cases {
+            SummarizerURLProtocol.reset()
+            SummarizerURLProtocol.response = .init(status: 200, json: completionJSON(json))
+            await expectPipeline(summarizer, .invalidSummary, transcript: shortTranscript, source: audioSource)
+        }
     }
 
     @Test func discardsLeadingReasoningBlockBeforeDecodingStructuredJSON() async throws {
@@ -209,10 +318,12 @@ struct OpenAICompatibleMaterialSummarizerTests {
 
 private func expectPipeline(
     _ summarizer: OpenAICompatibleMaterialSummarizer,
-    _ expected: MaterialDigestPipelineError
+    _ expected: MaterialDigestPipelineError,
+    transcript: TimestampedTranscript = sampleTranscript,
+    source: MaterialSource = videoSource
 ) async {
     do {
-        _ = try await summarizer.summarize(sampleTranscript, source: videoSource)
+        _ = try await summarizer.summarize(transcript, source: source)
         Issue.record("expected \(expected)")
     } catch let error as MaterialDigestPipelineError {
         #expect(error == expected)
@@ -248,6 +359,14 @@ private let sampleTranscript = TimestampedTranscript(segments: [
     TranscriptSegment(startSeconds: 8, endSeconds: 20, text: "主体")
 ])
 
+private let shortTranscript = TimestampedTranscript(segments: [
+    TranscriptSegment(startSeconds: 0.04, endSeconds: 0.86, text: "测试")
+])
+
+private let elevenSecondTranscript = TimestampedTranscript(segments: [
+    TranscriptSegment(startSeconds: 0, endSeconds: 10.4, text: "大家好，这是一条测试。")
+])
+
 private let videoSource = MaterialSource(
     inspirationID: InspirationID(),
     url: URL(string: "https://www.bilibili.com/video/BV1xx411c7mD/")!,
@@ -274,6 +393,12 @@ private func validSummaryJSON(
     let takeawayJSON = takeaways.map { "\"\($0)\"" }.joined(separator: ",")
     return """
     {"thesis":"\(thesis)","takeaways":[\(takeawayJSON)],"chapters":\(chapters),"quotes":[{"speaker":"讲者","startSeconds":8,"text":"一句原话"}],"dropped":["片头"]}
+    """
+}
+
+private func shortMaterialSummaryJSON() -> String {
+    """
+    {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长很短","没有广告或赞助"],"chapters":[],"quotes":[],"dropped":[]}
     """
 }
 
