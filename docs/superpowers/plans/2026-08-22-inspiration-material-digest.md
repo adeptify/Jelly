@@ -1372,3 +1372,94 @@ Codex 逐行复核 diff，重跑相关与完整测试、release、`Scripts/build
 - 若页面此时已下线，记录 HTTP 状态并换一个当前匿名可访问的 B 站公开视频，不得用 mock 冒充产品实操。
 
 仅这些证据通过才能报告 B 站元数据产品实操通过；完整提炼、写入笔记和用户本人 9 分验收仍保持 `UNVERIFIED`，直到凭据动作获得用户确认并完成真实旅程。
+
+## Task 15：在进入摘要模型前拒绝明显重复的 Whisper 幻觉转写
+
+**结论与边界：** 2026-08-22 最终 App 对公开 B 站视频 `https://www.bilibili.com/video/BV1hgEj6LEVh/` 的真实提炼已经走到音频兜底：该页面没有原生字幕，WhisperKit 把约 240 秒音频识别为 8 个每隔 30 秒出现一次、内容完全相同的 `Thank you.`。现有 `hasSemanticContent` 只检查字母或数字，因此这份低多样性幻觉被送进 MiniMax-M3，最终暴露成“模型返回的摘要无法校验”。Task 15 只在 Whisper 转写边界识别**至少 3 段、规范化后全部相同且语义多样性极低**的重复噪声，并映射为已有 `.insufficientContent`；不得放松摘要 schema，不得用固定短语黑名单，不得改变 B 站原生字幕或普通长短材料的处理。
+
+**真实根因证据：** 临时诊断测试调用了生产 `RoutedMaterialAcquirer`、真实 B 站音频和隔离验收目录内已下载的 WhisperKit 模型，得到 8 段、80 字符、总时长约 239.98 秒、semantic mass 16、semantic diversity mass 2；8 段文本均为 `Thank you.`。临时诊断代码已删除，不得进入提交。
+
+**Files:**
+
+- Modify: `Sources/CalendarApp/Inspiration/MaterialDigestProtocols.swift`
+- Modify: `Sources/CalendarApp/Inspiration/WhisperKitMaterialTranscriber.swift`
+- Modify: `Tests/CalendarAppTests/WhisperKitMaterialTranscriberContractTests.swift`
+
+### Step 1：写真实重复转写 RED 合同
+
+在 `WhisperKitMaterialTranscriberContractTests` 使用现有 fake engine 返回 8 个 30 秒 segment，内容为大小写或标点形式略有差异的 `Thank you.`，总跨度约 240 秒。调用生产 transcriber，并断言抛出：
+
+```swift
+MaterialTranscriberError.insufficientContent
+```
+
+同时先写两条回归合同：
+
+- 只有 2 个相同 segment 时不触发重复噪声规则，仍返回 transcript；
+- 至少 3 个内容有真实差异的长 segment 正常返回，不能因为持续时间长或总词数少被拒绝。
+
+Run: `swift test --filter WhisperKitMaterialTranscriberContractTests`
+
+Expected: 8 段重复样本当前错误地返回 transcript，RED 失败；既有测试与两条回归合同保持通过。
+
+### Step 2：增加窄边界的重复噪声判定
+
+在 `MaterialTranscriptSemantics` 增加纯函数，例如：
+
+```swift
+static func isLikelyRepetitiveTranscriptionNoise(
+    _ transcript: TimestampedTranscript
+) -> Bool
+```
+
+实现要求：
+
+- 先移除 Whisper special tokens；
+- 对每个非空 segment 做小写化，并只保留 Unicode 字母和数字，消除空白与标点差异；
+- 至少有 3 个语义 segment；
+- 所有语义 segment 的规范化文本完全相同；
+- `semanticDiversityMass(transcript) <= 4`，避免把一段被切成多段的正常长句误杀；
+- 不使用 `Thank you`、语言、网站或时长黑名单，不修改已有 `isShortAndSparse` 合同。
+
+在 `WhisperKitMaterialTranscriber.transcribe` 完成 segment 规范化后、返回 `TimestampedTranscript` 前，组合已有语义检查：
+
+```swift
+let transcript = TimestampedTranscript(segments: normalized)
+guard MaterialTranscriptSemantics.hasSemanticContent(transcript),
+      !MaterialTranscriptSemantics.isLikelyRepetitiveTranscriptionNoise(transcript)
+else {
+    throw MaterialTranscriberError.insufficientContent
+}
+return transcript
+```
+
+这条规则只约束 Whisper 输出，并在调用 MiniMax 前结束，避免无价值请求；B 站原生字幕不经过该 transcriber，因此不受影响。
+
+Run: `swift test --filter WhisperKitMaterialTranscriberContractTests`
+
+Expected: 新旧合同全部 PASS。
+
+### Step 3：相关回归与 Grok 候选提交
+
+```bash
+swift test --filter 'WhisperKitMaterialTranscriberContractTests|MaterialDigestCoordinatorTests|OpenAICompatibleMaterialSummarizerTests'
+git diff --check
+git add Sources/CalendarApp/Inspiration/MaterialDigestProtocols.swift \
+  Sources/CalendarApp/Inspiration/WhisperKitMaterialTranscriber.swift \
+  Tests/CalendarAppTests/WhisperKitMaterialTranscriberContractTests.swift
+git diff --cached --check
+git commit -m "fix(inspiration): 识别重复转写噪声"
+```
+
+Expected: exit 0；Grok 提交只包含三个指定文件，不修改计划、构建产物、凭据、验收数据或临时诊断代码，不 push、不 merge。
+
+### Step 4：Codex 独立复核与最终 App 产品实操
+
+Codex 逐行检查 Grok 候选 diff，先重跑 focused/related tests，再执行完整 `swift test`、release build、`Scripts/build-app.sh` 与严格 codesign。随后使用同一个隔离数据目录和新打包的 `dist/Jelly.app`：
+
+- 对上述 B 站样本点“重试”，应稳定得到现有友好状态“没有识别到足够可提炼的内容”，不再出现 `invalidSummary`；
+- 确认原始链接、真实标题和失败状态持久化，关闭重开后仍可恢复；
+- 另选一个当时匿名可访问、含有可识别真实讲话的 B 站视频，走完“点击提炼 → 摘要成功 → 用户点击写入笔记 → 原链接在笔记首行 → 摘要结构可编辑 → 重启持久化”；
+- 再确认此前小宇宙摘要与笔记仍然存在，跨来源没有回归。
+
+只有前两项完成可报告本缺陷的产品实操通过；只有有意义的 B 站成功样本、小宇宙回归和最终 App 完整旅程都完成，才可报告灵感材料提炼主流程的产品实操通过。视觉质感、等待手感与“用户 9 分体验”仍为 `UNVERIFIED`，必须由用户本人使用后确认。
