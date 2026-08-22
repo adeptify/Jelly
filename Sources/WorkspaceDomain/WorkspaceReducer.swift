@@ -136,6 +136,18 @@ public enum WorkspaceReducer {
                 authorization: authorization,
                 in: &candidate
             )
+        case let .startMaterialDigest(payload):
+            return try startMaterialDigest(payload, in: &candidate, now: now)
+        case let .advanceMaterialDigestStage(payload):
+            return try advanceMaterialDigestStage(payload, in: &candidate, now: now)
+        case let .completeMaterialDigest(payload):
+            return try completeMaterialDigest(payload, in: &candidate, now: now)
+        case let .failMaterialDigest(payload):
+            return try failMaterialDigest(payload, in: &candidate, now: now)
+        case let .cancelMaterialDigest(expectation):
+            return try cancelMaterialDigest(expectation, in: &candidate, now: now)
+        case let .markInterruptedMaterialDigest(expectation):
+            return try markInterruptedMaterialDigest(expectation, in: &candidate, now: now)
         case let .createCategory(category):
             try applyCategory(.createCategory(category), to: &candidate, now: now)
         case let .updateCategory(category):

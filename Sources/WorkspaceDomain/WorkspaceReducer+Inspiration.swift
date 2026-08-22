@@ -158,6 +158,7 @@ extension WorkspaceReducer {
                 createdAt: link.createdAt
             )
         })
+        candidate.materialDigests.removeValue(forKey: id)
         candidate.inspirations.removeValue(forKey: id)
         return .proceed
     }

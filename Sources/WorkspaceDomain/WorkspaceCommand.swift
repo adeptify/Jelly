@@ -191,6 +191,82 @@ public struct InspirationMetadataExpectation: Equatable, Sendable {
     public init(sourceChecksum: String) { self.sourceChecksum = sourceChecksum }
 }
 
+public struct MaterialDigestRunExpectation: Equatable, Sendable {
+    public let inspirationID: InspirationID
+    public let runID: MaterialDigestRunID
+    public let sourceChecksum: String
+
+    public init(inspirationID: InspirationID, runID: MaterialDigestRunID, sourceChecksum: String) {
+        self.inspirationID = inspirationID
+        self.runID = runID
+        self.sourceChecksum = sourceChecksum
+    }
+}
+
+public struct StartMaterialDigestPayload: Equatable, Sendable {
+    public let inspirationID: InspirationID
+    public let digestID: MaterialDigestID
+    public let runID: MaterialDigestRunID
+    public let expectedSourceChecksum: String
+
+    public init(
+        inspirationID: InspirationID,
+        digestID: MaterialDigestID,
+        runID: MaterialDigestRunID,
+        expectedSourceChecksum: String
+    ) {
+        self.inspirationID = inspirationID
+        self.digestID = digestID
+        self.runID = runID
+        self.expectedSourceChecksum = expectedSourceChecksum
+    }
+}
+
+public struct AdvanceMaterialDigestStagePayload: Equatable, Sendable {
+    public let expectation: MaterialDigestRunExpectation
+    public let stage: MaterialDigestStage
+
+    public init(expectation: MaterialDigestRunExpectation, stage: MaterialDigestStage) {
+        self.expectation = expectation
+        self.stage = stage
+    }
+}
+
+public struct CompleteMaterialDigestPayload: Equatable, Sendable {
+    public let expectation: MaterialDigestRunExpectation
+    public let transcript: TimestampedTranscript
+    public let summary: InspirationSummary
+    public let provenance: DigestProvenance
+
+    public init(
+        expectation: MaterialDigestRunExpectation,
+        transcript: TimestampedTranscript,
+        summary: InspirationSummary,
+        provenance: DigestProvenance
+    ) {
+        self.expectation = expectation
+        self.transcript = transcript
+        self.summary = summary
+        self.provenance = provenance
+    }
+}
+
+public struct FailMaterialDigestPayload: Equatable, Sendable {
+    public let expectation: MaterialDigestRunExpectation
+    public let code: MaterialDigestFailure.Code
+    public let userMessage: String
+
+    public init(
+        expectation: MaterialDigestRunExpectation,
+        code: MaterialDigestFailure.Code,
+        userMessage: String
+    ) {
+        self.expectation = expectation
+        self.code = code
+        self.userMessage = userMessage
+    }
+}
+
 public struct WorkspaceConsistencyRepairPayload: Equatable, Sendable {
     public let expectedIssuesChecksum: String
     public let resolutions: [WorkspaceConsistencyIssueID: WorkspaceConsistencyResolution]
@@ -253,6 +329,12 @@ public enum WorkspaceCommand: Sendable {
         at: Date,
         authorization: PermanentDeleteAuthorization
     )
+    case startMaterialDigest(StartMaterialDigestPayload)
+    case advanceMaterialDigestStage(AdvanceMaterialDigestStagePayload)
+    case completeMaterialDigest(CompleteMaterialDigestPayload)
+    case failMaterialDigest(FailMaterialDigestPayload)
+    case cancelMaterialDigest(MaterialDigestRunExpectation)
+    case markInterruptedMaterialDigest(MaterialDigestRunExpectation)
     case createCategory(CalendarCategory)
     case updateCategory(CalendarCategory)
     case reorderCategories([UUID])
@@ -269,6 +351,10 @@ public enum WorkspaceNoChangeReason: Equatable, Sendable {
     case staleDeleteAuthorization
     case staleConsistencyPreview
     case inspirationAlreadyConverted(NoteID)
+    case staleMaterialDigestRun
+    case staleMaterialDigestSource
+    case materialDigestNotRunning
+    case materialDigestAlreadyRunning
 }
 
 public enum WorkspaceConflict: Equatable, Sendable {
@@ -362,6 +448,7 @@ public enum WorkspaceReducerError: Error, Equatable, Sendable {
     case invalidRestoreMetadata
     case revisionOverflow
     case finalValidationFailed
+    case invalidMaterialDigestStage
 }
 
 public struct LegacyMarkdownMigrationPreview: Equatable, Sendable {
