@@ -58,6 +58,23 @@ struct WhisperKitMaterialTranscriberContractTests {
         #expect(await transcriber.modelRequirement() == .downloadRequired(approximateBytes: 626_000_000))
     }
 
+    @Test func recognizesWhisperKitRepositoryLayoutAfterDownloadAndRelaunch() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jelly-whisper-repository-layout-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let engine = FakeWhisperKitEngine(usesRepositoryLayout: true)
+        let transcriber = WhisperKitMaterialTranscriber(modelDirectory: directory, engine: engine)
+
+        try await transcriber.prepareModel { _ in }
+        #expect(await transcriber.modelRequirement() == .ready)
+
+        let relaunched = WhisperKitMaterialTranscriber(
+            modelDirectory: directory,
+            engine: FakeWhisperKitEngine(usesRepositoryLayout: true)
+        )
+        #expect(await relaunched.modelRequirement() == .ready)
+    }
+
     @Test func prepareModelCancellationDoesNotPublishReadyState() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("jelly-whisper-cancel-download-\(UUID().uuidString)", isDirectory: true)
@@ -139,6 +156,7 @@ private final class FakeWhisperKitEngine: WhisperKitEngine, @unchecked Sendable 
     var downloadDelayNanoseconds: UInt64
     var transcribeDelayNanoseconds: UInt64
     var installCompleteModel: Bool
+    var usesRepositoryLayout: Bool
     var downloadStarted = false
     var markedReady = false
     var transcribeStarted = false
@@ -150,12 +168,14 @@ private final class FakeWhisperKitEngine: WhisperKitEngine, @unchecked Sendable 
         ],
         downloadDelayNanoseconds: UInt64 = 0,
         transcribeDelayNanoseconds: UInt64 = 0,
-        installCompleteModel: Bool = true
+        installCompleteModel: Bool = true,
+        usesRepositoryLayout: Bool = false
     ) {
         self.segments = segments
         self.downloadDelayNanoseconds = downloadDelayNanoseconds
         self.transcribeDelayNanoseconds = transcribeDelayNanoseconds
         self.installCompleteModel = installCompleteModel
+        self.usesRepositoryLayout = usesRepositoryLayout
     }
 
     func download(
@@ -168,7 +188,10 @@ private final class FakeWhisperKitEngine: WhisperKitEngine, @unchecked Sendable 
             try await Task.sleep(nanoseconds: downloadDelayNanoseconds)
         }
         try Task.checkCancellation()
-        let folder = downloadBase.appendingPathComponent("openai_whisper-\(variant)", isDirectory: true)
+        let repository = usesRepositoryLayout
+            ? downloadBase.appendingPathComponent("models/argmaxinc/whisperkit-coreml", isDirectory: true)
+            : downloadBase
+        let folder = repository.appendingPathComponent("openai_whisper-\(variant)", isDirectory: true)
         if installCompleteModel {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             for name in ["MelSpectrogram", "AudioEncoder", "TextDecoder"] {

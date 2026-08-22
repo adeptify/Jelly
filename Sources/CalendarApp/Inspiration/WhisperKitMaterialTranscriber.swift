@@ -22,6 +22,7 @@ actor WhisperKitMaterialTranscriber: MaterialTranscribing {
 
     private let modelDirectory: URL
     private let engine: any WhisperKitEngine
+    private var resolvedModelFolder: URL?
 
     init(
         modelDirectory: URL,
@@ -41,8 +42,9 @@ actor WhisperKitMaterialTranscriber: MaterialTranscribing {
     func prepareModel(progress: @escaping @Sendable (Double) -> Void) async throws {
         if usableModelFolder() != nil { return }
         try Task.checkCancellation()
+        let downloadedFolder: URL
         do {
-            _ = try await engine.download(
+            downloadedFolder = try await engine.download(
                 variant: Self.variant,
                 downloadBase: modelDirectory,
                 progress: progress
@@ -53,9 +55,10 @@ actor WhisperKitMaterialTranscriber: MaterialTranscribing {
             throw MaterialDigestPipelineError.modelDownloadFailed
         }
         try Task.checkCancellation()
-        guard usableModelFolder() != nil else {
+        guard isUsableModelFolder(downloadedFolder) else {
             throw MaterialDigestPipelineError.modelDownloadFailed
         }
+        resolvedModelFolder = downloadedFolder
     }
 
     func transcribe(
@@ -85,24 +88,47 @@ actor WhisperKitMaterialTranscriber: MaterialTranscribing {
     }
 
     private func usableModelFolder() -> URL? {
-        guard let contents = try? FileManager.default.contentsOfDirectory(
-            at: modelDirectory,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) else { return nil }
-        return contents.first { url in
-            var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
-                  isDirectory.boolValue,
-                  url.lastPathComponent.contains(Self.variant)
-            else { return false }
-            return ["MelSpectrogram", "AudioEncoder", "TextDecoder"].allSatisfy { name in
-                FileManager.default.fileExists(
-                    atPath: url.appendingPathComponent("\(name).mlmodelc", isDirectory: true).path
-                ) || FileManager.default.fileExists(
-                    atPath: url.appendingPathComponent("\(name).mlpackage", isDirectory: true).path
-                )
+        if let resolvedModelFolder, isUsableModelFolder(resolvedModelFolder) {
+            return resolvedModelFolder
+        }
+        let parents = [
+            modelDirectory,
+            modelDirectory.appendingPathComponent(
+                "models/argmaxinc/whisperkit-coreml",
+                isDirectory: true
+            )
+        ]
+        for parent in parents {
+            guard let contents = try? FileManager.default.contentsOfDirectory(
+                at: parent,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            if let folder = contents.first(where: {
+                $0.lastPathComponent.contains(Self.variant) && isUsableModelFolder($0)
+            }) {
+                resolvedModelFolder = folder
+                return folder
             }
+        }
+        return nil
+    }
+
+    private func isUsableModelFolder(_ url: URL) -> Bool {
+        let rootPath = modelDirectory.standardizedFileURL.resolvingSymlinksInPath().path
+        let folderPath = url.standardizedFileURL.resolvingSymlinksInPath().path
+        guard folderPath.hasPrefix(rootPath + "/") else { return false }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: folderPath, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              url.lastPathComponent.contains(Self.variant)
+        else { return false }
+        return ["MelSpectrogram", "AudioEncoder", "TextDecoder"].allSatisfy { name in
+            FileManager.default.fileExists(
+                atPath: url.appendingPathComponent("\(name).mlmodelc", isDirectory: true).path
+            ) || FileManager.default.fileExists(
+                atPath: url.appendingPathComponent("\(name).mlpackage", isDirectory: true).path
+            )
         }
     }
 
