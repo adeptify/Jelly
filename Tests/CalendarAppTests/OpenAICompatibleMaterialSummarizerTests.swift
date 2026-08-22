@@ -191,7 +191,117 @@ struct OpenAICompatibleMaterialSummarizerTests {
                 status: 200,
                 json: completionJSON(shortMaterialSummaryJSON(takeaways: takeaways))
             )
-            await expectPipeline(summarizer, .invalidSummary, transcript: shortTranscript, source: audioSource)
+            await expectPipeline(
+                summarizer,
+                .invalidSummary,
+                transcript: elevenSecondTranscript,
+                source: audioSource
+            )
+        }
+    }
+
+    @Test func shortSparseClassificationUsesDurationAndMassNotPhrases() {
+        #expect(MaterialTranscriptSemantics.isShortAndSparse(sparseShortTranscripts[0]))
+        #expect(MaterialTranscriptSemantics.isShortAndSparse(sparseShortTranscripts[1]))
+        #expect(MaterialTranscriptSemantics.isShortAndSparse(shortTranscript))
+        #expect(!MaterialTranscriptSemantics.isShortAndSparse(elevenSecondTranscript))
+        #expect(!MaterialTranscriptSemantics.isShortAndSparse(sampleTranscript))
+        #expect(!MaterialTranscriptSemantics.isShortAndSparse(sparseOverThirtySecondsTranscript))
+        #expect(MaterialTranscriptSemantics.semanticMass("a") == 1)
+        #expect(MaterialTranscriptSemantics.semanticMass("mm uh") == 2)
+        #expect(MaterialTranscriptSemantics.semanticMass("测试") == 2)
+        #expect(MaterialTranscriptSemantics.semanticMass("大家好，这是一条测试。") == 9)
+    }
+
+    @Test func sparseShortTranscriptConvertsInvalidSummaryToInsufficientContent() async throws {
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+        let invalidPayloads = [
+            completionJSON(validSummaryJSON(thesis: "")),
+            completionJSON(validSummaryJSON(takeaways: [])),
+            #"{"choices":[{"message":{"content":"not-json"}}]}"#,
+            #"{"choices":[{"message":{"refusal":"no"}}]}"#,
+            #"{"choices":[]}"#
+        ]
+        for json in invalidPayloads {
+            for transcript in sparseShortTranscripts {
+                SummarizerURLProtocol.reset()
+                SummarizerURLProtocol.response = .init(status: 200, json: json)
+                await expectPipeline(
+                    summarizer,
+                    .insufficientContent,
+                    transcript: transcript,
+                    source: audioSource
+                )
+                #expect(SummarizerURLProtocol.lastRequest != nil)
+            }
+        }
+    }
+
+    @Test func sparseShortTranscriptStillSucceedsWithValidSingleTakeaway() async throws {
+        SummarizerURLProtocol.reset()
+        SummarizerURLProtocol.response = .init(
+            status: 200,
+            json: completionJSON(shortMaterialSummaryJSON(takeaways: ["测试"]))
+        )
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+        let output = try await summarizer.summarize(sparseShortTranscripts[0], source: audioSource)
+        #expect(output.summaryContractVersion == "summary-contract-v2")
+        #expect(output.summary.takeaways == ["测试"])
+        #expect(!output.summary.thesis.isEmpty)
+    }
+
+    @Test func sparseTextLongerThanThirtySecondsKeepsInvalidSummary() async throws {
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+        SummarizerURLProtocol.reset()
+        SummarizerURLProtocol.response = .init(
+            status: 200,
+            json: completionJSON(validSummaryJSON(thesis: ""))
+        )
+        await expectPipeline(
+            summarizer,
+            .invalidSummary,
+            transcript: sparseOverThirtySecondsTranscript,
+            source: audioSource
+        )
+        #expect(SummarizerURLProtocol.lastRequest != nil)
+    }
+
+    @Test func sparseShortTranscriptDoesNotConvertTransportOrContractErrors() async throws {
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+        let cases: [(status: Int, json: String, expected: MaterialDigestPipelineError)] = [
+            (401, #"{"error":{"message":"bad key sk-test-secret-value"}}"#, .authenticationFailed),
+            (403, #"{"error":{"message":"forbidden"}}"#, .accessDenied),
+            (413, #"{"error":{"message":"context_length exceeded"}}"#, .contextTooLong),
+            (400, #"{"error":{"message":"response_format json_schema is not supported"}}"#, .jsonSchemaUnsupported),
+            (429, #"{"error":{"message":"rate"}}"#, .summarizationFailed),
+            (503, #"{"error":{"message":"down"}}"#, .summarizationFailed)
+        ]
+        for item in cases {
+            SummarizerURLProtocol.reset()
+            SummarizerURLProtocol.response = .init(status: item.status, json: item.json)
+            await expectPipeline(
+                summarizer,
+                item.expected,
+                transcript: sparseShortTranscripts[0],
+                source: audioSource
+            )
+            #expect(SummarizerURLProtocol.lastRequest != nil)
         }
     }
 
@@ -321,7 +431,12 @@ struct OpenAICompatibleMaterialSummarizerTests {
         for json in cases {
             SummarizerURLProtocol.reset()
             SummarizerURLProtocol.response = .init(status: 200, json: completionJSON(json))
-            await expectPipeline(summarizer, .invalidSummary, transcript: shortTranscript, source: audioSource)
+            await expectPipeline(
+                summarizer,
+                .invalidSummary,
+                transcript: elevenSecondTranscript,
+                source: audioSource
+            )
         }
     }
 
@@ -503,6 +618,25 @@ private let shortTranscript = TimestampedTranscript(segments: [
 
 private let elevenSecondTranscript = TimestampedTranscript(segments: [
     TranscriptSegment(startSeconds: 0, endSeconds: 10.4, text: "大家好，这是一条测试。")
+])
+
+private let sparseShortTranscripts = [
+    TimestampedTranscript(segments: [
+        TranscriptSegment(startSeconds: 0, endSeconds: 11.08, text: "a")
+    ]),
+    TimestampedTranscript(segments: [
+        TranscriptSegment(startSeconds: 0, endSeconds: 11.08, text: "mm")
+    ]),
+    TimestampedTranscript(segments: [
+        TranscriptSegment(startSeconds: 0.2, endSeconds: 2.1, text: "uh")
+    ]),
+    TimestampedTranscript(segments: [
+        TranscriptSegment(startSeconds: 0.04, endSeconds: 0.86, text: "测试")
+    ])
+]
+
+private let sparseOverThirtySecondsTranscript = TimestampedTranscript(segments: [
+    TranscriptSegment(startSeconds: 0, endSeconds: 31, text: "a")
 ])
 
 private let videoSource = MaterialSource(

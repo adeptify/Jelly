@@ -50,6 +50,9 @@ enum MaterialDigestPipelineError: Error, Equatable, Sendable {
 }
 
 enum MaterialTranscriptSemantics {
+    static let shortSparseMaximumDurationSeconds: Double = 30
+    static let shortSparseMaximumSemanticMass = 3
+
     static func hasSemanticContent(_ transcript: TimestampedTranscript) -> Bool {
         transcript.segments.contains { hasSemanticContent($0.text) }
     }
@@ -58,6 +61,47 @@ enum MaterialTranscriptSemantics {
         strippingWhisperSpecialTokens(text).unicodeScalars.contains {
             CharacterSet.alphanumerics.contains($0)
         }
+    }
+
+    static func isShortAndSparse(_ transcript: TimestampedTranscript) -> Bool {
+        let duration = transcript.segments.reduce(0.0) { max($0, $1.endSeconds) }
+        guard duration.isFinite, duration <= shortSparseMaximumDurationSeconds else {
+            return false
+        }
+        return semanticMass(transcript) <= shortSparseMaximumSemanticMass
+    }
+
+    static func semanticMass(_ transcript: TimestampedTranscript) -> Int {
+        transcript.segments.reduce(0) { $0 + semanticMass($1.text) }
+    }
+
+    static func semanticMass(_ text: String) -> Int {
+        let stripped = strippingWhisperSpecialTokens(text)
+        var mass = 0
+        var inWesternWord = false
+        for scalar in stripped.unicodeScalars {
+            if isWesternAlphanumeric(scalar) {
+                inWesternWord = true
+                continue
+            }
+            if inWesternWord {
+                mass += 1
+                inWesternWord = false
+            }
+            if CharacterSet.letters.contains(scalar) || CharacterSet.decimalDigits.contains(scalar) {
+                mass += 1
+            }
+        }
+        if inWesternWord { mass += 1 }
+        return mass
+    }
+
+    private static let westernAlphanumerics = CharacterSet(charactersIn: "0"..."9")
+        .union(CharacterSet(charactersIn: "A"..."Z"))
+        .union(CharacterSet(charactersIn: "a"..."z"))
+
+    private static func isWesternAlphanumeric(_ scalar: Unicode.Scalar) -> Bool {
+        westernAlphanumerics.contains(scalar)
     }
 
     static func strippingWhisperSpecialTokens(_ text: String) -> String {

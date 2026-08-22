@@ -89,18 +89,24 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
             throw MaterialDigestPipelineError.summarizationFailed
         }
         try Self.throwForStatus(http.statusCode, data: data)
-        let summary = Self.normalized(
-            try Self.decodeSummary(from: data),
-            transcript: transcript,
-            maximumSourceTime: transcriptEnd
-        )
-        try Self.validate(summary, transcript: transcript, maximumSourceTime: transcriptEnd)
-        return MaterialSummarizerOutput(
-            summary: summary,
-            endpointHost: host,
-            model: model,
-            summaryContractVersion: Self.contractVersion
-        )
+        do {
+            let summary = Self.normalized(
+                try Self.decodeSummary(from: data),
+                transcript: transcript,
+                maximumSourceTime: transcriptEnd
+            )
+            try Self.validate(summary, transcript: transcript, maximumSourceTime: transcriptEnd)
+            return MaterialSummarizerOutput(
+                summary: summary,
+                endpointHost: host,
+                model: model,
+                summaryContractVersion: Self.contractVersion
+            )
+        } catch MaterialDigestPipelineError.invalidSummary
+            where MaterialTranscriptSemantics.isShortAndSparse(transcript)
+        {
+            throw MaterialDigestPipelineError.insufficientContent
+        }
     }
 
     private static func throwForStatus(_ status: Int, data: Data) throws {
