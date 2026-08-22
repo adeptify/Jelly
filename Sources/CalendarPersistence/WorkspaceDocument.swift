@@ -1,3 +1,4 @@
+import CalendarDomain
 import Foundation
 import WorkspaceDomain
 
@@ -129,7 +130,7 @@ public enum WorkspacePersistenceError: Error, Equatable, Sendable {
 }
 
 public struct WorkspaceDocument: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 4
+    public static let currentSchemaVersion = 5
 
     public var schemaVersion: Int
     public var state: WorkspaceState
@@ -138,4 +139,32 @@ public struct WorkspaceDocument: Codable, Equatable, Sendable {
         self.schemaVersion = schemaVersion
         self.state = state
     }
+}
+
+struct WorkspaceStateV3V4: Codable, Equatable, Sendable {
+    var revision: Int64
+    var calendar: CalendarState
+    var notes: [NoteID: Note]
+    var inspirations: [InspirationID: Inspiration]
+    var calendarNoteRelations: CalendarNoteRelationGraph
+    var taskBlockLinks: Set<TaskBlockCalendarLink>
+    var inspirationNoteLinks: Set<InspirationNoteLink>
+
+    func materializedV5() -> WorkspaceState {
+        WorkspaceState(
+            revision: revision,
+            calendar: calendar,
+            notes: notes,
+            inspirations: inspirations,
+            calendarNoteRelations: calendarNoteRelations,
+            taskBlockLinks: taskBlockLinks,
+            inspirationNoteLinks: inspirationNoteLinks,
+            materialDigests: [:]
+        )
+    }
+}
+
+struct WorkspaceDocumentV3V4: Codable, Equatable, Sendable {
+    var schemaVersion: Int
+    var state: WorkspaceStateV3V4
 }

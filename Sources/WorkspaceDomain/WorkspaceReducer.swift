@@ -317,6 +317,7 @@ public enum WorkspaceReducer {
               Set(payload.sourceNoteRevisions.keys) == sourceIDs,
               payload.content.notes.allSatisfy({ $0.key == $0.value.id }),
               payload.content.inspirations.allSatisfy({ $0.key == $0.value.id }),
+              payload.content.materialDigests.allSatisfy({ $0.key == $0.value.inspirationID }),
               payload.sourceNoteRevisions.values.allSatisfy({
                   $0 >= 0 && $0 <= payload.sourceRevisionHighWatermark
               })

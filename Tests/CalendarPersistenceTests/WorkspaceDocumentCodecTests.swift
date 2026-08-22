@@ -79,6 +79,44 @@ struct WorkspaceDocumentCodecTests {
         #expect(result.consistencyIssues.first?.defect == .missingCalendarOwner)
     }
 
+    @Test func v4PayloadWithoutDigestsMigratesToEmptyMaterialDigests() throws {
+        let legacyState = try WorkspacePersistenceFixtures.workspaceWithOneNote(revision: 3)
+        let v4Bytes = try JSONEncoder.workspaceDeterministic.encode(
+            LegacyWorkspaceDocumentV3V4(
+                schemaVersion: 4,
+                state: LegacyWorkspaceStateV3V4(state: legacyState)
+            )
+        )
+        #expect(String(decoding: v4Bytes, as: UTF8.self).contains("materialDigests") == false)
+
+        let result = try WorkspaceDocumentCodec.decode(v4Bytes)
+        #expect(result.provenance.sourceSchema == 4)
+        #expect(result.state.materialDigests.isEmpty)
+        #expect(result.state.inspirations == legacyState.inspirations)
+        #expect(result.state.notes == legacyState.notes)
+        #expect(result.state.revision == legacyState.revision)
+    }
+
+    @Test func v3LinkedTaskPayloadWithoutDigestsMigratesTitlesAndEmptyDigests() throws {
+        let (legacy, itemID) = try WorkspacePersistenceFixtures.linkedTaskWorkspace(
+            calendarTitle: "旧日历标题"
+        )
+        let v3Bytes = try JSONEncoder.workspaceDeterministic.encode(
+            LegacyWorkspaceDocumentV3V4(
+                schemaVersion: 3,
+                state: LegacyWorkspaceStateV3V4(state: legacy)
+            )
+        )
+        #expect(String(decoding: v3Bytes, as: UTF8.self).contains("materialDigests") == false)
+
+        let result = try WorkspaceDocumentCodec.decode(v3Bytes)
+        #expect(result.provenance.sourceSchema == 3)
+        #expect(result.state.calendar.items[itemID]?.title == "正文里的行动")
+        #expect(result.state.materialDigests.isEmpty)
+        #expect(result.consistencyIssues.isEmpty)
+        try WorkspaceValidator.validate(result.state)
+    }
+
     @Test func v3LinkedTaskTitleIsMigratedFromTheTaskBlock() throws {
         let (legacy, itemID) = try WorkspacePersistenceFixtures.linkedTaskWorkspace(
             calendarTitle: "旧日历标题"
@@ -93,6 +131,16 @@ struct WorkspaceDocumentCodecTests {
         #expect(result.state.calendar.items[itemID]?.title == "正文里的行动")
         #expect(result.consistencyIssues.isEmpty)
         try WorkspaceValidator.validate(result.state)
+    }
+
+    @Test func v5RoundTripPreservesSucceededAwaitingAndRetryDigests() throws {
+        let expected = try WorkspacePersistenceFixtures.workspaceWithMaterialDigests()
+        let encoded = try WorkspaceDocumentCodec.encode(expected)
+        let decoded = try WorkspaceDocumentCodec.decode(encoded)
+        #expect(decoded.provenance.sourceSchema == 5)
+        #expect(decoded.state == expected)
+        #expect(decoded.state.materialDigests.count == 3)
+        #expect(try WorkspaceDocumentCodec.encode(decoded.state) == encoded)
     }
 
     @Test func currentLinkedTaskTitleMismatchIsRejectedAsFatal() throws {
@@ -190,6 +238,129 @@ enum WorkspacePersistenceFixtures {
         Data(#"""
         {"schemaVersion":1,"state":{"categories":["00000000-0000-0000-0000-000000000501",{"id":"00000000-0000-0000-0000-000000000501","name":"未分类","colorHex":"#8E8E93","sortIndex":0,"createdAt":0,"updatedAt":0}],"items":[],"recurrence":{"series":[],"exceptions":[],"completions":[]},"uncategorizedID":"00000000-0000-0000-0000-000000000501"}}
         """#.utf8)
+    }
+
+    static func workspaceWithMaterialDigests() throws -> WorkspaceState {
+        let now = Date(timeIntervalSince1970: 1_800_200_000)
+        var state = WorkspaceState.empty(calendar: calendarState)
+        state.revision = 8
+        let succeeded = try materialInspiration(index: 1, now: now)
+        let awaiting = try materialInspiration(index: 2, now: now)
+        let retrying = try materialInspiration(index: 3, now: now)
+        state.inspirations = [
+            succeeded.id: succeeded,
+            awaiting.id: awaiting,
+            retrying.id: retrying
+        ]
+        state.materialDigests = [
+            succeeded.id: succeededDigest(for: succeeded, now: now),
+            awaiting.id: awaitingDigest(for: awaiting, now: now),
+            retrying.id: retryDigest(for: retrying, now: now)
+        ]
+        try WorkspaceValidator.validate(state)
+        return state
+    }
+
+    private static func materialInspiration(index: Int, now: Date) throws -> Inspiration {
+        let id = InspirationID(uuid(600 + index))
+        return Inspiration(
+            id: id,
+            inputKind: .url,
+            rawText: nil,
+            rawURL: URL(string: "https://www.bilibili.com/video/BV1xx411c7m\(index)/")!,
+            rawFile: nil,
+            resolvedSourceKind: .video,
+            resolvedMetadata: nil,
+            categoryID: categoryID,
+            lifecycle: .active,
+            createdAt: now,
+            updatedAt: now
+        )
+    }
+
+    private static func succeededDigest(for inspiration: Inspiration, now: Date) -> MaterialDigest {
+        digest(
+            for: inspiration,
+            now: now,
+            currentRun: nil,
+            result: succeededResult(for: inspiration, now: now)
+        )
+    }
+
+    private static func awaitingDigest(for inspiration: Inspiration, now: Date) -> MaterialDigest {
+        digest(
+            for: inspiration,
+            now: now,
+            currentRun: MaterialDigestRun(
+                id: MaterialDigestRunID(uuid(700)),
+                stage: .awaitingModelDownloadConsent,
+                startedAt: now,
+                updatedAt: now
+            ),
+            result: nil
+        )
+    }
+
+    private static func retryDigest(for inspiration: Inspiration, now: Date) -> MaterialDigest {
+        digest(
+            for: inspiration,
+            now: now,
+            currentRun: MaterialDigestRun(
+                id: MaterialDigestRunID(uuid(701)),
+                stage: .fetchingSource,
+                startedAt: now,
+                updatedAt: now
+            ),
+            result: succeededResult(for: inspiration, now: now)
+        )
+    }
+
+    private static func digest(
+        for inspiration: Inspiration,
+        now: Date,
+        currentRun: MaterialDigestRun?,
+        result: MaterialDigestResult?
+    ) -> MaterialDigest {
+        MaterialDigest(
+            id: MaterialDigestID(inspiration.id.rawValue),
+            inspirationID: inspiration.id,
+            sourceChecksum: WorkspaceChecksum.inspirationSourceChecksum(inspiration),
+            currentRun: currentRun,
+            result: result,
+            lastFailure: nil,
+            createdAt: now,
+            updatedAt: now
+        )
+    }
+
+    private static func succeededResult(for inspiration: Inspiration, now: Date) -> MaterialDigestResult {
+        MaterialDigestResult(
+            transcript: TimestampedTranscript(segments: [
+                TranscriptSegment(startSeconds: 0, endSeconds: 8, text: "开场"),
+                TranscriptSegment(startSeconds: 8, endSeconds: 20, text: "主体")
+            ]),
+            summary: InspirationSummary(
+                thesis: "核心论点",
+                takeaways: ["观点1", "观点2", "观点3"],
+                chapters: [
+                    DigestChapter(startSeconds: 0, title: "开场", points: ["引入"]),
+                    DigestChapter(startSeconds: 8, title: "主体", points: ["展开"])
+                ],
+                quotes: [],
+                dropped: []
+            ),
+            provenance: DigestProvenance(
+                modelIdentifier: "test-model",
+                generatedAt: now,
+                inputFingerprint: WorkspaceChecksum.inspirationSourceChecksum(inspiration),
+                summaryContractVersion: "summary-contract-v1"
+            ),
+            completedAt: now
+        )
+    }
+
+    private static func uuid(_ value: Int) -> UUID {
+        UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", value))!
     }
 
     static func workspaceWithOneNote(revision: Int64 = 1) throws -> WorkspaceState {
@@ -328,4 +499,29 @@ enum WorkspacePersistenceFixtures {
     static func sha256(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
+}
+
+private struct LegacyWorkspaceStateV3V4: Codable, Equatable {
+    var revision: Int64
+    var calendar: CalendarState
+    var notes: [NoteID: Note]
+    var inspirations: [InspirationID: Inspiration]
+    var calendarNoteRelations: CalendarNoteRelationGraph
+    var taskBlockLinks: Set<TaskBlockCalendarLink>
+    var inspirationNoteLinks: Set<InspirationNoteLink>
+
+    init(state: WorkspaceState) {
+        revision = state.revision
+        calendar = state.calendar
+        notes = state.notes
+        inspirations = state.inspirations
+        calendarNoteRelations = state.calendarNoteRelations
+        taskBlockLinks = state.taskBlockLinks
+        inspirationNoteLinks = state.inspirationNoteLinks
+    }
+}
+
+private struct LegacyWorkspaceDocumentV3V4: Codable, Equatable {
+    var schemaVersion: Int
+    var state: LegacyWorkspaceStateV3V4
 }

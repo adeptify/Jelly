@@ -46,16 +46,15 @@ public enum WorkspaceDocumentCodec {
                 throw WorkspacePersistenceError.invalidDocument
             }
         case 3:
-            let document: WorkspaceDocument
-            do {
-                document = try JSONDecoder.workspaceDeterministic.decode(WorkspaceDocument.self, from: data)
-            } catch {
-                throw WorkspacePersistenceError.invalidDocument
-            }
-            let migrated = migrateV3TaskTitles(document.state)
+            let migrated = migrateV3TaskTitles(try decodeV3V4(data).materializedV5())
             let report = WorkspaceConsistencyInspector.inspect(migrated)
             guard !report.hasFatalIssues else { throw WorkspacePersistenceError.invalidDocument }
             return .init(state: migrated, provenance: provenance, consistencyIssues: report.issues)
+        case 4:
+            let materialized = try decodeV3V4(data).materializedV5()
+            let report = WorkspaceConsistencyInspector.inspect(materialized)
+            guard !report.hasFatalIssues else { throw WorkspacePersistenceError.invalidDocument }
+            return .init(state: materialized, provenance: provenance, consistencyIssues: report.issues)
         case WorkspaceDocument.currentSchemaVersion:
             let document: WorkspaceDocument
             do {
@@ -68,6 +67,14 @@ public enum WorkspaceDocumentCodec {
             return .init(state: document.state, provenance: provenance, consistencyIssues: report.issues)
         default:
             throw WorkspacePersistenceError.unsupportedSchema(schema)
+        }
+    }
+
+    private static func decodeV3V4(_ data: Data) throws -> WorkspaceStateV3V4 {
+        do {
+            return try JSONDecoder.workspaceDeterministic.decode(WorkspaceDocumentV3V4.self, from: data).state
+        } catch {
+            throw WorkspacePersistenceError.invalidDocument
         }
     }
 
@@ -105,7 +112,7 @@ public enum WorkspaceDocumentCodec {
         }
         guard [
             "categories", "items", "series", "exceptions", "completions", "notes",
-            "inspirations", "baselines", "occurrenceOverrides"
+            "inspirations", "baselines", "occurrenceOverrides", "materialDigests"
         ].contains(key), values.count.isMultiple(of: 2)
         else { return values }
         return stride(from: 0, to: values.count, by: 2)
