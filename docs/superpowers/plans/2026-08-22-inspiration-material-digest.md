@@ -1280,3 +1280,95 @@ git commit -m "fix(inspiration): 友好处理重复短材料"
 ```
 
 进入 Codex 复核的硬门：有效短摘要仍成功；重复 11 秒样本 invalid 时稳定映射为内容不足；正常中文短句和超过 30 秒材料不被降级；完整测试、release build 与最终打包签名通过。产品实操与用户本人验收仍分开报告。
+
+## Task 14：在固定内存上限内读取大型 B 站页面的早期标题
+
+**结论与边界：** 2026-08-22 最终 App 对公开 B 站视频 `https://www.bilibili.com/video/BV1hgEj6LEVh/` 的元数据获取稳定失败。Apple `URLSession` 实测返回 HTTP 200、`text/html`、约 439,340 bytes，而完整 `</title>` 在约第 1,296 byte 已出现。现有 `URLMetadataResolver` 因 `expectedContentLength > 256_000` 在读取任何内容前直接失败。Task 14 保持 256KB 最大缓冲和无脚本执行，只取消“声明总长度过大就预拒绝”；在固定上限内按小步长检查完整 title，一旦得到标题立即返回。没有完整 title 的超限响应仍必须失败，不能把截断页面当成功，也不能提高默认内存上限。
+
+**Files:**
+
+- Modify: `Sources/CalendarApp/Inspiration/URLMetadataResolver.swift`
+- Modify: `Tests/CalendarAppTests/URLMetadataResolverTests.swift`
+
+### Step 1：写大型页面早期标题 RED 合同
+
+扩展测试 fixture，使响应 `Content-Length` 可以大于 resolver 的 `maxBytes`。新增：
+
+```swift
+@Test func acceptsCompleteTitleBeforeTheByteLimitEvenWhenDeclaredBodyIsLarger() async throws {
+    let prefix = "<html><head><title>B站大型页面</title></head><body>"
+    let body = prefix + String(repeating: "x", count: 512)
+    let resolver = makeResolver(
+        contentType: "text/html; charset=utf-8",
+        data: Data(body.utf8),
+        maxBytes: 64
+    )
+
+    let result = try await resolver.resolve(
+        URL(string: "https://www.bilibili.com/video/BV1hgEj6LEVh/")!
+    )
+
+    #expect(result.metadata.title == "B站大型页面")
+    #expect(result.metadata.fetchStatus == .succeeded)
+    #expect(result.resolvedKind == .video)
+}
+```
+
+保留并强化现有 `rejectsAResponseThatExceedsTheConfiguredByteLimit`：65 bytes 无完整 title、`maxBytes: 64` 仍抛 `.responseTooLarge`。新增 title 闭合标签落在上限之外的 case，仍必须失败。
+
+Run: `swift test --filter URLMetadataResolverTests`
+
+Expected: 新测试因 `expectedContentLength > maxBytes` 预拒绝而 FAIL；原超限测试 PASS。
+
+### Step 2：实现有界早期 title 解析
+
+删除这段预拒绝：
+
+```swift
+if http.expectedContentLength > Int64(maxBytes) {
+    throw URLMetadataResolverError.responseTooLarge
+}
+```
+
+保留逐字节 `guard data.count < maxBytes`。设检查步长为 `max(1, min(4_096, maxBytes))`；每累计一个步长，把当前有界 `Data` 解码并调用现有 `extractTitle`。一旦得到非空 title，立即构造 `SourceMetadata(fetchStatus: .succeeded)` 并返回。流自然结束时再做一次最终解析；只有完整 title 缺失时才继续使用现有 host fallback。读取第 `maxBytes + 1` 个 byte 前若仍没有完整 title，抛 `.responseTooLarge`。
+
+为避免分支复制，增加私有纯 helper：
+
+```swift
+private static func resolvedResult(
+    url: URL,
+    title: String,
+    classifiedKind: ResolvedSourceKind?
+) -> URLMetadataResolveResult
+```
+
+helper 只复用当前 `SourceMetadata` 字段，不增加 thumbnail、Cookie、脚本、重定向白名单例外或新网络依赖。不得把 `maxBytes` 提高到 512KB；不得把超限正文落盘；不得在日志打印响应正文。
+
+Run: `swift test --filter URLMetadataResolverTests`
+
+Expected: 全套 PASS。
+
+### Step 3：相关回归与 Grok 候选提交
+
+```bash
+swift test --filter 'URLMetadataResolverTests|InspirationWorkspaceViewModelTests|MaterialSourceProviderTests|SourceKindClassifierTests'
+git diff --check
+git add Sources/CalendarApp/Inspiration/URLMetadataResolver.swift \
+  Tests/CalendarAppTests/URLMetadataResolverTests.swift
+git diff --cached --check
+git commit -m "fix(inspiration): 有界读取大型页面标题"
+```
+
+Expected: exit 0；提交只包含两个指定文件。
+
+### Step 4：Codex 最终包真实 B 站回归
+
+Codex 逐行复核 diff，重跑相关与完整测试、release、`Scripts/build-app.sh`、严格 codesign。用新最终 `dist/Jelly.app`、全新 `JELLY_ACCEPTANCE_DATA_DIRECTORY` 和同一公开 B 站 URL 实际捕获：
+
+- 原链接立即持久化，元数据状态从 loading 进入 succeeded；
+- 展示真实页面标题而不是裸 URL，不出现“获取失败”；
+- 未配置摘要密钥时仍只提示打开设置，不自动提炼；
+- 关闭重开后标题、URL、`.video` 来源和未运行状态保持；
+- 若页面此时已下线，记录 HTTP 状态并换一个当前匿名可访问的 B 站公开视频，不得用 mock 冒充产品实操。
+
+仅这些证据通过才能报告 B 站元数据产品实操通过；完整提炼、写入笔记和用户本人 9 分验收仍保持 `UNVERIFIED`，直到凭据动作获得用户确认并完成真实旅程。
