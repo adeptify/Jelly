@@ -54,6 +54,27 @@ struct MaterialDigestPresentationTests {
         #expect(presentation.showsCancel == false)
     }
 
+    @Test func configuredModelTurnsPreviousSetupFailureIntoRetry() {
+        var digest = runningDigest(stage: .fetchingSource)
+        digest.currentRun = nil
+        digest.lastFailure = MaterialDigestFailure(
+            code: .modelNotConfigured,
+            userMessage: "尚未配置摘要模型，请先在设置中填写。",
+            occurredAt: MaterialDigestPresentationFixture.now
+        )
+
+        let presentation = MaterialDigestPresentation.project(
+            inspiration: videoInspiration(),
+            digest: digest,
+            operatorAvailable: true,
+            modelConfigured: true
+        )
+        #expect(presentation.statusText == "设置已就绪，可以重试提炼。")
+        #expect(presentation.primaryActionTitle == "重试")
+        #expect(presentation.showsRetry)
+        #expect(presentation.showsOpenSettings == false)
+    }
+
     @Test func hiddenWhenOperatorIsUnavailable() {
         let presentation = MaterialDigestPresentation.project(
             inspiration: videoInspiration(),

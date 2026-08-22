@@ -93,7 +93,11 @@ struct MaterialDigestPresentation: Equatable {
         }
         if let failure = digest?.lastFailure {
             presentation.statusText = failure.userMessage
-            if failure.code == .modelNotConfigured
+            if failure.code == .modelNotConfigured, modelConfigured {
+                presentation.statusText = "设置已就绪，可以重试提炼。"
+                presentation.showsRetry = true
+                presentation.primaryActionTitle = "重试"
+            } else if failure.code == .modelNotConfigured
                 || failure.code == .authenticationFailed
                 || failure.code == .accessDenied
                 || !modelConfigured {
