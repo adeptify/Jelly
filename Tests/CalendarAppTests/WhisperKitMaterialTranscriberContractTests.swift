@@ -131,6 +131,20 @@ struct WhisperKitMaterialTranscriberContractTests {
         #expect(result.segments[0].endSeconds == 0.8)
     }
 
+    @Test func preservesLiteralAngleBracketFieldsThatAreNotWhisperControlTokens() async throws {
+        let directory = try makeModelDirectory()
+        let engine = FakeWhisperKitEngine(segments: [
+            .init(
+                startSeconds: 0,
+                endSeconds: 2,
+                text: "字段是 <|customer_id|> 不要删"
+            )
+        ])
+        let transcriber = WhisperKitMaterialTranscriber(modelDirectory: directory, engine: engine)
+        let result = try await transcriber.transcribe(URL(fileURLWithPath: "/tmp/source-audio.m4a")) { _ in }
+        #expect(result.segments.map(\.text) == ["字段是 <|customer_id|> 不要删"])
+    }
+
     @Test func dropsPunctuationNoiseAndKeepsSemanticSpeech() async throws {
         let directory = try makeModelDirectory()
         let engine = FakeWhisperKitEngine(segments: [

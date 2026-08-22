@@ -177,6 +177,13 @@ extension WorkspaceReducer {
         }
         try validateProposedNote(merged, in: candidate)
         candidate.notes[current.id] = merged
+        releaseManagedDigestWriteIfUserChangedBlocks(
+            noteID: current.id,
+            mergedDocument: document,
+            affectedBlockIDs: affected,
+            in: &candidate,
+            now: now
+        )
         metadata.draftContext = .init(
             noteID: current.id,
             editSessionID: .editor(submission.editSessionID),
@@ -376,6 +383,29 @@ extension WorkspaceReducer {
         if base.categoryID != submitted.categoryID { fields.insert(.categoryID) }
         if base.archivedAt != submitted.archivedAt { fields.insert(.archivedAt) }
         return fields
+    }
+
+    private static func releaseManagedDigestWriteIfUserChangedBlocks(
+        noteID: NoteID,
+        mergedDocument: BlockDocument,
+        affectedBlockIDs: Set<BlockID>,
+        in candidate: inout WorkspaceState,
+        now: Date
+    ) {
+        for inspirationID in Array(candidate.materialDigests.keys) {
+            guard var digest = candidate.materialDigests[inspirationID],
+                  let noteWrite = digest.noteWrite,
+                  noteWrite.noteID == noteID
+            else { continue }
+            let remainingIDs = Set(mergedDocument.blocks.map(\.id))
+            let managed = Set(noteWrite.blockIDs)
+            let missing = !managed.isSubset(of: remainingIDs)
+            let rewritten = !affectedBlockIDs.isDisjoint(with: managed)
+            guard missing || rewritten else { continue }
+            digest.noteWrite = nil
+            digest.updatedAt = now
+            candidate.materialDigests[inspirationID] = digest
+        }
     }
 
     private static func affectedBlockIDs(

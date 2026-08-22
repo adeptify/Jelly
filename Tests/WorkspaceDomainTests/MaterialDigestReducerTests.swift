@@ -332,6 +332,78 @@ struct MaterialDigestReducerTests {
         #expect(updated.notes[noteID]?.document.blocks.contains(firstDigestBlock) == false)
         #expect(updated.materialDigests[fixture.inspiration.id]?.noteWrite?.blockIDs == [updatedDigestBlock.id])
     }
+
+    @Test func deletingManagedDigestBlocksClearsNoteWriteAndSavesTheNote() throws {
+        let fixture = MaterialDigestReducerFixture()
+        let written = try fixture.noteWithWrittenDigest()
+        let noteID = written.noteID
+        let digestBlockID = written.digestBlock.id
+        let userBlock = written.userBlock
+        let base = try #require(written.state.notes[noteID])
+        var submitted = base
+        submitted.document.blocks.removeAll { $0.id == digestBlockID }
+        submitted.updatedAt = fixture.later
+
+        let saved = try fixture.reduce(
+            .updateNote(try fixture.noteSubmission(base: base, submitted: submitted)),
+            from: written.state,
+            now: fixture.later
+        )
+        #expect(saved.notes[noteID]?.document.blocks == [userBlock])
+        #expect(saved.materialDigests[fixture.inspiration.id]?.noteWrite == nil)
+        #expect(saved.materialDigests[fixture.inspiration.id]?.result != nil)
+    }
+
+    @Test func rewritingDigestDoesNotDeleteUserModifiedFormerDigestBlocks() throws {
+        let fixture = MaterialDigestReducerFixture()
+        let written = try fixture.noteWithWrittenDigest()
+        let noteID = written.noteID
+        let base = try #require(written.state.notes[noteID])
+        var submitted = base
+        submitted.document.blocks = submitted.document.blocks.map { block in
+            guard block.id == written.digestBlock.id else { return block }
+            var edited = block
+            edited.inlineContent = .plain("用户改过的摘要段落")
+            return edited
+        }
+        submitted.updatedAt = fixture.later
+        let edited = try fixture.reduce(
+            .updateNote(try fixture.noteSubmission(base: base, submitted: submitted)),
+            from: written.state,
+            now: fixture.later
+        )
+        #expect(edited.materialDigests[fixture.inspiration.id]?.noteWrite == nil)
+        #expect(
+            edited.notes[noteID]?.document.blocks.map { $0.inlineContent.spans.map(\.text).joined() }
+                == ["这是用户自己写的内容", "用户改过的摘要段落"]
+        )
+
+        var retried = edited
+        retried.materialDigests[fixture.inspiration.id]?.result?.summary.thesis = "新一轮核心论点"
+        let updatedResult = try #require(retried.materialDigests[fixture.inspiration.id]?.result)
+        let newDigestBlock = DocumentBlock(
+            id: BlockID(),
+            kind: .paragraph,
+            inlineContent: .plain("新一轮摘要"),
+            taskState: nil,
+            indentLevel: 0
+        )
+        let rewritten = try fixture.reduce(
+            .writeMaterialDigestToNote(.init(
+                inspirationID: fixture.inspiration.id,
+                noteID: noteID,
+                expectedNoteRevision: try #require(retried.notes[noteID]?.revision),
+                resultFingerprint: try WorkspaceChecksum.materialDigestResultFingerprint(updatedResult),
+                proposedBlocks: [newDigestBlock]
+            )),
+            from: retried
+        )
+        #expect(
+            rewritten.notes[noteID]?.document.blocks.map { $0.inlineContent.spans.map(\.text).joined() }
+                == ["这是用户自己写的内容", "用户改过的摘要段落", "新一轮摘要"]
+        )
+        #expect(rewritten.materialDigests[fixture.inspiration.id]?.noteWrite?.blockIDs == [newDigestBlock.id])
+    }
 }
 
 struct MaterialDigestReducerFixture {
@@ -484,5 +556,79 @@ struct MaterialDigestReducerFixture {
         let started = try reduce(.startMaterialDigest(startPayload))
         let summarizing = try reduce(advance(to: .summarizing), from: started)
         return try reduce(.completeMaterialDigest(completePayload), from: summarizing)
+    }
+
+    struct WrittenDigestNote {
+        var state: WorkspaceState
+        var noteID: NoteID
+        var userBlock: DocumentBlock
+        var digestBlock: DocumentBlock
+    }
+
+    func noteWithWrittenDigest() throws -> WrittenDigestNote {
+        let succeeded = try succeededState()
+        let noteID = NoteID()
+        let userBlock = DocumentBlock(
+            id: BlockID(),
+            kind: .paragraph,
+            inlineContent: .plain("这是用户自己写的内容"),
+            taskState: nil,
+            indentLevel: 0
+        )
+        var note = Note.empty(id: noteID, categoryID: inspiration.categoryID, now: now)
+        note.title = "材料笔记"
+        note.document = BlockDocument(blocks: [userBlock])
+        let converted = try reduce(
+            .convertInspirationToNote(.init(
+                inspirationID: inspiration.id,
+                proposedNote: note
+            )),
+            from: succeeded
+        )
+        let digestBlock = DocumentBlock(
+            id: BlockID(),
+            kind: .paragraph,
+            inlineContent: .plain("第一版摘要"),
+            taskState: nil,
+            indentLevel: 0
+        )
+        let result = try #require(converted.materialDigests[inspiration.id]?.result)
+        let written = try reduce(
+            .writeMaterialDigestToNote(.init(
+                inspirationID: inspiration.id,
+                noteID: noteID,
+                expectedNoteRevision: try #require(converted.notes[noteID]?.revision),
+                resultFingerprint: try WorkspaceChecksum.materialDigestResultFingerprint(result),
+                proposedBlocks: [digestBlock]
+            )),
+            from: converted
+        )
+        return WrittenDigestNote(
+            state: written,
+            noteID: noteID,
+            userBlock: userBlock,
+            digestBlock: digestBlock
+        )
+    }
+
+    func noteSubmission(base: Note, submitted: Note) throws -> NoteDraftSubmission {
+        var fields = Set<NoteDraftField>()
+        if base.title != submitted.title { fields.insert(.title) }
+        if base.document != submitted.document { fields.insert(.document) }
+        if base.categoryID != submitted.categoryID { fields.insert(.categoryID) }
+        if base.archivedAt != submitted.archivedAt { fields.insert(.archivedAt) }
+        return NoteDraftSubmission(
+            noteID: base.id,
+            editSessionID: UUID(uuidString: "00000000-0000-0000-0000-00000000d120")!,
+            baseNoteRevision: base.revision,
+            baseNoteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(base),
+            baseSnapshot: base,
+            baseLinkedTaskBlockLinks: [],
+            draftGeneration: 1,
+            snapshot: submitted,
+            noteSnapshotChecksum: try WorkspaceChecksum.noteSnapshotChecksum(submitted),
+            modifiedFields: fields,
+            linkedBlockDeletionDispositions: [:]
+        )
     }
 }

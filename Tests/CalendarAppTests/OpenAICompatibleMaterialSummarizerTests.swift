@@ -169,7 +169,67 @@ struct OpenAICompatibleMaterialSummarizerTests {
         #expect(output.summary.dropped.isEmpty)
     }
 
-    @Test func clampsNearEndTimestampOnShortTranscriptButRejectsFarHallucination() async throws {
+    @Test func rejectsTakeawaysThatPadValidItemsWithEmptyStrings() async throws {
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+        let cases = [
+            ["内容为一句测试", "时长很短", "没有广告或赞助", ""],
+            ["内容为一句测试", "时长很短", "没有广告或赞助", "", "", "", "", ""]
+        ]
+        for takeaways in cases {
+            SummarizerURLProtocol.reset()
+            SummarizerURLProtocol.response = .init(
+                status: 200,
+                json: completionJSON(shortMaterialSummaryJSON(takeaways: takeaways))
+            )
+            await expectPipeline(summarizer, .invalidSummary, transcript: shortTranscript, source: audioSource)
+        }
+    }
+
+    @Test func keepsQuotedSpeechThatAppearsNearTheTimestamp() async throws {
+        SummarizerURLProtocol.reset()
+        SummarizerURLProtocol.response = .init(
+            status: 200,
+            json: completionJSON(
+                """
+                {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长约十一秒","没有广告或赞助"],"chapters":[],"quotes":[{"speaker":"","startSeconds":0.2,"text":"大家好，这是一条测试"}],"dropped":[]}
+                """
+            )
+        )
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+        let output = try await summarizer.summarize(elevenSecondTranscript, source: audioSource)
+        #expect(output.summary.quotes.map(\.text) == ["大家好，这是一条测试"])
+        #expect(output.summary.quotes[0].startSeconds == 0.2)
+    }
+
+    @Test func dropsFabricatedExpertQuotesThatAreNotInTheTranscript() async throws {
+        SummarizerURLProtocol.reset()
+        SummarizerURLProtocol.response = .init(
+            status: 200,
+            json: completionJSON(
+                """
+                {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长约十一秒","没有广告或赞助"],"chapters":[],"quotes":[{"speaker":"专家","startSeconds":0,"text":"专家指出大模型已经具备通用智能。"}],"dropped":[]}
+                """
+            )
+        )
+        let summarizer = OpenAICompatibleMaterialSummarizer(
+            settings: try makeSettings(),
+            credentials: try makeCredentials(),
+            configuration: protocolConfiguration()
+        )
+        let output = try await summarizer.summarize(elevenSecondTranscript, source: audioSource)
+        #expect(output.summary.quotes.isEmpty)
+        #expect(output.summary.thesis == "这是一条测试口播。")
+    }
+
+    @Test func rejectsTimestampsPastTranscriptEndWithoutClamping() async throws {
         let summarizer = OpenAICompatibleMaterialSummarizer(
             settings: try makeSettings(),
             credentials: try makeCredentials(),
@@ -181,22 +241,18 @@ struct OpenAICompatibleMaterialSummarizerTests {
             status: 200,
             json: completionJSON(
                 """
-                {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长约十一秒","没有广告或赞助"],"chapters":[{"startSeconds":11,"title":"测试口播","points":["一句中文测试"]}],"quotes":[{"speaker":"","startSeconds":11,"text":"大家好，这是一条测试。"}],"dropped":[]}
+                {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长约十一秒","没有广告或赞助"],"chapters":[{"startSeconds":11,"title":"测试口播","points":["一句中文测试"]}],"quotes":[],"dropped":[]}
                 """
             )
         )
-        let output = try await summarizer.summarize(elevenSecondTranscript, source: audioSource)
-        #expect(output.summary.chapters.count == 1)
-        #expect(output.summary.chapters[0].startSeconds == 10.4)
-        #expect(output.summary.quotes.count == 1)
-        #expect(output.summary.quotes[0].startSeconds == 10.4)
+        await expectPipeline(summarizer, .invalidSummary, transcript: elevenSecondTranscript, source: audioSource)
 
         SummarizerURLProtocol.reset()
         SummarizerURLProtocol.response = .init(
             status: 200,
             json: completionJSON(
                 """
-                {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长约十一秒","没有广告或赞助"],"chapters":[{"startSeconds":90,"title":"测试口播","points":["一句中文测试"]}],"quotes":[],"dropped":[]}
+                {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长约十一秒","没有广告或赞助"],"chapters":[],"quotes":[{"speaker":"","startSeconds":11,"text":"大家好，这是一条测试。"}],"dropped":[]}
                 """
             )
         )
@@ -432,13 +488,16 @@ private func validSummaryJSON(
         : #"[{"startSeconds":\#(chapterStart),"title":"开场","points":["引入"]},{"startSeconds":8,"title":"主体","points":["展开"]}]"#
     let takeawayJSON = takeaways.map { "\"\($0)\"" }.joined(separator: ",")
     return """
-    {"thesis":"\(thesis)","takeaways":[\(takeawayJSON)],"chapters":\(chapters),"quotes":[{"speaker":"讲者","startSeconds":8,"text":"一句原话"}],"dropped":["片头"]}
+    {"thesis":"\(thesis)","takeaways":[\(takeawayJSON)],"chapters":\(chapters),"quotes":[{"speaker":"讲者","startSeconds":8,"text":"主体"}],"dropped":["片头"]}
     """
 }
 
-private func shortMaterialSummaryJSON() -> String {
-    """
-    {"thesis":"这是一条测试口播。","takeaways":["内容为一句测试","时长很短","没有广告或赞助"],"chapters":[],"quotes":[],"dropped":[]}
+private func shortMaterialSummaryJSON(
+    takeaways: [String] = ["内容为一句测试", "时长很短", "没有广告或赞助"]
+) -> String {
+    let takeawayJSON = takeaways.map { "\"\($0)\"" }.joined(separator: ",")
+    return """
+    {"thesis":"这是一条测试口播。","takeaways":[\(takeawayJSON)],"chapters":[],"quotes":[],"dropped":[]}
     """
 }
 

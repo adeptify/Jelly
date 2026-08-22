@@ -91,6 +91,7 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
         try Self.throwForStatus(http.statusCode, data: data)
         let summary = Self.normalized(
             try Self.decodeSummary(from: data),
+            transcript: transcript,
             maximumSourceTime: transcriptEnd
         )
         try Self.validate(summary, maximumSourceTime: transcriptEnd)
@@ -205,48 +206,42 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
         return maximumEnd
     }
 
-    private static let timestampSlackSeconds = 1.0
-
     private static func normalized(
         _ summary: InspirationSummary,
+        transcript: TimestampedTranscript,
         maximumSourceTime: Double
     ) -> InspirationSummary {
         InspirationSummary(
             thesis: summary.thesis.trimmingCharacters(in: .whitespacesAndNewlines),
-            takeaways: summary.takeaways
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty },
+            takeaways: summary.takeaways.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) },
             chapters: summary.chapters.compactMap { chapter in
                 let title = chapter.title.trimmingCharacters(in: .whitespacesAndNewlines)
                 let points = chapter.points
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty }
                 guard !title.isEmpty, !points.isEmpty else { return nil }
-                guard let start = clampedTimestamp(
-                    chapter.startSeconds,
-                    maximumSourceTime: maximumSourceTime
-                ) else { return DigestChapter(startSeconds: chapter.startSeconds, title: title, points: points) }
-                return DigestChapter(startSeconds: start, title: title, points: points)
+                return DigestChapter(
+                    startSeconds: chapter.startSeconds,
+                    title: title,
+                    points: points
+                )
             },
             quotes: summary.quotes.compactMap { quote in
                 let text = quote.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { return nil }
                 let speaker = quote.speaker?.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let start = clampedTimestamp(
-                    quote.startSeconds,
-                    maximumSourceTime: maximumSourceTime
-                ) else {
-                    return DigestQuote(
-                        speaker: speaker?.isEmpty == false ? speaker : nil,
-                        startSeconds: quote.startSeconds,
-                        text: text
-                    )
-                }
-                return DigestQuote(
+                let kept = DigestQuote(
                     speaker: speaker?.isEmpty == false ? speaker : nil,
-                    startSeconds: start,
+                    startSeconds: quote.startSeconds,
                     text: text
                 )
+                if quote.startSeconds.isFinite,
+                   quote.startSeconds >= 0,
+                   quote.startSeconds <= maximumSourceTime,
+                   !quoteAppearsInNearbyTranscript(kept, transcript: transcript) {
+                    return nil
+                }
+                return kept
             },
             dropped: summary.dropped
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -254,17 +249,34 @@ final class OpenAICompatibleMaterialSummarizer: MaterialSummarizing, @unchecked 
         )
     }
 
-    private static func clampedTimestamp(
-        _ value: Double,
-        maximumSourceTime: Double
-    ) -> Double? {
-        guard value.isFinite,
-              value >= 0,
-              value <= MaterialDigestContentLimits.maximumTimestampSeconds
-        else { return nil }
-        if value <= maximumSourceTime { return value }
-        if value <= maximumSourceTime + timestampSlackSeconds { return maximumSourceTime }
-        return nil
+    private static func quoteAppearsInNearbyTranscript(
+        _ quote: DigestQuote,
+        transcript: TimestampedTranscript
+    ) -> Bool {
+        let needle = foldedQuoteText(quote.text)
+        guard !needle.isEmpty else { return false }
+        return foldedQuoteText(nearbyTranscriptText(transcript, at: quote.startSeconds)).contains(needle)
+    }
+
+    private static func nearbyTranscriptText(
+        _ transcript: TimestampedTranscript,
+        at startSeconds: Double
+    ) -> String {
+        let window = 2.0
+        return transcript.segments
+            .filter {
+                $0.endSeconds >= startSeconds - window
+                    && $0.startSeconds <= startSeconds + window
+            }
+            .map(\.text)
+            .joined()
+    }
+
+    private static func foldedQuoteText(_ text: String) -> String {
+        text.lowercased().unicodeScalars
+            .filter { CharacterSet.alphanumerics.contains($0) }
+            .map(String.init)
+            .joined()
     }
 
     private static func validate(

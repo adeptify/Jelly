@@ -62,11 +62,52 @@ enum MaterialTranscriptSemantics {
 
     static func strippingWhisperSpecialTokens(_ text: String) -> String {
         var result = text
-        while let start = result.range(of: "<|"),
-              let end = result.range(of: "|>", range: start.lowerBound..<result.endIndex) {
-            result.removeSubrange(start.lowerBound..<end.upperBound)
+        var searchStart = result.startIndex
+        while searchStart < result.endIndex,
+              let start = result.range(of: "<|", range: searchStart..<result.endIndex) {
+            guard let end = result.range(of: "|>", range: start.upperBound..<result.endIndex) else {
+                break
+            }
+            let inner = String(result[start.upperBound..<end.lowerBound])
+            if isAllowlistedWhisperControlToken(inner) {
+                result.removeSubrange(start.lowerBound..<end.upperBound)
+                searchStart = start.lowerBound
+            } else {
+                searchStart = end.upperBound
+            }
         }
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func isAllowlistedWhisperControlToken(_ inner: String) -> Bool {
+        if namedWhisperControlTokens.contains(inner) { return true }
+        if isWhisperLanguageToken(inner) { return true }
+        return isWhisperTimestampToken(inner)
+    }
+
+    private static let namedWhisperControlTokens: Set<String> = [
+        "startoftranscript",
+        "endoftext",
+        "transcribe",
+        "translate",
+        "nospeech",
+        "notimestamps",
+        "startofprev",
+        "startoflm"
+    ]
+
+    private static func isWhisperLanguageToken(_ inner: String) -> Bool {
+        (2...3).contains(inner.count)
+            && inner.unicodeScalars.allSatisfy { CharacterSet.lowercaseLetters.contains($0) }
+    }
+
+    private static func isWhisperTimestampToken(_ inner: String) -> Bool {
+        let parts = inner.split(separator: ".", omittingEmptySubsequences: false)
+        guard (1...2).contains(parts.count),
+              parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }),
+              parts[0].count <= 3
+        else { return false }
+        return parts.count == 1 || parts[1].count <= 3
     }
 }
 
