@@ -98,6 +98,7 @@ struct AppShellView: View {
         focusRegistry: EditorFocusRegistry = EditorFocusRegistry(),
         transitionCoordinator: WorkspaceRouteTransitionCoordinator? = nil,
         terminationCoordinator: NotesApplicationTerminationCoordinator? = nil,
+        materialDigestOperator: (any MaterialDigestOperating)? = nil,
         moduleHostBuilder: ((WorkspaceRoute) -> WorkspaceModuleHost)? = nil
     ) {
         self.store = store
@@ -148,7 +149,8 @@ struct AppShellView: View {
                         newItemRouter: newItemRouter,
                         transitionCoordinator: coordinator,
                         deepLinkRouter: deepLinkRouter,
-                        searchIndex: searchIndex
+                        searchIndex: searchIndex,
+                        digestOperator: materialDigestOperator
                     )),
                     lifetimeToken: WorkspaceModuleLifetimeToken()
                 )

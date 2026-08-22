@@ -1,0 +1,48 @@
+import Foundation
+import Observation
+
+enum DigestSettingsNormalization {
+    static func endpoint(_ raw: String) -> String? {
+        var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while trimmed.hasSuffix("/") { trimmed.removeLast() }
+        guard let url = URL(string: trimmed),
+              url.scheme?.lowercased() == "https",
+              url.host != nil,
+              !url.host!.isEmpty
+        else { return nil }
+        return trimmed
+    }
+
+    static func model(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+@Observable
+final class DigestSettingsStore {
+    static let endpointKey = "digest.endpoint.v1"
+    static let modelKey = "digest.model.v1"
+
+    private let defaults: UserDefaults
+    private(set) var endpoint: String
+    private(set) var model: String
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        endpoint = defaults.string(forKey: Self.endpointKey) ?? ""
+        model = defaults.string(forKey: Self.modelKey) ?? ""
+    }
+
+    @discardableResult
+    func save(endpoint rawEndpoint: String, model rawModel: String) -> Bool {
+        guard let normalizedEndpoint = DigestSettingsNormalization.endpoint(rawEndpoint),
+              let normalizedModel = DigestSettingsNormalization.model(rawModel)
+        else { return false }
+        defaults.set(normalizedEndpoint, forKey: Self.endpointKey)
+        defaults.set(normalizedModel, forKey: Self.modelKey)
+        endpoint = normalizedEndpoint
+        model = normalizedModel
+        return true
+    }
+}

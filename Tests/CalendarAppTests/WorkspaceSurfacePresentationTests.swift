@@ -66,6 +66,29 @@ struct WorkspaceSurfacePresentationTests {
         ) == nil)
     }
 
+    @Test func articleInspirationDoesNotShowADigestAction() {
+        let inspiration = Inspiration(
+            id: InspirationID(),
+            inputKind: .url,
+            rawText: nil,
+            rawURL: URL(string: "https://example.com/post")!,
+            rawFile: nil,
+            resolvedSourceKind: .article,
+            resolvedMetadata: nil,
+            categoryID: UUID(),
+            lifecycle: .active,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+        let presentation = MaterialDigestPresentation.project(
+            inspiration: inspiration,
+            digest: nil,
+            operatorAvailable: true
+        )
+        #expect(presentation.isVisible == false)
+        #expect(presentation.primaryActionTitle == nil)
+    }
+
     @Test func notesUsesOnePaneAtCompactWidthsAndNeverClipsTheEditorBehindTheBrowser() {
         #expect(NotesAdaptiveLayout.mode(width: 640, browserCollapsed: false) == .browserOnly)
         #expect(NotesAdaptiveLayout.mode(width: 640, browserCollapsed: true) == .editorOnly)

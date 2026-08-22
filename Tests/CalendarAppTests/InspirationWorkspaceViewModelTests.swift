@@ -153,6 +153,28 @@ struct InspirationWorkspaceViewModelTests {
         #expect(model.pending.map(\.id).contains(id))
     }
 
+    @Test func captureDoesNotStartMaterialDigest() async throws {
+        let calendar = makeEmptyState()
+        let store = WorkspaceStore(
+            initialState: .empty(calendar: calendar),
+            repository: InMemoryWorkspaceRepository(initialState: calendar)
+        )
+        await store.load()
+        let resolver = SuspendedURLMetadataResolver()
+        let recorder = RecordingMaterialDigestOperator()
+        let model = InspirationViewModel(
+            store: store,
+            metadataResolver: resolver,
+            digestOperator: recorder
+        )
+        _ = try await model.capture("https://www.bilibili.com/video/BV1xx411c7mD/")
+        #expect(recorder.starts.isEmpty)
+        #expect(recorder.confirms.isEmpty)
+        model.select(store.state.inspirations.keys.first)
+        #expect(try await model.archiveSelected())
+        #expect(recorder.starts.isEmpty)
+    }
+
     @Test func urlIsDurableBeforeMetadataStarts() async throws {
         let calendar = makeEmptyState()
         let store = WorkspaceStore(
@@ -451,6 +473,19 @@ struct InspirationWorkspaceViewModelTests {
         #expect(store.state.inspirations[id] == nil)
         #expect(model.selectedID == nil)
     }
+}
+
+@MainActor
+final class RecordingMaterialDigestOperator: MaterialDigestOperating {
+    var starts: [InspirationID] = []
+    var confirms: [InspirationID] = []
+    var cancels: [InspirationID] = []
+    var reconciles = 0
+
+    func start(inspirationID: InspirationID) async { starts.append(inspirationID) }
+    func confirmModelDownload(inspirationID: InspirationID) async { confirms.append(inspirationID) }
+    func cancel(inspirationID: InspirationID) async { cancels.append(inspirationID) }
+    func reconcileInterruptedRuns() async { reconciles += 1 }
 }
 
 @MainActor

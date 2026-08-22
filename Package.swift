@@ -38,7 +38,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "CalendarApp",
-            dependencies: ["CalendarDomain", "WorkspaceDomain", "CalendarPersistence"]
+            dependencies: ["CalendarDomain", "WorkspaceDomain", "CalendarPersistence"],
+            linkerSettings: [
+                .linkedFramework("Security")
+            ]
         ),
         .testTarget(
             name: "CalendarDomainTests",

@@ -16,6 +16,7 @@ struct AppEnvironmentWorkspaceCutoverTests {
         #expect(environment.features == .production)
         #expect(environment.features.notes == true)
         #expect(environment.features.inspiration == true)
+        #expect(environment.materialDigestOperator == nil)
     }
 
     @Test func liveEnvironmentComposesOneWorkspaceStoreFromTheResolvedDataDirectory() async throws {

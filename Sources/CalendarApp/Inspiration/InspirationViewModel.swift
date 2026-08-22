@@ -21,6 +21,7 @@ enum InspirationTextSaveState: Equatable {
     private let store: WorkspaceStore
     private let clock: @Sendable () -> Date
     private let metadataResolver: any URLMetadataResolving
+    private let digestOperator: (any MaterialDigestOperating)?
     private let searchIndex: WorkspaceSearchIndex
     private let textSaveDelay: Duration
     private var textDrafts: [InspirationID: String] = [:]
@@ -41,12 +42,14 @@ enum InspirationTextSaveState: Equatable {
     init(
         store: WorkspaceStore,
         metadataResolver: any URLMetadataResolving = URLMetadataResolver(),
+        digestOperator: (any MaterialDigestOperating)? = nil,
         searchIndex: WorkspaceSearchIndex = WorkspaceSearchIndex(),
         textSaveDelay: Duration = .milliseconds(450),
         clock: @escaping @Sendable () -> Date = Date.init
     ) {
         self.store = store
         self.metadataResolver = metadataResolver
+        self.digestOperator = digestOperator
         self.searchIndex = searchIndex
         self.textSaveDelay = textSaveDelay
         self.clock = clock
@@ -55,6 +58,42 @@ enum InspirationTextSaveState: Equatable {
 
     var selected: Inspiration? {
         selectedID.flatMap { store.state.inspirations[$0] }
+    }
+
+    var selectedDigest: MaterialDigest? {
+        guard let selectedID else { return nil }
+        return store.state.materialDigests[selectedID]
+    }
+
+    var selectedDigestPresentation: MaterialDigestPresentation {
+        guard let selected else { return .hidden }
+        return MaterialDigestPresentation.project(
+            inspiration: selected,
+            digest: selectedDigest,
+            operatorAvailable: digestOperator != nil
+        )
+    }
+
+    func startSelectedDigest() async {
+        guard let selectedID else { return }
+        await digestOperator?.start(inspirationID: selectedID)
+        refresh()
+    }
+
+    func confirmSelectedModelDownload() async {
+        guard let selectedID else { return }
+        await digestOperator?.confirmModelDownload(inspirationID: selectedID)
+        refresh()
+    }
+
+    func cancelSelectedDigest() async {
+        guard let selectedID else { return }
+        await digestOperator?.cancel(inspirationID: selectedID)
+        refresh()
+    }
+
+    func retrySelectedDigest() async {
+        await startSelectedDigest()
     }
 
     var selectedConvertedNoteID: NoteID? {

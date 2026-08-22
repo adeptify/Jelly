@@ -32,13 +32,18 @@ struct InspirationSplitView: View {
         newItemRouter: WorkspaceNewItemRouter = WorkspaceNewItemRouter(),
         transitionCoordinator: WorkspaceRouteTransitionCoordinator? = nil,
         deepLinkRouter: WorkspaceDeepLinkRouter = WorkspaceDeepLinkRouter(),
-        searchIndex: WorkspaceSearchIndex = WorkspaceSearchIndex()
+        searchIndex: WorkspaceSearchIndex = WorkspaceSearchIndex(),
+        digestOperator: (any MaterialDigestOperating)? = nil
     ) {
         self.store = store
         self.newItemRouter = newItemRouter
         self.transitionCoordinator = transitionCoordinator
         self.deepLinkRouter = deepLinkRouter
-        _model = State(initialValue: InspirationViewModel(store: store, searchIndex: searchIndex))
+        _model = State(initialValue: InspirationViewModel(
+            store: store,
+            digestOperator: digestOperator,
+            searchIndex: searchIndex
+        ))
     }
 
     var body: some View {
@@ -598,6 +603,13 @@ struct InspirationDetailView: View {
                         if let metadata = inspiration.resolvedMetadata {
                             sourceSection(inspiration, metadata: metadata)
                         }
+                        MaterialDigestSection(
+                            presentation: model.selectedDigestPresentation,
+                            onStart: { Task { await model.startSelectedDigest() } },
+                            onCancel: { Task { await model.cancelSelectedDigest() } },
+                            onRetry: { Task { await model.retrySelectedDigest() } },
+                            onConfirmDownload: { Task { await model.confirmSelectedModelDownload() } }
+                        )
                         statusSection
                     }
                     .frame(maxWidth: 680, alignment: .leading)
