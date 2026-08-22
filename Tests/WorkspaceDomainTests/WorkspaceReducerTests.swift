@@ -1245,7 +1245,8 @@ enum Task4Fixture {
             inspirations: [inspirationID: inspiration()],
             calendarNoteRelations: .empty,
             taskBlockLinks: [],
-            inspirationNoteLinks: []
+            inspirationNoteLinks: [],
+            materialDigests: [:]
         )
     }
 

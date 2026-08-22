@@ -23,3 +23,19 @@ public struct BlockID: Hashable, Codable, Sendable {
         self.rawValue = rawValue
     }
 }
+
+public struct MaterialDigestID: Hashable, Codable, Sendable {
+    public let rawValue: UUID
+
+    public init(_ rawValue: UUID = UUID()) {
+        self.rawValue = rawValue
+    }
+}
+
+public struct MaterialDigestRunID: Hashable, Codable, Sendable {
+    public let rawValue: UUID
+
+    public init(_ rawValue: UUID = UUID()) {
+        self.rawValue = rawValue
+    }
+}

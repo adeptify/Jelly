@@ -27,6 +27,13 @@ public enum WorkspaceValidationError: Error, Equatable, Sendable {
     case taskTitleMismatch(NoteID, BlockID, UUID)
     case taskCompletionMismatch(NoteID, BlockID, UUID)
     case danglingLiveInspiration(InspirationID)
+    case inconsistentMaterialDigestKey(InspirationID)
+    case danglingMaterialDigest(InspirationID)
+    case invalidMaterialDigestInspiration(InspirationID)
+    case materialDigestChecksumMismatch(InspirationID)
+    case invalidMaterialDigestRun(InspirationID)
+    case invalidMaterialDigestResult(InspirationID)
+    case invalidMaterialDigestFailure(InspirationID)
 }
 
 public enum WorkspaceValidator {
@@ -45,6 +52,7 @@ public enum WorkspaceValidator {
         try validateCalendarRelations(state)
         try validateTaskBlockLinks(state)
         try validateInspirationLinks(state)
+        try validateMaterialDigests(state)
     }
 
     private static func validateNotes(_ state: WorkspaceState) throws {
@@ -168,6 +176,112 @@ public enum WorkspaceValidator {
                     link.calendarItemID
                 )
             }
+        }
+    }
+
+    private static func validateMaterialDigests(_ state: WorkspaceState) throws {
+        for (key, digest) in state.materialDigests {
+            guard key == digest.inspirationID else {
+                throw WorkspaceValidationError.inconsistentMaterialDigestKey(key)
+            }
+            guard let inspiration = state.inspirations[digest.inspirationID] else {
+                throw WorkspaceValidationError.danglingMaterialDigest(digest.inspirationID)
+            }
+            guard inspiration.inputKind == .url,
+                  inspiration.resolvedSourceKind == .video || inspiration.resolvedSourceKind == .audio
+            else {
+                throw WorkspaceValidationError.invalidMaterialDigestInspiration(digest.inspirationID)
+            }
+            guard digest.sourceChecksum == WorkspaceChecksum.inspirationSourceChecksum(inspiration) else {
+                throw WorkspaceValidationError.materialDigestChecksumMismatch(digest.inspirationID)
+            }
+            if let run = digest.currentRun {
+                try validate(run, for: digest.inspirationID)
+            }
+            if let result = digest.result {
+                try validate(result, for: digest.inspirationID)
+            }
+            if let failure = digest.lastFailure {
+                try validate(failure, for: digest.inspirationID)
+            }
+        }
+    }
+
+    private static func validate(_ run: MaterialDigestRun, for inspirationID: InspirationID) throws {
+        guard run.startedAt <= run.updatedAt else {
+            throw WorkspaceValidationError.invalidMaterialDigestRun(inspirationID)
+        }
+    }
+
+    private static func validate(_ result: MaterialDigestResult, for inspirationID: InspirationID) throws {
+        try validate(result.transcript, for: inspirationID)
+        try validate(result.summary, for: inspirationID)
+        try validate(result.provenance, for: inspirationID)
+    }
+
+    private static func validate(_ transcript: TimestampedTranscript, for inspirationID: InspirationID) throws {
+        guard !transcript.segments.isEmpty else {
+            throw WorkspaceValidationError.invalidMaterialDigestResult(inspirationID)
+        }
+        var previousStart = -Double.infinity
+        for segment in transcript.segments {
+            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard segment.startSeconds >= 0,
+                  segment.endSeconds >= segment.startSeconds,
+                  segment.startSeconds >= previousStart,
+                  !text.isEmpty
+            else {
+                throw WorkspaceValidationError.invalidMaterialDigestResult(inspirationID)
+            }
+            previousStart = segment.startSeconds
+        }
+    }
+
+    private static func validate(_ summary: InspirationSummary, for inspirationID: InspirationID) throws {
+        guard !summary.thesis.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw WorkspaceValidationError.invalidMaterialDigestResult(inspirationID)
+        }
+        let takeaways = summary.takeaways.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard (3...7).contains(takeaways.count), takeaways.allSatisfy({ !$0.isEmpty }) else {
+            throw WorkspaceValidationError.invalidMaterialDigestResult(inspirationID)
+        }
+        var previousStart = -Double.infinity
+        for chapter in summary.chapters {
+            guard chapter.startSeconds >= 0,
+                  chapter.startSeconds >= previousStart,
+                  !chapter.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                throw WorkspaceValidationError.invalidMaterialDigestResult(inspirationID)
+            }
+            previousStart = chapter.startSeconds
+        }
+        for quote in summary.quotes {
+            guard quote.startSeconds >= 0,
+                  !quote.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else {
+                throw WorkspaceValidationError.invalidMaterialDigestResult(inspirationID)
+            }
+        }
+    }
+
+    private static func validate(_ provenance: DigestProvenance, for inspirationID: InspirationID) throws {
+        guard !provenance.modelIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !provenance.inputFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !provenance.summaryContractVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw WorkspaceValidationError.invalidMaterialDigestResult(inspirationID)
+        }
+    }
+
+    private static func validate(_ failure: MaterialDigestFailure, for inspirationID: InspirationID) throws {
+        let message = failure.userMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty,
+              !message.contains("Bearer "),
+              !message.lowercased().contains("sk-")
+        else {
+            throw WorkspaceValidationError.invalidMaterialDigestFailure(inspirationID)
         }
     }
 

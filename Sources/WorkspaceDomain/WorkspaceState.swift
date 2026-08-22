@@ -9,6 +9,7 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
     public var calendarNoteRelations: CalendarNoteRelationGraph
     public var taskBlockLinks: Set<TaskBlockCalendarLink>
     public var inspirationNoteLinks: Set<InspirationNoteLink>
+    public var materialDigests: [InspirationID: MaterialDigest]
 
     public init(
         revision: Int64,
@@ -17,7 +18,8 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
         inspirations: [InspirationID: Inspiration],
         calendarNoteRelations: CalendarNoteRelationGraph,
         taskBlockLinks: Set<TaskBlockCalendarLink>,
-        inspirationNoteLinks: Set<InspirationNoteLink>
+        inspirationNoteLinks: Set<InspirationNoteLink>,
+        materialDigests: [InspirationID: MaterialDigest]
     ) {
         self.revision = revision
         self.calendar = calendar
@@ -26,6 +28,7 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
         self.calendarNoteRelations = calendarNoteRelations
         self.taskBlockLinks = taskBlockLinks
         self.inspirationNoteLinks = inspirationNoteLinks
+        self.materialDigests = materialDigests
     }
 
     public static func empty(calendar: CalendarState) -> WorkspaceState {
@@ -36,7 +39,8 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
             inspirations: [:],
             calendarNoteRelations: .empty,
             taskBlockLinks: [],
-            inspirationNoteLinks: []
+            inspirationNoteLinks: [],
+            materialDigests: [:]
         )
     }
 }

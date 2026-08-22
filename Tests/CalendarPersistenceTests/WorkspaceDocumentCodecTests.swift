@@ -211,7 +211,8 @@ enum WorkspacePersistenceFixtures {
             inspirations: [:],
             calendarNoteRelations: .empty,
             taskBlockLinks: [],
-            inspirationNoteLinks: []
+            inspirationNoteLinks: [],
+            materialDigests: [:]
         )
     }
 
@@ -257,7 +258,8 @@ enum WorkspacePersistenceFixtures {
                     occurrenceOverrides: [:]
                 ),
                 taskBlockLinks: [.init(noteID: noteID, blockID: blockID, calendarItemID: itemID)],
-                inspirationNoteLinks: []
+                inspirationNoteLinks: [],
+                materialDigests: [:]
             ),
             itemID
         )
@@ -291,7 +293,8 @@ enum WorkspacePersistenceFixtures {
             inspirations: [:],
             calendarNoteRelations: .empty,
             taskBlockLinks: [],
-            inspirationNoteLinks: []
+            inspirationNoteLinks: [],
+            materialDigests: [:]
         )
     }
 
