@@ -37,27 +37,42 @@ final class URLMetadataResolver: URLMetadataResolving, @unchecked Sendable {
         else {
             throw URLMetadataResolverError.unsupportedContentType
         }
-        if http.expectedContentLength > Int64(maxBytes) {
-            throw URLMetadataResolverError.responseTooLarge
-        }
         var data = Data()
         data.reserveCapacity(min(maxBytes, max(0, Int(http.expectedContentLength))))
+        let checkStep = max(1, min(4_096, maxBytes))
         for try await byte in bytes {
             guard data.count < maxBytes else {
+                if let title = Self.extractTitle(from: String(decoding: data, as: UTF8.self)) {
+                    return Self.resolvedResult(url: url, title: title, classifiedKind: classifiedKind)
+                }
                 throw URLMetadataResolverError.responseTooLarge
             }
             data.append(byte)
+            if data.count.isMultiple(of: checkStep),
+               let title = Self.extractTitle(from: String(decoding: data, as: UTF8.self)) {
+                return Self.resolvedResult(url: url, title: title, classifiedKind: classifiedKind)
+            }
         }
         let html = String(decoding: data, as: UTF8.self)
-        let title = Self.extractTitle(from: html) ?? url.host
-        let metadata = SourceMetadata(
-            title: title,
-            siteName: url.host,
-            domain: url.host,
-            thumbnailURL: nil,
-            fetchStatus: .succeeded
+        let title = Self.extractTitle(from: html) ?? url.host ?? ""
+        return Self.resolvedResult(url: url, title: title, classifiedKind: classifiedKind)
+    }
+
+    private static func resolvedResult(
+        url: URL,
+        title: String,
+        classifiedKind: ResolvedSourceKind?
+    ) -> URLMetadataResolveResult {
+        .init(
+            metadata: SourceMetadata(
+                title: title,
+                siteName: url.host,
+                domain: url.host,
+                thumbnailURL: nil,
+                fetchStatus: .succeeded
+            ),
+            resolvedKind: classifiedKind ?? .article
         )
-        return .init(metadata: metadata, resolvedKind: classifiedKind ?? .article)
     }
 
     private static func extractTitle(from html: String) -> String? {
