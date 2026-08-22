@@ -1463,3 +1463,65 @@ Codex 逐行检查 Grok 候选 diff，先重跑 focused/related tests，再执�
 - 再确认此前小宇宙摘要与笔记仍然存在，跨来源没有回归。
 
 只有前两项完成可报告本缺陷的产品实操通过；只有有意义的 B 站成功样本、小宇宙回归和最终 App 完整旅程都完成，才可报告灵感材料提炼主流程的产品实操通过。视觉质感、等待手感与“用户 9 分体验”仍为 `UNVERIFIED`，必须由用户本人使用后确认。
+
+## Task 16：让中文 Jelly 的派生摘要统一使用简体中文
+
+**结论与边界：** 2026-08-22 最终 App 已对 B 站真实英文讲话样本 `https://www.bilibili.com/video/BV1YY4y1A7CP/` 完成 Whisper 转写、MiniMax-M3 摘要、写入笔记与可编辑展示，但 thesis、takeaways 和 chapters 全部跟随英文原文输出。当前 system prompt 虽然使用中文，却没有明确规定派生摘要语言。Jelly 当前产品界面和状态文案统一为中文，因此 Task 16 要求 thesis、takeaways、chapters.title、chapters.points 和 dropped 使用简体中文；quotes.text 必须保留原文语言和原句，quotes.speaker 保留原文姓名，完整 transcript 继续保留原语言。不得翻译引用后冒充原话，不得改变 Whisper 语言检测，不得用中文字符比例校验拒绝合法结果。
+
+**Files:**
+
+- Modify: `Sources/CalendarApp/Inspiration/OpenAICompatibleMaterialSummarizer.swift`
+- Modify: `Tests/CalendarAppTests/OpenAICompatibleMaterialSummarizerTests.swift`
+
+### Step 1：写摘要语言 RED 合同
+
+在 `OpenAICompatibleMaterialSummarizerTests` 新增生产请求合同，用英文 transcript 和 `.video` source 调用摘要器，捕获发送给 transport 的 JSON body，并读取 system message。断言该消息必须同时包含以下不可误解的约束：
+
+- thesis、takeaways、chapters.title、chapters.points、dropped 使用简体中文；
+- quotes.text 保留原文，不得翻译；
+- transcript 和专有名词不因摘要语言要求被改写。
+
+测试不得只搜索“中文”两个字；要断言派生字段和原文引用两个相反边界都存在。transport 返回一份合法中文派生摘要与英文原文 quote，确认现有 evidence 校验仍通过。
+
+Run: `swift test --filter OpenAICompatibleMaterialSummarizerTests`
+
+Expected: 当前 system prompt 没有输出语言要求，新合同 RED 失败。
+
+### Step 2：补充窄边界的 system prompt
+
+在 `OpenAICompatibleMaterialSummarizer.systemPrompt(for:)` 的通用合同中增加一段明确规则：
+
+```text
+面向 Jelly 用户的派生内容必须使用简体中文：thesis、takeaways、chapters.title、chapters.points、dropped 均用简体中文，必要的专有名词可保留原文。quotes.text 是原文证据，必须保持文稿中的原语言和原句，不得翻译或改写；quotes.speaker 保留原文姓名。完整文稿也保持原语言。
+```
+
+只改 system prompt，不改 JSON schema、字段上限、证据验证、transport、endpoint、模型参数或原文转写。不要在客户端用中文字符比例做启发式校验，避免技术名词、姓名和合法短摘要被误拒绝。
+
+Run: `swift test --filter OpenAICompatibleMaterialSummarizerTests`
+
+Expected: 全套 PASS。
+
+### Step 3：相关回归与 Grok 候选提交
+
+```bash
+swift test --filter 'OpenAICompatibleMaterialSummarizerTests|MaterialDigestCoordinatorTests|MaterialDigestPresentationTests'
+git diff --check
+git add Sources/CalendarApp/Inspiration/OpenAICompatibleMaterialSummarizer.swift \
+  Tests/CalendarAppTests/OpenAICompatibleMaterialSummarizerTests.swift
+git diff --cached --check
+git commit -m "fix(inspiration): 统一输出中文摘要"
+```
+
+Expected: exit 0；Grok 提交只包含两个指定文件，不修改 Task 15、schema、构建产物、凭据或验收数据，不 push、不 merge。
+
+### Step 4：Codex 独立复核与真实英文材料门禁
+
+Codex 逐行检查 diff，重跑 focused、related、完整测试、release、最终 App 打包和严格签名。使用同一隔离凭据命名空间、新打包的 `dist/Jelly.app` 和另一条当时匿名可访问的英文讲话 B 站视频完成：
+
+- 捕获后仍不自动提炼，必须由用户点击“提炼这个链接”；
+- transcript 与 quotes.text 保持英文原文；
+- thesis、takeaways、chapters.title、chapters.points 和 dropped 使用简体中文；
+- 用户点击“写入笔记”后，原链接在首行，中文派生摘要可编辑，英文原文引用不被翻译；
+- 关闭重开后结果、笔记和 Task 15 的友好失败状态均持久化，小宇宙既有笔记不回归。
+
+只有真实 MiniMax-M3 最终 App 旅程满足这些条件，才可报告跨语言 B 站提炼的产品实操通过；用户本人是否认为达到 9 分仍保持 `UNVERIFIED`。
