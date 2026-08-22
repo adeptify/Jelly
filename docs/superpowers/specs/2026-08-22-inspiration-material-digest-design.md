@@ -1,7 +1,7 @@
 # Jelly 灵感材料提炼设计
 
 日期：2026-08-22
-状态：设计已在会话中确认，等待用户复核书面版本
+状态：设计已由用户确认，可进入实现
 目标分支：`codex/jelly-inspiration-material-digest`
 
 ## 1. 结论
@@ -38,6 +38,7 @@ Jelly 把 B 站视频和小宇宙单集接入现有“灵感”模块，不新�
 - 用户开始提炼后可以离开当前页面，稍后回来查看。
 - 处理阶段用人话显示：正在获取字幕、正在获取音频、正在识别、正在生成摘要。
 - 处理中提供取消；失败提供具体原因和重试；旧的成功结果在重试期间继续可读。
+- 只有确实需要本机识别且模型尚未安装时，才显示首次模型下载说明（约 626 MB）并让用户确认“下载并继续”；有可用字幕的材料不触发模型下载。
 
 以后可以增加“支持的链接自动提炼”设置，但默认关闭，且不进入第一期。
 
@@ -119,6 +120,8 @@ Validator 至少保证：核心论点非空、主要观点为 3～7 条、章节
 ```swift
 public enum MaterialDigestStage: String, Codable, Equatable, Sendable {
     case fetchingSource
+    case awaitingModelDownloadConsent
+    case downloadingModel
     case transcribing
     case summarizing
 }
@@ -140,7 +143,7 @@ public enum MaterialDigestStage: String, Codable, Equatable, Sendable {
 - 来源变化后旧摘要写回；
 - 同一灵感的并发提炼相互串台。
 
-App 退出不会在后台伪装继续运行。下次启动时，遗留运行统一转换为“上次处理被中断”，保留已有成功结果并允许重试。
+App 退出不会在后台伪装继续运行。下次启动时，遗留的获取、下载、识别或摘要阶段统一转换为“上次处理被中断”，保留已有成功结果并允许重试；等待用户确认下载模型的阶段保持可继续，不冒充后台任务。
 
 ## 5. 提炼管线
 
@@ -191,7 +194,9 @@ Coordinator 只提交候选结果；Reducer 和 Validator 决定候选是否仍�
 
 ### 5.3 识别与摘要
 
-- Apple silicon、macOS 14+；识别走本机 WhisperKit 或 MLX，模型至少 `large-v3-turbo`。
+- Apple silicon、macOS 14+；识别固定使用 Argmax OSS Swift Package `1.0.0` 的 `WhisperKit` 产品，不嵌 Python、Homebrew CLI 或外部常驻服务。
+- 第一版固定模型 `large-v3-v20240930_626MB`（Large v3 Turbo compressed）；模型放在 App 数据目录的独立 `Models/WhisperKit` 目录，可复用、可显式删除，不打进 `.app`。
+- 首次下载必须有体积说明、进度、取消和失败重试；模型下载不是提炼成功状态，也不得阻塞已有字幕路径。
 - 音视频不上传到 Jelly 自有服务器。
 - 摘要使用用户配置的 OpenAI 兼容端点和模型。
 - 凭据只进入系统钥匙串或既有安全设置，不写进 Workspace、日志、表单持久化或导出文件。
