@@ -16,7 +16,7 @@ struct AppEnvironmentWorkspaceCutoverTests {
         #expect(environment.features == .production)
         #expect(environment.features.notes == true)
         #expect(environment.features.inspiration == true)
-        #expect(environment.materialDigestOperator == nil)
+        #expect(environment.materialDigestOperator is MaterialDigestCoordinator)
         #expect(environment.whisperModelDirectory.path.hasSuffix("Models/WhisperKit"))
         #expect(FileManager.default.fileExists(atPath: environment.whisperModelDirectory.path))
     }

@@ -347,6 +347,10 @@ final class MaterialDigestCoordinator: MaterialDigestOperating {
             (.modelNotConfigured, "尚未配置摘要模型，请先在设置中填写。")
         case .summarizationFailed:
             (.summarizationFailed, "摘要请求失败，可以稍后重试。")
+        case .contextTooLong:
+            (.summarizationFailed, "材料超过当前模型可处理长度")
+        case .jsonSchemaUnsupported:
+            (.summarizationFailed, "当前接口不支持可校验的 JSON 摘要，请更换兼容端点。")
         case .invalidSummary:
             (.invalidSummary, "模型返回的摘要无法校验，没有写入占位内容。")
         case .cancelled, .none:

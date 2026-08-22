@@ -44,6 +44,8 @@ enum MaterialDigestPipelineError: Error, Equatable, Sendable {
     case transcriptionFailed
     case modelNotConfigured
     case summarizationFailed
+    case contextTooLong
+    case jsonSchemaUnsupported
     case invalidSummary
     case cancelled
 }

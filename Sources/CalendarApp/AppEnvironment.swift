@@ -37,18 +37,29 @@ struct AppEnvironment {
             recoveryManifestURL: dataURLs.recoveryManifest
         )
         let journal = DraftJournalRepository(fileURL: dataURLs.draftJournal)
-        try fileManager.createDirectory(
-            at: dataURLs.root.appendingPathComponent("Models/WhisperKit", isDirectory: true),
-            withIntermediateDirectories: true
+        let whisperDirectory = dataURLs.root.appendingPathComponent("Models/WhisperKit", isDirectory: true)
+        try fileManager.createDirectory(at: whisperDirectory, withIntermediateDirectories: true)
+        let store = WorkspaceStore(initialState: seed, repository: repository, journal: journal)
+        let digestSettingsStore = DigestSettingsStore()
+        let digestCredentialStore = KeychainDigestCredentialStore()
+        let coordinator = MaterialDigestCoordinator(
+            store: store,
+            acquirer: RoutedMaterialAcquirer(),
+            audioDownloader: TemporaryMaterialAudioDownloader(),
+            transcriber: WhisperKitMaterialTranscriber(modelDirectory: whisperDirectory),
+            summarizer: OpenAICompatibleMaterialSummarizer(
+                settings: digestSettingsStore,
+                credentials: digestCredentialStore
+            )
         )
         return AppEnvironment(
-            store: WorkspaceStore(initialState: seed, repository: repository, journal: journal),
+            store: store,
             dataURLs: dataURLs,
             searchIndex: WorkspaceSearchIndex(fileURL: dataURLs.searchIndex),
             features: .production,
-            materialDigestOperator: nil,
-            digestSettingsStore: DigestSettingsStore(),
-            digestCredentialStore: KeychainDigestCredentialStore()
+            materialDigestOperator: coordinator,
+            digestSettingsStore: digestSettingsStore,
+            digestCredentialStore: digestCredentialStore
         )
     }
 
